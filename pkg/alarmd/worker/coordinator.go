@@ -644,7 +644,7 @@ func (coordinator *SlotExecutionCoordinator) executeQueryFreeFinalization(
 			Contract: request.Contract, Kind: completionKind,
 			Result: observability.ResultDegraded, ReasonCode: finalization.ReasonCode,
 			Evidence: evidence,
-		}, execution.CompletionAttribution{Cause: finalization.Cause})
+		}, execution.CompletionAttribution{Cause: finalization.Cause, Reason: finalization.ReasonCode})
 		return err
 	})
 	if err != nil {
@@ -1310,9 +1310,8 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 		if err := coordinator.admitActivatedPlans(ctx, request, guardActivations); err != nil {
 			return execution.SlotExecutionResult{}, err
 		}
-		driftCompletion, driftCause := activationChangeCompletion(request.Contract, &primary, change)
-		return coordinator.commitProgress(ctx, request, driftCompletion,
-			execution.CompletionAttribution{Cause: driftCause})
+		driftCompletion, driftAttribution := activationChangeCompletion(request.Contract, &primary, change, bindings)
+		return coordinator.commitProgress(ctx, request, driftCompletion, driftAttribution)
 	}
 
 	planResults := append([]execution.PlanEvaluationResult(nil), evaluated.Plans...)
@@ -1649,10 +1648,10 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 		attribution.Coverage.Merge(plan.HistoryCoverage)
 	}
 	if len(changedPlans) > 0 {
-		var cause execution.CompletionCause
-		completion, cause = activationChangeCompletion(request.Contract, &primary,
-			classifyActivationChange(header.DuePlans, guardActivations, loadedGaps))
-		attribution.Cause = cause
+		var drift execution.CompletionAttribution
+		completion, drift = activationChangeCompletion(request.Contract, &primary,
+			classifyActivationChange(header.DuePlans, guardActivations, loadedGaps), bindings)
+		attribution.Cause, attribution.Reason, attribution.Scope = drift.Cause, drift.Reason, drift.Scope
 	} else {
 		var derived execution.CompletionAttribution
 		completion.Kind, derived, err = execution.DeriveStreamingCompletionAttribution(header, bindings, evaluated)
@@ -1694,15 +1693,15 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 		return activationRetry(execution.ReasonCode(contract.ReasonActivationReadFailed)), nil
 	}
 	if !guardActivations.SameSelections(progressActivations) {
-		driftCompletion, driftCause := activationChangeCompletion(request.Contract, &primary,
-			classifyActivationChange(header.DuePlans, progressActivations, loadedGaps))
+		driftCompletion, driftAttribution := activationChangeCompletion(request.Contract, &primary,
+			classifyActivationChange(header.DuePlans, progressActivations, loadedGaps), bindings)
 		changedSelected := changedSelectedActivations(guardActivations, progressActivations)
 		return execution.SlotExecutionResult{}, &activationProtectionRequiredError{
 			activationRequest: activationRequest,
 			currentFacts:      progressActivations,
 			activations:       changedSelected,
 			completion:        driftCompletion,
-			completionCause:   execution.CompletionAttribution{Cause: driftCause},
+			completionCause:   driftAttribution,
 			guardReason:       guardReasonFor(header.DuePlans, changedSelected, loadedGaps),
 		}
 	}
@@ -2977,29 +2976,38 @@ func identityFacts(evidence *execution.IdentityEvidence) *observability.Identity
 func configDriftCompletion(
 	contractRef execution.FrozenExecutionContractRef,
 	primary *execution.PrimaryInputFact,
-) (execution.SlotCompletion, execution.CompletionCause) {
-	return activationChangeCompletion(contractRef, primary, activationChangeDrift)
+	bindings []execution.NamedInputBinding,
+) (execution.SlotCompletion, execution.CompletionAttribution) {
+	return activationChangeCompletion(contractRef, primary, activationChangeDrift, bindings)
 }
 
 // activationChangeCompletion is configDriftCompletion with the change named:
 // the same completion under CONFIG_DRIFT, PLAN_REACTIVATED or PLAN_NOT_ACTIVE,
 // which are one shape with three reasons. The unavailable-primary rule is the
 // same for all three.
+//
+// The attribution names the reason beside the cause, as a derived completion
+// does: the change's own word, or, when the primary input was unavailable,
+// the primary binding's reason and scope (execution.PrimaryBindingAttribution).
+// The completion's ReasonCode stays the change's word: it is persisted and
+// decides how consecutive gaps fold into a Progress gap summary.
 func activationChangeCompletion(
 	contractRef execution.FrozenExecutionContractRef,
 	primary *execution.PrimaryInputFact,
 	change activationChange,
-) (execution.SlotCompletion, execution.CompletionCause) {
+	bindings []execution.NamedInputBinding,
+) (execution.SlotCompletion, execution.CompletionAttribution) {
 	kind := execution.CompletionPartialGap
-	cause := change.cause()
+	attribution := execution.CompletionAttribution{Cause: change.cause(), Reason: change.reason()}
 	if primary != nil && primary.Completeness == execution.CompletenessUnavailable {
 		kind = execution.CompletionUnavailable
-		cause = execution.CausePrimaryInputUnavailable
+		attribution.Cause = execution.CausePrimaryInputUnavailable
+		attribution.Reason, attribution.Scope = execution.PrimaryBindingAttribution(bindings, execution.CompletenessUnavailable)
 	}
 	return execution.SlotCompletion{
 		Contract: contractRef, Kind: kind, Primary: primary,
 		Result: observability.ResultDegraded, ReasonCode: change.reason(),
-	}, cause
+	}, attribution
 }
 
 // storedStateLabel names the stored state a write-reuse comparison was made

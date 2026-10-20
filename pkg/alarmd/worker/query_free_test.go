@@ -1099,3 +1099,39 @@ func noPlanResult() execution.PlanActivationResult {
 		Facts:    []execution.PlanActivationFact{{Plan: planIdentity(), Selection: execution.ActivationNone}},
 	}
 }
+
+// A Slot finalized without a query names the finalization's reason beside its
+// cause, on its progress_committed line and on the result its slot_completed
+// line reads: GAP_SKIPPED or SNAPSHOT_UNAVAILABLE, where both read
+// reason_not_reported. The completion's own reason, which is persisted, is
+// the same word and is unchanged.
+func TestAQueryFreeSlotNamesTheFinalizationsReason(t *testing.T) {
+	for _, testCase := range []struct {
+		mode   execution.FinalizationMode
+		reason string
+	}{
+		{execution.FinalizationGapSkipped, contract.ReasonGapSkipped},
+		{execution.FinalizationSnapshotUnavailable, contract.ReasonSnapshotUnavailable},
+	} {
+		fixture, _ := queryFreeFixtureWithMode(t, testCase.mode, testCase.reason)
+		result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationReplay))
+		if err != nil || !result.Completed {
+			t.Fatalf("%s: Execute() result=%+v error=%v", testCase.mode, result, err)
+		}
+		var committed *observability.Observation
+		for index := range *fixture.observations {
+			if observation := (*fixture.observations)[index]; observation.Stage == observability.StageProgressCommitted {
+				committed = &observation
+			}
+		}
+		if committed == nil || committed.ProgressCompletionReason != testCase.reason {
+			t.Fatalf("%s: progress_committed %+v, want completion reason %s", testCase.mode, committed, testCase.reason)
+		}
+		if string(result.CompletionCause.Reason) != testCase.reason {
+			t.Fatalf("%s: the slot_completed line's reason %q, want %s", testCase.mode, result.CompletionCause.Reason, testCase.reason)
+		}
+		if completion := fixture.ports.lastProgress.Completion; string(completion.ReasonCode) != testCase.reason {
+			t.Fatalf("%s: persisted completion reason %q, want %s", testCase.mode, completion.ReasonCode, testCase.reason)
+		}
+	}
+}

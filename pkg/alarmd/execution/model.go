@@ -3664,13 +3664,7 @@ func deriveCompletionAttribution(input InternalExecution, result EvaluationResul
 	// A primary input short or missing names the binding that was, with the
 	// reason access gave it: the query and why, not only that one was.
 	primaryAt := func(completeness Completeness) (ReasonCode, CompletionScope) {
-		for _, binding := range input.Inputs {
-			if binding.Role == InputRolePrimary && binding.Completeness == completeness {
-				return AttributedReason(binding.ReasonCode, binding.UnavailableAttribution), CompletionScope{Plan: binding.Consumer.Plan, HasPlan: true,
-					LevelID: binding.Consumer.LevelID, HasLevel: binding.Consumer.HasLevel, PhysicalQuery: binding.Provenance.PhysicalQuery}
-			}
-		}
-		return "", CompletionScope{}
+		return PrimaryBindingAttribution(input.Inputs, completeness)
 	}
 	if hasUnavailable {
 		bindingReason, bindingScope := primaryAt(CompletenessUnavailable)
@@ -4607,4 +4601,20 @@ type SlotBudgetUsage struct {
 	// because the share's rule belongs to the producer that refuses by it,
 	// and a second copy of that rule elsewhere is one that can drift.
 	RetainedShareBytes uint64
+}
+
+// PrimaryBindingAttribution is the reason and the scope a completion names
+// for a primary input short or missing: the first primary binding at that
+// completeness, with the reason access gave it and the Plan, Level and
+// physical query it was bound for. Empty when no primary binding is at it.
+// The derivation of a completion and the completion of a Slot whose
+// activation changed under it both name a missing primary input by it.
+func PrimaryBindingAttribution(bindings []NamedInputBinding, completeness Completeness) (ReasonCode, CompletionScope) {
+	for _, binding := range bindings {
+		if binding.Role == InputRolePrimary && binding.Completeness == completeness {
+			return AttributedReason(binding.ReasonCode, binding.UnavailableAttribution), CompletionScope{Plan: binding.Consumer.Plan, HasPlan: true,
+				LevelID: binding.Consumer.LevelID, HasLevel: binding.Consumer.HasLevel, PhysicalQuery: binding.Provenance.PhysicalQuery}
+		}
+	}
+	return "", CompletionScope{}
 }
