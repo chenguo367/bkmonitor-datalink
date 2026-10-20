@@ -2,6 +2,7 @@ package evaluation
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -405,7 +406,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 		folded, proposed := execution.RoundGuardReasonForLevel(inputs(), due.Identity, levelID)
 		return string(folded), proposed
 	}
-	tr, err := trigger.EvaluateV2(trigger.EvaluationRequestV2{TenantID: due.Identity.TenantID, BusinessID: due.Identity.BusinessID, Plan: due.CompiledPlan, Record: trigger.DetectionRecord{RecordID: record.RecordID(), SourceTime: record.SourceTime(), ProjectedValues: tvalues, LevelFacts: tfacts}, RecordRef: contract.TriggerRecordRefV1{RecordID: record.RecordID(), SourceTime: record.SourceTime(), DimensionIdentityDigest: string(series), Dimensions: record.Dimensions()}, Observed: contract.TriggerObservedV1{Values: record.Values()}, Histories: histories, EffectiveTimeFacts: effective, EvaluationTime: int64(request.Header.Contract.Slot.EvaluationTime), ReadHoldMillis: request.Header.Contract.ReadHoldMillis, ReadEnd: primaryReadEnd(request.Header, due.Identity), SeriesSeenBefore: !fresh, ExecutionID: request.Header.ExecutionID, Limits: e.limits.Trigger, OpenAlerts: request.OpenAlerts, HoldRecovery: holdRecovery})
+	tr, err := trigger.EvaluateV2(trigger.EvaluationRequestV2{TenantID: due.Identity.TenantID, BusinessID: due.Identity.BusinessID, Plan: due.CompiledPlan, Record: trigger.DetectionRecord{RecordID: record.RecordID(), SourceTime: record.SourceTime(), ProjectedValues: tvalues, LevelFacts: tfacts}, RecordRef: contract.TriggerRecordRefV1{RecordID: record.RecordID(), SourceTime: record.SourceTime(), DimensionIdentityDigest: string(series), Dimensions: alertDimensions(record.Dimensions(), request.HostOverlay)}, Observed: contract.TriggerObservedV1{Values: record.Values()}, Histories: histories, EffectiveTimeFacts: effective, EvaluationTime: int64(request.Header.Contract.Slot.EvaluationTime), ReadHoldMillis: request.Header.Contract.ReadHoldMillis, ReadEnd: primaryReadEnd(request.Header, due.Identity), SeriesSeenBefore: !fresh, ExecutionID: request.Header.ExecutionID, Limits: e.limits.Trigger, OpenAlerts: request.OpenAlerts, HoldRecovery: holdRecovery})
 	if err != nil {
 		return recordResult{}, err
 	}
@@ -1418,3 +1419,22 @@ type namedEvaluationError struct {
 func (e *namedEvaluationError) Error() string                  { return e.err.Error() }
 func (e *namedEvaluationError) Unwrap() error                  { return e.err }
 func (e *namedEvaluationError) QueryFailure() (string, string) { return "", e.code }
+
+// alertDimensions are a record's dimensions as the alert identity reads them:
+// the record's own, with the host overlay written over them where there is
+// one, as the platform's fuller rewrites a record placed by its host id
+// before the alert is built from it. The series' identity and its State
+// stay on the record's own dimensions; only the alert reads these.
+func alertDimensions(dimensions map[string]json.RawMessage, overlay map[string]json.RawMessage) map[string]json.RawMessage {
+	if len(overlay) == 0 {
+		return dimensions
+	}
+	merged := make(map[string]json.RawMessage, len(dimensions)+len(overlay))
+	for key, value := range dimensions {
+		merged[key] = value
+	}
+	for key, value := range overlay {
+		merged[key] = value
+	}
+	return merged
+}

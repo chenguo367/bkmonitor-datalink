@@ -1210,7 +1210,7 @@ func (adapter *seriesAdapter) ConsumeProviderSeries(ctx context.Context, batch e
 	if batch.PhysicalQuery != adapter.query.Spec.Digest || batch.CompletionRef == "" || batch.Dataset == nil || batch.Dataset.Len() == 0 {
 		return errors.New("alarmd access: provider delivered an invalid series")
 	}
-	admitted, outside, keyMissing := adapter.admittedPlans(batch)
+	admitted, outside, keyMissing, overlays := adapter.admittedPlans(batch)
 	// Kept before the target filter returns: a recheck reads the whole
 	// dimension set, and a series every Plan turned away is still data.
 	adapter.lookback.Series(batch.Dataset, batch.Delivery.Bytes)
@@ -1236,7 +1236,7 @@ func (adapter *seriesAdapter) ConsumeProviderSeries(ctx context.Context, batch e
 	}
 	if err := adapter.consumer.ConsumeSeries(ctx, execution.SeriesExecutionBatch{PhysicalQuery: batch.PhysicalQuery,
 		QueryRevision: adapter.query.Spec.PlanFacts.QueryRevision, CompletionRef: batch.CompletionRef,
-		Dataset: batch.Dataset, Inputs: bindings, Delivery: batch.Delivery}); err != nil {
+		Dataset: batch.Dataset, Inputs: bindings, Delivery: batch.Delivery, HostOverlays: overlays}); err != nil {
 		return err
 	}
 	// Counted here rather than at the provider: this is the point a series
@@ -1288,10 +1288,11 @@ func (adapter *seriesAdapter) reconcileCompletion(completion execution.ProviderC
 // plan, and says whether every plan refused it as outside its monitoring
 // target, decided on facts that were all there. A nil result means no
 // filtering is installed and every plan is admitted.
-func (adapter *seriesAdapter) admittedPlans(batch execution.ProviderSeriesBatch) (map[execution.PlanIdentity]bool, bool, *execution.IdentitySample) {
+func (adapter *seriesAdapter) admittedPlans(batch execution.ProviderSeriesBatch) (map[execution.PlanIdentity]bool, bool, *execution.IdentitySample, map[execution.PlanIdentity]map[string]json.RawMessage) {
 	if adapter.admission == nil {
-		return nil, false, nil
+		return nil, false, nil, nil
 	}
+	var overlays map[execution.PlanIdentity]map[string]json.RawMessage
 	// keyMissing holds while every Plan refuses the series because its key
 	// could not be built; sample is the series' identity fields as the first
 	// such Plan's target reads them.
@@ -1318,6 +1319,12 @@ func (adapter *seriesAdapter) admittedPlans(batch execution.ProviderSeriesBatch)
 			decisions[identity] = admit
 			if !admit {
 				adapter.reportScopeDrop(identity, plan, &facts, filter, reason)
+			}
+			if admit && facts.HostOverlay != nil {
+				if overlays == nil {
+					overlays = make(map[execution.PlanIdentity]map[string]json.RawMessage, 1)
+				}
+				overlays[identity] = facts.HostOverlay
 			}
 			if admit && facts.PlacedByHostID && adapter.hostPlacement != nil {
 				adapter.hostPlacement(HostPlacement{Plan: identity, QueryGroup: adapter.queryGroup,
@@ -1351,7 +1358,7 @@ func (adapter *seriesAdapter) admittedPlans(batch execution.ProviderSeriesBatch)
 	if !keyMissing || len(decisions) == 0 || sample == nil {
 		sample = nil
 	}
-	return decisions, outside && len(decisions) > 0, sample
+	return decisions, outside && len(decisions) > 0, sample, overlays
 }
 
 // identitySampleOf is a series' identity fields as a target's identity reads

@@ -14,6 +14,7 @@ package execution
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -1270,8 +1271,13 @@ func gapSnapshotHasPayload(item GapGuardSnapshot) bool {
 type EvaluationRequest struct {
 	Header InternalExecutionHeader
 	Inputs []SeriesEvaluationInputRequest
-	State  StatePreflightResult
-	Gaps   GapLoadResult
+	// HostOverlay is the series' dimensions as the platform's fuller writes
+	// them for a host CMDB placed by id with another address: read by the
+	// alert identity in place of the record's own, never by the series'
+	// identity or its State. Nil for nearly every series.
+	HostOverlay map[string]json.RawMessage
+	State       StatePreflightResult
+	Gaps        GapLoadResult
 	// OpenAlerts is the consumer's open alert set the recovery gate asks. The worker passes it on every request; nil is a caller with no
 	// gate and is counted as such, see OpenAlertGateCounts.NotConfigured.
 	OpenAlerts contract.OpenAlertSet

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 )
 
@@ -73,6 +74,12 @@ type SeriesExecutionBatch struct {
 	Dataset       *Dataset
 	Inputs        []NamedInputBinding
 	Delivery      SeriesDelivery
+	// HostOverlays is, for each Plan the series was admitted to whose host
+	// CMDB placed by id with another address, the dimensions the platform's
+	// fuller writes in its place (admission.Facts.HostOverlay). Nil for
+	// every other series. It changes what the alert identity reads, never
+	// the series' own identity.
+	HostOverlays map[PlanIdentity]map[string]json.RawMessage
 }
 
 func (batch SeriesExecutionBatch) Validate(header InternalExecutionHeader) error {

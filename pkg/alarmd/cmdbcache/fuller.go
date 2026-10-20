@@ -78,6 +78,7 @@ func (fuller *HostTopologyFuller) Fill(dimensions map[string]json.RawMessage, fa
 			placeByID(facts, id, host)
 			facts.PlacedByHostID = true
 			facts.ReportedAddress = reportedAddress(dimensions, host)
+			facts.HostOverlay = hostOverlay(dimensions, host, facts.ReportedAddress)
 			return
 		}
 		// An id CMDB does not know is a host CMDB does not know: the status
@@ -96,6 +97,7 @@ func (fuller *HostTopologyFuller) Fill(dimensions map[string]json.RawMessage, fa
 			placeByAgent(facts, host)
 			facts.PlacedByHostID = true
 			facts.ReportedAddress = reportedAddress(dimensions, host)
+			facts.HostOverlay = hostOverlay(dimensions, host, facts.ReportedAddress)
 			return
 		}
 	}
@@ -376,4 +378,52 @@ func (fuller *ServiceInstanceTopologyFuller) Fill(_ map[string]json.RawMessage, 
 		resolveHostState(index, facts)
 		return
 	}
+}
+
+// hostOverlay is what Python's TopoNodeFuller writes into a record whose
+// host CMDB placed by bk_host_id or bk_agent_id (fullers.py:57-74): the
+// host's address as bk_target_ip, its cloud as bk_target_cloud_id - "0"
+// for none, as the platform writes the cloud it looked up in - and its id
+// as bk_host_id. Nil when the record's own address is the host's (reported,
+// the comparison the record was placed with) and its cloud reads as the
+// host's: the alert identity then reads the same either way, and the record
+// carries nothing - which is every such record on a deployment whose
+// records name their host's own address.
+func hostOverlay(dimensions map[string]json.RawMessage, host *HostFacts, reported admission.ReportedAddress) map[string]json.RawMessage {
+	cloud := host.CloudID
+	if cloud == "" {
+		cloud = "0"
+	}
+	recordCloud := admission.TruthyDimension(dimensions, "bk_target_cloud_id")
+	if recordCloud == "" {
+		recordCloud = "0"
+	}
+	if reported.Cause == admission.AddressSame && recordCloud == cloud {
+		return nil
+	}
+	address, _ := json.Marshal(host.IP)
+	cloudValue, _ := json.Marshal(cloud)
+	overlay := map[string]json.RawMessage{"bk_target_ip": address, "bk_target_cloud_id": cloudValue}
+	if host.HostID != "" {
+		// The platform writes the host's integer id; one that is not a
+		// number is carried as the string CMDB holds.
+		id := json.RawMessage(host.HostID)
+		if !numericID(host.HostID) {
+			id, _ = json.Marshal(host.HostID)
+		}
+		overlay["bk_host_id"] = id
+	}
+	return overlay
+}
+
+func numericID(value string) bool {
+	if value == "" || len(value) > 19 {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }

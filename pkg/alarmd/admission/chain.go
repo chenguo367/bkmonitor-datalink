@@ -120,6 +120,15 @@ type Facts struct {
 	// is decided whether alert identity follows CMDB's address as Python's
 	// does. Zero for a record not placed that way.
 	ReportedAddress ReportedAddress
+	// HostOverlay is what Python's fuller writes into the record's
+	// dimensions on the branch CMDB placed its host by bk_host_id or
+	// bk_agent_id: the host's bk_target_ip, its bk_target_cloud_id ("0" for
+	// none) and its bk_host_id. The alert's target and fingerprint are read
+	// from the dimensions as written. Nil unless the address or the cloud
+	// differs from the record's own - the record then already reads as the
+	// fuller would leave it - so a record placed the ordinary way carries
+	// nothing.
+	HostOverlay map[string]json.RawMessage
 	// PlacedByHostID records that CMDB placed the record's host by its
 	// bk_host_id or bk_agent_id: the branch Python's fuller overwrites
 	// bk_target_ip on, whatever the record's own address. The count the

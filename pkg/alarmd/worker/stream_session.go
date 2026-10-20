@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -28,6 +29,11 @@ type streamedExecution struct {
 	prepared      preparedNamedInputIndex
 	streamed      map[streamedInputKey]execution.NamedInputBinding
 	planSeries    map[execution.PlanIdentity]map[execution.SeriesIdentityDigest]struct{}
+	// hostOverlays holds, by Plan and series, the dimensions the platform's
+	// fuller writes for a host CMDB placed by id with another address
+	// (SeriesExecutionBatch.HostOverlays). Nil until a series carries one,
+	// which most Slots never do.
+	hostOverlays map[execution.PlanIdentity]map[execution.SeriesIdentityDigest]map[string]json.RawMessage
 	// planSeriesCounts is len(planSeries[plan]) once per Plan, for the
 	// evaluation lines: the number is constant for a Plan within a Slot and
 	// the lines are one per series, so it is counted on the first line and
@@ -297,6 +303,9 @@ func (stream *streamedExecution) ConsumeSeries(ctx context.Context, batch execut
 	if err != nil {
 		return fmt.Errorf("alarmd worker: measure provisional retention: %w", err)
 	}
+	// An overlay is kept until the series is evaluated, and charged as it is
+	// kept; a series without one is charged nothing more.
+	retained += hostOverlaysRetainedBytes(batch.HostOverlays)
 	if err := stream.reserveProvisional(ctx, batch.Delivery.Series, retained); err != nil {
 		return err
 	}
@@ -330,6 +339,15 @@ func (stream *streamedExecution) ConsumeSeries(ctx context.Context, batch execut
 		}
 		stream.streamed[key] = binding
 		if binding.Role == execution.InputRolePrimary {
+			if overlay := batch.HostOverlays[binding.Consumer.Plan]; overlay != nil {
+				if stream.hostOverlays == nil {
+					stream.hostOverlays = make(map[execution.PlanIdentity]map[execution.SeriesIdentityDigest]map[string]json.RawMessage)
+				}
+				if stream.hostOverlays[binding.Consumer.Plan] == nil {
+					stream.hostOverlays[binding.Consumer.Plan] = make(map[execution.SeriesIdentityDigest]map[string]json.RawMessage)
+				}
+				stream.hostOverlays[binding.Consumer.Plan][series] = overlay
+			}
 			seriesByPlan := stream.planSeries[binding.Consumer.Plan]
 			if seriesByPlan == nil {
 				seriesByPlan = make(map[execution.SeriesIdentityDigest]struct{})
@@ -391,6 +409,19 @@ func (stream *streamedExecution) releaseProvisional() {
 	stream.coordinator.releaseProvisional(stream.series, stream.retainedTotal())
 	stream.series, stream.retainedByPhase = 0, [retainPhaseCount]uint64{}
 	stream.retainedInputNow.Store(0)
+}
+
+// hostOverlaysRetainedBytes is what a batch's host overlays hold: their keys
+// and values, and a map header for each. Zero for a batch without one.
+func hostOverlaysRetainedBytes(overlays map[execution.PlanIdentity]map[string]json.RawMessage) uint64 {
+	var total uint64
+	for plan, overlay := range overlays {
+		total += 48 + uint64(len(plan.TenantID)+len(plan.BusinessID)+len(plan.StrategyID))
+		for key, value := range overlay {
+			total += 48 + uint64(len(key)+len(value))
+		}
+	}
+	return total
 }
 
 func streamedRetainedSize(bindings []execution.NamedInputBinding, delivery execution.SeriesDelivery) (uint64, error) {
@@ -1640,7 +1671,8 @@ func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry
 	if err != nil {
 		return fmt.Errorf("alarmd worker: bind series EffectiveTime facts: %w", err)
 	}
-	request := execution.EvaluationRequest{Header: evaluationHeader, Inputs: inputs, State: loaded, Gaps: stream.gaps}
+	request := execution.EvaluationRequest{Header: evaluationHeader, Inputs: inputs, State: loaded, Gaps: stream.gaps,
+		HostOverlay: stream.hostOverlays[due.Identity][series]}
 	// Told before the evaluation, so the strategy is in the copy's next read
 	// even if no record of this round asks about it. The constructor requires
 	// the port; the guard is for tests that build the struct.
