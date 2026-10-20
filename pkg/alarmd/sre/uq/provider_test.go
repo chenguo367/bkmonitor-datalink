@@ -140,6 +140,33 @@ func TestRejectedRequestsNeverReachEgress(t *testing.T) {
 		{"bkdata route alias", "uq_scope_denied", func(r *Request) { r.Body["query_list"].([]any)[0].(map[string]any)["DATA_SOURCE"] = "bk_data" }},
 		{"unsupported typed contract", "uq_contract_unsupported", func(r *Request) { delete(r.Body, "query_list"); r.Body["trace_query_v2"] = map[string]any{} }},
 		{"query aliases", "invalid_input", func(r *Request) { r.Body["QUERY_LIST"] = r.Body["query_list"] }},
+		// encoding/json folds U+017F to 's' and U+212A to 'k' when it matches field names.
+		{"folded physical override", "invalid_input", func(r *Request) { r.Body["t\u017fdb_map"] = map[string]any{} }},
+		{"folded skip", "invalid_input", func(r *Request) { r.Body["s\u212aip_space"] = true }},
+		{"folded SQL", "invalid_input", func(r *Request) {
+			r.Body["query_list"].([]any)[0].(map[string]any)["\u017fql"] = "select * from outside_scope"
+		}},
+		{"folded bkdata route", "invalid_input", func(r *Request) {
+			r.Body["query_list"].([]any)[0].(map[string]any)["data_\u017fource"] = "bkdata"
+		}},
+		{"folded query list shadow", "invalid_input", func(r *Request) {
+			r.Body["query_li\u017ft"] = []any{map[string]any{"table_id": "fixture.metric", "data_source": "bkdata"}}
+		}},
+		{"folded nested key", "invalid_input", func(r *Request) {
+			r.Body["query_list"].([]any)[0].(map[string]any)["conditions"] = map[string]any{"field_li\u017ft": []any{}}
+		}},
+		{"output expression route", "uq_scope_denied", func(r *Request) {
+			r.Body["output_list"] = []any{map[string]any{"reference_name": "b", "expression": "bkdata:db:t:m"}}
+		}},
+		// A promql key does not move a structured body off the structured checks.
+		{"promql key keeps SQL check", "uq_scope_denied", func(r *Request) {
+			r.Body["promql"] = "up"
+			r.Body["query_list"].([]any)[0].(map[string]any)["sql"] = "select * from outside_scope"
+		}},
+		{"promql key keeps bkdata check", "uq_scope_denied", func(r *Request) {
+			r.Body["promql"] = "up"
+			r.Body["query_list"].([]any)[0].(map[string]any)["data_source"] = "bkdata"
+		}},
 		{"window", "uq_window_exceeded", func(r *Request) { r.Body["end_time"] = "1702592001" }},
 		{"reversed", "uq_window_exceeded", func(r *Request) { r.Body["start_time"] = "1700000061" }},
 		{"timestamp unit", "invalid_input", func(r *Request) { r.Body["start_time"] = "1657851600000" }},
@@ -313,9 +340,9 @@ func promQLRequest(expr string) Request {
 		Body: map[string]any{"promql": expr, "match": "{}", "start": "1700000000", "end": "1700000060", "step": "60s"}}
 }
 
-// A PromQL request is the one the detection loop sends, so it reaches UQ
-// verbatim, an empty match included, and UQ's own refusal comes back as
-// native evidence rather than a local rewrite.
+// A PromQL request is the one the detection loop sends, so it reaches UQ as
+// parsed, an empty match included, and UQ's own refusal comes back as native
+// evidence rather than a local rewrite.
 func TestPromQLReachesUQVerbatim(t *testing.T) {
 	var got map[string]any
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -378,6 +405,17 @@ func TestPromQLScopeAndRouteRefusals(t *testing.T) {
 		{"physical storage override", "uq_scope_denied", func(r *Request) { r.Body["tsdb_map"] = map[string]any{} }},
 		{"body scope", "uq_scope_mismatch", func(r *Request) { r.Body["space_uid"] = "other-space" }},
 		{"window", "uq_window_exceeded", func(r *Request) { r.Body["end"] = "1702592001" }},
+		{"output expression route", "uq_scope_denied", func(r *Request) {
+			r.Body["promql"] = "up"
+			r.Body["output_list"] = []any{map[string]any{"reference_name": "a", "expression": "up"}, map[string]any{"reference_name": "b", "expression": "bkdata:db:t:m"}}
+		}},
+		{"output aliases", "uq_scope_denied", func(r *Request) {
+			r.Body["Output_List"] = []any{map[string]any{"reference_name": "b", "EXPRESSION": "bkdata:db:t:m"}}
+		}},
+		{"folded output list", "invalid_input", func(r *Request) {
+			r.Body["output_li\u017ft"] = []any{map[string]any{"reference_name": "b", "expression": "bkdata:db:t:m"}}
+		}},
+		{"output entry shape", "invalid_input", func(r *Request) { r.Body["output_list"] = []any{"bkdata:db:t:m"} }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := promQLRequest(`fixture:value`)
@@ -395,7 +433,12 @@ func TestPromQLScopeAndRouteRefusals(t *testing.T) {
 			t.Errorf("%s refused: %v", expr, err)
 		}
 	}
-	if calls.Load() != 3 {
+	named := promQLRequest(`fixture:value`)
+	named.Body["output_list"] = []any{map[string]any{"reference_name": "a", "expression": "fixture:value"}}
+	if _, err := p.Query(context.Background(), named); err != nil {
+		t.Errorf("named outputs refused: %v", err)
+	}
+	if calls.Load() != 4 {
 		t.Fatalf("admitted PromQL reached native egress %d times", calls.Load())
 	}
 }
