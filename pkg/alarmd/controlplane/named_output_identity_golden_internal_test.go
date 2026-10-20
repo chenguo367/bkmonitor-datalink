@@ -13,6 +13,8 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
 
 // identityGoldenSources are strategy items without query_output_config, one
@@ -87,5 +89,30 @@ func TestAStrategyWithoutNamedOutputsKeepsItsQueryIdentity(t *testing.T) {
 			t.Errorf("%s: revision %s group %s, the release before named outputs derives revision %s group %s",
 				name, facts.QueryRevision, group, want[0], want[1])
 		}
+	}
+}
+
+// A strategy without update_time takes its revision from a digest of the
+// decoded strategy, so a field this build reads must not encode itself when
+// the strategy lacks it. The revision is the one the release before named
+// outputs derives for the same strategy.
+func TestAStrategyWithoutUpdateTimeKeepsItsRevision(t *testing.T) {
+	const strategy = `{"id":104,"bk_biz_id":2,"name":"memory usage","is_enabled":true,` +
+		`"items":[{"id":1,"name":"memory","query_md5":"query-104","expression":"a","time_delay":0,` +
+		`"query_configs":[{"data_source_label":"bk_monitor","data_type_label":"time_series","metric_field":"pct_used",` +
+		`"alias":"a","agg_method":"AVG","agg_interval":60,"agg_dimension":["bk_target_ip"],"agg_condition":[],` +
+		`"result_table_id":"system.mem","functions":[]}],` +
+		`"algorithms":[{"level":1,"type":"Threshold","config":[[{"method":"gte","threshold":90}]]}]}],` +
+		`"detects":[{"level":1,"trigger_config":{"count":1,"check_window":1},"recovery_config":{"check_window":1}}]}`
+	var source legacyStrategy
+	if err := json.Unmarshal([]byte(strategy), &source); err != nil {
+		t.Fatal(err)
+	}
+	revision, err := contract.DeriveCanonicalDigestV2("alarmd-legacy-strategy-revision-v1", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "47f7bf96206a922f2dc7f3494c4779846a04287f656401b78be5e1bb20570911"; revision != want {
+		t.Fatalf("revision = %s, want %s: a field absent from the strategy moved its revision", revision, want)
 	}
 }
