@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -184,5 +185,29 @@ func TestAnEventFieldAlreadyUnderDimensionsIsNotPrefixedTwice(t *testing.T) {
 		if field.Field == "dimensions.dimensions.pod" {
 			t.Fatalf("condition key prefixed twice: %+v", clause.Conditions)
 		}
+	}
+}
+
+// Several PromQL queries without expression_mode are the retired form, named
+// so with the three ways to rewrite it; PromQL beside another source is not
+// that form and keeps its own word.
+func TestTheRetiredMultiPromQLFormIsRefusedByName(t *testing.T) {
+	planner, _ := NewLegacyPrimaryQueryCompiler("uq", "UTC", LegacyQueryRuntimeFacts{})
+	promql := func(alias string) string {
+		return `{"data_source_label":"prometheus","data_type_label":"time_series","alias":"` + alias + `","promql":"sum by (host) (up)","agg_interval":60}`
+	}
+	retired := pollingTestSource(promql("a"))
+	retired.QueryConfigs = append(retired.QueryConfigs, json.RawMessage(promql("b")))
+	_, err := planner.CompilePrimaryQuery(context.Background(), retired)
+	var failure *QueryPlanCompileError
+	if !errors.As(err, &failure) || failure.Reason != "QUERY_PROMQL_FORM_RETIRED" || failure.Err == nil ||
+		!strings.Contains(failure.Err.Error(), "expression_mode multi-PromQL expression") || !strings.Contains(failure.Err.Error(), "separate strategies") {
+		t.Fatalf("err = %v, want QUERY_PROMQL_FORM_RETIRED naming the rewrites", err)
+	}
+	mixed := pollingTestSource(promql("a"))
+	mixed.QueryConfigs = append(mixed.QueryConfigs, json.RawMessage(`{"data_source_label":"bk_monitor","data_type_label":"time_series",`+
+		`"metric_field":"usage","alias":"b","agg_method":"AVG","agg_interval":60,"result_table_id":"system.cpu_summary"}`))
+	if _, err := planner.CompilePrimaryQuery(context.Background(), mixed); !errors.As(err, &failure) || failure.Reason != "QUERY_MIXED_PROMQL_NOT_MIGRATED" {
+		t.Fatalf("err = %v, want QUERY_MIXED_PROMQL_NOT_MIGRATED for PromQL beside another source", err)
 	}
 }

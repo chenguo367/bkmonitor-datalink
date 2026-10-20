@@ -90,6 +90,8 @@ var capabilityByReason = map[string]CapabilityClass{
 	"UNSUPPORTED_MULTI_ITEM_STRATEGY":       {Area: CapabilitySource, Outcome: CapabilityNotYetSupported},
 	"SOURCE_NOT_SLIDING":                    {Area: CapabilitySource, Outcome: CapabilityNotYetSupported},
 	"QUERY_FTA_UNSUPPORTED":                 {Area: CapabilitySource, Outcome: CapabilityUnsupportedByDesign},
+	"QUERY_SOURCE_RETIRED":                  {Area: CapabilitySource, Outcome: CapabilityUnsupportedByDesign},
+	"QUERY_PROMQL_FORM_RETIRED":             {Area: CapabilitySource, Outcome: CapabilityUnsupportedByDesign},
 
 	"UNSUPPORTED_TARGET_SCOPE":              {Area: CapabilityTarget, Outcome: CapabilityNotYetSupported},
 	"UNSUPPORTED_TARGET_SCOPE_UNRESOLVABLE": {Area: CapabilityTarget, Outcome: CapabilityNotYetSupported},

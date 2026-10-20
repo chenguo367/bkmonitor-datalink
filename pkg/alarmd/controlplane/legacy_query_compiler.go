@@ -251,6 +251,18 @@ func (compiler *LegacyPrimaryQueryCompiler) CompilePrimaryQuery(_ context.Contex
 	stepSeconds := int64(0)
 	for _, config := range configs {
 		if config.DataSourceLabel == "prometheus" {
+			if allPrometheus(configs) {
+				// Several PromQL queries without expression_mode: the retired
+				// form, read by the platform as independent queries whose
+				// records are concatenated and whose expression never runs.
+				// Not migrated and not converted - as an expression the
+				// ignored expression would start running, and as one "or"
+				// query a series of both would lose one side.
+				return execution.QueryPlanFacts{}, queryUnsupported("QUERY_PROMQL_FORM_RETIRED", errors.New(
+					"several PromQL queries without expression_mode are a retired form; rewrite as one PromQL combining the "+
+						"series under one rule, as an expression_mode multi-PromQL expression for a computation across "+
+						"queries, or as separate strategies for independent alerting and recovery"))
+			}
 			return execution.QueryPlanFacts{}, queryUnsupported("QUERY_MIXED_PROMQL_NOT_MIGRATED", nil)
 		}
 		if config.DataSourceLabel == "bk_data" && len(strings.TrimSpace(source.Expression)) <= 1 {
@@ -1064,6 +1076,14 @@ func configSourceUnsupported(config legacyQueryConfig) error {
 	if config.DataSourceLabel == "bk_fta" {
 		return queryUnsupported("QUERY_FTA_UNSUPPORTED", nil)
 	}
+	if config.DataSourceLabel == "bk_monitor" && config.DataTypeLabel == "event" {
+		// GSE system events (system.event): the platform has retired this
+		// source for the custom event chain its migration rewrites such
+		// strategies into (AgentLost, DiskReadonly, DiskFull, CoreFile, OOM
+		// as custom/event), which compiles here.
+		return queryUnsupported("QUERY_SOURCE_RETIRED", errors.New(
+			"the GSE system event source is retired; the strategy is detected once rewritten as a custom event strategy"))
+	}
 	if !pollingSourceSupported(config) {
 		return queryUnsupported("QUERY_SOURCE_NOT_MIGRATED", nil)
 	}
@@ -1118,4 +1138,14 @@ func querySources(facts execution.QueryPlanFacts) []string {
 		return append([]string(nil), facts.SourceSemantics...)
 	}
 	return []string{omittedSourceSemantics}
+}
+
+// allPrometheus says every query of an item is a PromQL query.
+func allPrometheus(configs []legacyQueryConfig) bool {
+	for _, config := range configs {
+		if config.DataSourceLabel != "prometheus" {
+			return false
+		}
+	}
+	return true
 }

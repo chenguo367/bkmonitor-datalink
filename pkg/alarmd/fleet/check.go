@@ -269,7 +269,7 @@ var DeclaredCapabilities = []string{
 // the strategy owner moves the strategy to another data source. Filed as a
 // capability they would promise a build that is not coming; filed as this
 // deployment's, a fix it will not make.
-var strategyOwnedCapabilityReasons = []string{"QUERY_FTA_UNSUPPORTED"}
+var strategyOwnedCapabilityReasons = []string{"QUERY_FTA_UNSUPPORTED", "QUERY_SOURCE_RETIRED", "QUERY_PROMQL_FORM_RETIRED"}
 
 // sourceCheckOf is the line a withheld disposition and its reason are filed
 // under: the disposition's own, except that the capability disposition goes

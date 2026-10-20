@@ -184,6 +184,14 @@ var withheldReasonWords = map[string]WithheldReasonWords{
 	"QUERY_FTA_UNSUPPORTED": {Kind: WithheldStrategyDefinition,
 		What: "FTA 告警事件类数据源不支持：这类查询要用查询服务没有的字段，不带这些字段就会把整张表的告警都算进来，所以一律不编译",
 		Next: "不会在这里检测，也没有开关可开；需要检测的话，策略负责人改用其它数据源"},
+	// Retired by the platform, not still to come: no build carries them, and
+	// the strategy owner rewrites the strategy into the form that replaced it.
+	"QUERY_SOURCE_RETIRED": {Kind: WithheldStrategyDefinition,
+		What: "GSE 系统事件（bk_monitor 事件、system.event）这条旧链路平台已退役，由自定义事件链路取代",
+		Next: "策略改写为自定义事件策略（custom/event，如 AgentLost、DiskReadonly、DiskFull、CoreFile、OOM）后即在这里检测；不会有构建再支持旧链路"},
+	"QUERY_PROMQL_FORM_RETIRED": {Kind: WithheldStrategyDefinition,
+		What: "未标记 expression_mode 的多条 PromQL 写法已停用：各查询独立出数、表达式不生效，不迁移也不自动转换",
+		Next: "策略负责人改写为三者之一：一条合并后的 PromQL（同一规则下的多组序列）；带 expression_mode 的多 PromQL 表达式（跨查询计算）；拆成多条策略（各自独立告警与恢复）"},
 	"QUERY_SOURCE_NOT_MIGRATED": {Kind: WithheldBuildCapability,
 		What: "该数据源的查询还没迁到 Go 侧",
 		Next: "等带该数据源的构建；改部署参数没有用"},

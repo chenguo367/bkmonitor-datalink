@@ -325,7 +325,9 @@ func TestTheDeclaredCapabilitiesAreNamedReasonsAndOnlyThose(t *testing.T) {
 	owners := map[string]Owner{"capability": OwnerCapability, "alarmd": OwnerAlarmd, "strategy": OwnerStrategy}
 	for reason, want := range map[string]string{
 		"ALGORITHM_NOT_MIGRATED": "capability", "QUERY_SOURCE_NOT_MIGRATED": "capability",
-		"QUERY_FTA_UNSUPPORTED":        "strategy",
+		"QUERY_FTA_UNSUPPORTED": "strategy",
+		// Retired forms: the strategy owner rewrites the strategy.
+		"QUERY_SOURCE_RETIRED": "strategy", "QUERY_PROMQL_FORM_RETIRED": "strategy",
 		"EVALUATION_STEP_INCONSISTENT": "alarmd", "SNAPSHOT_RETENTION_INSUFFICIENT": "alarmd", "SOMETHING_NEW": "alarmd",
 	} {
 		if got := withheldAttribution("UNSUPPORTED_PHASE2_CAPABILITY", reason); got != want {
