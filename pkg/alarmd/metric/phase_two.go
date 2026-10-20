@@ -219,6 +219,7 @@ type phaseTwoMetrics struct {
 	hostDisableMonitorStates        prometheus.Gauge
 	unmappedSeverity                *prometheus.CounterVec
 	cmdbIndexAge                    *prometheus.GaugeVec
+	cmdbIndexPublish                *prometheus.GaugeVec
 	cmdbIndexDegraded               *prometheus.GaugeVec
 	cmdbIndexReads                  *prometheus.CounterVec
 	dueIndex                        dueIndexMetrics
@@ -1650,6 +1651,16 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"writer published what was read, which staleness is judged on when the writer says (0 when it does " +
 			"not); source, since another writer's last full-pass attempt, shown and not judged on.",
 	}, []string{"kind"})
+	metrics.cmdbIndexPublish = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Subsystem: metricSubsystem, Name: "cmdb_host_index_publish_seconds",
+		Help: "The CMDB writer's publish cadence as alarmd observes it, by kind: max_gap, the longest gap between " +
+			"its last 24 distinct publishes (0 before two were seen, and where the writer publishes no time); " +
+			"stale_bound, the published age past which the index is stale - twice max_gap, at least 15 minutes " +
+			"and at most 2 hours, and 15 minutes before two publishes were seen.",
+	}, []string{"kind"})
+	for _, kind := range []string{"stale_bound", "max_gap"} {
+		metrics.cmdbIndexPublish.WithLabelValues(kind)
+	}
 	metrics.cmdbIndexDegraded = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Subsystem: metricSubsystem, Name: "cmdb_host_index_degraded",
 		Help: "Whether the CMDB index is unusable for filtering, by bounded reason.",
@@ -1847,7 +1858,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.fleetTracker, m.effectiveTimeRefresh, m.activationRebuild, m.timelineRepair, m.activationSkippedTimelines, m.timelineUnreadableReports, m.activationHeader, m.activationBlocked, m.liveReserve, m.roundMemory, m.targetGroup, m.effectiveClose, m.logLines, m.observerPanics, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.apmCarried, m.apmCarriedBytes, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.controlFactsWrites, m.queryCooldownLoads, m.eventBusinessAttribution, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
 		m.controlSourceRetainedStale, m.controlSourceLastGoodIdentity, m.platformSettings,
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
-		m.seriesAdmission, m.cmdbAddressDiffers, m.cmdbPlacedByHostID, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.cmdbIndexBusinessMappings, m.cmdbIndexRecordsRefused, m.hostDisableMonitorStates, m.cmdbIndexAge,
+		m.seriesAdmission, m.cmdbAddressDiffers, m.cmdbPlacedByHostID, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.cmdbIndexBusinessMappings, m.cmdbIndexRecordsRefused, m.hostDisableMonitorStates, m.cmdbIndexAge, m.cmdbIndexPublish,
 		m.fleetSnapshotBytes, m.fleetViewSnapshotLoads, m.fleetViewSnapshotBytes,
 		m.fleetSummaryBytes, m.fleetViewSummaryLoads, m.fleetViewSummaryBytes, m.fleetViewOwnedLoads, m.fleetViewOwnedBytes, m.retainedPeakCensusGroups, m.retainedPeakCensusOverflow,
 		m.cmdbIndexDegraded, m.cmdbIndexReads, m.catalogComposition, m.noDataMemoryReads, m.noDataMemoryRenewals,

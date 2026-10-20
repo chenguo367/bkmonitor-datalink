@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -54,6 +55,22 @@ type Store struct {
 	now             func() time.Time
 
 	observeRead func(result string)
+	// publishedMaxAgeCap is the most the published bound may be derived to
+	// (derivePublishedBound); zero keeps it at publishedMaxAge.
+	publishedMaxAgeCap time.Duration
+	// onTransition is told when the judgement on the held index changes
+	// (Transition); nil tells no one. tenant names the store in it.
+	onTransition func(Transition)
+	tenant       string
+
+	// publishes are the writer's distinct publish times the loads read,
+	// oldest first, at most publishWindow+1 of them; derivedBound and
+	// maxGap are what they give, set at each refresh and read without the
+	// lock by every judgement.
+	publishes    []time.Time
+	derivedBound atomic.Int64
+	maxGap       atomic.Int64
+	lastJudged   string
 
 	mutex sync.RWMutex
 	index *Index
@@ -90,7 +107,43 @@ type StoreOptions struct {
 	// ObserveRead is told how each refresh read the cache (ReadResults).
 	// Nil observes nothing.
 	ObserveRead func(result string)
+	// PublishedMaxAgeCap, when set, derives the published bound from the
+	// writer's observed publish gaps (derivePublishedBound), between
+	// PublishedMaxAge and this cap. Zero holds the bound at PublishedMaxAge.
+	PublishedMaxAgeCap time.Duration
+	// OnTransition is told, at a refresh, when the judgement on the held
+	// index changed - into or out of stale, empty or never loaded. Nil tells
+	// no one.
+	OnTransition func(Transition)
 }
+
+// Transition is one change of the judgement on a store's held index, at a
+// refresh: the tenant, the judgement before and after ("" for usable), the
+// published age, the bound it was judged against and the longest publish
+// gap the bound was derived from (zero before two publishes were seen).
+type Transition struct {
+	Tenant       string
+	From, To     string
+	PublishedAge time.Duration
+	Bound        time.Duration
+	MaxGap       time.Duration
+}
+
+// The published bound is derived from the longest gap between the writer's
+// last publishWindow distinct publishes: two of them, and never below the
+// configured bound nor above its cap. The window is two hours of a writer
+// that publishes every five minutes, so a skipped cycle - a writer measured
+// at one deployment skips one every half hour to hour, its gaps reaching 33
+// minutes - is still in the window when the next one comes, and one long gap
+// raises the bound
+// for as long as it stays in the window. Twice the longest gap is a writer
+// that missed one more cycle than it ever has, not one that stopped; past
+// the cap, a writer that stopped is stale within two hours whatever its
+// history.
+const (
+	publishWindow          = 24
+	publishedBoundMultiple = 2
+)
 
 func NewStore(reader indexLoader, options StoreOptions) (*Store, error) {
 	if reader == nil {
@@ -109,8 +162,12 @@ func NewStore(reader indexLoader, options StoreOptions) (*Store, error) {
 	if now == nil {
 		now = time.Now
 	}
+	if options.PublishedMaxAgeCap != 0 && options.PublishedMaxAgeCap < options.PublishedMaxAge {
+		return nil, errors.New("alarmd cmdbcache: the published bound's cap is below the bound")
+	}
 	return &Store{reader: reader, maxAge: options.MaxAge, publishedMaxAge: options.PublishedMaxAge, now: now,
-		observeRead: options.ObserveRead}, nil
+		observeRead: options.ObserveRead, publishedMaxAgeCap: options.PublishedMaxAgeCap,
+		onTransition: options.OnTransition, tenant: DefaultTenant, lastJudged: IndexNeverLoaded}, nil
 }
 
 // The reasons an index is not one to decide on, as Health and every caller
@@ -133,12 +190,58 @@ func (store *Store) factsAge(index *Index) (time.Duration, time.Duration) {
 		if age < 0 {
 			age = 0
 		}
-		if store.publishedMaxAge == 0 {
-			return age, store.maxAge
-		}
-		return age, store.publishedMaxAge
+		return age, store.publishedBound()
 	}
 	return now.Sub(index.BuiltAt()), store.maxAge
+}
+
+// publishedBound is the bound a published age is held to: the derived one
+// once two distinct publishes have been seen, else the configured one.
+func (store *Store) publishedBound() time.Duration {
+	if derived := store.derivedBound.Load(); derived > 0 {
+		return time.Duration(derived)
+	}
+	if store.publishedMaxAge == 0 {
+		return store.maxAge
+	}
+	return store.publishedMaxAge
+}
+
+// notePublish records a load's publish time when it is a new one, and
+// derives the published bound from the gaps between the last publishWindow
+// of them. Called with the lock held.
+func (store *Store) notePublish(published time.Time) {
+	if published.IsZero() || store.publishedMaxAgeCap == 0 {
+		return
+	}
+	if n := len(store.publishes); n > 0 && !published.After(store.publishes[n-1]) {
+		return
+	}
+	store.publishes = append(store.publishes, published)
+	if len(store.publishes) > publishWindow+1 {
+		store.publishes = append([]time.Time(nil), store.publishes[len(store.publishes)-publishWindow-1:]...)
+	}
+	store.derivedBound.Store(int64(derivePublishedBound(store.publishes, store.publishedMaxAge, store.publishedMaxAgeCap)))
+	store.maxGap.Store(int64(maxPublishGap(store.publishes)))
+}
+
+// maxPublishGap is the longest gap between successive publishes.
+func maxPublishGap(publishes []time.Time) time.Duration {
+	var longest time.Duration
+	for i := 1; i < len(publishes); i++ {
+		longest = max(longest, publishes[i].Sub(publishes[i-1]))
+	}
+	return longest
+}
+
+// derivePublishedBound is publishedBoundMultiple times the longest gap
+// between the publishes, within [floor, ceiling]; zero before two publishes,
+// which leaves the configured bound in force.
+func derivePublishedBound(publishes []time.Time, floor, ceiling time.Duration) time.Duration {
+	if len(publishes) < 2 {
+		return 0
+	}
+	return min(max(publishedBoundMultiple*maxPublishGap(publishes), floor), ceiling)
 }
 
 // judge is the one staleness and emptiness judgement on a held index:
@@ -298,6 +401,7 @@ func (store *Store) Refresh(ctx context.Context) error {
 		store.unchanged++
 		store.mutex.Unlock()
 		store.observe(ReadUnchanged)
+		store.noteJudgement()
 		return nil
 	}
 	index, err := store.reader.Load(ctx, store.now())
@@ -306,10 +410,12 @@ func (store *Store) Refresh(ctx context.Context) error {
 		store.lastError = err
 		store.mutex.Unlock()
 		store.observe(ReadFailed)
+		store.noteJudgement()
 		return err
 	}
 	index.carryOptional(store.index)
 	store.index = index
+	store.notePublish(index.PublishedAt())
 	if index.Hosts() > 0 {
 		store.identity = identityLayers(index, store.identity)
 	}
@@ -320,7 +426,29 @@ func (store *Store) Refresh(ctx context.Context) error {
 	store.refreshes++
 	store.mutex.Unlock()
 	store.observe(ReadFull)
+	store.noteJudgement()
 	return nil
+}
+
+// noteJudgement tells OnTransition when the judgement on the held index has
+// changed since the last refresh. A refresh is once a minute, so a store
+// says each transition once and no more often than that.
+func (store *Store) noteJudgement() {
+	store.mutex.Lock()
+	index := store.index
+	reason := store.judge(index)
+	from := store.lastJudged
+	store.lastJudged = reason
+	store.mutex.Unlock()
+	if reason == from || store.onTransition == nil {
+		return
+	}
+	transition := Transition{Tenant: store.tenant, From: from, To: reason, Bound: store.publishedBound(),
+		MaxGap: time.Duration(store.maxGap.Load())}
+	if index != nil && !index.PublishedAt().IsZero() {
+		transition.PublishedAge = max(store.now().Sub(index.PublishedAt()), 0)
+	}
+	store.onTransition(transition)
 }
 
 // publishUnchanged is whether the held index can stand without reading the
@@ -389,9 +517,14 @@ type Health struct {
 	// long ago the writer published what it read, when the writer says
 	// (Published); SourceAge is the other writer's last attempt, shown and
 	// not decided on.
-	Age            time.Duration
-	Published      bool
-	PublishedAge   time.Duration
+	Age          time.Duration
+	Published    bool
+	PublishedAge time.Duration
+	// PublishedBound is the bound the published age is judged against now,
+	// and PublishMaxGap the longest gap between the writer's recent
+	// publishes it was derived from (zero before two were seen).
+	PublishedBound time.Duration
+	PublishMaxGap  time.Duration
 	SourceAge      time.Duration
 	Degraded       bool
 	DegradedReason string
@@ -421,7 +554,8 @@ func (store *Store) Health() Health {
 	}
 	store.mutex.RLock()
 	defer store.mutex.RUnlock()
-	health := Health{Refreshes: store.refreshes, Unchanged: store.unchanged}
+	health := Health{Refreshes: store.refreshes, Unchanged: store.unchanged, PublishedBound: store.publishedBound(),
+		PublishMaxGap: time.Duration(store.maxGap.Load())}
 	if store.index == nil {
 		health.Degraded = true
 		health.DegradedReason = IndexNeverLoaded

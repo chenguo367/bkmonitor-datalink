@@ -331,6 +331,12 @@ Whether the CMDB index is unusable for filtering, by bounded reason.
 
 Hosts in the in-memory CMDB index the target filter decides on.
 
+## alarmd_cmdb_host_index_publish_seconds
+
+Labels: `kind`
+
+The CMDB writer's publish cadence as alarmd observes it, by kind: max_gap, the longest gap between its last 24 distinct publishes (0 before two were seen, and where the writer publishes no time); stale_bound, the published age past which the index is stale - twice max_gap, at least 15 minutes and at most 2 hours, and 15 minutes before two publishes were seen.
+
 ## alarmd_cmdb_host_index_reads_total
 
 Labels: `result`

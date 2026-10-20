@@ -133,6 +133,16 @@ func (r *Recorder) SetCMDBHostIndex(hosts int, ageSeconds, publishedAgeSeconds, 
 	r.phaseTwo.cmdbIndexDegraded.WithLabelValues(reason).Set(value)
 }
 
+// SetCMDBHostIndexPublish publishes the published-staleness bound in force
+// and the longest recent publish gap it was derived from.
+func (r *Recorder) SetCMDBHostIndexPublish(boundSeconds, maxGapSeconds float64) {
+	if r == nil {
+		return
+	}
+	r.phaseTwo.cmdbIndexPublish.WithLabelValues("stale_bound").Set(boundSeconds)
+	r.phaseTwo.cmdbIndexPublish.WithLabelValues("max_gap").Set(maxGapSeconds)
+}
+
 // RecordCMDBIndexRead counts one refresh of the CMDB index by how it read
 // the cache: full, unchanged or failed. Any other word is counted as failed
 // rather than as a new series.

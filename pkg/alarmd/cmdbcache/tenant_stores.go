@@ -106,6 +106,7 @@ func (stores *TenantStores) For(tenant string) *Store {
 		stores.mu.Unlock()
 		return nil
 	}
+	store.tenant = tenant
 	stores.tenants[tenant] = store
 	stores.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), firstLoadBound)

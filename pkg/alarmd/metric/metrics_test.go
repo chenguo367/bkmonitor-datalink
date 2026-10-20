@@ -295,6 +295,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"alarmd_retained_peak_census_overflow":                "variableLabels: {}",
 		"alarmd_host_disable_monitor_states":                  "variableLabels: {}",
 		"alarmd_cmdb_host_index_age_seconds":                  "variableLabels: {kind}",
+		"alarmd_cmdb_host_index_publish_seconds":              "variableLabels: {kind}",
 		"alarmd_cmdb_host_index_degraded":                     "variableLabels: {reason}",
 		"alarmd_cmdb_host_index_reads_total":                  "variableLabels: {result}",
 		"alarmd_due_index_entries":                            "variableLabels: {}",
@@ -868,6 +869,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("retained_peak_census_overflow"):         1,
 		fqName("host_disable_monitor_states"):           1,
 		fqName("cmdb_host_index_age_seconds"):           3,
+		fqName("cmdb_host_index_publish_seconds"):       2,
 		fqName("cmdb_host_index_degraded"):              len(cmdbIndexReasons),
 		fqName("cmdb_host_index_reads_total"):           3,
 		// Every combination is created at construction, so these are exact rather
