@@ -1074,6 +1074,11 @@ type CauseOrigin struct {
 // published by a replica whose build did not. Never read as physical.
 const CauseOriginUnknown = "unknown"
 
+// CauseOriginDerived is the origin of a reason that is alarmd's own
+// judgement rather than anything a round met or carried: a cause word a
+// round is filed under, a check word, an UNKNOWN verdict's reason.
+const CauseOriginDerived = "derived"
+
 // unknownCauseOrigin is the origin a reason held without one carries.
 func unknownCauseOrigin() *CauseOrigin {
 	return &CauseOrigin{Origin: CauseOriginUnknown}
@@ -1089,11 +1094,18 @@ func settleCauseOrigin(anomaly *Anomaly) {
 
 // causeOriginOf is a round's cause origin as a row carries it; nil for a
 // round that named no reason.
-func causeOriginOf(reason string, carried *observability.CarriedReasonFacts) *CauseOrigin {
+//
+// A round filed under its cause word (roundFiledUnder: GAP_GUARD_WARMING,
+// SNAPSHOT_CORRUPT) has alarmd's own classification for a reason: derived.
+// A carried guard behind it still names where it came from.
+func causeOriginOf(reason string, filedUnderCause bool, carried *observability.CarriedReasonFacts) *CauseOrigin {
 	if reason == "" {
 		return nil
 	}
 	origin := &CauseOrigin{Origin: observability.ReasonOriginLabel(carried != nil)}
+	if filedUnderCause {
+		origin.Origin = CauseOriginDerived
+	}
 	if carried != nil && carried.Known() {
 		origin.Slot, origin.Cause = carried.OriginSlot, string(carried.OriginCause)
 	}
@@ -1508,8 +1520,10 @@ type Anomaly struct {
 	CauseScope *CauseScope `json:"cause_scope,omitempty"`
 	// CauseOrigin is whose CauseReason is: physical (the round's own),
 	// carried (a stored guard's carried onto it; Slot and Cause when the
-	// guard recorded them), or unknown (a row restored from a summary, or
-	// published by a build before this field, that never learned it). A
+	// guard recorded them), derived (alarmd's own word: a round filed under
+	// its cause, GAP_GUARD_WARMING or SNAPSHOT_CORRUPT), or unknown (a row
+	// restored from a summary, or published by a build before this field,
+	// that never learned it). A
 	// LEVEL_OUTCOME_UNKNOWN round still counts as something wrong - the
 	// series really was not evaluated - but its QUERY_TIMEOUT may be one an
 	// earlier round raised, and the row says so. Present whenever

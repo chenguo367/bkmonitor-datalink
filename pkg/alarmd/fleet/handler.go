@@ -461,16 +461,19 @@ type Summary struct {
 	// cause to carry a reason of either the coverage class or the retryable
 	// class, and those need opposite responses.
 	ByCauseReason Distribution `json:"by_cause_reason"`
-	// ByCauseReasonPhysical, ByCauseReasonCarried and ByCauseReasonUnknown
-	// split ByCauseReason by whose the reason is (Anomaly.CauseOrigin):
-	// physical for what the round met itself, carried for a stored guard's
-	// reason repeated on it (with or without a recorded origin), unknown for
-	// a row that never learned it - restored from a summary, or from a
-	// replica on an older build. Unknown is never counted as physical, so
-	// QUERY_TIMEOUT under physical is this deployment's own timeouts alone.
-	// The three add up to ByCauseReason.
+	// ByCauseReasonPhysical, ByCauseReasonCarried, ByCauseReasonDerived and
+	// ByCauseReasonUnknown split ByCauseReason by whose the reason is
+	// (Anomaly.CauseOrigin): physical for what the round met itself, carried
+	// for a stored guard's reason repeated on it (with or without a recorded
+	// origin), derived for alarmd's own word a round is filed under
+	// (GAP_GUARD_WARMING, SNAPSHOT_CORRUPT), unknown for a row that never
+	// learned it - restored from a summary, or from a replica on an older
+	// build. Unknown is never counted as physical, so QUERY_TIMEOUT under
+	// physical is this deployment's own timeouts alone. The four add up to
+	// ByCauseReason.
 	ByCauseReasonPhysical Distribution `json:"by_cause_reason_physical"`
 	ByCauseReasonCarried  Distribution `json:"by_cause_reason_carried"`
+	ByCauseReasonDerived  Distribution `json:"by_cause_reason_derived"`
 	ByCauseReasonUnknown  Distribution `json:"by_cause_reason_unknown"`
 	// ByBusiness is the unit someone can act on. The rows are objects, which are
 	// alarmd's own identities: an operator cannot look one up, cannot mention one
@@ -609,6 +612,7 @@ func summarize(anomalies []Anomaly, at time.Time) Summary {
 	details := map[string]int{}
 	causeReasons := map[string]int{}
 	physicalCauseReasons, carriedCauseReasons, unknownCauseReasons := map[string]int{}, map[string]int{}, map[string]int{}
+	derivedCauseReasons := map[string]int{}
 	businesses := map[string]int{}
 	strategies := map[StrategyRef]struct{}{}
 	replicas := map[string]int{}
@@ -712,6 +716,8 @@ func summarize(anomalies []Anomaly, at time.Time) Summary {
 				physicalCauseReasons[anomaly.CauseReason]++
 			case observability.ReasonOriginCarried:
 				carriedCauseReasons[anomaly.CauseReason]++
+			case CauseOriginDerived:
+				derivedCauseReasons[anomaly.CauseReason]++
 			default:
 				unknownCauseReasons[anomaly.CauseReason]++
 			}
@@ -737,8 +743,8 @@ func summarize(anomalies []Anomaly, at time.Time) Summary {
 		ByKind: rank(kinds), ByReason: rank(reasons),
 		ByFailure: rank(failures), ByFailureCode: rank(codes), ByFailureDetail: rank(details), ByCauseReason: rank(causeReasons),
 		ByCauseReasonPhysical: rank(physicalCauseReasons), ByCauseReasonCarried: rank(carriedCauseReasons),
-		ByCauseReasonUnknown: rank(unknownCauseReasons),
-		ByBusiness:           rank(businesses), Strategies: len(strategies),
+		ByCauseReasonDerived: rank(derivedCauseReasons), ByCauseReasonUnknown: rank(unknownCauseReasons),
+		ByBusiness: rank(businesses), Strategies: len(strategies),
 		ByReplica: rank(replicas), Stalled: stalled, Onset: onset,
 		Ours: ours, External: external, Unattributed: unattributed,
 		OursUnclassified: oursUnclassified, WindowNeverFills: neverFills,

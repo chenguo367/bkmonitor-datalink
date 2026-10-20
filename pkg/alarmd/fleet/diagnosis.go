@@ -103,8 +103,9 @@ type DiagnosisRow struct {
 	// one more precisely (cause_reason).
 	Reason string `json:"reason,omitempty"`
 	// ReasonOrigin is whose Reason is: the deciding row's CauseOrigin when
-	// Reason is that row's cause reason (physical, carried or unknown), and
-	// unknown for any other reason. Present whenever Reason is.
+	// Reason is that row's cause reason (physical, carried, derived or
+	// unknown), and derived for any other reason - a check word or an
+	// UNKNOWN verdict's reason. Present whenever Reason is.
 	ReasonOrigin *CauseOrigin `json:"reason_origin,omitempty"`
 	Check        Check        `json:"check,omitempty"`
 	// Catalog is the strategy's standing in the publication answered from.
@@ -199,7 +200,7 @@ func newDiagnosisContext(view *View, replica string, now time.Time) diagnosisCon
 
 // diagnoseStrategy decides one row. A row with a reason always says whose it
 // is: the deciding object's cause origin when the reason is that object's
-// cause reason, unknown for every other reason - a check word or an UNKNOWN
+// cause reason, derived for every other reason - a check word or an UNKNOWN
 // verdict's reason is this process's own judgement, not a reason any round
 // met or carried - so an absent reason_origin means only an absent reason.
 func diagnoseStrategy(id string, facts StrategyLookupFacts, ctx diagnosisContext) DiagnosisRow {
@@ -215,7 +216,7 @@ func settleReasonOrigin(row *DiagnosisRow) {
 	case row.Reason == "":
 		row.ReasonOrigin = nil
 	case row.ReasonOrigin == nil:
-		row.ReasonOrigin = unknownCauseOrigin()
+		row.ReasonOrigin = &CauseOrigin{Origin: CauseOriginDerived}
 	}
 }
 

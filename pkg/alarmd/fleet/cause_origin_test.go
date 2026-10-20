@@ -84,8 +84,8 @@ func TestAStrategyRowsReasonAlwaysHasAnOrigin(t *testing.T) {
 	at := time.Date(2026, 10, 8, 8, 0, 0, 0, time.UTC)
 	view, lookup := heldView(t, at, measuredHold(at))
 	row := diagnoseStrategy("4101", lookup, newDiagnosisContext(&view, "pod-a", at))
-	if row.Reason == "" || row.ReasonOrigin == nil || row.ReasonOrigin.Origin != CauseOriginUnknown {
-		t.Fatalf("row reason %q origin %+v, want a check-word reason with origin unknown", row.Reason, row.ReasonOrigin)
+	if row.Reason == "" || row.ReasonOrigin == nil || row.ReasonOrigin.Origin != CauseOriginDerived {
+		t.Fatalf("row reason %q origin %+v, want a check-word reason with origin derived", row.Reason, row.ReasonOrigin)
 	}
 	carried := DiagnosisRow{Reason: "QUERY_TIMEOUT", ReasonOrigin: &CauseOrigin{Origin: "carried", Slot: 1_700_000_040}}
 	settleReasonOrigin(&carried)
@@ -98,8 +98,38 @@ func TestAStrategyRowsReasonAlwaysHasAnOrigin(t *testing.T) {
 		t.Fatalf("a row with no reason kept origin %+v", unreasoned.ReasonOrigin)
 	}
 	unavailable := diagnoseStrategy("4102", StrategyLookupFacts{}, newDiagnosisContext(&view, "pod-a", at))
-	if unavailable.Reason == "" || unavailable.ReasonOrigin == nil || unavailable.ReasonOrigin.Origin != CauseOriginUnknown {
-		t.Fatalf("unavailable lookup row reason %q origin %+v, want origin unknown", unavailable.Reason, unavailable.ReasonOrigin)
+	if unavailable.Reason == "" || unavailable.ReasonOrigin == nil || unavailable.ReasonOrigin.Origin != CauseOriginDerived {
+		t.Fatalf("unavailable lookup row reason %q origin %+v, want an UNKNOWN verdict's reason derived", unavailable.Reason, unavailable.ReasonOrigin)
+	}
+	// The deciding object's cause reason restored without an origin stays
+	// unknown: derived is only for alarmd's own words.
+	restored := DiagnosisRow{Reason: "QUERY_TIMEOUT", ReasonOrigin: unknownCauseOrigin()}
+	settleReasonOrigin(&restored)
+	if restored.ReasonOrigin.Origin != CauseOriginUnknown {
+		t.Fatalf("a restored cause reason's origin became %+v", restored.ReasonOrigin)
+	}
+}
+
+// A round filed under its cause word has alarmd's own word for a reason:
+// derived, still naming the carried guard behind it.
+func TestARowFiledUnderItsCauseIsDerived(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	for round := 0; round < DefaultDegradedRounds; round++ {
+		tracker.Observe(context.Background(), observability.Observation{
+			ProgressCompletionKind: "COMPLETED_WITH_UNAVAILABLE", ProgressCompletionCause: "GAP_GUARD_WARMING",
+			ProgressCompletionReason: "QUERY_TIMEOUT",
+			CarriedReason:            &observability.CarriedReasonFacts{OriginSlot: 1_700_000_040, OriginCause: "QUERY_TIMEOUT"},
+			Trace:                    observability.TraceFields{QueryGroupKey: "qg-317", EvaluationTime: int64(1_700_000_100 + 60*round)},
+		})
+		at.at = at.at.Add(time.Minute)
+	}
+	// A guard warming is no fault, so the row is not on the anomaly list;
+	// it is the object's tracked row the views read.
+	row, found := tracker.TrackedRow("qg-317")
+	want := CauseOrigin{Origin: CauseOriginDerived, Slot: 1_700_000_040, Cause: "QUERY_TIMEOUT"}
+	if !found || row.CauseReason != "GAP_GUARD_WARMING" || row.CauseOrigin == nil || *row.CauseOrigin != want {
+		t.Fatalf("row %+v reason %q origin %+v, want GAP_GUARD_WARMING %+v", found, row.CauseReason, row.CauseOrigin, want)
 	}
 }
 
@@ -113,19 +143,27 @@ func TestTheSummarySplitsCauseReasonsByOrigin(t *testing.T) {
 		{QueryGroup: "qg-314", Kind: KindDegradedRun, CauseReason: "QUERY_TIMEOUT", CauseOrigin: &CauseOrigin{Origin: "carried"}},
 		{QueryGroup: "qg-315", Kind: KindDegradedRun, CauseReason: "QUERY_TIMEOUT", CauseOrigin: &CauseOrigin{Origin: CauseOriginUnknown}},
 		{QueryGroup: "qg-316", Kind: KindDegradedRun, CauseReason: "QUERY_TIMEOUT"},
+		{QueryGroup: "qg-318", Kind: KindDegradedRun, CauseReason: "GAP_GUARD_WARMING", CauseOrigin: &CauseOrigin{Origin: CauseOriginDerived}},
 	}
 	summary := summarize(rows, now)
-	count := func(distribution Distribution) int {
+	count := func(distribution Distribution, reason string) int {
 		for _, entry := range distribution.Top {
-			if entry.Value == "QUERY_TIMEOUT" {
+			if entry.Value == reason {
 				return entry.Count
 			}
 		}
 		return 0
 	}
-	if got := [4]int{count(summary.ByCauseReason), count(summary.ByCauseReasonPhysical), count(summary.ByCauseReasonCarried),
-		count(summary.ByCauseReasonUnknown)}; got != [4]int{5, 1, 2, 2} {
-		t.Fatalf("QUERY_TIMEOUT total/physical/carried/unknown = %v, want [5 1 2 2]", got)
+	parts := func(reason string) [5]int {
+		return [5]int{count(summary.ByCauseReason, reason), count(summary.ByCauseReasonPhysical, reason),
+			count(summary.ByCauseReasonCarried, reason), count(summary.ByCauseReasonDerived, reason),
+			count(summary.ByCauseReasonUnknown, reason)}
+	}
+	if got := parts("QUERY_TIMEOUT"); got != [5]int{5, 1, 2, 0, 2} {
+		t.Fatalf("QUERY_TIMEOUT total/physical/carried/derived/unknown = %v, want [5 1 2 0 2]", got)
+	}
+	if got := parts("GAP_GUARD_WARMING"); got != [5]int{1, 0, 0, 1, 0} {
+		t.Fatalf("GAP_GUARD_WARMING total/physical/carried/derived/unknown = %v, want [1 0 0 1 0]", got)
 	}
 }
 
