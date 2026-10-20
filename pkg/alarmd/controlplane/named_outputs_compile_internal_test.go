@@ -100,6 +100,41 @@ func TestAMultiPromQLExpressionCompilesAsThePlatformCompilesIt(t *testing.T) {
 	}
 }
 
+// An output's expression names its input after its ends are stripped, as the
+// platform strips it: space inside it is not dropped, so "a b" is not the
+// query aliased "ab", where the platform fails to find it.
+func TestAnOutputExpressionIsStrippedNotSquashed(t *testing.T) {
+	compiler := namedOutputsTestCompiler(t)
+	source := multiPromQLSource("")
+	source.QueryConfigs[0] = json.RawMessage(strings.Replace(string(source.QueryConfigs[0]), `"alias":"a"`, `"alias":"ab"`, 1))
+	source.Expression = "ab + b"
+	outputs := func(expression string) json.RawMessage {
+		return json.RawMessage(`{"response_contract":"named_outputs/v1","legacy_output_ref":"RESULT","output_list":[` +
+			`{"reference_name":"A","expression":"` + expression + `"},{"reference_name":"RESULT","expression":"ab+b"}]}`)
+	}
+	source.QueryOutputConfig = outputs(` ab\t`)
+	if _, err := compiler.CompilePrimaryQuery(context.Background(), source); err != nil {
+		t.Fatalf("an expression with space at its ends: err = %v", err)
+	}
+	source.QueryOutputConfig = outputs(`a b`)
+	var compileErr *QueryPlanCompileError
+	if _, err := compiler.CompilePrimaryQuery(context.Background(), source); !errors.As(err, &compileErr) || !strings.HasPrefix(compileErr.Reason, "QUERY_OUTPUT_CONFIG_") {
+		t.Fatalf("an expression with space inside: err = %v, want a QUERY_OUTPUT_CONFIG_ refusal", err)
+	}
+}
+
+// An item whose queries are marked in part is not the expression: it reads as
+// several PromQL queries, the retired form.
+func TestAPartlyMarkedMultiPromQLItemIsTheRetiredForm(t *testing.T) {
+	source := multiPromQLSource("")
+	source.QueryConfigs[1] = json.RawMessage(strings.Replace(string(source.QueryConfigs[1]), `"expression_mode":"promql",`, "", 1))
+	_, err := namedOutputsTestCompiler(t).CompilePrimaryQuery(context.Background(), source)
+	var compileErr *QueryPlanCompileError
+	if !errors.As(err, &compileErr) || compileErr.Reason != "QUERY_PROMQL_FORM_RETIRED" {
+		t.Fatalf("err = %v, want QUERY_PROMQL_FORM_RETIRED", err)
+	}
+}
+
 func multiPromQLSource(outputConfig string) PrimaryQuerySource {
 	query := func(alias, promql string) json.RawMessage {
 		return json.RawMessage(`{"data_source_label":"prometheus","data_type_label":"time_series","expression_mode":"promql",` +

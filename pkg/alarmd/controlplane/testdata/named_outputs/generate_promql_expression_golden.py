@@ -3,7 +3,8 @@
 usage: python3 -I generate_promql_expression_golden.py <promql_expression.py> > promql_expression_golden.json
 
 The argument is bkmonitor/data_source/promql_expression.py from a bk-monitor
-checkout. Each case records the compiled PromQL, or that it is refused; the Go
+checkout at the deployed revision (file sha256 5f83cd0c4d6c);
+an older checkout refuses an unused alias and gives a different file. Each case records the compiled PromQL, or that it is refused; the Go
 compiler is held to the same answer for every case.
 """
 
@@ -38,6 +39,9 @@ CASES = [
     ("comparison ops", [q("a", A), q("b", B)], "a >= b != 0"),
     ("whitespace kept", [q("a", A), q("b", B)], "  a\t+\n b  "),
     ("unicode space", [q("a", A), q("b", B)], "a　+ b"),
+    ("information separators as space", [q("a", A), q("b", B)], "a\x1c+\x1fb"),
+    ("exponent without digits refused", [q("a", A), q("b", B)], "a * 1e + b"),
+    ("signed exponent without digits refused", [q("a", A), q("b", B)], "a * 1e+ + b"),
     ("one query", [q("a", A)], "a"),
     ("empty expression", [q("a", A), q("b", B)], "   "),
     ("other data source", [q("a", A), q("b", B, source=("bk_monitor", "time_series"))], "a + b"),

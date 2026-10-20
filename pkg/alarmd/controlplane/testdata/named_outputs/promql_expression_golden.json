@@ -266,6 +266,69 @@
   "promql": "(sum by (job) (rate(requests_total{status=\"success\"}[5m])))　+ (sum by (job) (rate(requests_total{status=\"error\"}[5m])))"
  },
  {
+  "name": "information separators as space",
+  "query_configs": [
+   {
+    "data_source_label": "prometheus",
+    "data_type_label": "time_series",
+    "alias": "a",
+    "promql": "sum by (job) (rate(requests_total{status=\"success\"}[5m]))",
+    "agg_interval": 60
+   },
+   {
+    "data_source_label": "prometheus",
+    "data_type_label": "time_series",
+    "alias": "b",
+    "promql": "sum by (job) (rate(requests_total{status=\"error\"}[5m]))",
+    "agg_interval": 60
+   }
+  ],
+  "expression": "a\u001c+\u001fb",
+  "promql": "(sum by (job) (rate(requests_total{status=\"success\"}[5m])))\u001c+\u001f(sum by (job) (rate(requests_total{status=\"error\"}[5m])))"
+ },
+ {
+  "name": "exponent without digits refused",
+  "query_configs": [
+   {
+    "data_source_label": "prometheus",
+    "data_type_label": "time_series",
+    "alias": "a",
+    "promql": "sum by (job) (rate(requests_total{status=\"success\"}[5m]))",
+    "agg_interval": 60
+   },
+   {
+    "data_source_label": "prometheus",
+    "data_type_label": "time_series",
+    "alias": "b",
+    "promql": "sum by (job) (rate(requests_total{status=\"error\"}[5m]))",
+    "agg_interval": 60
+   }
+  ],
+  "expression": "a * 1e + b",
+  "refused": true
+ },
+ {
+  "name": "signed exponent without digits refused",
+  "query_configs": [
+   {
+    "data_source_label": "prometheus",
+    "data_type_label": "time_series",
+    "alias": "a",
+    "promql": "sum by (job) (rate(requests_total{status=\"success\"}[5m]))",
+    "agg_interval": 60
+   },
+   {
+    "data_source_label": "prometheus",
+    "data_type_label": "time_series",
+    "alias": "b",
+    "promql": "sum by (job) (rate(requests_total{status=\"error\"}[5m]))",
+    "agg_interval": 60
+   }
+  ],
+  "expression": "a * 1e+ + b",
+  "refused": true
+ },
+ {
   "name": "one query",
   "query_configs": [
    {

@@ -190,7 +190,7 @@ func namedOutputsOf(raw json.RawMessage, configs []legacyQueryConfig, facts exec
 			outputs.Outputs = append(outputs.Outputs, execution.NamedOutput{Ref: ref, Expression: legacyExpression(facts)})
 			continue
 		}
-		input, found := inputs[strings.Join(strings.FieldsFunc(expression, pythonSpace), "")]
+		input, found := inputs[strings.TrimFunc(expression, pythonSpace)]
 		if !found {
 			return nil, invalid(fmt.Errorf("output %q is not one input query", ref))
 		}
