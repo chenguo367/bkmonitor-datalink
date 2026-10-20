@@ -160,7 +160,9 @@ func newLookbackCollector() *lookbackCollector {
 		supplementWindows: desc("lookback_supplement_windows_total",
 			"Slots of series_late Query Groups read again for their late series, by source and what they came to: "+
 				"supplemented (the supplement ran), nothing_late, flight_busy (the group's own Slot was executing), "+
-				"contract_expired, failed, unobserved (not read). Coverage is supplemented over supplemented and "+
+				"contract_expired, kept_read_absent (the kept read did not hold the Slot's planned query, so nothing ran; "+
+				"SUPPLEMENT_KEPT_READ_ABSENT on the supplement's line), failed, unobserved (not read). Coverage is "+
+				"supplemented over supplemented and "+
 				"unobserved.", "source", "outcome"),
 		supplementUnobserved: desc("lookback_supplement_unobserved_total",
 			"Slots of series_late Query Groups not read again, by source and why: yielded, read_failed, "+

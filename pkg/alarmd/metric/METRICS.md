@@ -1123,7 +1123,7 @@ Slots of series_late Query Groups not read again, by source and why: yielded, re
 
 Labels: `source`, `outcome`
 
-Slots of series_late Query Groups read again for their late series, by source and what they came to: supplemented (the supplement ran), nothing_late, flight_busy (the group's own Slot was executing), contract_expired, failed, unobserved (not read). Coverage is supplemented over supplemented and unobserved.
+Slots of series_late Query Groups read again for their late series, by source and what they came to: supplemented (the supplement ran), nothing_late, flight_busy (the group's own Slot was executing), contract_expired, kept_read_absent (the kept read did not hold the Slot's planned query, so nothing ran; SUPPLEMENT_KEPT_READ_ABSENT on the supplement's line), failed, unobserved (not read). Coverage is supplemented over supplemented and unobserved.
 
 ## alarmd_lookback_unknown_lookback_total
 
