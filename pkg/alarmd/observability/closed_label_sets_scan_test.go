@@ -313,6 +313,20 @@ func closedLabelSets() []labelSet {
 			known:  closedSetMember("contract", "GapScopeReasons"),
 		},
 		{
+			// detection_snapshots_total counts a result the list names and
+			// leaves any other uncounted.
+			name:   "detection_snapshot_result",
+			fields: []fieldSink{{"trigger.DetectionSnapshotFacts", "Result"}},
+			known:  closedSetMember("contract", "DetectionSnapshotResults"),
+		},
+		{
+			// detection_snapshot_states_total folds a state the list does
+			// not name to _other.
+			name:   "detection_snapshot_state",
+			fields: []fieldSink{{"contract.DetectionRefValueV1", "State"}},
+			known:  closedSetMember("metric", "DetectionSnapshotStates"),
+		},
+		{
 			name:   "fleet_anomaly_kind",
 			params: []paramSink{{dir: "fleet", name: "MetricKind", arg: 0}},
 			known:  closedSetMember("fleet", "AnomalyKinds"),
@@ -1027,11 +1041,22 @@ func (index *scanIndex) typedLocals(decl *ast.FuncDecl) map[string]string {
 						continue
 					}
 					if call, ok := node.Rhs[i].(*ast.CallExpr); ok {
-						if result := resolver.resultType(scope, call, 0); result != "" {
+						if builtin, ok := call.Fun.(*ast.Ident); ok && builtin.Name == "make" && len(call.Args) > 0 {
+							// make([]T, n) and make(map[K]T): ranged over or
+							// indexed, they give a T.
+							typed[name.Name] = qualifiedType(function.file, call.Args[0])
+						} else if result := resolver.resultType(scope, call, 0); result != "" {
 							typed[name.Name] = result
 						}
 					} else if known := resolver.typeOf(scope, node.Rhs[i]); known != "" {
 						typed[name.Name] = known
+					}
+				}
+			} else if index, ok := node.Rhs[0].(*ast.IndexExpr); ok && len(node.Rhs) == 1 && len(node.Lhs) == 2 {
+				// value, found := m[key]: the value is the map's element.
+				if name, ok := node.Lhs[0].(*ast.Ident); ok {
+					if element := resolver.typeOf(scope, index); element != "" {
+						typed[name.Name] = element
 					}
 				}
 			} else if call, ok := node.Rhs[0].(*ast.CallExpr); ok && len(node.Rhs) == 1 {
@@ -2183,8 +2208,8 @@ func (r *scanResolver) returns(scope *scanScope, call *ast.CallExpr, result, dep
 //	B2 (10): a map key or composite key of an output aggregation;
 //	B3 (8): a call through an interface or a func value;
 //	B4 (5): a value decoded from the store;
-//	B5 (5): external or free text;
-//	B6 (24): a field of a result whose type the scan does not see, or the result of a call it does not follow.
+//	B5 (4): external or free text;
+//	B6 (22): a field of a result whose type the scan does not see, or the result of a call it does not follow.
 var closedLabelSetUnresolved = map[string]string{
 	"capacity_budget|worker/sideeffect_reservation.go|checkEffectCounts|check.kind":                                                                                  "PENDING B6",
 	"completion_cause|cmd/alarmd/runtime_phase_two_production.go|Execute|result.CompletionCause.Cause":                                                               "PENDING B6",
@@ -2218,7 +2243,6 @@ var closedLabelSetUnresolved = map[string]string{
 	"reason|evaluation/evaluator.go|evaluateRecordWith|f.ReasonCode":                                                                                                 "PENDING B6",
 	"reason|evaluation/evaluator.go|evaluateRecordWith|guarded":                                                                                                      "PENDING B1",
 	"reason|execution/gap_scope_reason.go|RoundGuardReasonForLevel|reason":                                                                                           "PENDING B1",
-	"reason|execution/guard_origin.go|StampGapScopeOrigins|before.ReasonOriginCause":                                                                                 "PENDING B6",
 	"reason|execution/model.go|deriveCompletionAttribution|candidateReason":                                                                                          "PENDING B1",
 	"reason|execution/unavailable_attribution.go|AttributeUnavailable|facts.Attempts[index].ReasonCode":                                                              "PENDING B1",
 	"reason|scheduler/query_cooldown.go|restoreQueryCooldown|record.Reason":                                                                                          "PENDING B4",
@@ -2249,7 +2273,6 @@ var closedLabelSetUnresolved = map[string]string{
 	"result|cmd/alarmd/runtime_phase_two_production.go|Execute|result.Result":                                                                                        "PENDING B6",
 	"state_admission_reason|worker/coordinator.go|firstStateAdmissionFailureReason|item.ReasonCode":                                                                  "PENDING B6",
 	"state_preflight_reason|state/execution_v2_store.go|decodeRuntime|reason":                                                                                        "PENDING B4",
-	"wire_format|controlplane/object_catalog_read.go|AssembleQueryGroup|context.WireFormat":                                                                          "PENDING B6",
 	"wire_format|kafka/output_partial.go|partialRejection|formats[index]":                                                                                            "PENDING B2",
 	"wire_format|kafka/trigger_event_sink.go|WriteBatch|key.format":                                                                                                  "PENDING B2",
 	"wire_format|metric/phase_two.go|observe|format":                                                                                                                 "PENDING B2",
