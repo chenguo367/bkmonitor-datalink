@@ -498,3 +498,18 @@ func TestAQueryWithoutNamedOutputsReservesNothing(t *testing.T) {
 		t.Fatalf("a query without named outputs reserved %d", reserver.peak)
 	}
 }
+
+// A Slot with less room than a reservation chunk left still aligns an
+// answer that fits: the chunk ahead is refused and the alignment reserves
+// exactly what it holds instead, so a Slot near its share or the pool is not
+// refused every alignment however small.
+func TestAnAlignmentFitsInLessRoomThanAChunk(t *testing.T) {
+	reserver := &testReserver{limit: namedReserveChunk / 2}
+	completion := decodeReserving(t, reservingAnswer(), reserver)
+	if completion.NamedOutputs == nil || reserver.refused == 0 {
+		t.Fatalf("aligned %v with %d refusals in %d bytes of room", completion.NamedOutputs != nil, reserver.refused, reserver.limit)
+	}
+	if reserver.held != completion.NamedOutputs.RetainedBytes() || reserver.peak >= namedReserveChunk/2 {
+		t.Fatalf("held %d (peak %d), want the table's %d and never a chunk", reserver.held, reserver.peak, completion.NamedOutputs.RetainedBytes())
+	}
+}
