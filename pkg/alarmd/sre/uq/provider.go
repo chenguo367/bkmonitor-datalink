@@ -119,7 +119,8 @@ func Validate(egresses []Egress) error {
 		}
 		paths := map[string]bool{}
 		for _, endpoint := range e.Endpoints {
-			if !nativePath(endpoint.Path) || paths[endpoint.Path] || endpoint.StartField != "start_time" || endpoint.EndField != "end_time" || (endpoint.TimeUnit != "s" && endpoint.TimeUnit != "ms") {
+			start, end, ok := nativeContract(endpoint.Path)
+			if !ok || paths[endpoint.Path] || endpoint.StartField != start || endpoint.EndField != end || (endpoint.TimeUnit != "s" && endpoint.TimeUnit != "ms") {
 				return fmt.Errorf("sre.uq.egresses.%s.endpoints: invalid path or time contract", e.Name)
 			}
 			paths[endpoint.Path] = true
@@ -226,7 +227,7 @@ func (p *Provider) query(ctx context.Context, request Request, trace bool) (rece
 	if request.Body == nil {
 		return receipt, fail("invalid_input", "A native query object is required.")
 	}
-	if err := validateScopeBody(request.Body, request.Tenant, request.Space); err != nil {
+	if err := validateScopeBody(request.Body, request.Tenant, request.Space, promQLPath(endpoint.Path)); err != nil {
 		return receipt, err
 	}
 	start, err := timestamp(request.Body[endpoint.StartField], endpoint.TimeUnit)
@@ -403,15 +404,21 @@ func allowed(values []string, value string) bool {
 	}
 	return false
 }
-func nativePath(path string) bool {
-	// These handlers use the audited QueryTs scope and route resolver. A new
-	// endpoint (notably typed Trace or PromQL) needs its own wire contract.
+
+// nativeContract names the time fields of each supported native endpoint.
+// These handlers all resolve through the audited QueryTs scope and route
+// resolver: PromQL is converted to a QueryTs before it runs. A new endpoint
+// (notably typed Trace) needs its own wire contract.
+func nativeContract(path string) (start, end string, ok bool) {
 	switch path {
 	case "/query/ts", "/query/ts/", "/query/ts/raw", "/query/ts/raw/", "/query/ts/raw_with_scroll", "/query/ts/raw_with_scroll/":
-		return true
+		return "start_time", "end_time", true
+	case "/query/ts/promql", "/query/ts/promql/":
+		return "start", "end", true
 	}
-	return false
+	return "", "", false
 }
+func promQLPath(path string) bool { return strings.TrimSuffix(path, "/") == "/query/ts/promql" }
 func timestamp(value any, unit string) (time.Time, error) {
 	s, ok := value.(string)
 	digits := 10
@@ -436,8 +443,10 @@ func timestamp(value any, unit string) (time.Time, error) {
 	return time.Unix(n, 0), nil
 }
 
-func validateScopeBody(body map[string]any, tenant, space string) error {
+func validateScopeBody(body map[string]any, tenant, space string, promQL bool) error {
 	var queries []any
+	var expr any
+	exprs := 0
 	for key, value := range body {
 		// The downstream Go decoder accepts case-insensitive JSON field names.
 		switch strings.ToLower(key) {
@@ -462,7 +471,16 @@ func validateScopeBody(body map[string]any, tenant, space string) error {
 				return fail("invalid_input", "Duplicate native query-list aliases are not accepted.")
 			}
 			queries, _ = value.([]any)
+		case "promql":
+			expr, exprs = value, exprs+1
 		}
+	}
+	if promQL {
+		q, _ := expr.(string)
+		if exprs != 1 || strings.TrimSpace(q) == "" {
+			return fail("invalid_input", "A PromQL query needs exactly one nonempty promql field.")
+		}
+		return promQLRoute(q)
 	}
 	if len(queries) == 0 {
 		return fail("uq_contract_unsupported", "This operation supports structured QueryTs metric/log queries with a nonempty query_list; typed Trace requires its trusted service contract.")
@@ -486,4 +504,29 @@ func validateScopeBody(body map[string]any, tenant, space string) error {
 		}
 	}
 	return nil
+}
+
+// promQLRoute keeps PromQL inside the QueryTs scope. UQ routes a metric by
+// the first colon segment of its name, so "bkdata:" anywhere a name starts
+// would reach BKData, which the structured path refuses by data_source. The
+// check is lexical and so errs toward refusal: a string escape that could
+// spell such a name is refused with it.
+func promQLRoute(q string) error {
+	lower := strings.ToLower(q)
+	for i := 0; i < len(lower); i++ {
+		if lower[i] == '\\' && i+1 < len(lower) {
+			if c := lower[i+1]; c == 'x' || c == 'u' || (c >= '0' && c <= '7') {
+				return fail("uq_scope_denied", "PromQL string escapes that can spell a metric route are not accepted.")
+			}
+			i++
+			continue
+		}
+		if strings.HasPrefix(lower[i:], "bkdata:") && (i == 0 || !nameByte(lower[i-1])) {
+			return fail("uq_scope_denied", "BKData queries require a separate trusted routing contract.")
+		}
+	}
+	return nil
+}
+func nameByte(c byte) bool {
+	return c == '_' || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
 }
