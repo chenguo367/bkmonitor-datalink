@@ -134,10 +134,6 @@ func closedLabelSets() []labelSet {
 			known: func(v string) bool { return v == "" || NormalizeOperation(Operation(v)) == Operation(v) },
 		},
 		{
-			name: "direction", fields: []fieldSink{{"observability.Observation", "Direction"}},
-			known: func(v string) bool { return NormalizeDirection(Direction(v)) == Direction(v) },
-		},
-		{
 			name: "reason",
 			fields: []fieldSink{
 				{"observability.Observation", "ReasonCode"}, {"observability.Observation", "EvaluationReason"},

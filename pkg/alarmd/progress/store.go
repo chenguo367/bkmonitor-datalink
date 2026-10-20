@@ -571,7 +571,6 @@ func (store *Store) observeSupersededProjection(
 	store.options.Observer.Observe(ctx, observability.Observation{
 		Component: observability.ComponentProgress, Stage: observability.StageProgressCommitted,
 		Result: observability.ResultDegraded, ReasonCode: observability.ReasonCode(contract.ReasonConfigDrift),
-		Direction: observability.DirectionInternal,
 		Trace: observability.TraceFields{
 			QueryGroupKey: string(queryGroup), EvaluationTime: int64(request.Contract.Slot.EvaluationTime),
 			ScheduleSegmentStart: int64(request.Contract.ScheduleSegmentStart), SnapshotRevision: string(request.Contract.SnapshotRevision),

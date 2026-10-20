@@ -2038,8 +2038,8 @@ func TestPhaseTwoRuntimeObserverReportsRealFenceChecks(t *testing.T) {
 	want := observability.Observation{
 		Component: observability.ComponentState, Stage: observability.StageSideEffectAdmission,
 		Result: observability.ResultSuccess, Operation: observability.OperationNormal,
-		Direction: observability.DirectionInternal, ReasonCode: observability.ReasonNone,
-		Trace: observability.TraceFields{QueryGroupKey: "query-group-1", OwnerID: "worker-1", OwnerEpoch: 2},
+		ReasonCode: observability.ReasonNone,
+		Trace:      observability.TraceFields{QueryGroupKey: "query-group-1", OwnerID: "worker-1", OwnerEpoch: 2},
 	}
 	observer.Observe(context.Background(), want)
 	if len(observations) != 2 || observations[0].Stage != observability.StageSideEffectAdmission {

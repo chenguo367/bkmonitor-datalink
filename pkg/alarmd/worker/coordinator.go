@@ -421,8 +421,8 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 			coordinator.emitObservation(ctx, observability.Observation{
 				Component: observability.ComponentAccess, Stage: observability.StageQueryCompleted,
 				Result: observability.ResultRetrying, Operation: observability.Operation(request.Operation),
-				Direction: observability.DirectionInternal, ReasonCode: observability.ReasonCode(contract.ReasonQueryNotReady),
-				Duration: time.Since(started), ReadinessDeferral: readinessDeferralOf(err),
+				ReasonCode: observability.ReasonCode(contract.ReasonQueryNotReady),
+				Duration:   time.Since(started), ReadinessDeferral: readinessDeferralOf(err),
 			})
 		} else {
 			coordinator.observeQueryFailure(ctx, request.Operation, started, "execute", err)
@@ -1436,7 +1436,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 				reason, _ := StateConflictReason(err)
 				coordinator.emitObservation(ctx, observability.Observation{
 					Component: observability.ComponentState, Stage: observability.StageMutationCompared,
-					Operation: observability.Operation(request.Operation), Direction: observability.DirectionInternal,
+					Operation:  observability.Operation(request.Operation),
 					ReasonCode: observability.ReasonCode(reason), Duration: time.Since(started), Err: err,
 					StateVersionConflict: conflicts,
 				})
@@ -1453,7 +1453,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 			coordinator.emitObservation(ctx, observability.Observation{
 				Component: observability.ComponentState, Stage: observability.StageMutationCompared,
 				Result: observability.ResultSuccess, Operation: observability.Operation(request.Operation),
-				Direction: observability.DirectionInternal, ReasonCode: observability.ReasonNone,
+				ReasonCode:      observability.ReasonNone,
 				StateWriteReuse: &facts,
 			})
 		}
@@ -1985,7 +1985,7 @@ func (coordinator *SlotExecutionCoordinator) writeEvents(
 	}
 	coordinator.emitObservation(ctx, observability.Observation{
 		Component: observability.ComponentOutput, Stage: observability.StageEventACKed,
-		Operation: observability.Operation(operation), Direction: observability.DirectionInternal,
+		Operation:  observability.Operation(operation),
 		ReasonCode: observability.ReasonCode(reason), Duration: time.Since(started),
 		Counts: observability.Counts{Events: int64(len(events) + len(withoutMessage))}, Err: err, OutputRejection: rejection,
 		OutputFailureKind: failureKind,
@@ -2455,7 +2455,7 @@ func (coordinator *SlotExecutionCoordinator) emitAlreadyApplied(ctx context.Cont
 	coordinator.emitObservation(ctx, observability.Observation{
 		Component: observability.ComponentState, Stage: observability.StageMutationCompared,
 		Result: observability.ResultSuccess, Operation: observability.Operation(operation),
-		Direction: observability.DirectionInternal, ReasonCode: observability.ReasonNone,
+		ReasonCode:          observability.ReasonNone,
 		StateAlreadyApplied: &facts,
 	})
 }
@@ -2518,7 +2518,7 @@ func (coordinator *SlotExecutionCoordinator) observeWithCounts(
 ) {
 	coordinator.emitObservation(ctx, observability.Observation{
 		Component: component, Stage: stage, Result: result,
-		Operation: observability.Operation(operation), Direction: observability.DirectionInternal,
+		Operation:  observability.Operation(operation),
 		ReasonCode: reason, Duration: time.Since(started), Counts: counts, Err: err,
 	})
 }
@@ -2551,8 +2551,8 @@ func (coordinator *SlotExecutionCoordinator) observeOutputUnapplied(
 	coordinator.emitObservation(ctx, observability.Observation{
 		Component: observability.ComponentState, Stage: observability.StageOutputUnapplied,
 		Result: observability.ResultFailed, Operation: observability.Operation(operation),
-		Direction: observability.DirectionInternal, ReasonCode: observability.ReasonCode(refusal),
-		Counts: observability.Counts{Events: int64(len(sent))}, Err: err,
+		ReasonCode: observability.ReasonCode(refusal),
+		Counts:     observability.Counts{Events: int64(len(sent))}, Err: err,
 	})
 }
 
@@ -2588,7 +2588,7 @@ func (coordinator *SlotExecutionCoordinator) observeCapacityRejection(
 	observation := observability.Observation{
 		Component: observability.ComponentResource, Stage: observability.StageResourceHard,
 		Result: observability.ResultPaused, Operation: observability.Operation(operation),
-		Direction: observability.DirectionInternal, ReasonCode: observability.ReasonCode(contract.ReasonResourceHardStop),
+		ReasonCode:     observability.ReasonCode(contract.ReasonResourceHardStop),
 		CapacityBudget: budget, Err: err,
 	}
 	var exceeded *provisionalBudgetExceededError
@@ -2829,8 +2829,8 @@ func (coordinator *SlotExecutionCoordinator) observeCommittedProgress(ctx contex
 	}
 	coordinator.ports.Observer.Observe(ctx, observability.Observation{
 		Component: observability.ComponentProgress, Stage: observability.StageProgressCommitted,
-		Operation: observability.Operation(operation), Direction: observability.DirectionInternal,
-		Result: result, ReasonCode: reason, Duration: time.Since(started), ProgressCompletionKind: kind,
+		Operation: observability.Operation(operation),
+		Result:    result, ReasonCode: reason, Duration: time.Since(started), ProgressCompletionKind: kind,
 		ProgressCompletionCause: cause, ProgressCompletionReason: causeReason, ProgressCompletionScope: scope,
 		CarriedReason:   carried,
 		HistoryCoverage: coverageFacts, ExecutionEvidence: executionEvidenceFacts(evidence),

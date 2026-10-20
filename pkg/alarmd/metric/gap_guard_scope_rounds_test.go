@@ -20,7 +20,7 @@ import (
 func gapGuardScopeRound(reason, progress string) observability.Observation {
 	return observability.Observation{
 		Component: observability.ComponentState, Stage: observability.StageGapGuardProgress,
-		Result: observability.ResultSuccess, Direction: observability.DirectionInternal,
+		Result: observability.ResultSuccess,
 		GapProgress: &observability.GapProgressFacts{
 			Scope: "plan", Status: "GAPPED", Reason: reason, Required: 5, Progress: progress,
 		},

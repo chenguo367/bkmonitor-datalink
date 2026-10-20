@@ -177,8 +177,8 @@ func (coordinator *SlotExecutionCoordinator) observeManualCloseCheck(
 	}
 	coordinator.emitObservation(ctx, observability.Observation{
 		Component: observability.ComponentOutput, Stage: observability.StageNoDataManualCloseChecked,
-		Operation: observability.Operation(operation), Direction: observability.DirectionInternal,
-		Result: observability.Result(observability.ResultSuccess), ReasonCode: reason,
+		Operation: observability.Operation(operation),
+		Result:    observability.Result(observability.ResultSuccess), ReasonCode: reason,
 		Counts: observability.Counts{Events: int64(facts.Dropped)}, Err: err,
 		NoDataManualClose: &facts,
 	})

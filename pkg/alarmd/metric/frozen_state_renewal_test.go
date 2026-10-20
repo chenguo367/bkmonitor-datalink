@@ -74,8 +74,8 @@ func TestASlotsFrozenRenewalOutcomesReachTheScrapeAsCounts(t *testing.T) {
 	facts.Record(2, 0, 0, 5)
 	gathered := gatherFrozenStateRenewals(t, observability.Observation{
 		Component: observability.ComponentState, Stage: observability.StageFrozenStateRenewed,
-		Operation: observability.Operation(execution.OperationNormal), Direction: observability.DirectionInternal,
-		Result: observability.ResultSuccess, ReasonCode: observability.ReasonNone,
+		Operation: observability.Operation(execution.OperationNormal),
+		Result:    observability.ResultSuccess, ReasonCode: observability.ReasonNone,
 		FrozenStateRenewal: &facts,
 	})
 	for label, want := range map[string]float64{"renewed": 5, "fresh": 40, "missing": 1, "failed": 5} {
@@ -103,8 +103,8 @@ func TestTheSeriesCensusReachesTheScrapeBesideTheOutcomes(t *testing.T) {
 	facts.RecordCensus(900, 150, 148)
 	gathered := gatherFrozenStateCensus(t, observability.Observation{
 		Component: observability.ComponentState, Stage: observability.StageFrozenStateRenewed,
-		Operation: observability.Operation(execution.OperationNormal), Direction: observability.DirectionInternal,
-		Result: observability.ResultSuccess, ReasonCode: observability.ReasonNone,
+		Operation: observability.Operation(execution.OperationNormal),
+		Result:    observability.ResultSuccess, ReasonCode: observability.ReasonNone,
 		FrozenStateRenewal: &facts,
 	})
 	for stage, want := range map[string]float64{"due": 900, "read": 150, "written": 148} {

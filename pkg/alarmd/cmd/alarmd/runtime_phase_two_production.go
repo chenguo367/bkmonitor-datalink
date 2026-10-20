@@ -540,7 +540,7 @@ func (runtime *productionPhaseTwoControl) refresh(
 		// limiter bounds these lines per window; the metric counts them all.
 		observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{
 			Component: observability.ComponentControlPlane, Stage: observability.StageSnapshotRefreshed,
-			Result: observability.ResultFailed, Direction: observability.DirectionInternal,
+			Result:     observability.ResultFailed,
 			ReasonCode: observability.ReasonContractRetryable, Err: err, SourceKind: sourceKind,
 			ControlSourceRound: &observability.ControlSourceRoundFacts{
 				Outcome: observability.ControlSourceRoundFailed, Exit: string(controlplane.SourceRefreshExitOf(err)),
@@ -560,7 +560,7 @@ func (runtime *productionPhaseTwoControl) refresh(
 	if markErr := runtime.dependencies.Repository.MarkSourceRefreshSuccess(ctx, runtime.dependencies.Now()); markErr != nil {
 		observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{
 			Component: observability.ComponentControlPlane, Stage: observability.StageSnapshotRefreshed,
-			Result: observability.ResultFailed, Direction: observability.DirectionInternal,
+			Result:     observability.ResultFailed,
 			ReasonCode: observability.ReasonContractRetryable, Err: fmt.Errorf("phase-two mark source refresh success: %w", markErr),
 		})
 	}
@@ -693,7 +693,6 @@ func (runtime *productionPhaseTwoControl) activate(
 			Stage:     observability.StageActivationFailed,
 			Result:    observability.ResultDegraded,
 			Operation: observability.OperationTransition,
-			Direction: observability.DirectionInternal,
 			// The classification, as the reason: the same word the fleet
 			// page groups the failure on. contract_retryable here was folded
 			// to _other by the normaliser, and the field people grep said
@@ -1548,7 +1547,7 @@ func (runtime *productionPhaseTwoOwnership) contentScopesFor(
 		observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{
 			Component: observability.ComponentOwnership, Stage: observability.StageAssignmentAcquired,
 			Result: observability.ResultDegraded, Operation: observability.OperationTransition,
-			Direction: observability.DirectionInternal, ReasonCode: observability.ReasonInternalUnknown, Err: err,
+			ReasonCode: observability.ReasonInternalUnknown, Err: err,
 		})
 		return scheduler.ContentScopes{}, nil
 	}
@@ -2797,8 +2796,8 @@ func (source observedProductionSlotSource) Next(
 		observeRuntime(ctx, source.observer, observability.Observation{
 			Component: observability.ComponentScheduler, Stage: observability.StageScheduleDue,
 			Result: observability.Result(observability.ResultRetrying), ReasonCode: observability.ReasonCode(contract.ReasonViewNotExecutable),
-			Direction: observability.DirectionInternal, AwaitingView: notExecutable.AwaitingView,
-			Trace: observability.TraceFields{QueryGroupKey: string(queryGroup)}, Err: notExecutable,
+			AwaitingView: notExecutable.AwaitingView,
+			Trace:        observability.TraceFields{QueryGroupKey: string(queryGroup)}, Err: notExecutable,
 		})
 	} else if errors.As(err, &retry) || errors.As(err, &blocked) {
 		var reason observability.ReasonCode
@@ -2814,15 +2813,15 @@ func (source observedProductionSlotSource) Next(
 		}
 		observeRuntime(ctx, source.observer, observability.Observation{
 			Component: observability.ComponentScheduler, Stage: observability.StageScheduleDue,
-			Result: observability.Result(observability.ResultRetrying), ReasonCode: reason, Direction: observability.DirectionInternal,
+			Result: observability.Result(observability.ResultRetrying), ReasonCode: reason,
 			Trace: observability.TraceFields{QueryGroupKey: string(queryGroup)}, Err: cause,
 		})
 	}
 	if err == nil && due {
 		observeRuntime(ctx, source.observer, observability.Observation{
 			Component: observability.ComponentScheduler, Stage: observability.StageScheduleDue,
-			Result: observability.ResultSuccess, Direction: observability.DirectionInternal,
-			Trace: frozenSlotTrace(slot.Contract, slot.Dispatch.OwnerFence),
+			Result: observability.ResultSuccess,
+			Trace:  frozenSlotTrace(slot.Contract, slot.Dispatch.OwnerFence),
 		})
 	}
 	return slot, due, facts, err
@@ -2847,7 +2846,7 @@ func (executor observedProductionSlotExecutor) Execute(
 	observeRuntime(ctx, executor.observer, observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageSlotStarted,
 		Operation: observability.Operation(request.Operation),
-		Result:    observability.ResultStarted, Direction: observability.DirectionInternal, Trace: trace,
+		Result:    observability.ResultStarted, Trace: trace,
 	})
 	started := time.Now()
 	// The attempt's query budget, recorded by access for whichever plan binds
@@ -2979,7 +2978,7 @@ func (executor observedProductionSlotExecutor) Execute(
 		CarriedReason:        result.CompletionCause.CarriedReason(),
 		ReadinessDeferral:    readiness,
 		ExecuteOutcome:       executeReturnOutcome(result, err),
-		Result:               observedResult, ReasonCode: reason, Direction: observability.DirectionInternal,
+		Result:               observedResult, ReasonCode: reason,
 		Duration: time.Since(started), Trace: trace, Err: observedErr,
 		SlotBudgetUsage: slotBudgetUsageFacts(result.Usage),
 		SlotTiming:      slotTimingFacts(result.Timing),
@@ -3203,7 +3202,7 @@ func observeProductionRenewalFailure(
 ) {
 	observeRuntime(ctx, observer, observability.Observation{
 		Component: observability.ComponentOwnership, Stage: stage, Result: observability.ResultFailed,
-		Direction: observability.DirectionInternal, ReasonCode: phaseTwoControlDependencyReason, Err: err,
+		ReasonCode: phaseTwoControlDependencyReason, Err: err,
 		Trace: observability.TraceFieldsFromContext(ctx),
 	})
 }
@@ -3223,7 +3222,7 @@ func observeProductionOwnership(
 	}
 	observeRuntime(ctx, observer, observability.Observation{
 		Component: observability.ComponentOwnership, Stage: stage, Result: result,
-		Direction: observability.DirectionInternal, ReasonCode: ownershipObservationReason(err), Err: err,
+		ReasonCode: ownershipObservationReason(err), Err: err,
 		Trace: observability.TraceFieldsFromContext(ctx),
 	})
 }

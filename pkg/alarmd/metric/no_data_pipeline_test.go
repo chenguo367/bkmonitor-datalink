@@ -36,12 +36,12 @@ func TestNoDataObservationsReachTheCountersThroughTheRecorder(t *testing.T) {
 
 	recorder.Observe(ctx, observability.Observation{
 		Component: observability.ComponentEvaluation, Stage: observability.StageNoDataDecided,
-		Direction: observability.DirectionInternal, Result: observability.ResultSuccess,
+		Result:       observability.ResultSuccess,
 		NoDataCensus: &observability.NoDataCensusFacts{Hop: observability.NoDataHopDue, Plans: 9},
 	})
 	recorder.Observe(ctx, observability.Observation{
 		Component: observability.ComponentEvaluation, Stage: observability.StageNoDataDecided,
-		Direction: observability.DirectionInternal, Result: observability.ResultSuccess,
+		Result:     observability.ResultSuccess,
 		NoDataSlot: &observability.NoDataSlotFacts{Outcome: string(nodata.OutcomeEvaluated), Plans: 9},
 	})
 
@@ -81,7 +81,7 @@ func TestASlotWithNoNoDataPlansStillReportsItsCensus(t *testing.T) {
 	recorder := NewRecorder(BuildInfo{Version: "0.2.9999", Commit: "0123456789abcdef", SchemaVersion: "v3"})
 	recorder.Observe(context.Background(), observability.Observation{
 		Component: observability.ComponentEvaluation, Stage: observability.StageNoDataDecided,
-		Direction: observability.DirectionInternal, Result: observability.ResultSuccess,
+		Result:       observability.ResultSuccess,
 		NoDataCensus: &observability.NoDataCensusFacts{Hop: observability.NoDataHopDue, Plans: 0},
 	})
 

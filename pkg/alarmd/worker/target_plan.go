@@ -273,8 +273,8 @@ func (stream *streamedExecution) observeTargetResolution(ctx context.Context, du
 	}
 	stream.coordinator.emitObservation(ctx, observability.Observation{
 		Component: observability.ComponentAccess, Stage: observability.StageTargetResolved,
-		Operation: observability.Operation(stream.request.Operation), Direction: observability.DirectionInternal,
-		Result: result, ReasonCode: reason, TargetResolution: facts,
+		Operation: observability.Operation(stream.request.Operation),
+		Result:    result, ReasonCode: reason, TargetResolution: facts,
 	})
 }
 

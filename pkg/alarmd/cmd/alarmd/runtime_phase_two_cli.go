@@ -100,7 +100,7 @@ func cliRedisFailures(recorder *metric.Recorder, observer observability.Observer
 		}
 		observeRuntime(context.Background(), observer, observability.Observation{
 			Component: observability.ComponentRuntime, Stage: observability.StageAuthStore,
-			Result: observability.ResultFailed, Direction: observability.DirectionInternal,
+			Result:     observability.ResultFailed,
 			ReasonCode: observability.ReasonContractRetryable, Err: fmt.Errorf("authorization store %s: %s", reason, detail),
 		})
 	}

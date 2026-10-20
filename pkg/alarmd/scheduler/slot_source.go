@@ -1205,8 +1205,7 @@ func (source *ProductionSlotSource) observeReplayExpiry(
 	source.observer.Observe(ctx, observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageReplayExpired,
 		Result: observability.ResultDegraded, ReasonCode: observability.ReasonCode(facts.Reason),
-		Direction: observability.DirectionInternal,
-		Trace:     observability.TraceFields{QueryGroupKey: string(source.queryGroup), EvaluationTime: int64(evaluationTime)},
+		Trace: observability.TraceFields{QueryGroupKey: string(source.queryGroup), EvaluationTime: int64(evaluationTime)},
 		ReplayExpiry: &observability.ReplayExpiryFacts{
 			Reason: string(facts.Reason), Distance: facts.Distance, AgeSeconds: facts.Age.Seconds(),
 			ReadyAtUnixMilli: facts.ReadyAtUnixMilli, DistanceBoundaryUnixMilli: facts.DistanceBoundaryUnixMilli,
@@ -1267,8 +1266,8 @@ func (source *ProductionSlotSource) divertShortOfTime(
 		if source.observer != nil && source.takeovers.FirstClassification(source.queryGroup, evaluationTime, observability.ReplayTakeoverDiverted) {
 			source.observe(ctx, observability.Observation{
 				Component: observability.ComponentScheduler, Stage: observability.StageReplayTakeover,
-				Result: observability.ResultSuccess, Direction: observability.DirectionInternal,
-				Trace: observability.TraceFields{QueryGroupKey: string(source.queryGroup), EvaluationTime: int64(evaluationTime)},
+				Result: observability.ResultSuccess,
+				Trace:  observability.TraceFields{QueryGroupKey: string(source.queryGroup), EvaluationTime: int64(evaluationTime)},
 				ReplayTakeover: &observability.ReplayTakeoverFacts{
 					Outcome: observability.ReplayTakeoverDiverted, TakeoverOffsetSeconds: at.Sub(takenOver).Seconds(),
 					RemainingSeconds: remaining.Seconds(), FloorSeconds: bound.Seconds(), FloorSource: boundSource,
@@ -1278,8 +1277,8 @@ func (source *ProductionSlotSource) divertShortOfTime(
 	} else if previous := source.readinessDiverted.Swap(int64(evaluationTime)); previous != int64(evaluationTime) && source.observer != nil {
 		source.observe(ctx, observability.Observation{
 			Component: observability.ComponentScheduler, Stage: observability.StageSlotDiverted,
-			Result: observability.ResultSuccess, Direction: observability.DirectionInternal,
-			Trace: observability.TraceFields{QueryGroupKey: string(source.queryGroup), EvaluationTime: int64(evaluationTime)},
+			Result: observability.ResultSuccess,
+			Trace:  observability.TraceFields{QueryGroupKey: string(source.queryGroup), EvaluationTime: int64(evaluationTime)},
 			SlotDiversion: &observability.SlotDiversionFacts{
 				Reason: observability.SlotDiversionReadinessLate, RemainingSeconds: remaining.Seconds(),
 				BoundSeconds: bound.Seconds(), BoundSource: boundSource,
@@ -1386,8 +1385,8 @@ func (source *ProductionSlotSource) observeReplayTakeover(
 	defer func() { _ = recover() }()
 	source.observer.Observe(ctx, observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageReplayTakeover,
-		Result: observability.ResultSuccess, Direction: observability.DirectionInternal,
-		Trace: observability.TraceFields{QueryGroupKey: string(source.queryGroup), EvaluationTime: int64(evaluationTime)},
+		Result: observability.ResultSuccess,
+		Trace:  observability.TraceFields{QueryGroupKey: string(source.queryGroup), EvaluationTime: int64(evaluationTime)},
 		ReplayTakeover: &observability.ReplayTakeoverFacts{
 			Outcome: outcome, AgeSeconds: age.Seconds(), TakeoverOffsetSeconds: sinceTakeover.Seconds(),
 		},
@@ -1876,8 +1875,8 @@ func (source *ProductionSlotSource) observeCursorAdvance(
 		Reason: string(request.SkipGap().ReasonCode), RepairedAtUnixMilli: repairedAt}
 	observed := observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageScheduleCursorAdvanced,
-		Operation: observability.OperationWrite, Direction: observability.DirectionInternal,
-		Trace: observability.TraceFields{QueryGroupKey: string(source.queryGroup)}, CursorAdvance: facts,
+		Operation: observability.OperationWrite,
+		Trace:     observability.TraceFields{QueryGroupKey: string(source.queryGroup)}, CursorAdvance: facts,
 	}
 	switch {
 	case err != nil:

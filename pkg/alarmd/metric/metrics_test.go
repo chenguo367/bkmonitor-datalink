@@ -84,7 +84,6 @@ func TestObservationRejectsANegativeDuration(t *testing.T) {
 		Component: observability.ComponentRuntime,
 		Stage:     observability.StageFleetSnapshotPublish,
 		Result:    observability.ResultSuccess,
-		Direction: observability.DirectionInternal,
 		Duration:  -time.Second,
 	})
 	got := scrape(t, recorder)
@@ -99,7 +98,7 @@ func TestKnownM0ReasonMapsToBoundedMetricValue(t *testing.T) {
 	recorder := NewRecorder(BuildInfo{})
 	recorder.Observe(context.Background(), observability.Observation{
 		Component: observability.ComponentRuntime, Stage: observability.StageFleetSnapshotPublish,
-		Result: observability.ResultTerminal, Direction: observability.DirectionInternal,
+		Result:     observability.ResultTerminal,
 		ReasonCode: observability.ReasonCode(contract.ReasonRecordIdentityConflict),
 	})
 	got := scrape(t, recorder)
@@ -120,14 +119,12 @@ func TestObservationsAreCountedByStageAndResult(t *testing.T) {
 			Component: observability.ComponentRuntime,
 			Stage:     observability.StageFleetSnapshotPublish,
 			Result:    observability.ResultSuccess,
-			Direction: observability.DirectionInternal,
 			Duration:  time.Second,
 		},
 		{
 			Component: observability.ComponentResource,
 			Stage:     observability.StageResourceHard,
 			Result:    observability.ResultPaused,
-			Direction: observability.DirectionInternal,
 		},
 	} {
 		recorder.Observe(context.Background(), observation)
@@ -722,7 +719,6 @@ func populateAllCustomLabelCombinations(recorder *Recorder) {
 					Component:  pair.Component,
 					Stage:      pair.Stage,
 					Result:     result,
-					Direction:  observability.DirectionOther,
 					ReasonCode: metricInputReason(reason),
 					Duration:   time.Second,
 				})
@@ -734,7 +730,7 @@ func populateAllCustomLabelCombinations(recorder *Recorder) {
 			for _, reason := range observability.AllMetricReasons() {
 				recorder.Observe(context.Background(), observability.Observation{
 					Component: observability.ComponentResource, Stage: observability.StageResourceHard,
-					Result: result, Operation: operation, Direction: observability.DirectionOther,
+					Result: result, Operation: operation,
 					ReasonCode: metricInputReason(reason),
 				})
 			}

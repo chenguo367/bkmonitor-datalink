@@ -617,7 +617,7 @@ func (coordinator *FlightCoordinator) observeQueryPermitReason(
 	defer func() { _ = recover() }()
 	coordinator.observer.Observe(ctx, observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageQueryAdmission,
-		Result: result, ReasonCode: reason, Operation: observability.Operation(operation), Direction: observability.DirectionInternal,
+		Result: result, ReasonCode: reason, Operation: observability.Operation(operation),
 		QueryPermit: &observability.QueryPermitFacts{
 			QueueKind: queueKind, Admission: admission,
 			NormalWaiting: snapshot.NormalWaiting, RecoveryWaiting: snapshot.RecoveryWaiting,

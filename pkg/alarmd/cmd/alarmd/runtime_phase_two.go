@@ -2282,9 +2282,8 @@ func (dispatcher *phaseTwoRunnerDispatcher) handleResult(
 			observeRuntime(ctx, dispatcher.bundle.dependencies.Observer, observability.Observation{
 				Component: observability.ComponentScheduler, Stage: observability.StageScheduleDue,
 				Result: outcome, ReasonCode: reason,
-				Direction: observability.DirectionInternal,
-				Trace:     observability.TraceFields{QueryGroupKey: string(scheduled.queryGroup)},
-				Err:       result.err,
+				Trace: observability.TraceFields{QueryGroupKey: string(scheduled.queryGroup)},
+				Err:   result.err,
 			})
 			if yielded != "" && requeue {
 				dispatcher.turnedAwayByHold(scheduled)
@@ -2833,7 +2832,7 @@ func (bundle *phaseTwoWorkerBundle) Shutdown(ctx context.Context) error {
 		bundle.mu.RUnlock()
 		observeRuntime(ctx, bundle.dependencies.Observer, observability.Observation{
 			Component: observability.ComponentRuntime, Stage: observability.StageShutdown, Result: shutdownResult,
-			Direction: observability.DirectionInternal, Err: bundle.shutdownErr, SlotDrain: drain,
+			Err: bundle.shutdownErr, SlotDrain: drain,
 		})
 	})
 	return bundle.shutdownErr
@@ -3498,8 +3497,8 @@ func (bundle *phaseTwoWorkerBundle) observeAssignmentApplied(ctx context.Context
 	observeRuntime(ctx, bundle.dependencies.Observer, observability.Observation{
 		Component: observability.ComponentOwnership, Stage: observability.StageAssignmentApplied,
 		Result: observability.ResultSuccess, Operation: observability.OperationTransition,
-		Direction: observability.DirectionInternal, AssignmentApplied: &facts,
-		Trace: observability.TraceFields{OwnerID: bundle.dependencies.Config.PhaseTwo.Worker.ID},
+		AssignmentApplied: &facts,
+		Trace:             observability.TraceFields{OwnerID: bundle.dependencies.Config.PhaseTwo.Worker.ID},
 	})
 }
 
@@ -3538,7 +3537,7 @@ func (bundle *phaseTwoWorkerBundle) clearControlDependencyDegraded(ctx context.C
 	bundle.mu.Unlock()
 	observeRuntime(ctx, bundle.dependencies.Observer, observability.Observation{
 		Component: observability.ComponentControlPlane, Stage: observability.StageSnapshotRefreshed,
-		Result: observability.Result(observability.ResultRecovered), Direction: observability.DirectionInternal,
+		Result:     observability.Result(observability.ResultRecovered),
 		ReasonCode: phaseTwoControlDependencyReason,
 	})
 }
@@ -3564,7 +3563,7 @@ func (bundle *phaseTwoWorkerBundle) scopeControlError(
 	}
 	observeRuntime(ctx, bundle.dependencies.Observer, observability.Observation{
 		Component: component, Stage: stage, Result: observability.ResultFailed,
-		Direction: observability.DirectionInternal, ReasonCode: phaseTwoControlDependencyReason, Err: err,
+		ReasonCode: phaseTwoControlDependencyReason, Err: err,
 	})
 	bundle.markControlDependencyDegraded()
 	return nil
@@ -3689,8 +3688,8 @@ func (bundle *phaseTwoWorkerBundle) recordHandoverDrain(queryGroup execution.Que
 	observeRuntime(context.Background(), bundle.dependencies.Observer, observability.Observation{
 		Component: observability.ComponentOwnership, Stage: observability.StageHandoverDrained,
 		Result: observability.ResultSuccess, Operation: observability.OperationTransition,
-		Direction: observability.DirectionInternal, SlotDrain: &drain,
-		Trace: observability.TraceFields{QueryGroupKey: string(queryGroup), OwnerID: bundle.dependencies.Config.PhaseTwo.Worker.ID},
+		SlotDrain: &drain,
+		Trace:     observability.TraceFields{QueryGroupKey: string(queryGroup), OwnerID: bundle.dependencies.Config.PhaseTwo.Worker.ID},
 	})
 }
 
@@ -4107,7 +4106,7 @@ func (bundle *phaseTwoWorkerBundle) recordHungExecution(
 	}
 	observeRuntime(context.Background(), bundle.dependencies.Observer, observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageExecutionHung,
-		Result: result, Direction: observability.DirectionInternal, ExecutionHung: &facts, Err: err,
+		Result: result, ExecutionHung: &facts, Err: err,
 		Trace: observability.TraceFields{QueryGroupKey: string(queryGroup), OwnerID: bundle.dependencies.Config.PhaseTwo.Worker.ID},
 	})
 }
@@ -4382,7 +4381,7 @@ func (bundle *phaseTwoWorkerBundle) applyControlRefresh(
 		bundle.dependencies.Recorder.RecordControlHealthInvalid(field)
 		observeRuntime(ctx, bundle.dependencies.Observer, observability.Observation{
 			Component: observability.ComponentControlPlane, Stage: observability.StageSnapshotRefreshed,
-			Result: observability.ResultFailed, Direction: observability.DirectionInternal,
+			Result:     observability.ResultFailed,
 			ReasonCode: observability.ReasonInternalUnknown,
 			Err:        fmt.Errorf("phase-two Control refresh returned an invalid health fact: %s", field),
 		})
@@ -4434,7 +4433,7 @@ func (bundle *phaseTwoWorkerBundle) applyControlRefresh(
 	}
 	observeRuntime(ctx, bundle.dependencies.Observer, observability.Observation{
 		Component: observability.ComponentControlPlane, Stage: stage, Result: transitionResult,
-		Direction: observability.DirectionInternal, ReasonCode: transitionReason, Err: transitionCause,
+		ReasonCode: transitionReason, Err: transitionCause,
 		SourceKind: transitionSource,
 	})
 	return nil
@@ -4474,7 +4473,7 @@ func (bundle *phaseTwoWorkerBundle) observe(
 ) {
 	observeRuntime(ctx, bundle.dependencies.Observer, observability.Observation{
 		Component: component, Stage: stage, Result: result,
-		Direction: observability.DirectionInternal, Err: err,
+		Err: err,
 	})
 }
 
@@ -4492,7 +4491,7 @@ func (bundle *phaseTwoWorkerBundle) observeRegistrationRenewal(result observabil
 	}
 	observeRuntime(context.Background(), bundle.dependencies.Observer, observability.Observation{
 		Component: observability.ComponentOwnership, Stage: observability.StageLeaseRenewed, Result: result,
-		Direction: observability.DirectionInternal, ReasonCode: reason, Err: err,
+		ReasonCode: reason, Err: err,
 	})
 }
 
@@ -4506,7 +4505,7 @@ func (bundle *phaseTwoWorkerBundle) observeOwnership(
 	reason := ownershipObservationReason(err)
 	observeRuntime(ctx, bundle.dependencies.Observer, observability.Observation{
 		Component: observability.ComponentOwnership, Stage: stage, Result: result,
-		Operation: observability.OperationTransition, Direction: observability.DirectionInternal,
+		Operation:  observability.OperationTransition,
 		ReasonCode: reason, Trace: observability.TraceFields{
 			QueryGroupKey: string(queryGroup), OwnerID: bundle.dependencies.Config.PhaseTwo.Worker.ID,
 		}, Err: err,
@@ -4539,7 +4538,7 @@ func phaseTwoRuntimeObserver(observer observability.Observer) observability.Obse
 		}
 		observeRuntime(ctx, observer, observability.Observation{
 			Component: observability.ComponentOwnership, Stage: observability.StageFenceChecked,
-			Result: observation.Result, Operation: observation.Operation, Direction: observability.DirectionInternal,
+			Result: observation.Result, Operation: observation.Operation,
 			ReasonCode: observation.ReasonCode, Duration: observation.Duration, Trace: observation.Trace, Err: observation.Err,
 		})
 	})

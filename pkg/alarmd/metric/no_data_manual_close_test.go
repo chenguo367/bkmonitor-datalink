@@ -48,23 +48,23 @@ func TestTheManualCloseCheckLineMovesItsCounters(t *testing.T) {
 	ctx := context.Background()
 	recorder.Observe(ctx, observability.Observation{
 		Component: observability.ComponentOutput, Stage: observability.StageNoDataManualCloseChecked,
-		Direction: observability.DirectionInternal, Result: observability.ResultSuccess,
+		Result:            observability.ResultSuccess,
 		NoDataManualClose: &observability.NoDataManualCloseFacts{Dropped: 2},
 	})
 	recorder.Observe(ctx, observability.Observation{
 		Component: observability.ComponentOutput, Stage: observability.StageNoDataManualCloseChecked,
-		Direction: observability.DirectionInternal, Result: observability.ResultFailed,
+		Result:     observability.ResultFailed,
 		ReasonCode: observability.ReasonCode(contract.ReasonRedisUnavailable), Err: errors.New("redis down"),
 		NoDataManualClose: &observability.NoDataManualCloseFacts{CheckFailed: true},
 	})
 	recorder.Observe(ctx, observability.Observation{
 		Component: observability.ComponentState, Stage: observability.StageNoDataMemoryRead,
-		Direction: observability.DirectionInternal, Result: observability.ResultSuccess,
+		Result:           observability.ResultSuccess,
 		NoDataMemoryRead: &observability.NoDataMemoryReadFacts{Representation: "PER_GROUP", ManualClosesUnread: true},
 	})
 	recorder.Observe(ctx, observability.Observation{
 		Component: observability.ComponentOutput, Stage: observability.StageEventACKed,
-		Direction: observability.DirectionInternal, Result: observability.ResultSuccess,
+		Result: observability.ResultSuccess,
 	})
 
 	if got := recorderCounterValue(t, recorder, "alarmd_worker_no_data_manual_close_dropped_total"); got != 2 {

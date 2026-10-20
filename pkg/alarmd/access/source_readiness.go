@@ -79,7 +79,7 @@ func (source *Source) observeSlotReadiness(
 	source.config.Observer.Observe(ctx, observability.Observation{
 		Component: observability.ComponentAccess, Stage: observability.StageSlotReadinessArrival,
 		Result: observability.ResultSuccess, Operation: observability.Operation(request.Operation),
-		Direction: observability.DirectionInternal, SlotReadiness: &facts,
+		SlotReadiness: &facts,
 		Trace: observability.TraceFields{
 			QueryGroupKey:    string(request.Contract.Slot.QueryGroup),
 			EvaluationTime:   int64(request.Contract.Slot.EvaluationTime),

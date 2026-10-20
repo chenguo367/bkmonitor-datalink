@@ -1265,7 +1265,7 @@ func (stream *streamedExecution) observeNoDataRenewals(ctx context.Context) {
 		stream.coordinator.emitObservation(ctx, observability.Observation{
 			Component: observability.ComponentState, Stage: observability.StageNoDataMemoryRenewed,
 			Operation: observability.Operation(stream.request.Operation),
-			Direction: observability.DirectionInternal, Result: result, ReasonCode: reason,
+			Result:    result, ReasonCode: reason,
 			Trace: observability.TraceFields{
 				StrategyID: renewal.Identity.Plan.StrategyID, BusinessID: renewal.Identity.Plan.BusinessID,
 			},
@@ -1295,8 +1295,8 @@ func (stream *streamedExecution) observeNoDataRepresentations(ctx context.Contex
 		representation := snapshot.Representation
 		stream.coordinator.emitObservation(ctx, observability.Observation{
 			Component: observability.ComponentState, Stage: observability.StageNoDataMemoryRead,
-			Operation: observability.Operation(stream.request.Operation),
-			Direction: observability.DirectionInternal, Result: observability.ResultSuccess,
+			Operation:  observability.Operation(stream.request.Operation),
+			Result:     observability.ResultSuccess,
 			ReasonCode: observability.ReasonNone,
 			Trace: observability.TraceFields{
 				StrategyID: snapshot.Identity.Plan.StrategyID, BusinessID: snapshot.Identity.Plan.BusinessID,
@@ -1894,8 +1894,8 @@ func (stream *streamedExecution) observeEvaluationCompleted(
 	observation := observability.Observation{
 		Component: observability.ComponentEvaluation, Stage: observability.StageEvaluationCompleted,
 		Result: evaluated.Result, Operation: observability.Operation(stream.request.Operation),
-		Direction: observability.DirectionInternal, ReasonCode: evaluated.ReasonCode,
-		Duration: time.Since(started), Counts: observability.Counts{Records: evaluationRecordCount(inputs)},
+		ReasonCode: evaluated.ReasonCode,
+		Duration:   time.Since(started), Counts: observability.Counts{Records: evaluationRecordCount(inputs)},
 		DurationKnown: true, EvaluationOwner: costEvaluationOwner(due.Identity), EvaluationRecordsKnown: true,
 		Trace:                observability.TraceFields{StrategyID: due.Identity.StrategyID, BusinessID: due.Identity.BusinessID, DimensionIdentityDigest: string(series)},
 		AlgorithmEvaluations: evaluations, AlgorithmInputs: namedInputs,
@@ -1949,8 +1949,8 @@ func costEvaluationOwner(identity execution.PlanIdentity) observability.CostPlan
 func (stream *streamedExecution) observeEvaluationFailure(ctx context.Context, started time.Time, due execution.DuePlan, err error) {
 	stream.coordinator.emitObservation(ctx, observability.Observation{
 		Component: observability.ComponentEvaluation, Stage: observability.StageEvaluationCompleted,
-		Operation: observability.Operation(stream.request.Operation), Direction: observability.DirectionInternal,
-		Duration: time.Since(started), DurationKnown: true, Err: err,
+		Operation: observability.Operation(stream.request.Operation),
+		Duration:  time.Since(started), DurationKnown: true, Err: err,
 		EvaluationOwner: costEvaluationOwner(due.Identity),
 	})
 }
@@ -2055,8 +2055,8 @@ func (stream *streamedExecution) observeCompletionOnlyPlan(
 	observation := observability.Observation{
 		Component: observability.ComponentEvaluation, Stage: observability.StageEvaluationCompleted,
 		Result: evaluated.Result, Operation: observability.Operation(stream.request.Operation),
-		Direction: observability.DirectionInternal, ReasonCode: evaluated.ReasonCode,
-		Duration: time.Since(started), DurationKnown: true,
+		ReasonCode: evaluated.ReasonCode,
+		Duration:   time.Since(started), DurationKnown: true,
 		EvaluationOwner: costEvaluationOwner(due.Identity), EvaluationRecordsKnown: true,
 		Trace:             observability.TraceFields{StrategyID: due.Identity.StrategyID, BusinessID: due.Identity.BusinessID},
 		AlgorithmInputs:   stream.completionOnlyAlgorithmInputFacts(due),

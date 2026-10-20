@@ -66,7 +66,7 @@ func (source *Source) observeQueryTiming(ctx context.Context, request execution.
 						facts.RecoveryBudgetMilli = recoveryDeadline.Sub(recoveryStart).Milliseconds()
 					}
 					source.config.Observer.Observe(ctx, observability.Observation{Component: observability.ComponentAccess, Stage: observability.StageQueryBudgetResolved,
-						Result: observability.ResultSuccess, Operation: observability.Operation(request.Operation), Direction: observability.DirectionInternal, QueryTiming: &facts,
+						Result: observability.ResultSuccess, Operation: observability.Operation(request.Operation), QueryTiming: &facts,
 						Trace: observability.TraceFields{QueryGroupKey: string(request.Contract.Slot.QueryGroup), EvaluationTime: int64(request.Contract.Slot.EvaluationTime),
 							ScheduleRevision: string(request.Contract.ScheduleRevision), SnapshotRevision: string(request.Contract.SnapshotRevision), QueryRevision: string(request.Contract.QueryRevision),
 							DuePlanSetDigest: string(request.Contract.DuePlanSetDigest),

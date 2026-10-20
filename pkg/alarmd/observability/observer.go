@@ -25,7 +25,6 @@ type Stage string
 type Result string
 type Operation string
 type ReasonCode string
-type Direction string
 type CapacityBudget string
 type SourceKind string
 type QueryQueueKind string
@@ -257,11 +256,6 @@ const (
 	OperationProbe              = "probe"
 	OperationSupplement         = "supplement"
 	OperationOther              = "_other"
-
-	DirectionInput    Direction = "input"
-	DirectionOutput   Direction = "output"
-	DirectionInternal Direction = "internal"
-	DirectionOther    Direction = "_other"
 
 	CapacityBudgetSeries         CapacityBudget = "series"
 	CapacityBudgetRetainedBytes  CapacityBudget = "retained_bytes"
@@ -2484,7 +2478,6 @@ type Observation struct {
 	Stage             Stage
 	Result            Result
 	Operation         Operation
-	Direction         Direction
 	ReasonCode        ReasonCode
 	Duration          time.Duration
 	Counts            Counts
@@ -2684,7 +2677,6 @@ func NormalizeObservation(observation Observation) Observation {
 	observation.stageReasonBucket = rawReason == "" ||
 		(rawReason == ReasonNone && !resultAllowsNone(observation.Result))
 	observation.Operation = NormalizeOperation(observation.Operation)
-	observation.Direction = NormalizeDirection(observation.Direction)
 	observation.SourceKind = NormalizeSourceKind(observation.SourceKind)
 	if observation.Component == ComponentControlPlane && observation.SourceKind != "" && isSourceReasonClass(observation.ReasonCode) {
 		observation.ReasonCode = rawReason
@@ -3398,13 +3390,6 @@ func NormalizeCapacityBudget(budget CapacityBudget) CapacityBudget {
 	}
 }
 
-func NormalizeDirection(direction Direction) Direction {
-	if _, ok := directionSet[direction]; ok {
-		return direction
-	}
-	return DirectionOther
-}
-
 func NormalizeComponentStage(component Component, stage Stage) (Component, Stage) {
 	if _, ok := componentStageSet[ComponentStage{Component: component, Stage: stage}]; ok {
 		return component, stage
@@ -3663,8 +3648,6 @@ var metricOperations = []Operation{
 var phaseTwoOperations = []Operation{OperationNormal, OperationRetry, OperationReplay, OperationProbe, OperationSupplement}
 var allOperations = append(append([]Operation(nil), metricOperations...), phaseTwoOperations...)
 
-var allDirections = []Direction{DirectionInput, DirectionOutput, DirectionInternal, DirectionOther}
-
 // unclassifiedReasons are the reasons that carry no classification of their
 // own: the absence of one, a site that says it does not know, and a site that
 // did not say. They are listed once and shared, so adding one cannot silently
@@ -3853,7 +3836,6 @@ var metricComponentStageSet = makeComponentStageSet(metricComponentStages)
 var resultSet = makeResultSet(allResults)
 var operationSet = makeOperationSet(allOperations)
 var metricOperationSet = makeOperationSet(metricOperations)
-var directionSet = makeDirectionSet(allDirections)
 var logReasonSet = makeReasonSet(AllLogReasons())
 var commonReasonSet = makeReasonSet(joinReasons(unclassifiedReasons, []ReasonCode{ReasonStateAlreadyAppliedBeforeEvaluation}))
 var resourceReasonSet = makeReasonSet(resourceOnlyReasons)
@@ -3882,14 +3864,6 @@ func makeResultSet(values []Result) map[Result]struct{} {
 
 func makeOperationSet(values []Operation) map[Operation]struct{} {
 	result := make(map[Operation]struct{}, len(values))
-	for _, value := range values {
-		result[value] = struct{}{}
-	}
-	return result
-}
-
-func makeDirectionSet(values []Direction) map[Direction]struct{} {
-	result := make(map[Direction]struct{}, len(values))
 	for _, value := range values {
 		result[value] = struct{}{}
 	}
@@ -3996,6 +3970,6 @@ func ObserveSlotWait(
 	defer func() { _ = recover() }()
 	observer.Observe(ctx, Observation{
 		Component: ComponentScheduler, Stage: StageSlotWait, Result: result, Operation: operation,
-		Direction: DirectionInternal, Duration: elapsed, SlotWait: &SlotWaitFacts{Wait: wait},
+		Duration: elapsed, SlotWait: &SlotWaitFacts{Wait: wait},
 	})
 }

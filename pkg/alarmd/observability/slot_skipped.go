@@ -186,7 +186,7 @@ func ObserveSlotSkipped(ctx context.Context, observer Observer, trace TraceField
 	}
 	observer.Observe(ctx, Observation{
 		Component: ComponentScheduler, Stage: StageSlotSkipped, Operation: operation,
-		Result: ResultDegraded, ReasonCode: ReasonCode(facts.Reason), Direction: DirectionInternal,
+		Result: ResultDegraded, ReasonCode: ReasonCode(facts.Reason),
 		Trace: trace, HeldBy: HeldByFromContext(ctx), SlotSkipped: &facts, RangeDistance: facts.Range,
 	})
 }

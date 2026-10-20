@@ -575,7 +575,7 @@ func (runner *Runner) emitQueryCooldown(ctx context.Context, event string) {
 	result, reason := queryCooldownOutcome(event, state.reason)
 	runner.flights.observer.Observe(ctx, observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageQueryCooldown,
-		Result: result, ReasonCode: reason, Direction: observability.DirectionInternal,
+		Result: result, ReasonCode: reason,
 		Trace: observability.TraceFields{QueryGroupKey: string(runner.queryGroup)},
 		QueryCooldown: &observability.QueryCooldownFacts{Event: event, Until: state.until,
 			LastQueryAt: state.lastQueryAt, Failures: state.failures, Timeouts: state.timeouts, FirstTimeoutAt: state.firstTimeoutAt, Cuts: state.cuts,

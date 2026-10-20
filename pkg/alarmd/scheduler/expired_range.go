@@ -236,7 +236,7 @@ func (source *ProductionSlotSource) observeRangeDistanceExpiry(ctx context.Conte
 	facts := report.facts()
 	source.observer.Observe(ctx, observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageRangeDistanceExpired,
-		Result: observability.ResultDegraded, Direction: observability.DirectionInternal,
+		Result:     observability.ResultDegraded,
 		ReasonCode: observability.ReasonCode(contract.ReasonGapSkipped),
 		Trace: observability.TraceFields{
 			QueryGroupKey: string(source.queryGroup), EvaluationTime: int64(report.firstEvaluationTime),
@@ -403,7 +403,6 @@ func (source *ProductionSlotSource) observeRangeGate(
 	source.observer.Observe(ctx, observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageRangeGateDecided,
 		Result: rangeGateResult(outcome.word), ReasonCode: observability.ReasonCode(outcome.word),
-		Direction: observability.DirectionInternal,
 		Trace: observability.TraceFields{
 			QueryGroupKey: string(source.queryGroup), EvaluationTime: int64(evaluationTime),
 		},

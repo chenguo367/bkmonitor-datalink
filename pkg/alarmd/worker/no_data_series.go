@@ -515,8 +515,8 @@ func (coordinator *SlotExecutionCoordinator) observeNoDataMemoryWrite(
 	}
 	coordinator.emitObservation(ctx, observability.Observation{
 		Component: observability.ComponentState, Stage: observability.StageNoDataMemoryWritten,
-		Operation: observability.Operation(request.Operation),
-		Direction: observability.DirectionInternal, Result: result,
+		Operation:  observability.Operation(request.Operation),
+		Result:     result,
 		ReasonCode: observability.ReasonCode(item.ReasonCode),
 		Trace: observability.TraceFields{
 			StrategyID: item.Identity.Plan.StrategyID, BusinessID: item.Identity.Plan.BusinessID,
@@ -562,8 +562,8 @@ func (coordinator *SlotExecutionCoordinator) observeNoDataMemoryRefusal(
 	}
 	coordinator.emitObservation(ctx, observability.Observation{
 		Component: observability.ComponentState, Stage: observability.StageNoDataMemoryRefused,
-		Operation: observability.Operation(request.Operation),
-		Direction: observability.DirectionInternal, Result: observability.ResultDegraded,
+		Operation:  observability.Operation(request.Operation),
+		Result:     observability.ResultDegraded,
 		ReasonCode: observability.ReasonCode(item.ReasonCode),
 		Trace: observability.TraceFields{
 			StrategyID: item.Identity.Plan.StrategyID, BusinessID: item.Identity.Plan.BusinessID,
@@ -590,7 +590,7 @@ func (stream *streamedExecution) observeNoDataOutcomes(ctx context.Context) {
 	stream.coordinator.emitObservation(ctx, observability.Observation{
 		Component: observability.ComponentEvaluation, Stage: observability.StageNoDataDecided,
 		Operation: observability.Operation(stream.request.Operation),
-		Direction: observability.DirectionInternal, Result: observability.ResultSuccess,
+		Result:    observability.ResultSuccess,
 		NoDataCensus: &observability.NoDataCensusFacts{
 			Hop: observability.NoDataHopDue, Plans: stream.noDataPlansSeen,
 		},
@@ -610,8 +610,8 @@ func (stream *streamedExecution) observeNoDataOutcomes(ctx context.Context) {
 		}
 		stream.coordinator.emitObservation(ctx, observability.Observation{
 			Component: observability.ComponentEvaluation, Stage: observability.StageNoDataDecided,
-			Operation: observability.Operation(stream.request.Operation),
-			Direction: observability.DirectionInternal, Result: observability.ResultSuccess,
+			Operation:  observability.Operation(stream.request.Operation),
+			Result:     observability.ResultSuccess,
 			NoDataSlot: &observability.NoDataSlotFacts{Outcome: string(outcome), Plans: plans},
 		})
 	}
@@ -680,7 +680,7 @@ func (stream *streamedExecution) observeNoDataAbsence(
 	stream.coordinator.emitObservation(ctx, observability.Observation{
 		Component: observability.ComponentEvaluation, Stage: observability.StageNoDataDecided,
 		Operation: observability.Operation(stream.request.Operation),
-		Direction: observability.DirectionInternal, Result: observability.ResultSuccess,
+		Result:    observability.ResultSuccess,
 		Trace: observability.TraceFields{
 			StrategyID: due.Identity.StrategyID, BusinessID: due.Identity.BusinessID,
 		},

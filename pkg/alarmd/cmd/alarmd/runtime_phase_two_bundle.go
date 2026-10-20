@@ -1414,22 +1414,22 @@ func observationWindowObserver(observer observability.Observer) func(int, int, i
 			failing = true
 			observeRuntime(context.Background(), observer, observability.Observation{
 				Component: observability.ComponentRuntime, Stage: observability.StageObservationWindow,
-				Result: observability.ResultFailed, Direction: observability.DirectionInternal, Err: err,
+				Result: observability.ResultFailed, Err: err,
 			})
 		case dropped > 0:
 			failing = false
 			applied, requested = nowApplied, nowRequested
 			observeRuntime(context.Background(), observer, observability.Observation{
 				Component: observability.ComponentRuntime, Stage: observability.StageObservationWindow,
-				Result: observability.ResultDegraded, Direction: observability.DirectionInternal,
-				Err: fmt.Errorf("observation windows exceed the diagnostic budget: %d of %d requested objects are not observed", dropped, nowRequested),
+				Result: observability.ResultDegraded,
+				Err:    fmt.Errorf("observation windows exceed the diagnostic budget: %d of %d requested objects are not observed", dropped, nowRequested),
 			})
 		case failing || nowApplied != applied || nowRequested != requested:
 			failing = false
 			applied, requested = nowApplied, nowRequested
 			observeRuntime(context.Background(), observer, observability.Observation{
 				Component: observability.ComponentRuntime, Stage: observability.StageObservationWindow,
-				Result: observability.Result(observability.ResultSuccess), Direction: observability.DirectionInternal,
+				Result: observability.Result(observability.ResultSuccess),
 			})
 		}
 	}
@@ -1443,13 +1443,13 @@ func publishOutcomeObserver(observer observability.Observer) func(error) {
 			failing = true
 			observeRuntime(context.Background(), observer, observability.Observation{
 				Component: observability.ComponentRuntime, Stage: observability.StageFleetSnapshotPublish,
-				Result: observability.ResultFailed, Direction: observability.DirectionInternal, Err: err,
+				Result: observability.ResultFailed, Err: err,
 			})
 		case failing:
 			failing = false
 			observeRuntime(context.Background(), observer, observability.Observation{
 				Component: observability.ComponentRuntime, Stage: observability.StageFleetSnapshotPublish,
-				Result: observability.ResultResumed, Direction: observability.DirectionInternal,
+				Result: observability.ResultResumed,
 			})
 		}
 	}

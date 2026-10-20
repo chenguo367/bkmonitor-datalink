@@ -282,7 +282,6 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		slog.String("result", string(observation.Result)),
 		slog.String("reason_code", string(observation.ReasonCode)),
 		slog.String("operation", string(observation.Operation)),
-		slog.String("direction", string(observation.Direction)),
 		slog.Int64("duration_ms", observation.Duration.Milliseconds()),
 	}
 	if f := observation.GapExtensions; len(f) > 0 {
