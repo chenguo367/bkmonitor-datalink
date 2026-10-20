@@ -122,10 +122,13 @@ func newLookbackCollector() *lookbackCollector {
 			"Query Groups this replica holds, by the source they read and their read hold: held (a hold of more than "+
 				"none), at_limit (held at the group's limit), unknown (its hold not yet known - not counted under the "+
 				"other two). Each replica counts only its own groups: the deployment's is the sum. Absent while the "+
-				"replica holds none.", "source", "kind"),
+				"replica holds none. The source partition covers groups that have prepared a Schedule; "+
+				"alarmd_worker_owned_query_groups counts every owned group.", "source", "kind"),
 		readHoldMax: desc("read_hold_max_seconds",
 			"The largest known read hold among the Query Groups this replica holds that read the source; the "+
-				"deployment's is the max. Absent for a source none of whose groups here has a known hold.", "source"),
+				"deployment's is the max. Absent for a source none of whose groups here has a known hold. The source "+
+				"partition covers groups that have prepared a Schedule; alarmd_worker_owned_query_groups counts every "+
+				"owned group.", "source"),
 		readHoldRetireClose: desc("read_hold_retire_close_failed_total",
 			"Retired Query Groups whose read hold closing failed; they retire all the same, and a successor reads the "+
 				"unclosed record as the hold bound."),

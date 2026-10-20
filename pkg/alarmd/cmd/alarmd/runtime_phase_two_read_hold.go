@@ -89,7 +89,11 @@ type productionReadHoldGroup struct {
 	// groups that share it are the peers a new group's first hold is seeded
 	// from.
 	querySource string
-	queryDelay  time.Duration
+	// semantics is the data source the query reads, as the lookback and the
+	// catalog label it (controlplane.SourceSemanticsLabel), so a group the
+	// lookback has not sampled is still counted under its source.
+	semantics  string
+	queryDelay time.Duration
 	// queryStep is the query's data step, the one the lookback aligns its
 	// suggestion to, and settlingWait the newest prepared Segment's spec's,
 	// cached with the delay for the time_delay a measured hold suggests
@@ -344,6 +348,7 @@ func (holds *productionReadHolds) queryBasis(ctx context.Context, schedule execu
 		source := readHoldSource(object.QueryPlan, route)
 		holds.indexSourceLocked(qg, source)
 		owned.querySource = source
+		owned.semantics = controlplane.SourceSemanticsLabel(object.QueryPlan.SourceSemantics)
 		owned.queryRoute, owned.queryDelay, owned.queryStep = route, delay, step
 		owned.queryUnaligned = object.QueryPlan.NotTimeAlign
 	}

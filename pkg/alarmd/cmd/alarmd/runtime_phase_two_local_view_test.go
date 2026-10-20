@@ -11,6 +11,7 @@ import (
 
 	dto "github.com/prometheus/client_model/go"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
@@ -91,4 +92,41 @@ func gatherPhaseTwoGauges(t *testing.T, fixture *cutoverStallFixture) map[string
 		}
 	}
 	return gathered
+}
+
+// Of the fixture's two owned Query Groups, only the one whose Slot ran has
+// prepared a Schedule. Both are in worker_owned_query_groups; read_hold_groups
+// counts the prepared one under the source its query plan names, and the
+// other under none, other included, until it prepares.
+func TestReadHoldGroupsCoverPreparedGroupsAndOwnedCountsEvery(t *testing.T) {
+	fixture := startCutoverFixtureOpened(t, nil, observability.Discard(observability.ComponentRuntime), nil,
+		func(bundle *phaseTwoWorkerBundle) { bundle.dependencies.RunEffectiveTime = nil })
+	gathered := gatherPhaseTwoGauges(t, fixture)
+	if owned := gathered["alarmd_worker_owned_query_groups{worker_role=complete}"]; owned != 2 {
+		t.Fatalf("owned = %v, want the fixture's two", owned)
+	}
+	holds := fixture.bundle.dependencies.ReadHolds
+	holds.mu.Lock()
+	held, prepared := len(holds.groups), map[execution.QueryGroupIdentity]string{}
+	for qg, group := range holds.groups {
+		if group.semantics != "" {
+			prepared[qg] = group.semantics
+		}
+	}
+	holds.mu.Unlock()
+	if held != 2 || len(prepared) != 1 {
+		t.Fatalf("read holds bound %d groups with %d prepared (%v), want both owned groups bound and one prepared", held, len(prepared), prepared)
+	}
+	if prepared[fixture.initialSchedule.Segment.QueryGroup] == "" {
+		t.Fatalf("prepared %v, want the group whose Slot ran", prepared)
+	}
+	counts := holds.groupsBySource(nil)
+	if _, other := counts[controlplane.SourceSemanticsOther]; other {
+		t.Fatalf("read_hold_groups counts %+v, want nothing under other", counts)
+	}
+	for source := range counts {
+		if source != prepared[fixture.initialSchedule.Segment.QueryGroup] {
+			t.Fatalf("read_hold_groups counts %+v, want only the prepared group's source", counts)
+		}
+	}
 }

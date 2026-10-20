@@ -1471,13 +1471,13 @@ New Slots frozen with the hold their Query Group last read -- zero for a group w
 
 Labels: `source`, `kind`
 
-Query Groups this replica holds, by the source they read and their read hold: held (a hold of more than none), at_limit (held at the group's limit), unknown (its hold not yet known - not counted under the other two). Each replica counts only its own groups: the deployment's is the sum. Absent while the replica holds none.
+Query Groups this replica holds, by the source they read and their read hold: held (a hold of more than none), at_limit (held at the group's limit), unknown (its hold not yet known - not counted under the other two). Each replica counts only its own groups: the deployment's is the sum. Absent while the replica holds none. The source partition covers groups that have prepared a Schedule; alarmd_worker_owned_query_groups counts every owned group.
 
 ## alarmd_read_hold_max_seconds
 
 Labels: `source`
 
-The largest known read hold among the Query Groups this replica holds that read the source; the deployment's is the max. Absent for a source none of whose groups here has a known hold.
+The largest known read hold among the Query Groups this replica holds that read the source; the deployment's is the max. Absent for a source none of whose groups here has a known hold. The source partition covers groups that have prepared a Schedule; alarmd_worker_owned_query_groups counts every owned group.
 
 ## alarmd_read_hold_predecessor_total
 

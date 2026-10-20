@@ -165,12 +165,18 @@ func productionLookbackStats(engine *lookback.Engine, holds *productionReadHolds
 // groupsBySource counts the Query Groups this process holds by their
 // source and read hold, from the same state the lookback's group page reads,
 // with the hold known as that page knows it. A group the lookback has not
-// seen yet is under other. Nil when it holds none.
+// sampled is counted under the source its query plan names, read when its
+// Schedule was prepared; one not prepared yet since this process took it has
+// no source to be counted under and is left out until it is, rather than
+// put under other, which is a source that compiles without a name. Nil when
+// it holds none.
 func (holds *productionReadHolds) groupsBySource(engine *lookback.Engine) map[string]lookback.ReadHoldGroups {
 	holds.mu.Lock()
 	groups := make([]execution.QueryGroupIdentity, 0, len(holds.groups))
-	for qg := range holds.groups {
+	semantics := make(map[execution.QueryGroupIdentity]string, len(holds.groups))
+	for qg, group := range holds.groups {
 		groups = append(groups, qg)
+		semantics[qg] = group.semantics
 	}
 	holds.mu.Unlock()
 	groups = slices.DeleteFunc(groups, func(qg execution.QueryGroupIdentity) bool {
@@ -185,7 +191,10 @@ func (holds *productionReadHolds) groupsBySource(engine *lookback.Engine) map[st
 	for _, qg := range groups {
 		source := sources[qg]
 		if source == "" {
-			source = lookback.SourceOther
+			source = semantics[qg]
+		}
+		if source == "" {
+			continue
 		}
 		entry := counts[source]
 		inspection := holds.controller.Inspect(qg)
