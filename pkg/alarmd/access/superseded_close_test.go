@@ -156,8 +156,9 @@ func (targetOverlayFuller) Fill(dimensions map[string]json.RawMessage, facts *ad
 
 // A target rejection of a host-placed series names the fingerprint its alert
 // is filed under - the record's dimensions with the host overlay over them -
-// not the record's own, which no alert of it carries any more.
-func TestATargetRejectionOfAnOverlaidSeriesNamesItsAlertsFingerprint(t *testing.T) {
+// and the record's own, under which an alert opened before the overlay, or
+// in a window without it, may still be open.
+func TestATargetRejectionOfAnOverlaidSeriesNamesBothFingerprints(t *testing.T) {
 	sink := &recordingSink{}
 	output := planOutput{strategyID: "42", revision: 3,
 		identity: &contract.MonitorOutputIdentity{DimensionFields: []string{"bk_host_id", "bk_target_ip", "bk_target_cloud_id"}}}
@@ -173,8 +174,10 @@ func TestATargetRejectionOfAnOverlaidSeriesNamesItsAlertsFingerprint(t *testing.
 	if want == "" || want == output.fingerprint(plan.BusinessID, record) {
 		t.Fatal("the fixture's overlay does not move the fingerprint")
 	}
-	if len(sink.observed) != 1 || sink.observed[0].Fingerprint != want {
-		t.Fatalf("observed %+v, want one rejection under the alert's fingerprint %s", sink.observed, want)
+	own := output.fingerprint(plan.BusinessID, record)
+	if len(sink.observed) != 2 || sink.observed[0].Fingerprint != want || sink.observed[1].Fingerprint != own {
+		t.Fatalf("observed %+v, want the rejection under the alert's fingerprint %s and under the record's own %s",
+			sink.observed, want, own)
 	}
 }
 
@@ -183,6 +186,7 @@ func TestATargetRejectionOfAnOverlaidSeriesNamesItsAlertsFingerprint(t *testing.
 type identitySourceFuller struct {
 	source      string
 	unavailable bool
+	raw         bool
 }
 
 func (identitySourceFuller) Name() string { return "identity_source" }
@@ -191,6 +195,10 @@ func (fuller identitySourceFuller) Fill(_ map[string]json.RawMessage, facts *adm
 	facts.MarkFactsUnavailable(admission.FactsUnavailableHostIndex)
 	if fuller.unavailable {
 		facts.HostIdentityUnavailable = true
+		return
+	}
+	if fuller.raw {
+		facts.HostOverlaySource = fuller.source
 		return
 	}
 	facts.HostOverlay = map[string]json.RawMessage{"bk_target_ip": json.RawMessage(`"192.0.2.172"`)}
@@ -210,7 +218,8 @@ func TestTheSourceOfAHostPlacedSeriesIdentityIsCounted(t *testing.T) {
 	}{
 		{"stale index", identitySourceFuller{source: admission.HostOverlayFromStaleIndex}, "host_identity/admitted/stale_index", false},
 		{"last populated index", identitySourceFuller{source: admission.HostOverlayFromLastPopulatedIndex}, "host_identity/admitted/last_populated_index", false},
-		{"no index", identitySourceFuller{unavailable: true}, "host_identity/held/held_no_index", true},
+		{"no index yet", identitySourceFuller{unavailable: true}, "host_identity/held/held_no_index", true},
+		{"no host in any load", identitySourceFuller{source: admission.HostIdentityRawNoIndex, raw: true}, "host_identity/admitted/raw_no_index", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			chain := admission.NewChain([]admission.Fuller{admission.IdentityFuller{}, c.fuller}, nil)

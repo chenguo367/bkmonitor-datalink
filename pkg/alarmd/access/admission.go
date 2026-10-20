@@ -317,19 +317,29 @@ func (adapter *seriesAdapter) reportScopeDrop(identity execution.PlanIdentity, p
 		return
 	}
 	// The fingerprint the alert is filed under: with the host overlay over
-	// the record's dimensions, as the evaluator reads them, or the close
-	// would look for an alert the series no longer opens.
+	// the record's dimensions, as the evaluator reads them. A host-placed
+	// series may also hold an alert under its own dimensions' fingerprint -
+	// opened before its identity read CMDB's address - so that one is
+	// offered too, and whichever the consumer holds is closed.
 	fingerprint := output.fingerprint(identity.BusinessID, alertedDimensions(facts))
 	if fingerprint == "" {
 		adapter.tallyScopeDrop(identity, ScopeDropNoFingerprint)
 		return
 	}
+	fingerprints := []string{fingerprint}
+	if len(facts.HostOverlay) > 0 {
+		if own := output.fingerprint(identity.BusinessID, facts.Dimensions); own != "" && own != fingerprint {
+			fingerprints = append(fingerprints, own)
+		}
+	}
 	var readOffset time.Duration
 	if ready := adapter.query.ReadyAtUnixMilli; ready > 0 {
 		readOffset = max(0, time.Duration(ready-adapter.round*1000)*time.Millisecond)
 	}
-	adapter.scopeSink.Observe(ScopeDrop{Plan: identity, Filter: filter, Reason: reason, Fingerprint: fingerprint,
-		StrategyRevision: output.revision, GlobalBusiness: output.globalBusiness, Round: adapter.round, IntervalSeconds: output.intervalSeconds, ReadOffset: readOffset})
+	for _, offered := range fingerprints {
+		adapter.scopeSink.Observe(ScopeDrop{Plan: identity, Filter: filter, Reason: reason, Fingerprint: offered,
+			StrategyRevision: output.revision, GlobalBusiness: output.globalBusiness, Round: adapter.round, IntervalSeconds: output.intervalSeconds, ReadOffset: readOffset})
+	}
 }
 
 func (adapter *seriesAdapter) tallyScopeDrop(plan execution.PlanIdentity, word string) {

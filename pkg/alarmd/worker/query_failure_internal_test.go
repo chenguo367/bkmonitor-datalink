@@ -456,3 +456,25 @@ func TestOnlyALostQueryLineCarriesItsDecisionAndBudget(t *testing.T) {
 		}
 	}
 }
+
+type seriesIdentityError struct{}
+
+func (seriesIdentityError) Error() string { return "a host-placed series has no CMDB index" }
+func (seriesIdentityError) QueryFailure() (string, string) {
+	return observability.QueryFailureCategorySeriesIdentity, contract.ReasonQueryUnavailable
+}
+
+// A query failed because a host-placed series' alert identity could not be
+// read yet names that on the query line, not internal_unknown.
+func TestASeriesIdentityFailureNamesItselfOnTheQueryLine(t *testing.T) {
+	var got observability.Observation
+	c := &SlotExecutionCoordinator{ports: Ports{Observer: observability.ObserverFunc(func(_ context.Context, o observability.Observation) { got = observability.NormalizeObservation(o) })}}
+	c.observeQueryFailure(context.Background(), execution.OperationNormal, time.Now(), "execute",
+		fmt.Errorf("alarmd access: execute physical query: %w", seriesIdentityError{}))
+	if got.ReasonCode != observability.ReasonCode(contract.ReasonQueryUnavailable) {
+		t.Fatalf("reason = %q, want QUERY_UNAVAILABLE rather than internal_unknown", got.ReasonCode)
+	}
+	if f := got.QueryFailure; f == nil || f.Category != observability.QueryFailureCategorySeriesIdentity {
+		t.Fatalf("failure facts = %+v, want series_identity", got.QueryFailure)
+	}
+}

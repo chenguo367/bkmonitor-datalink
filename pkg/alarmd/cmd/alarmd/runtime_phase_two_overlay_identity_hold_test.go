@@ -89,14 +89,19 @@ func TestAStaleCMDBIndexKeepsAHostPlacedAlertsIdentity(t *testing.T) {
 	}
 }
 
-// With no CMDB index that ever held hosts for the tenant, a host-placed series
-// cannot have its alert identity read: the round is not completed and nothing
-// is written for it under its raw address; once the index is read, the round
-// runs and files the alert under CMDB's address.
-func TestWithoutAnyCMDBIndexAHostPlacedSeriesIsNotEmittedRaw(t *testing.T) {
+// A tenant whose CMDB cache holds no host - its first load returned empty -
+// gives a host-placed series no identity to read, and none is waited for: the
+// round completes and its alert goes out under the record's own address, as
+// Python's does when CMDB holds no host for it. Once a load holds the host,
+// the next round files the alert under CMDB's address.
+func TestATenantCacheWithNoHostsEmitsAHostPlacedSeriesUnderItsOwnAddress(t *testing.T) {
 	identity := contract.MonitorOutputIdentity{DimensionFields: overlayAggregation}
 	series := overlaySeriesSet[0]
 	cmdb, err := contract.MonitorDedupeMD5(lifecycleStrategyID, "2", series.pythonDimensions(), identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := contract.MonitorDedupeMD5(lifecycleStrategyID, "2", series.rawDimensions(), identity)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,21 +117,10 @@ func TestWithoutAnyCMDBIndexAHostPlacedSeriesIsNotEmittedRaw(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The Slot fails, as a query that could not be answered does, and is
-	// retried by the scheduler.
-	fixture.clock.Store(roundReadAtMillis(fixture.cfg, fixture.queryGroup, fixture.evaluationAt(1), fixture.interval))
-	_, attempted, err := fixture.runner.RunOne(ctx)
-	if !attempted || err == nil {
-		t.Fatalf("round 1 without an index: attempted %t, error %v; want the Slot attempted and failed", attempted, err)
-	}
-	if reason, _ := slotFailureReason(err); string(reason) != contract.ReasonQueryUnavailable {
-		t.Fatalf("the failed Slot is named %q, want %s", reason, contract.ReasonQueryUnavailable)
-	}
-	if events := overlayEventsSince(fixture, 0); len(events) != 0 {
-		t.Fatalf("round 1, no index, wrote %+v for the host-placed series; want nothing", events)
-	}
-	if _, lastFull := fixture.progressSlots(); lastFull == fixture.evaluationAt(1) {
-		t.Fatal("round 1 completed although a series' identity could not be read")
+	fixture.mustAttempt(1)
+	first := overlayEventsSince(fixture, 0)
+	if len(first) == 0 || first[0].DedupeMD5 != raw {
+		t.Fatalf("round 1, a tenant cache with no host, wrote %+v; want the alert under the record's own %s", first, raw)
 	}
 
 	fields := make([]any, 0, 2*len(saved))
@@ -137,19 +131,15 @@ func TestWithoutAnyCMDBIndexAHostPlacedSeriesIsNotEmittedRaw(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = fixture.bundle.cmdbIndex.Refresh(ctx)
-	for retry := time.Duration(0); retry < 10; retry++ {
-		if _, lastFull := fixture.progressSlots(); lastFull == fixture.evaluationAt(1) {
-			break
-		}
-		fixture.attempt(1, (retry+1)*fixture.retry)
+	before := writtenCount(fixture)
+	fixture.mustAttempt(2)
+	second := overlayEventsSince(fixture, before)
+	if len(second) == 0 {
+		t.Fatal("round 2 wrote nothing for the series")
 	}
-	events := overlayEventsSince(fixture, 0)
-	if len(events) == 0 {
-		t.Fatal("the retried round wrote nothing for the series")
-	}
-	for _, event := range events {
+	for _, event := range second {
 		if event.DedupeMD5 != cmdb {
-			t.Fatalf("the retried round filed %s under %s, want CMDB's %s", event.EventKind, event.DedupeMD5, cmdb)
+			t.Fatalf("round 2, the host in CMDB, filed %s under %s, want CMDB's %s", event.EventKind, event.DedupeMD5, cmdb)
 		}
 	}
 }

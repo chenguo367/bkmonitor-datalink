@@ -74,21 +74,27 @@ type Store struct {
 
 	mutex sync.RWMutex
 	index *Index
-	// identity is the last index read with hosts in it, newest first, and
-	// identityAgents the last agent hash read whole: what a record's alert
-	// identity is read from (IdentityHost, IdentityAgent) whether or not the
-	// index in force may be decided on. An alert's identity is not a
-	// decision, and the last CMDB that placed a host is a better answer for
-	// it than the record's raw address, which would file the alert under
-	// another fingerprint. A load that refused host records keeps the
-	// identity it replaced behind it, so a host refused in that load is still
-	// found where the last load placed it; a clean load stands alone, and a
-	// host absent from it is gone. At most maxIdentityLayers are kept.
-	identity       []*Index
+	// identity is the last index read with hosts in it, carried the hosts
+	// it refused, and identityAgents the last agent hash read whole: what a
+	// record's alert identity is read from (IdentityHost, IdentityAgent)
+	// whether or not the index in force may be decided on. An alert's
+	// identity is not a decision, and the last CMDB that placed a host is a
+	// better answer for it than the record's raw address, which would file
+	// the alert under another fingerprint. A host a load refused keeps the
+	// facts the last load that placed it gave it, until a clean load - one
+	// that refused nothing - no longer has it: the host is gone then. No
+	// more hosts are carried than the load holds.
+	identity       *Index
+	carried        map[string]*HostFacts
 	identityAgents map[string]string
 	lastError      error
-	refreshes      uint64
-	unchanged      uint64
+	// attempted says a load has been attempted and has returned, whatever
+	// it found: before then a record whose identity no index can give is
+	// held (FirstLoadAttempted), after it such a record is emitted under
+	// its own address, as Python emits a record CMDB holds no host for.
+	attempted bool
+	refreshes uint64
+	unchanged uint64
 }
 
 type StoreOptions struct {
@@ -290,34 +296,44 @@ func (store *Store) IdentityHost(key string) (*HostFacts, bool) {
 		return nil, false
 	}
 	store.mutex.RLock()
-	layers := store.identity
+	index, carried := store.identity, store.carried
 	store.mutex.RUnlock()
-	for _, index := range layers {
-		if host, found := index.Lookup(key); found {
-			return host, true
-		}
+	if host, found := index.Lookup(key); found {
+		return host, true
 	}
-	return nil, false
+	host, found := carried[key]
+	return host, found
 }
 
-// maxIdentityLayers bounds the loads the identity keeps behind a load that
-// refused host records: a writer that keeps publishing a record alarmd cannot
-// read leaves that host where the last few loads placed it, and the memory
-// is a few snapshots, not one per refresh.
-const maxIdentityLayers = 3
-
-// identityLayers is the identity after a load with hosts: that load alone
-// when it refused no host record, else that load in front of the identity
-// it replaces, at most maxIdentityLayers deep.
-func identityLayers(index *Index, previous []*Index) []*Index {
-	if index.Refused().Hosts == 0 || len(previous) == 0 {
-		return []*Index{index}
+// carryRefused is what the identity carries after a load with hosts: when
+// the load refused host records, every host the identity it replaces placed
+// - its index's and those it carried - that this load does not have, no
+// more of them than the load holds; after a clean load, none.
+func carryRefused(index *Index, previous *Index, carried map[string]*HostFacts) map[string]*HostFacts {
+	if index.Refused().Hosts == 0 || previous == nil {
+		return nil
 	}
-	layers := append([]*Index{index}, previous...)
-	if len(layers) > maxIdentityLayers {
-		layers = layers[:maxIdentityLayers]
+	next := make(map[string]*HostFacts)
+	carry := func(id string, host *HostFacts) bool {
+		if len(next) >= index.Hosts() {
+			return false
+		}
+		if _, present := index.byHostID[id]; !present {
+			next[id] = host
+		}
+		return true
 	}
-	return layers
+	for id, host := range previous.byHostID {
+		if !carry(id, host) {
+			return next
+		}
+	}
+	for id, host := range carried {
+		if !carry(id, host) {
+			return next
+		}
+	}
+	return next
 }
 
 // IdentityAgent is the host CMDB last placed an agent at, read as
@@ -328,24 +344,23 @@ func (store *Store) IdentityAgent(agent string) (host *HostFacts, found, held bo
 		return nil, false, false
 	}
 	store.mutex.RLock()
-	layers, agents := store.identity, store.identityAgents
+	index, carried, agents := store.identity, store.carried, store.identityAgents
 	store.mutex.RUnlock()
-	if len(layers) == 0 || agents == nil {
+	if index == nil || agents == nil {
 		return nil, false, false
 	}
 	id, named := agents[agent]
 	if !named {
 		return nil, false, true
 	}
-	for _, index := range layers {
-		if host, found := index.byHostID[id]; found {
-			if host.AgentID != agent {
-				return nil, false, true
-			}
-			return host, true, true
-		}
+	host, found = index.byHostID[id]
+	if !found {
+		host, found = carried[id]
 	}
-	return nil, false, true
+	if !found || host.AgentID != agent {
+		return nil, false, true
+	}
+	return host, true, true
 }
 
 // IdentityHeld is whether any index with hosts was ever read.
@@ -355,7 +370,18 @@ func (store *Store) IdentityHeld() bool {
 	}
 	store.mutex.RLock()
 	defer store.mutex.RUnlock()
-	return len(store.identity) > 0
+	return store.identity != nil
+}
+
+// FirstLoadAttempted is whether a load of this store has been attempted and
+// returned, whatever it found.
+func (store *Store) FirstLoadAttempted() bool {
+	if store == nil {
+		return false
+	}
+	store.mutex.RLock()
+	defer store.mutex.RUnlock()
+	return store.attempted
 }
 
 // Current returns the index in force, or nil before the first successful load.
@@ -399,6 +425,7 @@ func (store *Store) Refresh(ctx context.Context) error {
 		store.mutex.Lock()
 		store.lastError = nil
 		store.unchanged++
+		store.attempted = true
 		store.mutex.Unlock()
 		store.observe(ReadUnchanged)
 		store.noteJudgement()
@@ -406,6 +433,7 @@ func (store *Store) Refresh(ctx context.Context) error {
 	}
 	index, err := store.reader.Load(ctx, store.now())
 	store.mutex.Lock()
+	store.attempted = true
 	if err != nil {
 		store.lastError = err
 		store.mutex.Unlock()
@@ -417,7 +445,8 @@ func (store *Store) Refresh(ctx context.Context) error {
 	store.index = index
 	store.notePublish(index.PublishedAt())
 	if index.Hosts() > 0 {
-		store.identity = identityLayers(index, store.identity)
+		store.carried = carryRefused(index, store.identity, store.carried)
+		store.identity = index
 	}
 	if !index.agentsUnreadable && index.Hosts() > 0 {
 		store.identityAgents = index.byAgent

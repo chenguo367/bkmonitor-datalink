@@ -52,9 +52,12 @@ var admissionReasons = map[string]struct{}{
 	// Host identity: a host-placed series whose alert identity was read from
 	// the index past its bound (stale_index) or from the last index that held
 	// its host (last_populated_index), while the filters saw the facts
-	// unavailable; and one held, its query failed and the Slot retried,
-	// because no index ever held hosts (held_no_index, result held).
+	// unavailable; one held, its query failed and the Slot retried, until
+	// the store's first load returns (held_no_index, result held); and one
+	// emitted under its own address because that load held no host
+	// (raw_no_index).
 	admission.HostOverlayFromStaleIndex: {}, admission.HostOverlayFromLastPopulatedIndex: {}, admission.HostIdentityHeld: {},
+	admission.HostIdentityRawNoIndex: {},
 }
 
 // RecordSeriesAdmission counts one admission decision.

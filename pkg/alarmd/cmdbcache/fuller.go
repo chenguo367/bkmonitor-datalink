@@ -49,7 +49,12 @@ func (fuller *HostTopologyFuller) Fill(dimensions map[string]json.RawMessage, fa
 	store := fuller.tenantStore(facts.TenantID)
 	agent := admission.TruthyDimension(dimensions, "bk_agent_id")
 	if store == nil {
-		facts.HostIdentityUnavailable = facts.HostNaming.IDKey != "" || agent != ""
+		// No store for the tenant at all: nothing will ever be read, so a
+		// host-placed record goes out under its own address, as Python's
+		// does when CMDB holds no host for it.
+		if facts.HostNaming.IDKey != "" || agent != "" {
+			facts.HostOverlaySource = admission.HostIdentityRawNoIndex
+		}
 		facts.MarkFactsUnavailable(admission.FactsUnavailableHostIndex)
 		return
 	}
@@ -119,6 +124,9 @@ func (fuller *HostTopologyFuller) Fill(dimensions map[string]json.RawMessage, fa
 			facts.HostOverlay = hostOverlay(dimensions, host, facts.ReportedAddress)
 			return
 		}
+		// An agent this load does not place: the alert's identity reads the
+		// identity index, which still holds a host this load refused.
+		identityOverlay(store, dimensions, facts, agent, admission.HostOverlayFromLastPopulatedIndex)
 	}
 	// Past this point a true id the record carried is one CMDB does not know:
 	// whatever else places the record's topology, the host the status filter
@@ -149,14 +157,21 @@ func (fuller *HostTopologyFuller) Fill(dimensions map[string]json.RawMessage, fa
 // index (Store.IdentityHost, IdentityAgent) - for its alert's identity only,
 // with no placement, so no filter or scope decides on it - by its true
 // bk_host_id, else by agent. A record that names either while the store has
-// never held an index with hosts is one whose identity cannot be read
-// (Facts.HostIdentityUnavailable).
+// never held an index with hosts is held (Facts.HostIdentityUnavailable)
+// only until the store's first load has returned: the identity may yet be
+// read. After it, the store's cache holds no host - empty, or never
+// written - and the record goes out under its own address, as Python's
+// does when CMDB holds no host for it (admission.HostIdentityRawNoIndex).
 func identityOverlay(store *Store, dimensions map[string]json.RawMessage, facts *admission.Facts, agent, source string) {
 	id := facts.HostNaming.IDKey
 	if id == "" && agent == "" {
 		return
 	}
 	if !store.IdentityHeld() {
+		if store.FirstLoadAttempted() {
+			facts.HostOverlaySource = admission.HostIdentityRawNoIndex
+			return
+		}
 		facts.HostIdentityUnavailable = true
 		return
 	}

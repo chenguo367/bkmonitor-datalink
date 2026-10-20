@@ -135,6 +135,11 @@ func (coordinator *SlotExecutionCoordinator) observeQueryFailure(ctx context.Con
 		if facts.Category == observability.QueryFailureCategoryDelivery {
 			reason = observability.ReasonCode(facts.Code)
 		}
+		// A host-placed series whose alert identity no CMDB index could read
+		// yet: the query's own word, not an internal error.
+		if facts.Category == observability.QueryFailureCategorySeriesIdentity {
+			reason = observability.ReasonCode(facts.Code)
+		}
 	}
 	// How far the answer got before the query failed.
 	var sized interface {

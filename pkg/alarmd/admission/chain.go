@@ -180,7 +180,11 @@ const (
 	HostOverlayFromLastPopulatedIndex = "last_populated_index"
 	// HostIdentityHeld names a series held because no index can give its
 	// alert identity (HostIdentityUnavailable).
-	HostIdentityHeld                     = "held_no_index"
+	HostIdentityHeld = "held_no_index"
+	// HostIdentityRawNoIndex names a host-placed series emitted under its
+	// own address because no index ever held hosts once the store's first
+	// load returned: nothing can give its identity, as for Python.
+	HostIdentityRawNoIndex               = "raw_no_index"
 	FactsUnavailableServiceInstanceIndex = "service_instance_facts_unavailable"
 )
 

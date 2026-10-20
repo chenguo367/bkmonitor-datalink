@@ -152,42 +152,60 @@ func TestAnUnreadableAgentHashKeepsTheRecordsIdentity(t *testing.T) {
 	}
 }
 
-// A load that refused host records keeps the identity behind it: a host it
-// refused is still found where the last load placed it. A clean load that no
-// longer holds a host means the host is gone, and its record keeps its own
-// address, as Python's would.
-func TestARefusedHostKeepsItsIdentityAndACleanlyAbsentOneDoesNot(t *testing.T) {
-	c := newIdentityCase(t, `{"bk_host_id":"720002","bk_target_ip":"198.51.100.9"}`)
-	both := []string{"720002", identityLive, "720003", identityOther}
-	c.refresh(identityLoad(both, map[string]string{}, c.now, 0))
-	before, _ := c.overlay()
-	c.refresh(identityLoad([]string{"720003", identityOther}, map[string]string{}, c.now, 1))
-	if after, _ := c.overlay(); after != before || after != wantLiveOverlayByID {
-		t.Fatalf("host refused in one load: overlay %s, want %s", after, before)
-	}
-	c.refresh(identityLoad([]string{"720003", identityOther}, map[string]string{}, c.now, 0))
-	if gone, _ := c.overlay(); gone != "null" {
-		t.Fatalf("host absent from a clean load: overlay %s, want none", gone)
+// A host refused in load after load keeps where the last load that placed it
+// put it, by id and by agent; a clean load without it means the host is
+// gone, and its record keeps its own address, as Python's would.
+func TestARefusedHostKeepsItsIdentityUntilACleanLoadDropsIt(t *testing.T) {
+	for _, by := range []struct{ name, record, want string }{
+		{"by id", `{"bk_host_id":"720002","bk_target_ip":"198.51.100.9"}`, wantLiveOverlayByID},
+		{"by agent", `{"bk_agent_id":"agent-live","bk_target_ip":"198.51.100.9"}`, wantLiveOverlay},
+	} {
+		t.Run(by.name, func(t *testing.T) {
+			c := newIdentityCase(t, by.record)
+			agents := map[string]string{"agent-live": "720002"}
+			c.refresh(identityLoad([]string{"720002", identityLive, "720003", identityOther}, agents, c.now, 0))
+			for load := 1; load <= 10; load++ {
+				c.refresh(identityLoad([]string{"720003", identityOther}, agents, c.now, 1))
+				if got, _ := c.overlay(); got != by.want {
+					t.Fatalf("load %d refused the host: overlay %s, want %s", load, got, by.want)
+				}
+			}
+			c.refresh(identityLoad([]string{"720003", identityOther}, agents, c.now, 0))
+			if gone, _ := c.overlay(); gone != "null" {
+				t.Fatalf("a clean load without the host: overlay %s, want none", gone)
+			}
+		})
 	}
 }
 
-// Without any index that ever held hosts, a record naming a true id or
-// agent says its identity cannot be read; one naming neither does not.
-func TestWithoutAnyIdentityIndexAHostPlacedRecordSaysSo(t *testing.T) {
-	for _, record := range []struct {
-		dims string
-		want bool
-	}{
-		{`{"bk_host_id":"720002","bk_target_ip":"198.51.100.9"}`, true},
-		{`{"bk_agent_id":"agent-live","bk_target_ip":"198.51.100.9"}`, true},
-		{`{"bk_target_ip":"198.51.100.9"}`, false},
-	} {
-		c := newIdentityCase(t, record.dims)
-		c.refresh(identityLoad(nil, map[string]string{}, c.now, 0))
-		facts := c.chain.Enrich(c.record)
-		if facts.HostIdentityUnavailable != record.want || facts.HostOverlay != nil {
-			t.Errorf("%s: identity unavailable %t overlay %v, want %t and none", record.dims, facts.HostIdentityUnavailable, facts.HostOverlay, record.want)
+// Before the store's first load has returned, a record naming a true id or
+// agent is held; once loads have returned with no host in them - fifty empty
+// ones - it goes out under its own address, counted raw_no_index; once a
+// load holds its host, it carries the host's identity. A record naming
+// neither is never held.
+func TestAHostPlacedRecordIsHeldOnlyUntilTheFirstLoadReturns(t *testing.T) {
+	for _, record := range []string{`{"bk_host_id":"720002","bk_target_ip":"198.51.100.9"}`,
+		`{"bk_agent_id":"agent-live","bk_target_ip":"198.51.100.9"}`} {
+		c := newIdentityCase(t, record)
+		if facts := c.chain.Enrich(c.record); !facts.HostIdentityUnavailable || facts.HostOverlay != nil {
+			t.Fatalf("%s before the first load: held %t overlay %v, want held", record, facts.HostIdentityUnavailable, facts.HostOverlay)
 		}
+		for load := 0; load < 50; load++ {
+			c.refresh(identityLoad(nil, map[string]string{}, c.now, 0))
+		}
+		facts := c.chain.Enrich(c.record)
+		if facts.HostIdentityUnavailable || facts.HostOverlay != nil || facts.HostOverlaySource != admission.HostIdentityRawNoIndex {
+			t.Fatalf("%s after fifty empty loads: held %t overlay %v source %q, want raw, named %s", record,
+				facts.HostIdentityUnavailable, facts.HostOverlay, facts.HostOverlaySource, admission.HostIdentityRawNoIndex)
+		}
+		c.refresh(identityLoad([]string{"720002", identityLive}, map[string]string{"agent-live": "720002"}, c.now, 0))
+		if facts := c.chain.Enrich(c.record); facts.HostOverlay == nil || facts.HostIdentityUnavailable {
+			t.Fatalf("%s once a load holds the host: overlay %v, want it", record, facts.HostOverlay)
+		}
+	}
+	plain := newIdentityCase(t, `{"bk_target_ip":"198.51.100.9"}`)
+	if facts := plain.chain.Enrich(plain.record); facts.HostIdentityUnavailable || facts.HostOverlaySource != "" {
+		t.Fatalf("a record naming no id or agent: held %t source %q, want neither", facts.HostIdentityUnavailable, facts.HostOverlaySource)
 	}
 }
 

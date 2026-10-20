@@ -1336,7 +1336,8 @@ func (adapter *seriesAdapter) admittedPlans(batch execution.ProviderSeriesBatch)
 				switch {
 				case facts.HostIdentityUnavailable:
 					adapter.observe(hostIdentityFilter, "held", admission.HostIdentityHeld)
-				case facts.HostOverlay != nil && facts.HostOverlaySource != "":
+				case facts.HostOverlaySource == admission.HostIdentityRawNoIndex,
+					facts.HostOverlay != nil && facts.HostOverlaySource != "":
 					adapter.observe(hostIdentityFilter, "admitted", facts.HostOverlaySource)
 				}
 			}
