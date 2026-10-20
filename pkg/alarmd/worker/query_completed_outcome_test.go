@@ -12,6 +12,7 @@ package worker
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -102,6 +103,76 @@ func TestAWholeQueryUnderACarriedTimeoutGuardReportsSuccessBesideTheEvaluation(t
 	for key := range line {
 		if len(key) > len("failure_") && key[:len("failure_")] == "failure_" {
 			t.Fatalf("a whole query's line names a failure field %s: %v", key, line)
+		}
+	}
+}
+
+// The round TestAnOpenReadGapHoldsRecoveryWhileTheLevelCarriesItsFirstStampedOrigin
+// (evaluation) evaluates, seen from the query line. The series' Level loaded
+// GAPPED under the QUERY_TIMEOUT guard Slot 5880 stamped, the Plan's read-gap
+// marker is open from the same origin, and this round's physical query
+// answered whole. The EvaluationResult below is the one that round returns:
+// the Level held UNKNOWN under the carried reason, its guard rewritten GAPPED
+// from the first stamp, and the open marker counted forward as a WARMUP scope
+// after State.
+//
+// The query line says the query succeeded and nothing on it reads as this
+// query failing or being diverted: no failure facts, no divert decision, no
+// budget. Beside it, the evaluation's reason, carried, from 5880.
+func TestAWholeQueryUnderAnOpenReadGapAndACarriedTimeoutGuardReportsSuccess(t *testing.T) {
+	plan := execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "307"}
+	reason := execution.ReasonCode(contract.ReasonQueryTimeout)
+	origin := execution.ReasonOrigin{Slot: 5880, Cause: reason}
+	series := execution.SeriesIdentityDigest(strings.Repeat("c", 64))
+	record := execution.RecordAnchor{RecordID: strings.Repeat("b", 64), SourceTime: 6000}
+	evaluated := execution.EvaluationResult{
+		Result: observability.ResultDegraded, ReasonCode: reason, ReasonCarried: true, ReasonOrigin: origin,
+		Plans: []execution.PlanEvaluationResult{{
+			Plan: plan, Disposition: execution.PlanDecidedDegraded, ReasonCode: reason,
+			ReasonCarried: true, ReasonOrigin: origin,
+			LevelOutcomes: []execution.LevelOutcome{{Plan: plan, LevelID: 5, SeriesIdentityDigest: series, Record: record,
+				Outcome: execution.LevelOutcomeUnknown, ReasonCode: reason, GuardTail: true,
+				ReasonCarried: true, ReasonOrigin: origin}},
+			StateResults: []execution.StateEvaluation{{Mutation: execution.StateMutation{
+				Identity: execution.StateKeyIdentity{Plan: plan, StateGeneration: "state-v1", SeriesIdentityDigest: series},
+				Levels: []execution.RuntimeLevelStateMutation{{LevelID: 5, HistoryCompleteness: execution.HistoryGapped,
+					GapReasonCode: reason, LastProcessedEventTime: 6000,
+					GapReasonOriginSlot: origin.Slot, GapReasonOriginCause: origin.Cause}},
+			}}},
+			GuardAfterState: []execution.PlanGapMutation{{
+				Identity: execution.PlanGapIdentity{Plan: plan, StateGeneration: "state-v1"}, ExpectedMarkerRevision: 2,
+				Scopes: []execution.GapScopeMutation{{Scope: execution.GapScope{HasLevel: true, LevelID: 5},
+					Kind: execution.GapWarmup, ReasonCode: reason, RequiredFullSlots: 3}},
+			}},
+		}},
+	}
+	seen, line := queryLine(t, wholeAnswer(), evaluated)
+	if seen.Result != observability.ResultSuccess || seen.ReasonCode != observability.ReasonNone {
+		t.Fatalf("query result %s/%s, want success/none: the query answered whole", seen.Result, seen.ReasonCode)
+	}
+	if seen.QueryFailure != nil || seen.DivertDecision != nil || seen.QueryBudget != nil {
+		t.Fatalf("a whole query under an open read gap carries failure facts %+v, decision %+v, budget %+v",
+			seen.QueryFailure, seen.DivertDecision, seen.QueryBudget)
+	}
+	if line == nil {
+		t.Fatal("the line was not written: a query held by its evaluation is not a routine success")
+	}
+	want := map[string]any{
+		"result": "success", "reason_code": string(observability.ReasonNone),
+		"evaluation_result": "degraded", "evaluation_reason": contract.ReasonQueryTimeout,
+		"evaluation_reason_carried": true, "evaluation_reason_origin_slot": float64(5880),
+		"evaluation_reason_origin_cause": contract.ReasonQueryTimeout,
+	}
+	for key, value := range want {
+		if line[key] != value {
+			t.Fatalf("%s = %v, want %v; line %v", key, line[key], value, line)
+		}
+	}
+	for key := range line {
+		for _, prefix := range []string{"failure_", "divert_", "budget_"} {
+			if strings.HasPrefix(key, prefix) {
+				t.Fatalf("a whole query's line names %s: the round lost nothing of its own; line %v", key, line)
+			}
 		}
 	}
 }
