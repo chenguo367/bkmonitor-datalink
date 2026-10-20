@@ -97,7 +97,7 @@ func (m workflowMetrics) observe(o observability.Observation) {
 				m.progressCauses.WithLabelValues(o.ProgressCompletionKind,
 					observability.NormalizeProgressCompletionCause(o.ProgressCompletionCause),
 					string(observability.NormalizeReason(observability.ReasonCode(o.ProgressCompletionReason), observability.ResultDegraded)),
-					observability.ReasonOriginLabel(o.CarriedReason != nil)).Inc()
+					observability.ReasonOriginOf(observability.ReasonCode(o.ProgressCompletionReason), o.CarriedReason != nil)).Inc()
 			}
 		}
 	case o.Component == observability.ComponentScheduler && o.Stage == observability.StageDispatcherSnapshot:

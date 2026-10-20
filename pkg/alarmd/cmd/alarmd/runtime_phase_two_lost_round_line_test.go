@@ -41,6 +41,18 @@ func TestALostRoundExplainsItselfOnItsCompletionLine(t *testing.T) {
 		{"timed out", execution.SlotExecutionResult{Completed: true, CompletionKind: execution.CompletionUnavailable,
 			Result: observability.ResultDegraded, ReasonCode: execution.ReasonCode(contract.ReasonQueryTimeout)}, true},
 		{"succeeded", execution.SlotExecutionResult{Completed: true, CompletionKind: execution.CompletionFull, Result: observability.ResultSuccess}, false},
+		// Degraded because its Levels were outside their configured hours:
+		// alarmd's own judgement, every query answered, nothing lost.
+		{"out of hours", execution.SlotExecutionResult{Completed: true, CompletionKind: execution.CompletionUnavailable,
+			Result: observability.ResultDegraded, ReasonCode: execution.ReasonCode(contract.ReasonEffectiveTimeInactive),
+			CompletionCause: execution.SlotCompletionCause{Cause: execution.CauseLevelOutcomeUnknown,
+				Reason: execution.ReasonCode(contract.ReasonEffectiveTimeInactive)}}, false},
+		// The same judgement beside a query that did answer short: the loss
+		// is the round's, and its facts stay on the line.
+		{"out of hours with a short query", execution.SlotExecutionResult{Completed: true, CompletionKind: execution.CompletionUnavailable,
+			Result: observability.ResultDegraded, ReasonCode: execution.ReasonCode(contract.ReasonEffectiveTimeInactive),
+			CompletionCause: execution.SlotCompletionCause{Cause: execution.CauseLevelOutcomeUnknown,
+				Reason: execution.ReasonCode(contract.ReasonEffectiveTimeInactive)}, PhysicalQueryLoss: true}, true},
 		// The primary input timed out this round: a lost query.
 		{"primary timed out", execution.SlotExecutionResult{Completed: true, CompletionKind: execution.CompletionUnavailable,
 			Result: observability.ResultDegraded, ReasonCode: execution.ReasonCode(contract.ReasonQueryTimeout),

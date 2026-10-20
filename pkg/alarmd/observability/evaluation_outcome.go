@@ -9,7 +9,11 @@
 
 package observability
 
-import "log/slog"
+import (
+	"log/slog"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+)
 
 // CarriedReasonFacts is where a carried reason came from: the Slot that first
 // stamped the stored guard (its evaluation time) and the reason it stamped it
@@ -25,22 +29,30 @@ func (facts CarriedReasonFacts) Known() bool {
 	return facts.OriginSlot > 0 && facts.OriginCause != ""
 }
 
-// ReasonOrigin is the label value a counter of reasons takes for whether a
-// reason is the round's own or a stored guard's: physical for what the round
-// itself met, carried for a guard's reason repeated on a later round. Closed
-// and two-valued.
+// ReasonOrigin is the label value a counter of reasons takes for whose a
+// reason is: physical for what the round itself met, carried for a stored
+// guard's reason repeated on a later round, derived for alarmd's own
+// judgement from configuration, schedule or State (contract.ReasonJudgedV2).
+// Closed and three-valued.
 const (
 	ReasonOriginPhysical = "physical"
 	ReasonOriginCarried  = "carried"
+	ReasonOriginDerived  = "derived"
 )
 
-// ReasonOriginLabel is the origin label for a reason that was or was not
-// carried.
-func ReasonOriginLabel(carried bool) string {
-	if carried {
+// ReasonOriginOf is the origin of a reason a round names: carried when it is
+// a stored guard's, derived when the code is alarmd's own judgement, and
+// physical only for a code the round met. The judgement is the catalogue's,
+// so no reason reads as physical by default.
+func ReasonOriginOf(reason ReasonCode, carried bool) string {
+	switch {
+	case carried:
 		return ReasonOriginCarried
+	case contract.ReasonJudgedV2(string(reason)):
+		return ReasonOriginDerived
+	default:
+		return ReasonOriginPhysical
 	}
-	return ReasonOriginPhysical
 }
 
 // evaluationHeldQuery is a query_completed line whose physical queries

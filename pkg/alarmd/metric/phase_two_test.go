@@ -638,9 +638,14 @@ func TestLevelOutcomesAreCountedByKindAndCoverageReason(t *testing.T) {
 			{Outcome: "ABNORMAL", Carried: true, Count: 3},
 		},
 	})
-	physical, carried := observability.ReasonOriginPhysical, observability.ReasonOriginCarried
-	if got := testutil.ToFloat64(recorder.phaseTwo.levelOutcomes.WithLabelValues("UNKNOWN", contract.ReasonEffectiveTimeInactive, physical)); got != 2 {
-		t.Fatalf("UNKNOWN/EFFECTIVE_TIME_INACTIVE/physical = %v, want 2", got)
+	physical, carried, derived := observability.ReasonOriginPhysical, observability.ReasonOriginCarried, observability.ReasonOriginDerived
+	// Out of hours is alarmd's own judgement from the strategy's
+	// configuration, not something the round met: derived, never physical.
+	if got := testutil.ToFloat64(recorder.phaseTwo.levelOutcomes.WithLabelValues("UNKNOWN", contract.ReasonEffectiveTimeInactive, physical)); got != 0 {
+		t.Fatalf("UNKNOWN/EFFECTIVE_TIME_INACTIVE/physical = %v, want 0", got)
+	}
+	if got := testutil.ToFloat64(recorder.phaseTwo.levelOutcomes.WithLabelValues("UNKNOWN", contract.ReasonEffectiveTimeInactive, derived)); got != 2 {
+		t.Fatalf("UNKNOWN/EFFECTIVE_TIME_INACTIVE/derived = %v, want 2", got)
 	}
 	if got := testutil.ToFloat64(recorder.phaseTwo.levelOutcomes.WithLabelValues("UNKNOWN", contract.ReasonEffectiveTimeInactive, carried)); got != 5 {
 		t.Fatalf("UNKNOWN/EFFECTIVE_TIME_INACTIVE/carried = %v, want 5", got)

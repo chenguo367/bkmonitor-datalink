@@ -3004,8 +3004,23 @@ func (executor observedProductionSlotExecutor) Execute(
 // input that came back PARTIAL, and a Query Group whose one Plan was held by
 // a guard while another Plan's query was short lost that query all the
 // same. The Slot's result and reason on the line are unchanged.
+//
+// The same holds for a Slot whose reason is alarmd's own judgement
+// (contract.ReasonJudgedV2) - a round outside its configured hours, a
+// history still warming - while none of its queries answered short: its
+// queries answered, and it is degraded by a decision, not a loss.
 func queryLossResult(observed observability.Result, result execution.SlotExecutionResult) observability.Result {
-	if result.CompletionCause.Cause != "" && result.CompletionCause.ReasonCarried && !result.PhysicalQueryLoss {
+	if result.PhysicalQueryLoss {
+		return observed
+	}
+	if result.CompletionCause.Cause != "" && result.CompletionCause.ReasonCarried {
+		return observability.ResultSuccess
+	}
+	reason := result.CompletionCause.Reason
+	if reason == "" {
+		reason = result.ReasonCode
+	}
+	if contract.ReasonJudgedV2(string(reason)) {
 		return observability.ResultSuccess
 	}
 	return observed

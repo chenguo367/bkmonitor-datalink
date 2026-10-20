@@ -1189,12 +1189,14 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"per evaluation, not alerts and not strategies; read a reason against level_outcome_total summed over " +
 			"every cell for its share. origin says whose the reason is: physical for what this round met itself, " +
 			"carried for a stored guard's reason repeated on a later round (an UNKNOWN Level held by a guard an " +
-			"earlier round raised; the origin Slot is on the evaluation_completed line). Only UNKNOWN is ever carried.",
+			"earlier round raised; the origin Slot is on the evaluation_completed line), derived for alarmd's own " +
+			"judgement from configuration, schedule or State (EFFECTIVE_TIME_INACTIVE, HISTORY_WARMING, ...). " +
+			"Only UNKNOWN is ever carried.",
 	}, []string{"outcome", "reason", "origin"})
 	for _, outcome := range observability.LevelOutcomeKinds {
 		if outcome == "UNKNOWN" || outcome == "TERMINAL" {
 			for _, reason := range observability.LevelOutcomeReasons() {
-				metrics.levelOutcomes.WithLabelValues(outcome, reason, observability.ReasonOriginPhysical)
+				metrics.levelOutcomes.WithLabelValues(outcome, reason, observability.ReasonOriginOf(observability.ReasonCode(reason), false))
 				if outcome == "UNKNOWN" {
 					metrics.levelOutcomes.WithLabelValues(outcome, reason, observability.ReasonOriginCarried)
 				}
@@ -2065,7 +2067,7 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 			reason = observability.LevelOutcomeReasonLabel(fact.Reason)
 		}
 		m.levelOutcomes.WithLabelValues(fact.Outcome, reason,
-			observability.ReasonOriginLabel(fact.Outcome == "UNKNOWN" && fact.Carried)).Add(float64(fact.Count))
+			observability.ReasonOriginOf(observability.ReasonCode(reason), fact.Outcome == "UNKNOWN" && fact.Carried)).Add(float64(fact.Count))
 	}
 	for _, fact := range observation.RecoveryGates {
 		m.recoveryBeside.WithLabelValues(string(fact.Cause)).Add(float64(fact.Records))

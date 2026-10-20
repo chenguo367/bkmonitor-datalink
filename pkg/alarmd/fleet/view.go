@@ -1107,13 +1107,15 @@ func settleCauseOrigin(anomaly *Anomaly) {
 // round that named no reason.
 //
 // A round filed under its cause word (roundFiledUnder: GAP_GUARD_WARMING,
-// SNAPSHOT_CORRUPT) has alarmd's own classification for a reason: derived.
-// A carried guard behind it still names where it came from.
+// SNAPSHOT_CORRUPT) has alarmd's own classification for a reason: derived,
+// and so is a reason the catalogue says alarmd judged (an out-of-hours
+// EFFECTIVE_TIME_INACTIVE), unless a stored guard carried it here. A carried
+// guard behind it still names where it came from.
 func causeOriginOf(reason string, filedUnderCause bool, carried *observability.CarriedReasonFacts) *CauseOrigin {
 	if reason == "" {
 		return nil
 	}
-	origin := &CauseOrigin{Origin: observability.ReasonOriginLabel(carried != nil)}
+	origin := &CauseOrigin{Origin: observability.ReasonOriginOf(observability.ReasonCode(reason), carried != nil)}
 	if filedUnderCause {
 		origin.Origin = CauseOriginDerived
 	}
