@@ -123,6 +123,9 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	ReasonDetectIntervalStorageNotSliding: {
 		ReasonDetectIntervalStorageNotSliding, ReasonClassCoverage, reasonQueryDomainsV2,
 	},
+	ReasonQueryNamedOutputDuplicateKey: {
+		ReasonQueryNamedOutputDuplicateKey, ReasonClassCoverage, reasonQueryDomainsV2,
+	},
 	ReasonReadinessBudgetInvalid: {
 		ReasonReadinessBudgetInvalid, ReasonClassCoverage, reasonQueryDomainsV2,
 	},

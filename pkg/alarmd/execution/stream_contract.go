@@ -159,6 +159,10 @@ type ProviderCompletion struct {
 	// value: data that arrived and that the target's identity cannot read.
 	WithheldKeyMissing uint64           `json:",omitempty"`
 	IdentitySamples    []IdentitySample `json:",omitempty"`
+	// NamedOutputs is, for a query that asked for named outputs, every
+	// output aligned to each record it delivered, by RecordID; nil for every
+	// other query. It rides beside the records, never in them.
+	NamedOutputs *NamedOutputRecords `json:",omitempty"`
 }
 
 type ProviderSeriesSink interface {
@@ -275,6 +279,9 @@ type PhysicalQueryCompletion struct {
 	// Clock is what the query had of its time from the moment it was sent
 	// and what it used. Nil from a source that does not measure it.
 	Clock *PhysicalQueryClock `json:",omitempty"`
+	// NamedOutputs is the provider completion's (ProviderCompletion), nil
+	// for a query that asked for none.
+	NamedOutputs *NamedOutputRecords `json:",omitempty"`
 }
 
 // PhysicalQueryRange is a physical query's asked and accepted range lengths

@@ -563,7 +563,7 @@ func appendQueryCompletion(
 		RouteFacts: providerCompletion.RouteFacts, PartialEvidence: providerCompletion.PartialEvidence,
 		Stats: providerCompletion.Stats, Withheld: providerCompletion.Withheld, WithheldOutsideTarget: providerCompletion.WithheldOutsideTarget,
 		WithheldKeyMissing: providerCompletion.WithheldKeyMissing, IdentitySamples: providerCompletion.IdentitySamples,
-		Range: queryRange(query),
+		Range: queryRange(query), NamedOutputs: providerCompletion.NamedOutputs,
 	})
 	// Every valid requirement receives a completion binding, also when the
 	// query delivered series. A Plan whose PRIMARY query returned no series

@@ -2016,7 +2016,6 @@ var closedLabelSetUnresolved = map[string]string{
 	"output_event_kind|worker/coordinator.go|writeEvents|dropped.EventKind":                                                                                          "PENDING B2",
 	"query_failure_code|access/uq/rejection.go|rejectionClass|strconv.Itoa(status)":                                                                                  "PENDING B5",
 	"query_failure_code|worker/stream_session.go|physicalFailureReason|execution.AttributeUnavailable(facts, execution.ReasonCode(contract.ReasonQueryUnavailable))": "PENDING B6",
-	"query_status_code|access/uq/series_decoder.go|complete|status.Code":                                                                                             "PENDING B5",
 	"reason|cmd/alarmd/runtime_phase_two_production.go|Execute|result.CompletionCause.Reason":                                                                        "PENDING B6",
 	"reason|cmd/alarmd/runtime_phase_two_production.go|Execute|result.ReasonCode":                                                                                    "PENDING B6",
 	"reason|cmd/alarmd/slot_failure_reason.go|slotFailureReason|admission.QueryFailure()":                                                                            "PENDING B3",

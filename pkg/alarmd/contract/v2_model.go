@@ -148,7 +148,14 @@ const (
 	// query is not used. Like QUERY_TARGET_MISSING it stays until the
 	// strategy changes - here, until its detect_interval is removed.
 	ReasonDetectIntervalStorageNotSliding = "DETECT_INTERVAL_STORAGE_NOT_SLIDING"
-	ReasonReadinessBudgetInvalid          = "READINESS_BUDGET_INVALID"
+	// ReasonQueryNamedOutputDuplicateKey names a query with named outputs
+	// one of whose outputs answered two points at the same time under the
+	// same labels, __name__ aside: the outputs cannot be aligned to the
+	// records detection reads, so the query is not used, as the platform
+	// refuses it. It stays until the strategy changes - until each output
+	// is aggregated to the labels of the one detection reads.
+	ReasonQueryNamedOutputDuplicateKey = "QUERY_NAMED_OUTPUT_DUPLICATE_KEY"
+	ReasonReadinessBudgetInvalid       = "READINESS_BUDGET_INVALID"
 	// ReasonQueryNotReady names a Slot deferred because the window it would
 	// query is not in yet. It is the normal pacing of every Slot, and the
 	// highest-volume observation alarmd makes, so it needs its own name:

@@ -359,7 +359,10 @@ var failureFacets = map[string]facets{
 	// The answer came back bucketed on the aggregation grid, which a Plan
 	// detected every step cannot use: refused for the strategy's step.
 	"DETECT_INTERVAL_STORAGE_NOT_SLIDING": {StageQuery, ClassRefused, ""},
-	"QUERY_PARTIAL":                       {StageQuery, ClassUnavailable, ""},
+	// An output of a query with named outputs answered twice at one time and
+	// labels: the outputs cannot be aligned, refused for the strategy as written.
+	"QUERY_NAMED_OUTPUT_DUPLICATE_KEY": {StageQuery, ClassRefused, ""},
+	"QUERY_PARTIAL":                    {StageQuery, ClassUnavailable, ""},
 	// The backend answered, completely, with nothing: the dependency data is
 	// not there. Not unavailable -- the query succeeded -- and where the data
 	// went is not this deployment's to say.

@@ -863,7 +863,12 @@ var codeChecks = map[string]verdict{
 	// storage buckets on the aggregation grid: the definition cannot be
 	// evaluated as written here, and its owner removes the detect_interval.
 	"DETECT_INTERVAL_STORAGE_NOT_SLIDING": lands(CheckPlanUnevaluable),
-	"QUERY_PARTIAL":                       lands(CheckBackendNotAnswering),
+	// A query with named outputs one of whose outputs answers two points at
+	// one time and labels, __name__ aside: the definition cannot be
+	// evaluated as written, and its owner aggregates each output to the
+	// labels detection reads.
+	"QUERY_NAMED_OUTPUT_DUPLICATE_KEY": lands(CheckPlanUnevaluable),
+	"QUERY_PARTIAL":                    lands(CheckBackendNotAnswering),
 	// The backend answered and the dependency holds no rows: the data the
 	// algorithm compares against is missing, the same reading a series with
 	// no history point gets.

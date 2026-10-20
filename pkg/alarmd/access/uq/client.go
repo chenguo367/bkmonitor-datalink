@@ -813,6 +813,24 @@ func (client *Client) decodeQuery(ctx context.Context, reader io.Reader, attempt
 			if err := decoder.Decode(&resultTableIDs); err != nil {
 				return completion, err
 			}
+		case "contract_version", "outputs":
+			if session.named == nil {
+				// Only a query that asked for named outputs reads them.
+				var ignored json.RawMessage
+				if err := decoder.Decode(&ignored); err != nil {
+					return completion, err
+				}
+				continue
+			}
+			if key == "outputs" {
+				if err := session.acceptOutputs(ctx, decoder); err != nil {
+					return completion, err
+				}
+				continue
+			}
+			if err := decoder.Decode(&session.named.contract); err != nil {
+				return completion, fmt.Errorf("alarmd access uq: decode contract version: %w", err)
+			}
 		default:
 			var ignored json.RawMessage
 			if err := decoder.Decode(&ignored); err != nil {
@@ -828,6 +846,9 @@ func (client *Client) decodeQuery(ctx context.Context, reader io.Reader, attempt
 			return completion, fmt.Errorf("alarmd access uq: decode trailing payload: %w", err)
 		}
 		return completion, fmt.Errorf("alarmd access uq: unexpected trailing token %v", token)
+	}
+	if session.named != nil {
+		return session.finishNamed(ctx, status, isPartial, resultTableIDs)
 	}
 	return session.finish(ctx, status, isPartial, resultTableIDs)
 }

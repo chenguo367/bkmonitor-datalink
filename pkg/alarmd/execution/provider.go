@@ -343,6 +343,14 @@ const (
 	// more often than it aggregates - answered with buckets on a grid other
 	// than its request's.
 	ResponseFailureOffRequestGrid = "off_request_grid"
+	// ResponseFailureNamedOutputContract is a query with named outputs
+	// answered under a response contract other than the one asked for, or
+	// without its legacy output, or naming an output twice.
+	ResponseFailureNamedOutputContract = "named_output_contract"
+	// ResponseFailureNamedOutputDuplicateKey is a query with named outputs
+	// one of whose outputs answered two points at one time and labels,
+	// __name__ aside (contract.ReasonQueryNamedOutputDuplicateKey).
+	ResponseFailureNamedOutputDuplicateKey = "named_output_duplicate_key"
 	// ResponseFailureStatusPrefix precedes the lower-cased UQ status code of a
 	// 200 response whose status field reports a deterministic backend failure
 	// (for example "response=status_space_table_id_field_is_not_exists").
@@ -406,6 +414,7 @@ func BodyRouteDetail(class string) string {
 func ResponseRouteDetail(class string) string {
 	switch class {
 	case ResponseFailureIsPartialMissing, ResponseFailureOffRequestGrid,
+		ResponseFailureNamedOutputContract, ResponseFailureNamedOutputDuplicateKey,
 		ResponseFailureLimitResponseBytes, ResponseFailureLimitSeriesBytes, ResponseFailureLimitTotalSeries, ResponseFailureLimitTotalRecords,
 		ResponseFailureLimitFrameBytes, ResponseFailureLimitFrameSeries, ResponseFailureLimitDictionary,
 		ResponseFailureFormatUnsupported, ResponseFailureFrameInvalid, ResponseFailureSchemaInvalid,

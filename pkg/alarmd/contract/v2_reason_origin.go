@@ -96,7 +96,9 @@ var reasonSourcesV2 = map[string]ReasonSourceV2{
 	ReasonQueryRejected:        ReasonSourceMet,
 	ReasonQueryDeliveryTimeout: ReasonSourceMet,
 	ReasonQueryTargetMissing:   ReasonSourceMet,
-	ReasonProviderUnavailable:  ReasonSourceMet,
+	// The answer of one of its named outputs, which cannot be aligned.
+	ReasonQueryNamedOutputDuplicateKey: ReasonSourceMet,
+	ReasonProviderUnavailable:          ReasonSourceMet,
 	// The round's own clock or measured size past a limit.
 	ReasonExecutionBudgetExhausted: ReasonSourceMet,
 	ReasonQGBudgetShareExceeded:    ReasonSourceMet,
