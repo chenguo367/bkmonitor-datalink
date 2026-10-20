@@ -62,6 +62,7 @@ const (
 	EarlyMemoryRefused       = "early_memory_refused"
 	EarlyFlightBusy          = "flight_busy"
 	EarlyContractExpired     = "contract_expired"
+	EarlyKeptReadAbsent      = "kept_read_absent"
 	EarlyFailed              = "failed"
 )
 
@@ -69,7 +70,7 @@ const (
 var EarlyOutcomes = []string{EarlyBeforeNext, EarlyNothingLate, EarlyRungFirst, EarlyMultiQuery, EarlyFirstReadIncomplete,
 	EarlyFirstReadRefused, EarlyOwnerLost, EarlyAnchorUnknown, EarlyOvertaken, EarlyOlderSlotPending, EarlyYielded,
 	EarlyPermitRefused, EarlyAnchorPassed, EarlyReadFailed, EarlyMemoryRefused, EarlyFlightBusy, EarlyContractExpired,
-	EarlyFailed}
+	EarlyKeptReadAbsent, EarlyFailed}
 
 // EarlyOutsideMechanism are the outcomes the early read's working is not
 // read by: a Slot it does not apply to, one it could not be anchored for,
@@ -587,6 +588,8 @@ func (engine *Engine) earlyRead(ctx context.Context, slot *directedSlot, release
 		engine.fileEarlyLocked(state, slot, EarlyFlightBusy)
 	case outcome.Refused == DirectedContractExpired:
 		engine.fileEarlyLocked(state, slot, EarlyContractExpired)
+	case outcome.Refused == DirectedKeptReadAbsent:
+		engine.fileEarlyLocked(state, slot, EarlyKeptReadAbsent)
 	default:
 		engine.fileEarlyLocked(state, slot, EarlyFailed)
 	}

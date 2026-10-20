@@ -37,20 +37,22 @@ import (
 // Query Group. supplemented is a Slot read whose supplement ran, whatever
 // each of its series came to; nothing_late one read that had no series its
 // first read did not. flight_busy, contract_expired and failed are Slots
-// read whose supplement did not run, by why; unobserved one not read, by
-// the reason in DirectedUnobservedReasons.
+// read whose supplement did not run, by why - kept_read_absent one whose
+// queries, planned again, were not the query the read kept; unobserved one
+// not read, by the reason in DirectedUnobservedReasons.
 const (
 	DirectedSupplemented    = "supplemented"
 	DirectedNothingLate     = "nothing_late"
 	DirectedFlightBusy      = "flight_busy"
 	DirectedContractExpired = "contract_expired"
+	DirectedKeptReadAbsent  = "kept_read_absent"
 	DirectedFailed          = "failed"
 	DirectedUnobserved      = "unobserved"
 )
 
 // DirectedOutcomes is every directed window outcome.
 var DirectedOutcomes = []string{DirectedSupplemented, DirectedNothingLate, DirectedFlightBusy, DirectedContractExpired,
-	DirectedFailed, DirectedUnobserved}
+	DirectedKeptReadAbsent, DirectedFailed, DirectedUnobserved}
 
 // Why a directed Slot was not read, closed.
 const (
@@ -162,10 +164,15 @@ type KeptRead struct {
 	completion execution.ProviderCompletion
 }
 
+// Keeps says whether the read is of the physical query of digest.
+func (read *KeptRead) Keeps(digest execution.PhysicalQueryDigest) bool {
+	return read != nil && digest == read.digest
+}
+
 // Replay delivers the kept series in the order they were read and returns
 // the completion restated for them.
 func (read *KeptRead) Replay(ctx context.Context, spec execution.PhysicalQuerySpec, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
-	if read == nil || spec.Digest != read.digest {
+	if !read.Keeps(spec.Digest) {
 		return execution.ProviderCompletion{}, ErrNotKept
 	}
 	for _, batch := range read.batches {
@@ -555,7 +562,8 @@ func (engine *Engine) directedRead(ctx context.Context, slot *directedSlot, rele
 	case outcome.Ran:
 		rung.facts = &outcome.Facts
 		engine.fileWindowLocked(state, slot, DirectedSupplemented, "", rung)
-	case outcome.Refused == DirectedFlightBusy || outcome.Refused == DirectedContractExpired:
+	case outcome.Refused == DirectedFlightBusy || outcome.Refused == DirectedContractExpired ||
+		outcome.Refused == DirectedKeptReadAbsent:
 		engine.fileWindowLocked(state, slot, outcome.Refused, "", rung)
 	default:
 		engine.fileWindowLocked(state, slot, DirectedFailed, "", rung)
@@ -571,6 +579,8 @@ func earlyRefusalWindow(early string) (outcome string, ok bool) {
 		return DirectedFlightBusy, true
 	case EarlyContractExpired, EarlyOvertaken:
 		return DirectedContractExpired, true
+	case EarlyKeptReadAbsent:
+		return DirectedKeptReadAbsent, true
 	case EarlyFailed:
 		return DirectedFailed, true
 	}

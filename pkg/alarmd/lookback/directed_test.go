@@ -231,7 +231,7 @@ func TestADirectedSlotNotReadIsUnobservedByWhy(t *testing.T) {
 // kept, or it failed.
 func TestADirectedSlotWhoseSupplementDidNotRunIsCountedByWhy(t *testing.T) {
 	for refused, want := range map[string]string{DirectedFlightBusy: DirectedFlightBusy,
-		DirectedContractExpired: DirectedContractExpired, "redis": DirectedFailed} {
+		DirectedContractExpired: DirectedContractExpired, DirectedKeptReadAbsent: DirectedKeptReadAbsent, "redis": DirectedFailed} {
 		f, _ := directedFixture(t, SupplementOutcome{Refused: refused})
 		slot := f.clock.now().Unix()
 		f.firstRead(slot, execution.CompletenessFull)

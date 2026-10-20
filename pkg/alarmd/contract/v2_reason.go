@@ -171,10 +171,13 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	// every time until the strategy's shape changes, so calling it retryable
 	// would have the scheduler back off and re-run it forever.
 	ReasonQGBudgetShareExceeded: {ReasonQGBudgetShareExceeded, ReasonClassDeterministic, ReasonDomainObservation},
-	ReasonProviderUnavailable:   {ReasonProviderUnavailable, ReasonClassRetryable, ReasonDomainObservation},
-	ReasonProgressBeginRejected: {ReasonProgressBeginRejected, ReasonClassRetryable, ReasonDomainObservation},
-	ReasonProgressBeginFailed:   {ReasonProgressBeginFailed, ReasonClassDeterministic, ReasonDomainObservation},
-	ReasonActivationReadFailed:  {ReasonActivationReadFailed, ReasonClassRetryable, ReasonDomainObservation},
+	// Deterministic: the kept read is the one the lookback made, and a retry
+	// of the supplement asks it for the same query it does not hold.
+	ReasonSupplementKeptReadAbsent: {ReasonSupplementKeptReadAbsent, ReasonClassDeterministic, ReasonDomainObservation},
+	ReasonProviderUnavailable:      {ReasonProviderUnavailable, ReasonClassRetryable, ReasonDomainObservation},
+	ReasonProgressBeginRejected:    {ReasonProgressBeginRejected, ReasonClassRetryable, ReasonDomainObservation},
+	ReasonProgressBeginFailed:      {ReasonProgressBeginFailed, ReasonClassDeterministic, ReasonDomainObservation},
+	ReasonActivationReadFailed:     {ReasonActivationReadFailed, ReasonClassRetryable, ReasonDomainObservation},
 	// Retryable rather than deterministic: the record is absent now, and the
 	// Control Leader's next round writes it back from the published Catalog.
 	// Repeating the read is what finds it there.

@@ -2918,6 +2918,12 @@ func (executor observedProductionSlotExecutor) Execute(
 			// failure of this deployment.
 			observedResult = observability.ResultRetrying
 			reason = observability.ReasonCode(contract.ReasonViewNotExecutable)
+		} else if errors.Is(err, execution.ErrSupplementKeptReadAbsent) {
+			// A supplement whose kept read does not hold the Slot's query
+			// ran nothing and wrote nothing: skipped, by name, at WARN. The
+			// Slot stands as it completed.
+			observedResult = observability.ResultSkipped
+			reason = observability.ReasonCode(contract.ReasonSupplementKeptReadAbsent)
 		} else if _, deferred := access.ReadinessDeferredAt(err); deferred {
 			// The Slot's data is not in yet: the normal pacing of every Slot,
 			// and the single highest-volume completion line alarmd writes. The

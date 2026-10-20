@@ -31,6 +31,8 @@ type KeptRead interface {
 	// it delivered: its delivery accumulated over those series alone, or
 	// empty when it kept none. An error means the query was not kept.
 	Replay(ctx context.Context, spec execution.PhysicalQuerySpec, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error)
+	// Keeps says whether the read holds the physical query of digest.
+	Keeps(digest execution.PhysicalQueryDigest) bool
 }
 
 type keptReadKey struct{}
@@ -75,6 +77,15 @@ func (source *Source) executeSupplement(
 	prepared, err := prepare(request.Contract, frozen, source.config.MinReadyDelay, false, source.config.LiveReserve)
 	if err != nil {
 		return execution.QueryExecutionCompletion{}, err
+	}
+	// Every query the Slot plans has to be the one kept, asked before
+	// anything is handed to the worker: a query the read does not hold
+	// would stop the supplement halfway, and a supplement either runs
+	// whole or not at all.
+	for _, query := range prepared.Queries {
+		if len(query.Requirements) != 0 && !read.Keeps(query.Spec.Digest) {
+			return execution.QueryExecutionCompletion{}, fmt.Errorf("%w: query %s", execution.ErrSupplementKeptReadAbsent, query.Spec.Digest)
+		}
 	}
 	if err := consumer.Begin(ctx, prepared.Header); err != nil {
 		return execution.QueryExecutionCompletion{}, err

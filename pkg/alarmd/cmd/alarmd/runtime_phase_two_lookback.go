@@ -145,6 +145,10 @@ func lookbackSupplement(
 				return lookback.SupplementOutcome{Refused: lookback.DirectedContractExpired, Held: held}
 			case errors.Is(err, scheduler.ErrSupplementOvertaken):
 				return lookback.SupplementOutcome{Refused: lookback.SupplementOvertaken, Held: held}
+			case errors.Is(err, execution.ErrSupplementKeptReadAbsent):
+				// Named, and on the supplement's own completion line at WARN:
+				// not a failure this line has to explain.
+				return lookback.SupplementOutcome{Refused: lookback.DirectedKeptReadAbsent, Held: held}
 			default:
 				if logger != nil {
 					logger.Warn("lookback", "supplement_failed", 0, 0, slog.String("query_group", string(job.QueryGroup)),

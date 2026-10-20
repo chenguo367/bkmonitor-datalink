@@ -204,6 +204,7 @@ func TestARefusedEarlySupplementIsNotNothingLateWhenTheRungFindsNone(t *testing.
 		{DirectedFlightBusy, EarlyFlightBusy, DirectedFlightBusy},
 		{DirectedContractExpired, EarlyContractExpired, DirectedContractExpired},
 		{SupplementOvertaken, EarlyOvertaken, DirectedContractExpired},
+		{DirectedKeptReadAbsent, EarlyKeptReadAbsent, DirectedKeptReadAbsent},
 		{"other", EarlyFailed, DirectedFailed},
 	} {
 		t.Run(c.refused, func(t *testing.T) {

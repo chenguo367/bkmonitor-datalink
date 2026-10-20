@@ -278,10 +278,16 @@ const (
 	// large objects across replicas; nothing stops one from filling the replica
 	// it lands on.
 	ReasonQGBudgetShareExceeded = "QG_BUDGET_SHARE_EXCEEDED"
-	ReasonProviderUnavailable   = "PROVIDER_UNAVAILABLE"
-	ReasonProgressBeginRejected = "PROGRESS_BEGIN_REJECTED"
-	ReasonProgressBeginFailed   = "PROGRESS_BEGIN_FAILED"
-	ReasonActivationReadFailed  = "ACTIVATION_READ_FAILED"
+	// ReasonSupplementKeptReadAbsent names a supplement of a Slot whose
+	// queries, planned again from the Slot's frozen plan, are not all the
+	// query the lookback kept the late read of. Nothing is run and nothing
+	// is written: the Slot stands as it completed, and the series stay for a
+	// later Slot to read. Deterministic, since the kept read does not change.
+	ReasonSupplementKeptReadAbsent = "SUPPLEMENT_KEPT_READ_ABSENT"
+	ReasonProviderUnavailable      = "PROVIDER_UNAVAILABLE"
+	ReasonProgressBeginRejected    = "PROGRESS_BEGIN_REJECTED"
+	ReasonProgressBeginFailed      = "PROGRESS_BEGIN_FAILED"
+	ReasonActivationReadFailed     = "ACTIVATION_READ_FAILED"
 	// ReasonActivationMissing names a control round that found no activation
 	// record at all. It is separate from ACTIVATION_READ_FAILED because the
 	// store answered: there is no record, rather than no answer, and the two
