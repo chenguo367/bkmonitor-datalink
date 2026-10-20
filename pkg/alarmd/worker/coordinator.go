@@ -1310,7 +1310,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 		if err := coordinator.admitActivatedPlans(ctx, request, guardActivations); err != nil {
 			return execution.SlotExecutionResult{}, err
 		}
-		driftCompletion, driftAttribution := activationChangeCompletion(request.Contract, &primary, change, bindings)
+		driftCompletion, driftAttribution := activationChangeCompletion(request.Contract, &primary, change, bindings, targets)
 		return coordinator.commitProgress(ctx, request, driftCompletion, driftAttribution)
 	}
 
@@ -1650,7 +1650,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 	if len(changedPlans) > 0 {
 		var drift execution.CompletionAttribution
 		completion, drift = activationChangeCompletion(request.Contract, &primary,
-			classifyActivationChange(header.DuePlans, guardActivations, loadedGaps), bindings)
+			classifyActivationChange(header.DuePlans, guardActivations, loadedGaps), bindings, targets)
 		attribution.Cause, attribution.Reason, attribution.Scope = drift.Cause, drift.Reason, drift.Scope
 	} else {
 		var derived execution.CompletionAttribution
@@ -1694,7 +1694,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 	}
 	if !guardActivations.SameSelections(progressActivations) {
 		driftCompletion, driftAttribution := activationChangeCompletion(request.Contract, &primary,
-			classifyActivationChange(header.DuePlans, progressActivations, loadedGaps), bindings)
+			classifyActivationChange(header.DuePlans, progressActivations, loadedGaps), bindings, targets)
 		changedSelected := changedSelectedActivations(guardActivations, progressActivations)
 		return execution.SlotExecutionResult{}, &activationProtectionRequiredError{
 			activationRequest: activationRequest,
@@ -2977,8 +2977,9 @@ func configDriftCompletion(
 	contractRef execution.FrozenExecutionContractRef,
 	primary *execution.PrimaryInputFact,
 	bindings []execution.NamedInputBinding,
+	targets []execution.TargetResolutionSummary,
 ) (execution.SlotCompletion, execution.CompletionAttribution) {
-	return activationChangeCompletion(contractRef, primary, activationChangeDrift, bindings)
+	return activationChangeCompletion(contractRef, primary, activationChangeDrift, bindings, targets)
 }
 
 // activationChangeCompletion is configDriftCompletion with the change named:
@@ -2990,12 +2991,16 @@ func configDriftCompletion(
 // does: the change's own word, or, when the primary input was unavailable,
 // the primary binding's reason and scope (execution.PrimaryBindingAttribution).
 // The completion's ReasonCode stays the change's word: it is persisted and
-// decides how consecutive gaps fold into a Progress gap summary.
+// decides how consecutive gaps fold into a Progress gap summary. The targets
+// the Slot resolved at Begin are the completion's whatever changed, as
+// LastCompletion reports them after a restart; every caller has resolved
+// them by the time it builds this completion.
 func activationChangeCompletion(
 	contractRef execution.FrozenExecutionContractRef,
 	primary *execution.PrimaryInputFact,
 	change activationChange,
 	bindings []execution.NamedInputBinding,
+	targets []execution.TargetResolutionSummary,
 ) (execution.SlotCompletion, execution.CompletionAttribution) {
 	kind := execution.CompletionPartialGap
 	attribution := execution.CompletionAttribution{Cause: change.cause(), Reason: change.reason()}
@@ -3005,7 +3010,7 @@ func activationChangeCompletion(
 		attribution.Reason, attribution.Scope = execution.PrimaryBindingAttribution(bindings, execution.CompletenessUnavailable)
 	}
 	return execution.SlotCompletion{
-		Contract: contractRef, Kind: kind, Primary: primary,
+		Contract: contractRef, Kind: kind, Primary: primary, TargetResolutions: targets,
 		Result: observability.ResultDegraded, ReasonCode: change.reason(),
 	}, attribution
 }

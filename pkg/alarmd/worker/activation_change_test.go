@@ -90,7 +90,7 @@ func TestActivationChangeIsClassifiedFromTheSameComparisonAsDrift(t *testing.T) 
 				t.Fatalf("change = %d, want %d", change, testCase.want)
 			}
 			primary := execution.PrimaryInputFact{Completeness: execution.CompletenessFull}
-			completion, attribution := activationChangeCompletion(execution.FrozenExecutionContractRef{}, &primary, change, nil)
+			completion, attribution := activationChangeCompletion(execution.FrozenExecutionContractRef{}, &primary, change, nil, nil)
 			if completion.Kind != execution.CompletionPartialGap || string(completion.ReasonCode) != testCase.wantReason || attribution.Cause != testCase.wantCause {
 				t.Fatalf("completion = (%s, %s, %s), want a partial gap under %s / %s", completion.Kind, completion.ReasonCode, attribution.Cause, testCase.wantReason, testCase.wantCause)
 			}
@@ -110,7 +110,12 @@ func TestActivationChangeIsClassifiedFromTheSameComparisonAsDrift(t *testing.T) 
 				{Role: execution.InputRolePrimary, Completeness: execution.CompletenessUnavailable, ReasonCode: execution.ReasonCode(contract.ReasonQueryTimeout),
 					Consumer: execution.ConsumerRef{Plan: plan, LevelID: 2, HasLevel: true}},
 			}
-			completion, attribution = activationChangeCompletion(execution.FrozenExecutionContractRef{}, &unavailable, change, bindings)
+			targets := []execution.TargetResolutionSummary{{StrategyID: "101"}}
+			completion, attribution = activationChangeCompletion(execution.FrozenExecutionContractRef{}, &unavailable, change, bindings, targets)
+			// The targets the Slot resolved at Begin stay its completion's.
+			if len(completion.TargetResolutions) != 1 || completion.TargetResolutions[0].StrategyID != "101" {
+				t.Fatalf("target resolutions = %+v, want the Slot's", completion.TargetResolutions)
+			}
 			if completion.Kind != execution.CompletionUnavailable || attribution.Cause != execution.CausePrimaryInputUnavailable {
 				t.Fatalf("with an unavailable primary the completion is (%s, %s), want unavailable / primary input unavailable", completion.Kind, attribution.Cause)
 			}

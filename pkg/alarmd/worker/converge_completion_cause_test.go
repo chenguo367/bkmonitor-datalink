@@ -89,7 +89,7 @@ func convergeDriftedSlot(t *testing.T, completeness execution.Completeness) (exe
 		bindings = []execution.NamedInputBinding{{Role: execution.InputRolePrimary, Completeness: execution.CompletenessUnavailable,
 			ReasonCode: execution.ReasonCode(contract.ReasonQueryUnavailable), Consumer: execution.ConsumerRef{Plan: plan}}}
 	}
-	completion, attribution := configDriftCompletion(contractRef, &primary, bindings)
+	completion, attribution := configDriftCompletion(contractRef, &primary, bindings, nil)
 	cause := attribution.Cause
 	if cause == "" {
 		t.Fatal("the constructor produced a completion with no cause; the rest of this test proves nothing")
