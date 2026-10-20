@@ -44,10 +44,16 @@ const (
 	bytesPerMutation      = 32 << 10
 
 	// The Go runtime's own budgets are derived from the same container limit.
-	// The soft memory limit takes half of it; the collector target crosses over
-	// to that limit once the live heap reaches an eighth of it.
-	goMemoryLimitDivisor = 2
-	goGCLiveHeapDivisor  = 8
+	// The soft memory limit takes five eighths of it (DeriveGoRuntime); the
+	// collector target is a fixed ratio, set on its own.
+	goMemoryLimitNumerator   = 5
+	goMemoryLimitDenominator = 8
+	goGCPercent              = 300
+	// executionRuntimeDivisor is the share of the container the parked
+	// executions are sized under (activeExecutionCeiling): half, as it was
+	// before the soft limit moved, so raising the collector's room admits no
+	// more concurrent Slots than before.
+	executionRuntimeDivisor = 2
 
 	controlTimelineCacheMemoryDivisor = 16
 	// The smallest Schedule timeline that can exist - one Segment carrying one
@@ -203,7 +209,7 @@ func DeriveScheduler(inputs CapacityInputs) DerivedScheduler {
 }
 
 func activeExecutionCeiling(inputs CapacityInputs) int {
-	runtimeBytes := inputs.MemoryLimitBytes / goMemoryLimitDivisor
+	runtimeBytes := inputs.MemoryLimitBytes / executionRuntimeDivisor
 	retained := inputs.MemoryLimitBytes / retainedMemoryDivisor
 	if runtimeBytes <= retained {
 		return minimumActiveExecutions
@@ -304,33 +310,29 @@ type DerivedGoRuntime struct {
 // target alone has no absolute ceiling. So the limit is the byte budget and
 // derives from the container; the target is a ratio and therefore does not.
 //
-// Half the container is what the limit can be without becoming the next
-// problem. It has to clear the largest ceiling the process already derives
-// from the same number - retained bytes take a quarter - and it has to leave
-// enough underneath that the runtime's own collector CPU limiter can overshoot
-// into the remainder rather than the kernel reclaiming the process. Half
-// leaves both: twice the retained ceiling above, and half the container below.
-// It also keeps the steady heap under the memory request a deployment of this
-// shape asks for, which turning the collector off entirely would not - and a
-// process permanently above its request is the first one evicted when its node
-// comes under pressure.
+// The limit is five eighths of the container, derived from measured usage
+// (decision-019 §5.2). The live heap rises at most about 1.5 bytes per
+// retained byte charged; with one Query Group at its share of the retained
+// pool beside its measured co-tenants, the live heap is near 1.4 GiB on a
+// 4 GiB container. Five eighths gives the collector about 1.8 times that
+// before it runs continuously - the room it had at half the container
+// before the share grew - and the container, counting the measured non-heap
+// memory and a sampling allowance, stays within about 3.3 GiB.
 //
-// The target crosses over to that limit once the live heap reaches an eighth
-// of the container. Below that the ratio governs and the heap tracks what the
-// process actually holds; above it the byte budget governs. Both crossover
-// terms are fractions of the same limit, so the ratio between them - 300 - is
-// the same on every container, which is correct for a ratio.
+// The collector target is a fixed 300 percent, set apart from the limit so
+// that moving the limit changes one thing: at 2 to 4 percent collector CPU
+// in bursts a higher target buys nothing and only raises the peak.
 func DeriveGoRuntime(inputs CapacityInputs) DerivedGoRuntime {
 	if inputs.MemorySource == "" || inputs.MemorySource == memorySourceFallback {
 		return DerivedGoRuntime{}
 	}
-	limit := inputs.MemoryLimitBytes / goMemoryLimitDivisor
+	limit := inputs.MemoryLimitBytes / goMemoryLimitDenominator * goMemoryLimitNumerator
 	if limit > uint64(math.MaxInt64) {
 		limit = uint64(math.MaxInt64)
 	}
 	return DerivedGoRuntime{
 		MemoryLimitBytes: int64(max(limit, 1)),
-		GCPercent:        (goGCLiveHeapDivisor/goMemoryLimitDivisor - 1) * 100,
+		GCPercent:        goGCPercent,
 		Applied:          true,
 	}
 }

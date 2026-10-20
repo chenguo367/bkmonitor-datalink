@@ -2601,7 +2601,7 @@ func (coordinator *SlotExecutionCoordinator) observeCapacityRejection(
 }
 
 // qgShareBytes is the most of the retained-byte pool one Query Group's Slot may
-// hold: half of it.
+// hold: three quarters of it.
 //
 // A share exists because acquireEffects otherwise only asks whether the pool
 // has room, so one object may legitimately take all of it and every other Query
@@ -2609,16 +2609,15 @@ func (coordinator *SlotExecutionCoordinator) observeCapacityRejection(
 // replicas, which makes that less likely; it does not stop one object from
 // filling the replica it lands on.
 //
-// Half rather than a smaller fraction because the share has to leave the
-// largest object that legitimately exists able to run: on a 4 GiB replica half
-// the pool is 512 MiB. The estimate this was first set against - 65 to 134 MiB
-// for the largest strategy - was wrong by a factor of three to seven; that
-// strategy's Slots measure 464 MB at the median and 489 MB at p99, 86 to 91
-// percent of the share. A strategy that does not fit in half a replica's pool
-// is one that has to be sharded, and refusing it by name is better than letting
-// it fill the pool and take its neighbours down with it - but a refusal nobody
-// saw coming stops a strategy whole, which is why an object nearing its share
-// is reported before it arrives (fleet's RETAINED_SHARE_APPROACHING).
+// Three quarters is derived from measured usage (decision-019 §5.2): what a
+// share protects is the room its co-tenants on the replica hold at the same
+// moment, measured at 76.5 MB beside the largest object, and the process's
+// live heap with the share full stays under the collector's limit with room.
+// On a 4 GiB replica the share is 768 MiB, which leaves the largest strategy
+// measured (about 506 MiB at its peak) about half again of its size. A
+// strategy that still does not fit is refused by name rather than let fill
+// the pool, and an object nearing its share is reported before it arrives
+// (fleet's RETAINED_SHARE_APPROACHING).
 // stateHorizon is how long this Plan's series keep their runtime state past
 // their last write: the Plan's own no-data horizon when it has one frozen -
 // the strategy's, or the platform's at compile time - else the platform's
@@ -2636,7 +2635,7 @@ func (coordinator *SlotExecutionCoordinator) stateHorizon(due execution.DuePlan)
 }
 
 func (coordinator *SlotExecutionCoordinator) qgShareBytes() uint64 {
-	return coordinator.budget.MaxRetainedBytes / 2
+	return coordinator.budget.MaxRetainedBytes / 4 * 3
 }
 
 func summarizeStateLoad(result execution.StatePreflightResult) (observability.Result, observability.ReasonCode) {

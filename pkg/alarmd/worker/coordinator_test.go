@@ -241,14 +241,13 @@ func TestSlotExecutionCoordinatorBudgetsRetainedSeriesAndBytes(t *testing.T) {
 }
 
 func TestSlotExecutionCoordinatorRejectsCumulativeUQPayloadBeforeSideEffectsAndReleasesReservation(t *testing.T) {
-	// Two MiB so the pool is what this case is about. One Query Group may hold
-	// half the pool, so at 1 MiB a single 600 KiB batch is over its share and
-	// the cumulative pool rejection below would never be the thing that fired.
+	// Two MiB, so one 900 KiB batch fits the share (three quarters of the
+	// pool, 1.5 MiB) and the second one's cumulative total does not.
 	fixture := newFixtureWithBudget(t, worker.ProvisionalBudget{
 		MaxSeries: 100, MaxRetainedBytes: 2 << 20, MaxStateMutations: 100, MaxEvents: 100, MaxGapMutations: 10,
 	})
 	fixture.ports.reverseStateReceipts = true
-	fixture.ports.queryDeliveryBytes = []uint64{600 << 10, 600 << 10}
+	fixture.ports.queryDeliveryBytes = []uint64{900 << 10, 900 << 10}
 
 	result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
 	if err == nil || result.Completed {
@@ -257,8 +256,8 @@ func TestSlotExecutionCoordinatorRejectsCumulativeUQPayloadBeforeSideEffectsAndR
 	if fixture.ports.eventCount != 0 || fixture.ports.stateApplyCalls != 0 || !isZeroProgressCommit(fixture.ports.lastProgress) {
 		t.Fatal("retained-byte rejection reached Event, State or Progress")
 	}
-	// The share, not the pool. One Query Group may hold half the retained-byte
-	// budget, so a single object's cumulative payload always crosses its share
+	// The share, not the pool. One Query Group may hold three quarters of the
+	// retained-byte budget, so a single object's cumulative payload crosses its share
 	// before it can reach the pool - the pool's own retained-byte refusal needs
 	// two Query Groups running at once. The property this case is about is
 	// unchanged: a rejected cumulative payload reaches no side effect and
@@ -276,9 +275,9 @@ func TestSlotExecutionCoordinatorRejectsCumulativeUQPayloadBeforeSideEffectsAndR
 	// and the share it crossed, and no shared usage: nothing another Query
 	// Group did is part of why this one was refused, and reporting a pool
 	// figure here would point the reader at a neighbour that is not involved.
-	// Limit is half the 2 MiB budget.
+	// Limit is three quarters of the 2 MiB budget.
 	if rejection == nil || rejection.Phase != "normal_output" || rejection.OwnUsed == nil ||
-		*rejection.OwnUsed < 600<<10 || rejection.SharedUsed != 0 || rejection.Limit != 1<<20 {
+		*rejection.OwnUsed < 900<<10 || rejection.SharedUsed != 0 || rejection.Limit != 3<<19 {
 		t.Fatalf("missing exact failed-reservation facts: %+v", rejection)
 	}
 	usedAtRejection := *rejection.OwnUsed

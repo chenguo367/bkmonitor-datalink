@@ -21,7 +21,7 @@ func TestAShareRefusalOfTheSlotsOwnTotalIsMarkedDeterministic(t *testing.T) {
 	co := &SlotExecutionCoordinator{budget: ProvisionalBudget{
 		MaxSeries: 10, MaxRetainedBytes: 100, MaxStateMutations: 10, MaxEvents: 10, MaxGapMutations: 10,
 	}}
-	stream := &streamedExecution{coordinator: co, began: true, retainedByPhase: retainedSeed(40)}
+	stream := &streamedExecution{coordinator: co, began: true, retainedByPhase: retainedSeed(60)}
 	err := co.acquireEffects(effectCounts{states: 1}, 20, stream, stream.reservationPhase("normal_output"))
 	if err == nil {
 		t.Fatal("an object over its share was admitted")
@@ -30,7 +30,7 @@ func TestAShareRefusalOfTheSlotsOwnTotalIsMarkedDeterministic(t *testing.T) {
 	if !deterministic {
 		t.Fatalf("a refusal of the Slot's own total against the share is not marked deterministic: %v", err)
 	}
-	if want := (execution.ShareRefusal{Phase: "normal_output", OwnUsedBytes: 40, RequestedBytes: 20, LimitBytes: 50}); refusal != want {
+	if want := (execution.ShareRefusal{Phase: "normal_output", OwnUsedBytes: 60, RequestedBytes: 20, LimitBytes: 75}); refusal != want {
 		t.Fatalf("refusal = %+v, want %+v", refusal, want)
 	}
 }

@@ -343,12 +343,17 @@ func TestGoRuntimeBudgetFollowsTheContainerAndClearsItsOwnCeilings(t *testing.T)
 			t.Fatalf("%d MiB container: soft limit %d does not clear the timeline cache budget",
 				inputs.MemoryLimitBytes>>20, derived.MemoryLimitBytes)
 		}
-		// And it has to leave the container enough room that the runtime's own
-		// collector CPU limiter can overshoot into the remainder instead of the
-		// kernel reclaiming the process.
-		if uint64(derived.MemoryLimitBytes) > inputs.MemoryLimitBytes/2 {
-			t.Fatalf("%d MiB container: soft limit %d leaves no reserve",
+		// And it has to leave the container room for what the limit does not
+		// cover - measured at about 11 percent of a 4 GiB container in non-heap
+		// memory, plus a sampling allowance of up to 7 percent - and for the
+		// collector's CPU limiter to overshoot into, instead of the kernel
+		// reclaiming the process: at least a quarter of the container.
+		if inputs.MemoryLimitBytes-uint64(derived.MemoryLimitBytes) < inputs.MemoryLimitBytes/4 {
+			t.Fatalf("%d MiB container: soft limit %d leaves less than a quarter of the container",
 				inputs.MemoryLimitBytes>>20, derived.MemoryLimitBytes)
+		}
+		if derived.GCPercent != 300 {
+			t.Fatalf("%d MiB container: GC percent %d, want the fixed 300 whatever the limit", inputs.MemoryLimitBytes>>20, derived.GCPercent)
 		}
 	}
 }
