@@ -10,6 +10,7 @@
 package fleet
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -84,5 +85,29 @@ func TestTheOverviewCarriesTheCauseReasonsByOriginThroughSummaries(t *testing.T)
 	missing.CauseReasonsMissing = true
 	if !overviewCauseReasonsOf(missing).Partial {
 		t.Fatal("a replica without counts did not mark the overview's counts partial")
+	}
+}
+
+// A replica on a build before the counts publishes a part without them: it
+// decodes as none, the merge says so, and the overview reads partial rather
+// than zero. With no replica at all the counts are partial too.
+func TestAPartWithoutCauseReasonCountsLeavesTheOverviewPartial(t *testing.T) {
+	var older ReplicaPart
+	if err := json.Unmarshal([]byte(`{"replica":"pod-old","attribution":{},"impact":{},"empty_every_round":0,"demoted_due":0,`+
+		`"demoted_due_since":"0001-01-01T00:00:00Z","cooling":{},"loss":{},"pruned_skips_total":0,"retained_share_total":0,`+
+		`"read_early_total":0,"truncated":0}`), &older); err != nil {
+		t.Fatal(err)
+	}
+	if older.CauseReasons != nil {
+		t.Fatalf("a part without cause_reasons decoded counts %+v", older.CauseReasons)
+	}
+	current := ReplicaPart{CauseReasons: newCauseReasonCounts()}
+	current.CauseReasons.add(Anomaly{CauseReason: "QUERY_TIMEOUT", CauseOrigin: &CauseOrigin{Origin: observability.ReasonOriginPhysical}})
+	merged := overviewCauseReasonsOf(MergeReplicaParts(current, older))
+	if !merged.Partial || len(merged.ByCauseReason.Top) != 1 {
+		t.Fatalf("merged %+v, want the current replica's count marked partial", merged)
+	}
+	if none := overviewCauseReasonsOf(MergeReplicaParts()); !none.Partial {
+		t.Fatal("no replica at all read as nothing degraded")
 	}
 }

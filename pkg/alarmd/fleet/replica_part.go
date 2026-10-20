@@ -158,7 +158,7 @@ func ReplicaPartOf(view View, now time.Time) ReplicaPart {
 // MergeReplicaParts adds replicas' parts into the deployment's.
 func MergeReplicaParts(parts ...ReplicaPart) ReplicaPart {
 	merged := ReplicaPart{CohortRows: map[int64]*CohortView{}, CheckRows: checkTallies{}, Metrics: &MetricRows{},
-		CauseReasons: newCauseReasonCounts()}
+		CauseReasons: newCauseReasonCounts(), CauseReasonsMissing: len(parts) == 0}
 	running := len(parts) > 0
 	merged.RunningStrategies = map[StateWord]int{}
 	tallies := make([]ImpactTally, 0, len(parts))

@@ -102,14 +102,16 @@ type OverviewCauseReasons struct {
 // rows, so the counts travel in each summary's part, counted at the replica
 // from the rows it published (ReplicaPartOf).
 func overviewCauseReasonsOf(part ReplicaPart) OverviewCauseReasons {
-	counts := part.CauseReasons
+	// No counts at all - no replica read, the registry unreadable - is not
+	// "nothing degraded": it reads partial, as a replica without counts does.
+	counts, missing := part.CauseReasons, part.CauseReasonsMissing
 	if counts == nil {
-		counts = newCauseReasonCounts()
+		counts, missing = newCauseReasonCounts(), true
 	}
 	return OverviewCauseReasons{ByCauseReason: rank(counts.All),
 		ByCauseReasonPhysical: rank(counts.Physical), ByCauseReasonCarried: rank(counts.Carried),
 		ByCauseReasonDerived: rank(counts.Derived), ByCauseReasonUnknown: rank(counts.Unknown),
-		Partial: part.CauseReasonsMissing || part.Truncated&(1<<0) != 0}
+		Partial: missing || columnCut(part.Truncated, ColumnAnomalies)}
 }
 
 // CauseReasonCounts counts anomaly rows' cause reasons: all of them, and by

@@ -174,10 +174,14 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	// Deterministic: the kept read is the one the lookback made, and a retry
 	// of the supplement asks it for the same query it does not hold.
 	ReasonSupplementKeptReadAbsent: {ReasonSupplementKeptReadAbsent, ReasonClassDeterministic, ReasonDomainObservation},
-	ReasonProviderUnavailable:      {ReasonProviderUnavailable, ReasonClassRetryable, ReasonDomainObservation},
-	ReasonProgressBeginRejected:    {ReasonProgressBeginRejected, ReasonClassRetryable, ReasonDomainObservation},
-	ReasonProgressBeginFailed:      {ReasonProgressBeginFailed, ReasonClassDeterministic, ReasonDomainObservation},
-	ReasonActivationReadFailed:     {ReasonActivationReadFailed, ReasonClassRetryable, ReasonDomainObservation},
+	// Coverage: the target is read from the CMDB caches as they stand, and
+	// the round runs on what resolved.
+	ReasonTargetResolutionIncomplete:  {ReasonTargetResolutionIncomplete, ReasonClassCoverage, ReasonDomainObservation},
+	ReasonTargetResolutionUnavailable: {ReasonTargetResolutionUnavailable, ReasonClassCoverage, ReasonDomainObservation},
+	ReasonProviderUnavailable:         {ReasonProviderUnavailable, ReasonClassRetryable, ReasonDomainObservation},
+	ReasonProgressBeginRejected:       {ReasonProgressBeginRejected, ReasonClassRetryable, ReasonDomainObservation},
+	ReasonProgressBeginFailed:         {ReasonProgressBeginFailed, ReasonClassDeterministic, ReasonDomainObservation},
+	ReasonActivationReadFailed:        {ReasonActivationReadFailed, ReasonClassRetryable, ReasonDomainObservation},
 	// Retryable rather than deterministic: the record is absent now, and the
 	// Control Leader's next round writes it back from the published Catalog.
 	// Repeating the read is what finds it there.

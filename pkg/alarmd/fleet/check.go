@@ -1998,3 +1998,13 @@ func truncatedColumns(truncated map[string]bool) uint8 {
 	}
 	return mask
 }
+
+// columnCut says the truncation mask has column's bit set (truncatedColumns).
+func columnCut(mask uint8, column string) bool {
+	for index, name := range columnNames {
+		if name == column {
+			return mask&(1<<index) != 0
+		}
+	}
+	return false
+}

@@ -284,10 +284,16 @@ const (
 	// is written: the Slot stands as it completed, and the series stay for a
 	// later Slot to read. Deterministic, since the kept read does not change.
 	ReasonSupplementKeptReadAbsent = "SUPPLEMENT_KEPT_READ_ABSENT"
-	ReasonProviderUnavailable      = "PROVIDER_UNAVAILABLE"
-	ReasonProgressBeginRejected    = "PROGRESS_BEGIN_REJECTED"
-	ReasonProgressBeginFailed      = "PROGRESS_BEGIN_FAILED"
-	ReasonActivationReadFailed     = "ACTIVATION_READ_FAILED"
+	// ReasonTargetResolutionIncomplete names a Plan's monitoring target
+	// resolved in part - a dynamic group with members dropped, a node
+	// missing - and ReasonTargetResolutionUnavailable one not resolved at
+	// all. The selectors on the target_resolved line say which and how many.
+	ReasonTargetResolutionIncomplete  = "TARGET_RESOLUTION_INCOMPLETE"
+	ReasonTargetResolutionUnavailable = "TARGET_RESOLUTION_UNAVAILABLE"
+	ReasonProviderUnavailable         = "PROVIDER_UNAVAILABLE"
+	ReasonProgressBeginRejected       = "PROGRESS_BEGIN_REJECTED"
+	ReasonProgressBeginFailed         = "PROGRESS_BEGIN_FAILED"
+	ReasonActivationReadFailed        = "ACTIVATION_READ_FAILED"
 	// ReasonActivationMissing names a control round that found no activation
 	// record at all. It is separate from ACTIVATION_READ_FAILED because the
 	// store answered: there is no record, rather than no answer, and the two

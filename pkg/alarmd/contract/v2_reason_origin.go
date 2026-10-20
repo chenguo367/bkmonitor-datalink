@@ -161,6 +161,10 @@ var reasonSourcesV2 = map[string]ReasonSourceV2{
 	ReasonOwnershipNotDesired:        ReasonSourceMet,
 	ReasonOwnershipLeaseBusy:         ReasonSourceMet,
 	ReasonContentScopeMoved:          ReasonSourceMet,
+	// The CMDB caches' answer for the Plan's target: members dropped, nodes
+	// missing, a cache unreadable.
+	ReasonTargetResolutionIncomplete:  ReasonSourceMet,
+	ReasonTargetResolutionUnavailable: ReasonSourceMet,
 }
 
 // ReasonJudgedV2 says a reason is alarmd's own judgement, not something a

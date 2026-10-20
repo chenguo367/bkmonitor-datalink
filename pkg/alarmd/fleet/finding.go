@@ -660,8 +660,14 @@ var codeChecks = map[string]verdict{
 	"STATE_WRITE_RETRYABLE":   lands(CheckDependencyDown),
 	"OUTPUT_ACK_UNKNOWN":      lands(CheckDependencyDown),
 	"SNAPSHOT_UNAVAILABLE":    lands(CheckDependencyDown),
-	"SNAPSHOT_RETRY_PENDING":  lands(CheckDependencyDown),
-	"ACTIVATION_READ_FAILED":  lands(CheckDependencyDown),
+	// A target read from the CMDB caches: in part is the caches as they
+	// stand - members dropped, nodes missing - and the round runs on what
+	// resolved; not at all is the caches unreadable. Target lines reach no
+	// round row, so these record the decision.
+	"TARGET_RESOLUTION_INCOMPLETE":  isNormal,
+	"TARGET_RESOLUTION_UNAVAILABLE": lands(CheckDependencyDown),
+	"SNAPSHOT_RETRY_PENDING":        lands(CheckDependencyDown),
+	"ACTIVATION_READ_FAILED":        lands(CheckDependencyDown),
 	// The store answered and the activation record was not in it. That is the
 	// infrastructure losing state rather than refusing a read, but it lands
 	// here for the same reason the rest do: nobody outside this deployment can

@@ -7,6 +7,7 @@ package worker
 
 import (
 	"context"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -260,14 +261,20 @@ func (stream *streamedExecution) observeTargetResolution(ctx context.Context, du
 			Kept: selector.Kept, Dropped: selector.Dropped, NodeMissing: selector.NodeMissing, NodeForeign: selector.NodeForeign,
 		})
 	}
-	result := observability.Result(observability.ResultSuccess)
-	if resolution.State != targetplan.ResolutionComplete {
-		result = observability.ResultDegraded
+	// A resolution short of complete says which, by name: the selectors
+	// beside it carry why and how many (members_dropped, kept and dropped).
+	result, reason := observability.Result(observability.ResultSuccess), observability.ReasonNone
+	switch resolution.State {
+	case targetplan.ResolutionComplete:
+	case targetplan.ResolutionIncomplete:
+		result, reason = observability.ResultDegraded, observability.ReasonCode(contract.ReasonTargetResolutionIncomplete)
+	default:
+		result, reason = observability.ResultDegraded, observability.ReasonCode(contract.ReasonTargetResolutionUnavailable)
 	}
 	stream.coordinator.emitObservation(ctx, observability.Observation{
 		Component: observability.ComponentAccess, Stage: observability.StageTargetResolved,
 		Operation: observability.Operation(stream.request.Operation), Direction: observability.DirectionInternal,
-		Result: result, TargetResolution: facts,
+		Result: result, ReasonCode: reason, TargetResolution: facts,
 	})
 }
 
