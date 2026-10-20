@@ -112,6 +112,29 @@ func (facts DetectionFactsV1) MarshalJSON() ([]byte, error) {
 	return buffer.Bytes(), nil
 }
 
+// UnmarshalJSON reads an object of scalar facts back, in its order.
+func (facts *DetectionFactsV1) UnmarshalJSON(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return errors.New("alarmd contract: detection facts must be an object")
+	}
+	read := DetectionFactsV1{}
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		name, _ := token.(string)
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return err
+		}
+		read = append(read, DetectionFactV1{Name: name, Value: value})
+	}
+	*facts = read
+	return nil
+}
+
 // EncodeDetectionSnapshotV1 is the snapshot as an event carries it, held to
 // its bounds: ref_values past MaxDetectionSnapshotRefValues and levels past
 // MaxDetectionSnapshotLevels are refused, as a snapshot built wrong; facts

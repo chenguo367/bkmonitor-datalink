@@ -68,3 +68,25 @@ func TestASlotIsChargedForItsNamedOutputsAndRefusedPastItsShare(t *testing.T) {
 		t.Fatalf("%d bytes still reserved after a refused Slot", reserved)
 	}
 }
+
+// The table a Slot's primary query aligned reaches the evaluation of each of
+// its series, for the snapshots their events carry; a Slot whose queries
+// aligned none evaluates with none.
+func TestTheNamedOutputTableReachesTheSeriesEvaluation(t *testing.T) {
+	budget := worker.ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxStateMutations: 100, MaxEvents: 100, MaxGapMutations: 10}
+	plain := newFixtureWithBudget(t, budget)
+	if _, err := plain.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal)); err != nil {
+		t.Fatal(err)
+	}
+	if plain.ports.lastEvaluation.NamedOutputs != nil {
+		t.Fatal("a Slot without named outputs evaluated with a table")
+	}
+	f := newFixtureWithBudget(t, budget)
+	table := withNamedOutputs(f, 2)
+	if _, err := f.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal)); err != nil {
+		t.Fatal(err)
+	}
+	if f.ports.lastEvaluation.NamedOutputs != table {
+		t.Fatalf("the series was evaluated with %p, want the primary query's table %p", f.ports.lastEvaluation.NamedOutputs, table)
+	}
+}

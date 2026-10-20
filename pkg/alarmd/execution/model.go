@@ -1276,8 +1276,13 @@ type EvaluationRequest struct {
 	// alert identity in place of the record's own, never by the series'
 	// identity or its State. Nil for nearly every series.
 	HostOverlay map[string]json.RawMessage
-	State       StatePreflightResult
-	Gaps        GapLoadResult
+	// NamedOutputs is the named outputs the Plan's primary query aligned to
+	// its records, by RecordID (PhysicalQueryCompletion.NamedOutputs): read
+	// by the detection snapshot an event carries, never by detection, the
+	// series' identity or its State. Nil for a Plan without named outputs.
+	NamedOutputs *NamedOutputRecords
+	State        StatePreflightResult
+	Gaps         GapLoadResult
 	// OpenAlerts is the consumer's open alert set the recovery gate asks. The worker passes it on every request; nil is a caller with no
 	// gate and is counted as such, see OpenAlertGateCounts.NotConfigured.
 	OpenAlerts contract.OpenAlertSet

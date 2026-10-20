@@ -11,6 +11,7 @@ import (
 	"fmt"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 )
 
@@ -174,6 +175,11 @@ func (e StateEligibilityV2) StateDisposition() string {
 }
 
 type EvaluationRequestV2 struct {
+	// NamedOutputs is the named outputs aligned to the Plan's records, by
+	// RecordID; nil for a Plan without them. An event of a Plan with them
+	// carries its detection snapshot (detectionSnapshot); nothing else reads
+	// it.
+	NamedOutputs       *execution.NamedOutputRecords
 	TenantID           string
 	BusinessID         string
 	Plan               *strategy.CompiledPlan

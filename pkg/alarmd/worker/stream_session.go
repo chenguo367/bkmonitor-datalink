@@ -109,6 +109,11 @@ type streamedExecution struct {
 	effects  effectCounts
 	gapFacts uint64
 	began    bool
+	// namedOutputs is the tables of named outputs the Slot's queries aligned,
+	// by physical query, kept from the completion for the detection
+	// snapshots of their Plans' events. Nil for a Slot whose queries asked
+	// for none.
+	namedOutputs map[execution.PhysicalQueryDigest]*execution.NamedOutputRecords
 	// namedReserved is what this execution's queries reserved for their
 	// named outputs (ReserveRetainedBytes) and still hold: part of the input
 	// phase, settled to the aligned tables at the completion.
@@ -470,6 +475,7 @@ func (stream *streamedExecution) releaseProvisional() {
 	stream.coordinator.releaseEffects(stream.effects)
 	stream.effects = effectCounts{}
 	stream.coordinator.releaseProvisional(stream.series, stream.retainedTotal())
+	stream.namedOutputs = nil
 	stream.series, stream.retainedByPhase, stream.namedReserved = 0, [retainPhaseCount]uint64{}, 0
 	stream.retainedInputNow.Store(0)
 }
@@ -492,6 +498,25 @@ func (stream *streamedExecution) retainNamedOutputs(ctx context.Context, complet
 	case reserved < tables:
 		if err := stream.ReserveRetainedBytes(ctx, tables-reserved); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// primaryNamedOutputs is the table of named outputs the series' primary
+// query aligned, which its events' detection snapshots read; nil when that
+// query asked for none.
+func (stream *streamedExecution) primaryNamedOutputs(inputs []execution.SeriesEvaluationInputRequest) *execution.NamedOutputRecords {
+	if stream.namedOutputs == nil {
+		return nil
+	}
+	for _, input := range inputs {
+		for _, binding := range input.Inputs {
+			if binding.Role == execution.InputRolePrimary {
+				if table := stream.namedOutputs[binding.Provenance.PhysicalQuery]; table != nil {
+					return table
+				}
+			}
 		}
 	}
 	return nil
@@ -854,6 +879,14 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 	}
 	if err := stream.retainNamedOutputs(ctx, completion); err != nil {
 		return err
+	}
+	for _, query := range completion.PhysicalQueries {
+		if query.NamedOutputs != nil {
+			if stream.namedOutputs == nil {
+				stream.namedOutputs = make(map[execution.PhysicalQueryDigest]*execution.NamedOutputRecords)
+			}
+			stream.namedOutputs[query.PhysicalQuery] = query.NamedOutputs
+		}
 	}
 	physical := make(map[execution.PhysicalQueryDigest]classifiedPhysicalCompletion, len(completion.PhysicalQueries))
 	for _, item := range completion.PhysicalQueries {
@@ -1774,7 +1807,7 @@ func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry
 		return fmt.Errorf("alarmd worker: bind series EffectiveTime facts: %w", err)
 	}
 	request := execution.EvaluationRequest{Header: evaluationHeader, Inputs: inputs, State: loaded, Gaps: stream.gaps,
-		HostOverlay: stream.hostOverlays[due.Identity][series]}
+		HostOverlay: stream.hostOverlays[due.Identity][series], NamedOutputs: stream.primaryNamedOutputs(inputs)}
 	// Told before the evaluation, so the strategy is in the copy's next read
 	// even if no record of this round asks about it. The constructor requires
 	// the port; the guard is for tests that build the struct.

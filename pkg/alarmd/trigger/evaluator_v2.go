@@ -152,6 +152,15 @@ func EvaluateV2(request EvaluationRequestV2) (EvaluationResultV2, error) {
 			return EvaluationResultV2{}, invariantV2("build TriggerEvent", 0, err)
 		}
 		result.TriggerEvent = event
+		// A Plan with named outputs carries what its detection decided on;
+		// every other Plan's event carries nothing more than it did.
+		if request.NamedOutputs != nil {
+			encoded, _, snapshotErr := contract.EncodeDetectionSnapshotV1(detectionSnapshot(request, event))
+			if snapshotErr != nil {
+				return EvaluationResultV2{}, invariantV2("build detection snapshot", 0, snapshotErr)
+			}
+			event.DetectionSnapshot = encoded
+		}
 		// The compatibility context is attached whenever the Plan publishes that
 		// protocol. Before the format was stated, the only Plans that did were
 		// the ones with no frozen revision, so the two conditions were the same

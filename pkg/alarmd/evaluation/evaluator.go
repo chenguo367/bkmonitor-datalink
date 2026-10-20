@@ -83,7 +83,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, request execution.EvaluationRe
 	if e == nil || len(request.Inputs) == 0 {
 		return execution.EvaluationResult{}, errors.New("alarmd evaluation: invalid or over-budget request")
 	}
-	plan, err := e.evaluateSeriesWith(ctx, request.Header, request.Inputs, request.State, request.Gaps, request.OpenAlerts, request.HostOverlay)
+	plan, err := e.evaluateSeriesWith(ctx, request.Header, request.Inputs, request.State, request.Gaps, request.OpenAlerts, request.HostOverlay, request.NamedOutputs)
 	if err != nil {
 		return execution.EvaluationResult{}, err
 	}
@@ -406,7 +406,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 		folded, proposed := execution.RoundGuardReasonForLevel(inputs(), due.Identity, levelID)
 		return string(folded), proposed
 	}
-	tr, err := trigger.EvaluateV2(trigger.EvaluationRequestV2{TenantID: due.Identity.TenantID, BusinessID: due.Identity.BusinessID, Plan: due.CompiledPlan, Record: trigger.DetectionRecord{RecordID: record.RecordID(), SourceTime: record.SourceTime(), ProjectedValues: tvalues, LevelFacts: tfacts}, RecordRef: contract.TriggerRecordRefV1{RecordID: record.RecordID(), SourceTime: record.SourceTime(), DimensionIdentityDigest: string(series), Dimensions: alertDimensions(record.Dimensions(), request.HostOverlay)}, Observed: contract.TriggerObservedV1{Values: record.Values()}, Histories: histories, EffectiveTimeFacts: effective, EvaluationTime: int64(request.Header.Contract.Slot.EvaluationTime), ReadHoldMillis: request.Header.Contract.ReadHoldMillis, ReadEnd: primaryReadEnd(request.Header, due.Identity), SeriesSeenBefore: !fresh, ExecutionID: request.Header.ExecutionID, Limits: e.limits.Trigger, OpenAlerts: request.OpenAlerts, HoldRecovery: holdRecovery})
+	tr, err := trigger.EvaluateV2(trigger.EvaluationRequestV2{TenantID: due.Identity.TenantID, BusinessID: due.Identity.BusinessID, Plan: due.CompiledPlan, Record: trigger.DetectionRecord{RecordID: record.RecordID(), SourceTime: record.SourceTime(), ProjectedValues: tvalues, LevelFacts: tfacts}, RecordRef: contract.TriggerRecordRefV1{RecordID: record.RecordID(), SourceTime: record.SourceTime(), DimensionIdentityDigest: string(series), Dimensions: alertDimensions(record.Dimensions(), request.HostOverlay)}, Observed: contract.TriggerObservedV1{Values: record.Values()}, Histories: histories, EffectiveTimeFacts: effective, EvaluationTime: int64(request.Header.Contract.Slot.EvaluationTime), ReadHoldMillis: request.Header.Contract.ReadHoldMillis, ReadEnd: primaryReadEnd(request.Header, due.Identity), SeriesSeenBefore: !fresh, ExecutionID: request.Header.ExecutionID, Limits: e.limits.Trigger, OpenAlerts: request.OpenAlerts, HoldRecovery: holdRecovery, NamedOutputs: request.NamedOutputs})
 	if err != nil {
 		return recordResult{}, err
 	}
@@ -577,7 +577,7 @@ func (e *Evaluator) evaluateSeries(
 	gaps execution.GapLoadResult,
 	openAlerts contract.OpenAlertSet,
 ) (execution.PlanEvaluationResult, error) {
-	return e.evaluateSeriesWith(ctx, header, inputs, stateResult, gaps, openAlerts, nil)
+	return e.evaluateSeriesWith(ctx, header, inputs, stateResult, gaps, openAlerts, nil, nil)
 }
 
 // evaluateSeriesWith is evaluateSeries for a series whose alert identity
@@ -590,6 +590,7 @@ func (e *Evaluator) evaluateSeriesWith(
 	gaps execution.GapLoadResult,
 	openAlerts contract.OpenAlertSet,
 	hostOverlay map[string]json.RawMessage,
+	namedOutputs *execution.NamedOutputRecords,
 ) (execution.PlanEvaluationResult, error) {
 	if e == nil || len(inputs) == 0 {
 		return execution.PlanEvaluationResult{}, errors.New("alarmd evaluation: named inputs are required")
@@ -670,7 +671,7 @@ func (e *Evaluator) evaluateSeriesWith(
 	// result contract will, so the series' named inputs travel with the
 	// request rather than only its header.
 	legacy := execution.EvaluationRequest{Header: header, Inputs: inputs, State: stateResult, Gaps: gaps, OpenAlerts: openAlerts,
-		HostOverlay: hostOverlay}
+		HostOverlay: hostOverlay, NamedOutputs: namedOutputs}
 	result := execution.PlanEvaluationResult{Plan: due.Identity, Disposition: execution.PlanDecided, ReasonCode: observability.ReasonNone}
 	// What the loads decide, before anything is evaluated. A load that failed
 	// or is terminal settles the Plan's disposition on its own; the outcome

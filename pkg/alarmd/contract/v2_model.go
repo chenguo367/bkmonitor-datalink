@@ -1011,12 +1011,13 @@ type TriggerEventV1 struct {
 	// SignalType travels beside WireFormat and for the same reason: the sink
 	// has no Plan in hand. Empty means this build could not name it.
 	SignalType string `json:"-"`
-	// DetectionSnapshot is what the detection decided on, for the output to
-	// carry (extra_data.detection_snapshot): beside the event and not in
+	// DetectionSnapshot is what the detection decided on, encoded and held
+	// to its bounds (EncodeDetectionSnapshotV1), for the output to carry
+	// (extra_data.detection_snapshot): beside the event and not in
 	// it, so neither the event id nor its semantic digest moves with what is
 	// read beside the detection. Nil on the events of a strategy without
 	// named outputs.
-	DetectionSnapshot       *DetectionSnapshotV1 `json:"-"`
+	DetectionSnapshot       json.RawMessage      `json:"-"`
 	Schema                  Schema               `json:"schema"`
 	RequiredFeatures        []string             `json:"required_features"`
 	EventID                 string               `json:"event_id"`
