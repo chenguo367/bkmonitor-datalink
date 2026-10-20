@@ -1060,19 +1060,37 @@ type CauseScope struct {
 }
 
 // CauseOrigin is whose a row's cause reason is. Origin is physical (the
-// round met it itself) or carried (a stored guard's, repeated on this round);
-// Slot and Cause are where a carried guard came from, absent when it was
-// stamped by a build that did not record it.
+// round met it itself), carried (a stored guard's, repeated on this round)
+// or unknown (CauseOriginUnknown); Slot and Cause are where a carried guard
+// came from, absent when it was stamped by a build that did not record it.
 type CauseOrigin struct {
 	Origin string `json:"origin"`
 	Slot   int64  `json:"slot,omitempty"`
 	Cause  string `json:"cause,omitempty"`
 }
 
+// CauseOriginUnknown is the origin of a reason this process holds without
+// knowing whose it is: restored from a summary that never recorded it, or
+// published by a replica whose build did not. Never read as physical.
+const CauseOriginUnknown = "unknown"
+
+// unknownCauseOrigin is the origin a reason held without one carries.
+func unknownCauseOrigin() *CauseOrigin {
+	return &CauseOrigin{Origin: CauseOriginUnknown}
+}
+
+// settleCauseOrigin gives a row that has a reason and no origin the unknown
+// one, so an absent origin means only an absent reason.
+func settleCauseOrigin(anomaly *Anomaly) {
+	if anomaly.CauseReason != "" && anomaly.CauseOrigin == nil {
+		anomaly.CauseOrigin = unknownCauseOrigin()
+	}
+}
+
 // causeOriginOf is a round's cause origin as a row carries it; nil for a
-// round that named no cause reason.
-func causeOriginOf(cause, reason string, carried *observability.CarriedReasonFacts) *CauseOrigin {
-	if cause == "" || reason == "" {
+// round that named no reason.
+func causeOriginOf(reason string, carried *observability.CarriedReasonFacts) *CauseOrigin {
+	if reason == "" {
 		return nil
 	}
 	origin := &CauseOrigin{Origin: observability.ReasonOriginLabel(carried != nil)}
@@ -1488,12 +1506,14 @@ type Anomaly struct {
 	// and the Level for a Level's outcome or the physical query for the
 	// primary input. Nil when the cause named no place.
 	CauseScope *CauseScope `json:"cause_scope,omitempty"`
-	// CauseOrigin is whose CauseReason is: the round's own, or a stored
-	// guard's carried onto it. A LEVEL_OUTCOME_UNKNOWN round still counts
-	// as something wrong - the series really was not evaluated - but its
-	// QUERY_TIMEOUT may be one an earlier round raised, and the row says so.
-	// Nil when the round named no reason, or the row was restored and never
-	// learned it: unknown, never physical.
+	// CauseOrigin is whose CauseReason is: physical (the round's own),
+	// carried (a stored guard's carried onto it; Slot and Cause when the
+	// guard recorded them), or unknown (a row restored from a summary, or
+	// published by a build before this field, that never learned it). A
+	// LEVEL_OUTCOME_UNKNOWN round still counts as something wrong - the
+	// series really was not evaluated - but its QUERY_TIMEOUT may be one an
+	// earlier round raised, and the row says so. Present whenever
+	// CauseReason is; absent means only that the row has no reason.
 	CauseOrigin *CauseOrigin `json:"cause_origin,omitempty"`
 	// HeldBy is what held the latest round's Slot, on a row whose latest
 	// round gave the Slot up (GAP_SKIPPED): the completion's own word, the

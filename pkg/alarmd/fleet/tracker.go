@@ -1794,7 +1794,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		state.cause = observation.ProgressCompletionCause
 		state.causeReason = roundReason
 		state.causeScope = causeScopeOf(observation.ProgressCompletionScope)
-		state.causeOrigin = causeOriginOf(observation.ProgressCompletionCause, roundReason, observation.CarriedReason)
+		state.causeOrigin = causeOriginOf(roundReason, observation.CarriedReason)
 		// A round whose reading the observer refused carries no windows, and
 		// that is not the same as a round with no windows short. It holds
 		// every run counter below as it stands -- neither extending a run

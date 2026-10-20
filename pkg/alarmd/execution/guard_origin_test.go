@@ -62,6 +62,29 @@ func TestAReasonOriginLeavesTheStateMutationDigestAlone(t *testing.T) {
 	}
 }
 
+// A write whose Level state differs from the stored one only in the guard's
+// origin is decision-stable for the reuse reading: the origin decides
+// nothing, as it reaches no digest.
+func TestAWriteThatDiffersOnlyInOriginIsDecisionStable(t *testing.T) {
+	mutation, err := execution.BuildStateMutation(originFixtureMutation(execution.ReasonOrigin{Slot: 1_787_999_940, Cause: contract.ReasonQueryTimeout}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := mutation.Levels[0]
+	view := execution.RuntimeStateView{Identity: mutation.Identity, PersistedMutationDigest: "an-earlier-statement",
+		Levels: []execution.RuntimeLevelStateView{{LevelID: stored.LevelID, LevelStateCompatibility: stored.LevelStateCompatibility,
+			HistoryCompleteness: stored.HistoryCompleteness, GapReasonCode: stored.GapReasonCode,
+			WarmupRequirementRef: stored.WarmupRequirementRef, LastProcessedEventTime: stored.LastProcessedEventTime,
+			GapReasonOriginSlot: 1_787_999_880, GapReasonOriginCause: contract.ReasonGapSkipped}}}
+	if got := execution.ClassifyStateWriteReuse(view, mutation); got != execution.StateWriteReuseDecisionStable {
+		t.Fatalf("reuse = %s, want %s for a write differing only in origin", got, execution.StateWriteReuseDecisionStable)
+	}
+	view.Levels[0].GapReasonCode = contract.ReasonGapSkipped
+	if got := execution.ClassifyStateWriteReuse(view, mutation); got != execution.StateWriteReuseChanged {
+		t.Fatalf("reuse = %s, want %s when the reason itself differs", got, execution.StateWriteReuseChanged)
+	}
+}
+
 // An origin is whole or absent, and only on a Level that holds a guard.
 func TestAStateMutationRefusesAHalfOriginOrOneWithoutAGuard(t *testing.T) {
 	half := originFixtureMutation(execution.ReasonOrigin{})

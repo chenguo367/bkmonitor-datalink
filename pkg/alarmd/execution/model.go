@@ -1514,7 +1514,10 @@ func decisionStateChanged(view RuntimeStateView, mutation StateMutation) bool {
 		if !found || stored.LevelStateCompatibility != level.LevelStateCompatibility ||
 			stored.HistoryCompleteness != level.HistoryCompleteness || stored.GapReasonCode != level.GapReasonCode ||
 			stored.WarmupRequirementRef != level.WarmupRequirementRef ||
-			stored.LastProcessedEventTime != level.LastProcessedEventTime || stored.ReasonOrigin() != level.ReasonOrigin() {
+			stored.LastProcessedEventTime != level.LastProcessedEventTime {
+			// The guard's reason origin is not compared: it describes the
+			// guard and changes nothing a later round decides on, as the
+			// digest leaves it out (digestLevelState).
 			return true
 		}
 	}

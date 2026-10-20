@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategycache"
 )
 
@@ -460,6 +461,17 @@ type Summary struct {
 	// cause to carry a reason of either the coverage class or the retryable
 	// class, and those need opposite responses.
 	ByCauseReason Distribution `json:"by_cause_reason"`
+	// ByCauseReasonPhysical, ByCauseReasonCarried and ByCauseReasonUnknown
+	// split ByCauseReason by whose the reason is (Anomaly.CauseOrigin):
+	// physical for what the round met itself, carried for a stored guard's
+	// reason repeated on it (with or without a recorded origin), unknown for
+	// a row that never learned it - restored from a summary, or from a
+	// replica on an older build. Unknown is never counted as physical, so
+	// QUERY_TIMEOUT under physical is this deployment's own timeouts alone.
+	// The three add up to ByCauseReason.
+	ByCauseReasonPhysical Distribution `json:"by_cause_reason_physical"`
+	ByCauseReasonCarried  Distribution `json:"by_cause_reason_carried"`
+	ByCauseReasonUnknown  Distribution `json:"by_cause_reason_unknown"`
 	// ByBusiness is the unit someone can act on. The rows are objects, which are
 	// alarmd's own identities: an operator cannot look one up, cannot mention one
 	// to the person who configured the strategy, and cannot tell from a list of
@@ -596,6 +608,7 @@ func summarize(anomalies []Anomaly, at time.Time) Summary {
 	codes := map[string]int{}
 	details := map[string]int{}
 	causeReasons := map[string]int{}
+	physicalCauseReasons, carriedCauseReasons, unknownCauseReasons := map[string]int{}, map[string]int{}, map[string]int{}
 	businesses := map[string]int{}
 	strategies := map[StrategyRef]struct{}{}
 	replicas := map[string]int{}
@@ -690,6 +703,18 @@ func summarize(anomalies []Anomaly, at time.Time) Summary {
 		}
 		if anomaly.CauseReason != "" {
 			causeReasons[anomaly.CauseReason]++
+			origin := ""
+			if anomaly.CauseOrigin != nil {
+				origin = anomaly.CauseOrigin.Origin
+			}
+			switch origin {
+			case observability.ReasonOriginPhysical:
+				physicalCauseReasons[anomaly.CauseReason]++
+			case observability.ReasonOriginCarried:
+				carriedCauseReasons[anomaly.CauseReason]++
+			default:
+				unknownCauseReasons[anomaly.CauseReason]++
+			}
 		}
 		replicas[anomaly.Replica]++
 		// Counted per object, not per reference: one object naming the same
@@ -711,7 +736,9 @@ func summarize(anomalies []Anomaly, at time.Time) Summary {
 	return Summary{
 		ByKind: rank(kinds), ByReason: rank(reasons),
 		ByFailure: rank(failures), ByFailureCode: rank(codes), ByFailureDetail: rank(details), ByCauseReason: rank(causeReasons),
-		ByBusiness: rank(businesses), Strategies: len(strategies),
+		ByCauseReasonPhysical: rank(physicalCauseReasons), ByCauseReasonCarried: rank(carriedCauseReasons),
+		ByCauseReasonUnknown: rank(unknownCauseReasons),
+		ByBusiness:           rank(businesses), Strategies: len(strategies),
 		ByReplica: rank(replicas), Stalled: stalled, Onset: onset,
 		Ours: ours, External: external, Unattributed: unattributed,
 		OursUnclassified: oursUnclassified, WindowNeverFills: neverFills,

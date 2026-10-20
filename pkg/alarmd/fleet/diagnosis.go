@@ -102,8 +102,9 @@ type DiagnosisRow struct {
 	// reason for UNKNOWN, or the deciding row's own reason where it names
 	// one more precisely (cause_reason).
 	Reason string `json:"reason,omitempty"`
-	// ReasonOrigin is the deciding row's CauseOrigin when Reason is that
-	// row's cause reason: whether it was carried from a stored guard.
+	// ReasonOrigin is whose Reason is: the deciding row's CauseOrigin when
+	// Reason is that row's cause reason (physical, carried or unknown), and
+	// unknown for any other reason. Present whenever Reason is.
 	ReasonOrigin *CauseOrigin `json:"reason_origin,omitempty"`
 	Check        Check        `json:"check,omitempty"`
 	// Catalog is the strategy's standing in the publication answered from.
@@ -196,8 +197,29 @@ func newDiagnosisContext(view *View, replica string, now time.Time) diagnosisCon
 	return ctx
 }
 
-// diagnoseStrategy decides one row.
+// diagnoseStrategy decides one row. A row with a reason always says whose it
+// is: the deciding object's cause origin when the reason is that object's
+// cause reason, unknown for every other reason - a check word or an UNKNOWN
+// verdict's reason is this process's own judgement, not a reason any round
+// met or carried - so an absent reason_origin means only an absent reason.
 func diagnoseStrategy(id string, facts StrategyLookupFacts, ctx diagnosisContext) DiagnosisRow {
+	row := diagnoseStrategyRow(id, facts, ctx)
+	settleReasonOrigin(&row)
+	return row
+}
+
+// settleReasonOrigin holds the rule: a reason has an origin, no reason has
+// none.
+func settleReasonOrigin(row *DiagnosisRow) {
+	switch {
+	case row.Reason == "":
+		row.ReasonOrigin = nil
+	case row.ReasonOrigin == nil:
+		row.ReasonOrigin = unknownCauseOrigin()
+	}
+}
+
+func diagnoseStrategyRow(id string, facts StrategyLookupFacts, ctx diagnosisContext) DiagnosisRow {
 	row := DiagnosisRow{StrategyID: id, Plans: []DiagnosisPlan{}}
 	if !facts.Available {
 		row.Verdict, row.Reason = DiagnosisUnknown, UnknownLookupUnavailable
@@ -289,6 +311,7 @@ func diagnoseStrategy(id string, facts StrategyLookupFacts, ctx diagnosisContext
 		row.Verdict, row.Action, row.Check = bestWords.State, bestWords.Action, bestWords.Check
 		row.Reason, row.DecidingObject = string(bestWords.Check), best.QueryGroup
 		if best.CauseReason != "" {
+			settleCauseOrigin(&best)
 			row.Reason, row.ReasonOrigin = best.CauseReason, best.CauseOrigin
 		}
 		if !best.LastHealthyAt.IsZero() {

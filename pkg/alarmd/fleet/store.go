@@ -530,6 +530,11 @@ func (store *RedisStore) loadEach(ctx context.Context, replicas []string, admitt
 			decodeErr = fmt.Errorf("alarmd fleet: snapshot for %s reports replica %q", replicas[index], snapshot.Replica)
 			return decodeErr
 		}
+		// A replica on a build before cause_origin publishes reasons without
+		// one: unknown, not physical.
+		for row := range snapshot.Anomalies {
+			settleCauseOrigin(&snapshot.Anomalies[row])
+		}
 		keep(snapshot)
 		loaded++
 		return nil
