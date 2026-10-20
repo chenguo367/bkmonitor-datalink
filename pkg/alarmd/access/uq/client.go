@@ -169,8 +169,9 @@ func (client *Client) Execute(ctx context.Context, attempt execution.QueryAttemp
 	return client.execute(callerCtx, ctx, queryIdentity{Spec: attempt.Spec, AttemptNo: attempt.AttemptNo,
 		// Ordinary Slot reads negotiate the shared format by default. The
 		// same response may still be legacy JSON; other entry points do not
-		// negotiate, nor do PromQL and polling Execute queries.
-		SharedSchema: attempt.Spec.PlanFacts.PromQL == nil &&
+		// negotiate, nor do PromQL and polling Execute queries, nor a query
+		// asking for named outputs, whose answer has its own JSON shape.
+		SharedSchema: attempt.Spec.PlanFacts.PromQL == nil && attempt.Spec.PlanFacts.NamedOutputs == nil &&
 			attempt.Spec.PlanFacts.Normalization.Version != "uq-polling-normalization-v1",
 		Budget: queryBudget{StartUnixMilli: attempt.BudgetStartUnixMilli, ReadyAtUnixMilli: attempt.ReadyAtUnixMilli,
 			DeadlineUnixMilli: attempt.DeadlineUnixMilli},
@@ -247,7 +248,15 @@ func buildWireRequestCarrying(spec execution.PhysicalQuerySpec, carryApp bool) (
 		// promql strategy over them read as "no data" on every round, and the
 		// backend (which pops bk_biz_ids out of the body before sending) saw
 		// the data the whole time.
-		payload = map[string]any{"promql": query.Expression, "match": query.Match, "start": body.StartTime, "end": body.EndTime, "step": body.Step, "timezone": body.Timezone}
+		promQL := map[string]any{"promql": query.Expression, "match": query.Match, "start": body.StartTime, "end": body.EndTime, "step": body.Step, "timezone": body.Timezone}
+		// The PromQL path takes the same three fields; the top-level promql
+		// stays the legacy output, which a provider that ignores them still
+		// answers alone.
+		if body.ResponseContract != "" {
+			promQL["response_contract"], promQL["legacy_output_ref"], promQL["output_list"] =
+				body.ResponseContract, body.LegacyOutputRef, body.OutputList
+		}
+		payload = promQL
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
@@ -617,11 +626,21 @@ func buildRequestCarrying(spec execution.PhysicalQuerySpec, carryApp bool) (requ
 			KeepColumns: append([]string(nil), source.KeepColumns...), QueryString: source.QueryString,
 		})
 	}
-	return request{TSDBMap: spec.PlanFacts.TSDBMap, QueryList: queries, MetricMerge: spec.PlanFacts.MetricMerge,
+	body := request{TSDBMap: spec.PlanFacts.TSDBMap, QueryList: queries, MetricMerge: spec.PlanFacts.MetricMerge,
 		StartTime: strconv.FormatInt(spec.ProviderRange.Start, 10), EndTime: strconv.FormatInt(spec.ProviderRange.End, 10),
 		Step: durationString(spec.PlanFacts.StepMillis), SpaceUID: bodySpace(spec.PlanFacts),
 		DownSampleRange: string(spec.PlanFacts.DownSampleRange), Timezone: spec.PlanFacts.Timezone,
-		NotTimeAlign: spec.PlanFacts.NotTimeAlign}, nil
+		NotTimeAlign: spec.PlanFacts.NotTimeAlign}
+	if outputs := spec.PlanFacts.NamedOutputs; outputs != nil {
+		// metric_merge stays: the provider requires it, and compares the
+		// legacy output's expression to it.
+		body.ResponseContract, body.LegacyOutputRef = execution.NamedOutputsContract, outputs.LegacyRef
+		body.OutputList = make([]outputListEntry, 0, len(outputs.Outputs))
+		for _, output := range outputs.Outputs {
+			body.OutputList = append(body.OutputList, outputListEntry{ReferenceName: output.Ref, Expression: output.Expression})
+		}
+	}
+	return body, nil
 }
 
 func mapConditions(source execution.QueryConditions) (conditions, error) {
