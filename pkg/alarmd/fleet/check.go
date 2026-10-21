@@ -390,15 +390,16 @@ var checkAnswers = map[Check]struct {
 	CheckLatePastRound:      {OwnerStrategy, GroupByStrategy},
 	// The data's: its late tail is past what a supplement reaches.
 	CheckLateSeriesMissed: {OwnerData, GroupByStrategy},
-	// The strategy's: the backend read the query and rejected it - a
-	// condition value its storage refuses, an expression it cannot parse -
-	// and the platform's own detector is refused the same way. The owner
-	// rests on the cases checked on 2026-09-29: five refused queries, each
-	// compared with the platform detector's request for the same strategy,
-	// all five refused there too (four condition values opening with control
-	// characters, one expression that did not parse). Folded by the stage
-	// and class the refusal was blocked at.
-	CheckQueryRefused: {OwnerStrategy, GroupByBlocked},
+	// The query provider answered and refused, without naming a missing
+	// table or field. Its status alone does not say whose that is: a
+	// condition value its storage refuses is the strategy's input, a backend
+	// fault the provider reports the same way (a bkbase result=false answers
+	// 400 as well) is the provider's, and the evidence does not decide
+	// between them -- the same owner as the provider not answering
+	// (BACKEND_NOT_ANSWERING). The row keeps the provider's excerpt and trace
+	// id to read the refusal by. Folded by the stage and class the refusal
+	// was blocked at.
+	CheckQueryRefused: {OwnerUndetermined, GroupByBlocked},
 
 	CheckWindowUndecided:  {OwnerUndetermined, GroupByCause},
 	CheckConfigUnresolved: {OwnerUndetermined, GroupByStrategy},
@@ -444,6 +445,7 @@ var checkOrder = []Check{
 	CheckWindowUndecided,
 	CheckConfigUnresolved,
 	CheckBackendNotAnswering,
+	CheckQueryRefused,
 	CheckSeriesDataMissing,
 	CheckNoDataPersistent,
 	CheckSeriesSparse,
@@ -453,7 +455,6 @@ var checkOrder = []Check{
 	CheckSeriesChurning,
 	CheckPlanUnevaluable,
 	CheckQueryTargetMissing,
-	CheckQueryRefused,
 	CheckConfigRejected,
 	// Below the lines that stop detection, above the one that only warns:
 	// this one detects, from data read before it was all there.
