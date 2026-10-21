@@ -24,8 +24,10 @@ type ReadHoldFacts struct {
 	TransitionMillis int64 `json:"transition_ms,omitempty"`
 	ArrivalAgeMillis int64 `json:"arrival_age_ms"`
 	LimitMillis      int64 `json:"limit_ms"`
-	// AtLimit says the group is held at its limit now (readhold
-	// Record.HeldAtLimit): false once trials lower the hold below it.
+	// AtLimit says the group is held at its limit with its data still
+	// landing past it (readhold Record.AtLimitHeld): false once it has been
+	// quiet for its bar and is tried lower, and once trials lower the hold
+	// below the limit.
 	AtLimit             bool   `json:"at_limit"`
 	RaisedAfterLowering uint64 `json:"raised_after_lowering"`
 	// NoWholeWindowArrival is the samples classed window read early in

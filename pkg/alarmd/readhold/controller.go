@@ -475,6 +475,16 @@ func nextCandidate(record Record, step time.Duration, now int64) (int64, bool) {
 // still landing past the limit is read early again within the bar, which
 // starts its quiet over: it is never tried while it does.
 func atLimitHeld(record Record, now int64) bool {
+	return record.AtLimitHeld(now)
+}
+
+// AtLimitHeld says the record is held at its limit with its data still
+// landing past it at now, Unix milliseconds: held at the limit
+// (HeldAtLimit) and read early within its quiet bar since. A group held at
+// its limit whose data has been quiet for its bar is being tried lower and
+// is not one; every reading of "its data lands past the limit" - the trial
+// gate, a round read at the limit, the strategy page - asks this.
+func (record Record) AtLimitHeld(now int64) bool {
 	if !record.HeldAtLimit() {
 		return false
 	}

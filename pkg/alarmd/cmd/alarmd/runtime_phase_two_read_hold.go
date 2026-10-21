@@ -767,15 +767,17 @@ func (holds *productionReadHolds) degradedHold(schedule execution.FrozenQueryGro
 }
 
 // roundReadAtLimit says the round of the Slot ref names was read at its
-// group's hold limit while the group's data was measured landing past it -
-// frozen with a hold at the limit its record keeps, the record's last
-// arrival reading wanting more - and counts it under the source the group
-// reads: one of lookback.Sources, other for a group whose source is not
-// known yet. The record is the group's now, not as the Slot was frozen: a
-// round read at the limit on the arrival that put it there.
+// group's hold limit while the group's data lands past it - frozen with a
+// hold at the limit its record keeps, the record held there with its data
+// still read early within its quiet bar (readhold.Record.AtLimitHeld) - and
+// counts it under the source the group reads: one of lookback.Sources,
+// other for a group whose source is not known yet. The record is the
+// group's now, not as the Slot was frozen: the first round after a raise
+// is read at the limit on the arrival that raised it, and a group quiet
+// past its bar is being tried lower, not read at the limit.
 func (holds *productionReadHolds) roundReadAtLimit(ref execution.FrozenExecutionContractRef) bool {
 	record, known := holds.controller.Reading(ref.Slot.QueryGroup)
-	if !known || !record.AtLimit || record.LimitMillis <= 0 || ref.ReadHoldMillis < record.LimitMillis {
+	if !known || ref.ReadHoldMillis < record.LimitMillis || !record.AtLimitHeld(holds.now().UnixMilli()) {
 		return false
 	}
 	holds.mu.Lock()

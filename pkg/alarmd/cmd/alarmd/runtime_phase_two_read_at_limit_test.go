@@ -64,17 +64,25 @@ func TestARoundReadAtTheHoldLimitSaysSoAndIsCounted(t *testing.T) {
 }
 
 // A round is read at the limit only when both say so: the Slot frozen with a
-// hold at the limit its group's record keeps, and the record's last arrival
-// wanting more than it. A Slot frozen under the limit before the group was
-// raised to it, and one at the limit whose data lands within it, are not;
-// a group whose source is not known yet is counted under other.
+// hold at the limit its group's record keeps, and the record held there with
+// its data still landing past it - read early within its quiet bar. A Slot
+// frozen under the limit before the group was raised to it, one at the limit
+// whose data lands within it, and one of a group quiet past its bar - being
+// tried lower - are not, and the strategy page reads the last two as held,
+// not at the limit; a group whose source is not known yet is counted under
+// other.
 func TestARoundIsReadAtTheLimitOnlyWhenItsHoldAndItsDataBothSaySo(t *testing.T) {
 	h, c, at := runtimeTestHolds(t)
+	// Two hours on, so a quiet started at the fixture's start is a real one.
+	started := *at
+	*at = at.Add(2 * time.Hour)
 	records := map[execution.QueryGroupIdentity]readhold.Record{
-		"limited": {SinceSlot: 1, HoldMillis: 600000, AtLimit: true, LimitMillis: 600000},
-		"within":  {SinceSlot: 1, HoldMillis: 600000, LimitMillis: 600000},
+		"limited": {SinceSlot: 1, HoldMillis: 600000, AtLimit: true, LimitMillis: 600000, QuietSinceMillis: at.UnixMilli()},
+		"within":  {SinceSlot: 1, HoldMillis: 600000, LimitMillis: 600000, QuietSinceMillis: at.UnixMilli()},
+		"quiet": {SinceSlot: 1, HoldMillis: 600000, AtLimit: true, LimitMillis: 600000,
+			QuietSinceMillis: started.UnixMilli()},
 	}
-	groups := []execution.QueryGroupIdentity{"limited", "within"}
+	groups := []execution.QueryGroupIdentity{"limited", "within", "quiet"}
 	for qg, record := range records {
 		raw, _ := json.Marshal(record)
 		c.values[qg] = raw
@@ -96,6 +104,7 @@ func TestARoundIsReadAtTheLimitOnlyWhenItsHoldAndItsDataBothSaySo(t *testing.T) 
 		{"frozen at the limit, data past it", ref("limited", 600000), true},
 		{"frozen under the limit before the raise", ref("limited", 300000), false},
 		{"at the limit, data within it", ref("within", 600000), false},
+		{"at the limit, quiet past its bar", ref("quiet", 600000), false},
 		{"no record", ref("unknown", 600000), false},
 	} {
 		if got := h.roundReadAtLimit(test.ref); got != test.want {
@@ -104,5 +113,11 @@ func TestARoundIsReadAtTheLimitOnlyWhenItsHoldAndItsDataBothSaySo(t *testing.T) 
 	}
 	if got := h.readAtLimit; len(got) != 1 || got[lookback.SourceOther] != 1 {
 		t.Fatalf("counted %v, want the one round under other, its source not known yet", got)
+	}
+	facts := h.fleetFacts()
+	for qg, want := range map[string]bool{"limited": true, "within": false, "quiet": false} {
+		if facts[qg].AtLimit != want {
+			t.Errorf("the page reads %s at the limit %t, want %t", qg, facts[qg].AtLimit, want)
+		}
 	}
 }

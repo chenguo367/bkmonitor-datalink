@@ -93,8 +93,10 @@ func newLookbackCollector() *lookbackCollector {
 				"record_corrupt, record_unreadable; and the links it skipped: self_link, invalid_link, expired.", "reason"),
 		roundsReadAtLimit: desc("rounds_read_at_limit_total",
 			"Decided rounds (normal and retry) read at their Query Group's read hold limit while the group's data "+
-				"was measured landing past it, by the source the group reads (other while it is not known yet): "+
-				"each round was decided before all of its data was there, and the hold waits no longer. Every "+
+				"lands past it, by the source the group reads (other while it is not known yet): each round was "+
+				"decided before all of its data was there, and the hold waits no longer. A round is judged on its "+
+				"group's record as it completes: the first round after a raise to the limit is marked on the "+
+				"arrival that raised it, and a group quiet for its bar is tried lower and no longer counted. Every "+
 				"such round's slot_completed line carries read_at_limit; the group's row on the strategy page "+
 				"names the arrival age, the limit and the time_delay that would read it whole. Every source "+
 				"exists from the start.", "source"),
