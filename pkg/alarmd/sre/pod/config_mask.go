@@ -150,10 +150,23 @@ func (m *configMasker) leaf(name, text string) string {
 	if text == "" {
 		return text
 	}
+	if referencePath(name, text) {
+		return text
+	}
 	if configKey.MatchString(name) || !plainValue(text) {
 		return m.mask(text)
 	}
 	return text
+}
+
+// referencePath says a value is a credential reference: a name ending in
+// _file (password_file, admin_key_file) whose value is an absolute path.
+// The path says where a credential is mounted, not what it is, and showing
+// it is how a wrongly mounted key is diagnosed; so it is shown although the
+// name reads like a credential. A value that is not a plain absolute path
+// is masked as any other.
+func referencePath(name, text string) bool {
+	return strings.HasSuffix(strings.ToLower(name), "_file") && strings.HasPrefix(text, "/") && plainValue(text)
 }
 
 // value is one ConfigMap value under its key, as it may be shown.
