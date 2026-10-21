@@ -1017,7 +1017,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"PENDING ::", "待确认后端拒绝了 1 个对象的查询"},
 		{"PENDING ::", "读后端原话之前不交给策略负责人"},
 		{"PENDING ::", "证据：分组的后端回答：状态码、拒绝类别与后端 trace_id（行上\"最近一次错误\"带类别与 trace_id；遮蔽后的后端原文片段只留在持有该组的副本上，经 OB 通道的 strategy.get 读，不上公开页面）"},
-		{"PENDING ::", "按行上的拒绝类别与后端 trace_id 读后端的原话：是条件值、表达式这类请求的问题，转策略负责人改；是后端自己的错误，找查询服务"},
+		{"PENDING ::", "按行上的拒绝类别与后端 trace_id 读后端的原话：原话片段只在持有该组的副本上，经 OB 通道（alarmd-cli）对行上那个副本调 strategy.get 读，或拿 trace_id 查查询服务自己的日志与调用链；是条件值、表达式这类请求的问题，转策略负责人改；是后端自己的错误，找查询服务"},
 		// The timeout and the short old-series window are not the data side's
 		// until the query path and the fetch are ruled out: both are here, not
 		// under governance.
