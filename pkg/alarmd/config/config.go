@@ -72,6 +72,9 @@ type CLIConfig struct {
 	EnvironmentName string `yaml:"environment_name"`
 	PublicBaseURL   string `yaml:"public_base_url"`
 	AdminKey        string `yaml:"admin_key" json:"-"`
+	// AdminKeyFile names a file holding AdminKey (resolveCredentials),
+	// cleared once read.
+	AdminKeyFile string `yaml:"admin_key_file" json:"-"`
 	// AdminKeySecret says where the deployment keeps AdminKey, so that the
 	// login page can show the one command that reads it. It is never read
 	// from the file; see resolveAdminKeySecret.
@@ -796,7 +799,14 @@ func splitUnknownKeys(err error) ([]string, error) {
 
 // LoadWithRoles applies a CLI selection before validating dependencies. A nil
 // override keeps the file's selection; a non-nil empty override is refused.
+// It reads the credential references the selected roles use.
 func LoadWithRoles(path string, override roles.Set) (Config, error) {
+	return LoadWithCredentials(path, override, CredentialsForRoles)
+}
+
+// LoadWithCredentials is LoadWithRoles with the treatment of credential
+// references stated: see CredentialMode.
+func LoadWithCredentials(path string, override roles.Set, credentials CredentialMode) (Config, error) {
 	cfg := Default().WithContainerCapacity()
 	if path == "" {
 		if override != nil {
@@ -838,6 +848,10 @@ func LoadWithRoles(path string, override roles.Set) (Config, error) {
 		return Config{}, err
 	}
 	cfg.Roles = selected
+	// Before anything copies a connection: see resolveCredentials.
+	if err := cfg.resolveCredentials(credentials); err != nil {
+		return Config{}, err
+	}
 	cfg.resolvePlatformCacheRedis()
 	cfg.resolveCompatibilityServiceTimeouts()
 	cfg.resolveCompatibilityPodCache()
@@ -845,15 +859,9 @@ func LoadWithRoles(path string, override roles.Set) (Config, error) {
 		return Config{}, err
 	}
 	cfg.resolvePhaseTwoWorkerIDFromEnvironment()
-	if cfg.HasRole(roles.Control) || cfg.HasRole(roles.Worker) {
-		if err := cfg.PhaseTwo.Linkd.resolveCredentialsFromEnvironment(); err != nil {
-			return Config{}, err
-		}
-	}
 	if cfg.HasRole(roles.Channel) {
-		if err := cfg.CLI.resolveAdminKeyFromEnvironment(); err != nil {
-			return Config{}, err
-		}
+		// Where the key is kept, for the login page; a pointer beside the
+		// key's one source, not a source of its own.
 		cfg.CLI.resolveAdminKeySecret()
 	}
 	if err := cfg.Validate(); err != nil {

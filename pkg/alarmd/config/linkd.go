@@ -29,6 +29,10 @@ type LinkdConfig struct {
 	ConsoleURL string `yaml:"console_url"`
 	Username   string `yaml:"username"`
 	Password   string `yaml:"password"`
+	// UsernameFile and PasswordFile name files holding the credentials
+	// (resolveCredentials), cleared once read.
+	UsernameFile string `yaml:"username_file"`
+	PasswordFile string `yaml:"password_file"`
 }
 
 // LinkdCalibrationInterval is how often the copy calibrates against the
