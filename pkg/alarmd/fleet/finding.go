@@ -432,6 +432,10 @@ func refusalCheck(failure *FailureRef) Check {
 	return CheckQueryRefused
 }
 
+// refusalNamesMissingTarget is a substring rule over the provider's status
+// code. It stays until the provider offers a closed error code to read
+// instead: the state it names is a large, useful one, owned by the strategy
+// on the backend's own word that the table or field is not there.
 func refusalNamesMissingTarget(failure *FailureRef) bool {
 	if failure == nil {
 		return false

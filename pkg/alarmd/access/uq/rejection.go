@@ -148,6 +148,8 @@ func bodyTraceID(body []byte) string {
 // rejectionClass names what a refusal was about from words the provider's
 // storages answer with, HTTP_<status> when it names none of them. A bounded
 // word, so it can be a label and a log field; the body itself is not.
+// It stays a log-only diagnostic: nothing decides a reason, check or owner
+// on it, and attribution reads the status alone.
 func rejectionClass(status int, body []byte) string {
 	text := bytes.ToLower(body)
 	switch {
