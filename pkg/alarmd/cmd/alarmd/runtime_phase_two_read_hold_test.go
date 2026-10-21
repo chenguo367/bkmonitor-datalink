@@ -235,6 +235,40 @@ func TestARetireCloseFailureIsExportedWithTheReadHoldCounters(t *testing.T) {
 	}
 }
 
+// An earlier-read trial a group held at its limit does not run is exported
+// with the read hold's counters, by its reason, and every reason is exported
+// at zero before any is counted.
+func TestASkippedEarlierTrialIsExportedWithTheReadHoldCounters(t *testing.T) {
+	h, c, at := runtimeTestHolds(t)
+	h.links = map[string]uint64{}
+	engine, err := lookback.New(lookback.Options{Now: h.now,
+		Recheck: func(context.Context, execution.PhysicalQuerySpec, execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
+			return execution.ProviderCompletion{}, nil
+		},
+		Permit: func() (func(), <-chan struct{}, string) { return func() {}, nil, "" },
+		Owns:   func(execution.QueryGroupIdentity) bool { return true }, Owned: func() int { return 1 }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := productionLookbackStats(engine, h).ReadHoldEarlierSkipped; len(got) != len(readhold.EarlierSkipReasons) || got[readhold.EarlierSkipAtLimit] != 0 {
+		t.Fatalf("skipped trials before any %v, want every reason at zero", got)
+	}
+	limited, _ := json.Marshal(readhold.Record{SinceSlot: 1, HoldMillis: 600000, AtLimit: true, LimitMillis: 600000})
+	c.values["limited"] = limited
+	session, err := ownership.OpenSession(context.Background(), &fakePhaseTwoOwnershipStore{}, "limited", "worker", *at, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.bind("limited", session)
+	h.restore(context.Background(), []execution.QueryGroupIdentity{"limited"})
+	if hold, ok := h.controller.EarlierCandidate("limited"); ok {
+		t.Fatalf("a group held at its limit offered a %v trial", hold)
+	}
+	if got := productionLookbackStats(engine, h).ReadHoldEarlierSkipped; got[readhold.EarlierSkipAtLimit] != 1 {
+		t.Fatalf("skipped trials %v, want one at_limit", got)
+	}
+}
+
 // The read hold counts by source are the group page's own facts: a corrupt
 // or unseeded record is a hold not yet known, a known one is counted held
 // when more than none and at its limit when marked so, and the largest

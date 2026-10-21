@@ -197,6 +197,10 @@ type Stats struct {
 	// ReadHoldQueryDurationWrites is the read-hold records written for the
 	// query duration they keep for a successor: changed or refreshed.
 	ReadHoldQueryDurationWrites map[string]uint64 `json:"read_hold_query_duration_writes,omitempty"`
+	// ReadHoldEarlierSkipped is the earlier-read trials not run, by why:
+	// at_limit, a group held at its limit, whose data arrives past the
+	// longest hold it may have.
+	ReadHoldEarlierSkipped map[string]uint64 `json:"read_hold_earlier_skipped,omitempty"`
 	// ReadHoldClamped is the Slots frozen at the hold limit because a
 	// transition asked for more: known or fallback.
 	ReadHoldClamped map[string]uint64 `json:"read_hold_transition_clamped,omitempty"`

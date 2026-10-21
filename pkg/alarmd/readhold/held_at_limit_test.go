@@ -9,43 +9,28 @@ import (
 	"context"
 	"testing"
 	"time"
-
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
-// A group held at its limit and then lowered by trials, with no arrival read
-// since, is no longer at its limit: the arrival that wanted more than the
-// limit is still on the record, and the hold is not.
-func TestAHoldLoweredBelowItsLimitIsNotHeldAtIt(t *testing.T) {
-	c, _, now := controllerFixture(t)
-	spec := groupSpec("qg", 0)
-	spec.HoldLimit = 10 * time.Minute
-	prepare(t, c, spec)
-	observeEarly(t, c, "qg", 15*time.Minute+spec.SettlingWait, 0)
-	ctx := context.Background()
-	first := execution.EvaluationTime(120)
-	if _, err := c.SlotReadHold(ctx, scheduleFor(t, "qg", 60, nil), first, holdFence("qg")); err != nil {
-		t.Fatal(err)
-	}
-	if record, _ := c.Reading("qg"); !record.AtLimit || !record.HeldAtLimit() || c.ReadHold("qg") != 10*time.Minute {
-		t.Fatalf("fixture: record %+v hold %v, want held at the 10 minute limit", record, c.ReadHold("qg"))
-	}
-	*now = now.Add(time.Hour)
-	for index := range EarlierMatchesRequired {
-		if err := c.EarlierRead(ctx, EarlierEvidence{Contract: holdContract("qg", first+execution.EvaluationTime(index), 600_000),
-			CandidateHold: 5 * time.Minute, Observed: true, Equal: true}); err != nil {
-			t.Fatal(err)
+// A record says held at its limit only while its hold is at the limit: the
+// flag says the last arrival wanted more than the limit, and a hold under
+// the limit - one an earlier build lowered by trials, before trials at the
+// limit were refused - is not held at it.
+func TestAHoldUnderItsLimitIsNotHeldAtIt(t *testing.T) {
+	pending := int64(600_000)
+	for _, test := range []struct {
+		name   string
+		record Record
+		want   bool
+	}{
+		{"at the limit", Record{AtLimit: true, LimitMillis: 600_000, HoldMillis: 600_000}, true},
+		{"pending at the limit", Record{AtLimit: true, LimitMillis: 600_000, HoldMillis: 300_000, PendingHoldMillis: &pending}, true},
+		{"lowered under the limit", Record{AtLimit: true, LimitMillis: 600_000, HoldMillis: 300_000}, false},
+		{"no limit recorded", Record{AtLimit: true, HoldMillis: 600_000}, false},
+		{"not flagged", Record{LimitMillis: 600_000, HoldMillis: 600_000}, false},
+	} {
+		if got := test.record.HeldAtLimit(); got != test.want {
+			t.Errorf("%s: held at limit %t, want %t (record %+v)", test.name, got, test.want, test.record)
 		}
-	}
-	record, _ := c.Reading("qg")
-	if c.ReadHold("qg") != 5*time.Minute {
-		t.Fatalf("fixture: lowered to %v, want 5 minutes", c.ReadHold("qg"))
-	}
-	if !record.AtLimit {
-		t.Fatal("fixture: the lowering rewrote the arrival reading; this test no longer covers a stale flag")
-	}
-	if record.HeldAtLimit() {
-		t.Fatalf("a hold lowered to 5 minutes under a 10 minute limit reads held at its limit: %+v", record)
 	}
 }
 

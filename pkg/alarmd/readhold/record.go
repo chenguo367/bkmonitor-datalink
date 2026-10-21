@@ -44,12 +44,21 @@ type Record struct {
 	// not measured its own (SeedPeer, SeedColdStart); empty once it has. A
 	// seeded age is where reading starts, not a measurement, and nothing
 	// that advises on a measured one reads it.
-	ArrivalAgeSeed         string                   `json:"arrival_age_seed,omitempty"`
-	LastEarlyMillis        int64                    `json:"last_early_ms,omitempty"`
-	MaxEarlyIntervalMillis int64                    `json:"max_early_interval_ms,omitempty"`
-	QuietSinceMillis       int64                    `json:"quiet_since_ms,omitempty"`
-	EarlierMatches         int                      `json:"earlier_matches,omitempty"`
-	LastEarlierSlot        execution.EvaluationTime `json:"last_earlier_slot,omitempty"`
+	ArrivalAgeSeed  string `json:"arrival_age_seed,omitempty"`
+	LastEarlyMillis int64  `json:"last_early_ms,omitempty"`
+	// MaxEarlyIntervalMillis is the longest gap between two read-early
+	// arrivals a build before EarlyGaps kept, over the record's whole life.
+	// It is read once, into EarlyGaps (earlyGapsOf), and written no more.
+	MaxEarlyIntervalMillis int64 `json:"max_early_interval_ms,omitempty"`
+	// EarlyGaps is the longest gap between two read-early arrivals that
+	// ended on each UTC day, for the days within RecordTTL: the quiet a
+	// lowering waits for is the longest of them (quietBar). A gap that ended
+	// longer ago than the record lives says nothing of how the data arrives
+	// now, so it ages out with the days instead of holding the bar forever.
+	EarlyGaps        []EarlyGap               `json:"early_gaps,omitempty"`
+	QuietSinceMillis int64                    `json:"quiet_since_ms,omitempty"`
+	EarlierMatches   int                      `json:"earlier_matches,omitempty"`
+	LastEarlierSlot  execution.EvaluationTime `json:"last_earlier_slot,omitempty"`
 	// EarlierFloorMillis is the largest candidate shown too early under the
 	// current hold (execution.CandidateReadHold), nil while none is; and
 	// EarlierDifferents the different trials in a row at the current
@@ -86,6 +95,13 @@ type Record struct {
 	QueryDurationAtMillis int64 `json:"query_duration_at_ms,omitempty"`
 }
 
+// EarlyGap is the longest gap between two read-early arrivals that ended on
+// one UTC day (Day, days since the Unix epoch).
+type EarlyGap struct {
+	Day    int64 `json:"day"`
+	Millis int64 `json:"ms"`
+}
+
 // ErrRecordInvalid is a record that does not decode or holds out of range.
 var ErrRecordInvalid = errors.New("alarmd readhold: invalid read hold record")
 
@@ -104,6 +120,14 @@ func Decode(raw []byte) (Record, error) {
 		record.EarlierMatches < 0 || record.EarlierMatches > EarlierMatchesRequired || !inRange(record.LimitMillis) ||
 		record.SegmentStart < 0 || record.QueryDurationMillis < 0 || record.QueryDurationAtMillis < 0 {
 		return Record{}, ErrRecordInvalid
+	}
+	if len(record.EarlyGaps) > earlyGapDays {
+		return Record{}, ErrRecordInvalid
+	}
+	for index, gap := range record.EarlyGaps {
+		if gap.Day < 0 || gap.Millis <= 0 || (index > 0 && gap.Day <= record.EarlyGaps[index-1].Day) {
+			return Record{}, ErrRecordInvalid
+		}
 	}
 	for _, plan := range record.Plans {
 		if plan.Key.PlanIdentity.Validate() != nil ||

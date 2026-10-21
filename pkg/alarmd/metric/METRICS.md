@@ -1467,6 +1467,12 @@ Labels: `reason`
 
 New Slots frozen with the hold their Query Group last read -- zero for a group without a record -- because its own could not be prepared or written, each freeze attempt once, by what failed: spec_unreadable, previous_unreadable, predecessors_unreadable, spec_rejected, close_failed, stale_segment, hold_failed, record_unreadable. No Slot is refused for it; the group learns nothing until its hold prepares again.
 
+## alarmd_read_hold_earlier_skipped_total
+
+Labels: `reason`
+
+Earlier-read trials not run, by why, one per Slot a trial would have been reserved for: at_limit (the group is held at its limit, so its data arrives past the longest hold it may have; a read below the hold and the formal read both come before the data, and their agreeing would say nothing of it). A group counted here keeps its hold at the limit, and its trials resume once an arrival reading wants a hold below the limit. Every reason exists from the start.
+
 ## alarmd_read_hold_groups
 
 Labels: `source`, `kind`

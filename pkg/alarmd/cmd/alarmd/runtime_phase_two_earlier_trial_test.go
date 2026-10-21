@@ -230,9 +230,6 @@ func TestAHoldPastThePeriodIsTriedFromThePreviousSlotAndComesDown(t *testing.T) 
 		// past its start too, and the trial two Slots ahead is reserved.
 		{"just past one Slot ahead", 118 * time.Second},
 		{"five periods", 300500 * time.Millisecond},
-		// Measured past the hold limit: the hold is the limit, the trial
-		// reserved as far ahead as the limit needs.
-		{"the hold limit", 700 * time.Second},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
@@ -262,18 +259,56 @@ func TestAHoldPastThePeriodIsTriedFromThePreviousSlotAndComesDown(t *testing.T) 
 			if skipped != 0 {
 				t.Fatalf("%d Slots skipped unevaluated as the hold came down from %v to %v", skipped, raised, lowest)
 			}
-			// At the limit the trials are reserved many Slots ahead; that alone
-			// skips nothing, the hold coming down a step per Slot.
-			if c.name == "the hold limit" {
-				deep := uint64(0)
-				for _, source := range f.bundle.dependencies.Lookback.Stats().Sources {
-					deep += source.EarlierAhead["4+"]
-				}
-				if deep == 0 {
-					t.Fatal("fixture: no trial reserved four or more Slots ahead at the hold limit")
-				}
-			}
 		})
+	}
+}
+
+// A group measured past its hold limit is held at the limit and tried no lower: its data arrives past the longest
+// hold it may have, so a trial and the formal read would both come before it. Each trial not run is counted
+// at_limit. Once an arrival is measured within the limit the trials resume - reserved as far ahead as a hold at
+// the limit needs - and the hold comes down a step per Slot, skipping none.
+func TestAHoldAtItsLimitIsTriedOnlyOnceAnArrivalIsMeasuredWithinIt(t *testing.T) {
+	t.Parallel()
+	f := startCutoverFixture(t, nil)
+	engine, holds := f.bundle.dependencies.Lookback, f.bundle.dependencies.ReadHolds
+	lowest, raised, outcomes, _, skipped := heldTrialRun(t, f, 700*time.Second, 20*time.Minute, false,
+		func(time.Duration, time.Duration, time.Duration, map[string]uint64) bool { return false })
+	record, _ := holds.controller.Reading(f.queryGroup)
+	if !record.HeldAtLimit() {
+		t.Fatalf("fixture: a 700 s arrival left the group not held at its limit: %+v", record)
+	}
+	tried := uint64(0)
+	for _, count := range outcomes {
+		tried += count
+	}
+	if lowest != raised || tried != 0 || skipped != 0 {
+		t.Fatalf("held at the limit: hold %v -> %v, trials %v, %d Slots skipped; want no trial and the hold kept", raised, lowest, outcomes, skipped)
+	}
+	if got := productionLookbackStats(engine, holds).ReadHoldEarlierSkipped[readhold.EarlierSkipAtLimit]; got == 0 {
+		t.Fatal("no trial counted skipped at the limit")
+	}
+	// An arrival within the limit: the hold is not raised by it, and is no longer held at the limit.
+	within := time.Duration(record.LimitMillis) * time.Millisecond
+	loweredAt := time.Duration(-1)
+	lowest, raised, outcomes, overtaken, skipped := heldTrialRun(t, f, within, 6*time.Hour, false,
+		func(elapsed, lowest, raised time.Duration, _ map[string]uint64) bool {
+			if lowest < raised && loweredAt < 0 {
+				loweredAt = elapsed
+			}
+			return loweredAt >= 0 && elapsed >= loweredAt+30*time.Minute
+		})
+	if outcomes[lookback.EarlierEqual] == 0 || lowest >= raised {
+		t.Fatalf("an arrival within the limit left the hold at %v -> %v: trials %v, overtaken by %v", raised, lowest, outcomes, overtaken)
+	}
+	if overtaken[lookback.OvertakenPreparedLate] != 0 || skipped != 0 {
+		t.Fatalf("%d trials prepared past their point, %d Slots skipped", overtaken[lookback.OvertakenPreparedLate], skipped)
+	}
+	deep := uint64(0)
+	for _, source := range engine.Stats().Sources {
+		deep += source.EarlierAhead["4+"]
+	}
+	if deep == 0 {
+		t.Fatal("fixture: no trial reserved four or more Slots ahead from the hold limit")
 	}
 }
 

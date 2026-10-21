@@ -109,7 +109,18 @@ type Stats struct {
 	// QueryDurationWrites is the records written for the query duration they
 	// keep, by why (QueryDurationWriteReasons).
 	QueryDurationWrites map[string]uint64
+	// EarlierSkipped is the earlier-read trials not run, by why
+	// (EarlierSkipReasons).
+	EarlierSkipped map[string]uint64
 }
+
+// Why an earlier-read trial was not run, closed. at_limit: the group is held
+// at its limit (Record.HeldAtLimit), so its data arrives past the longest
+// hold and a trial below it can show nothing about the hold.
+const EarlierSkipAtLimit = "at_limit"
+
+// EarlierSkipReasons is every reason a trial is not run.
+var EarlierSkipReasons = []string{EarlierSkipAtLimit}
 
 // Control uses the existing ownership store. A value and its Plan
 // evidence are one fenced CAS in the owning Query Group's Redis hash slot.
@@ -266,6 +277,9 @@ type Controller struct {
 	clamped      map[string]uint64
 	seeds        map[string]uint64
 	ownCorrupt   uint64
+	// earlierSkipped is the earlier-read trials not run, by why
+	// (EarlierSkipReasons).
+	earlierSkipped map[string]uint64
 	// durationWrites is the records written for a query duration, by why
 	// (QueryDurationWriteReasons).
 	durationWrites map[string]uint64
@@ -281,7 +295,7 @@ func NewController(options Options) (*Controller, error) {
 	}
 	return &Controller{options: options, groups: make(map[execution.QueryGroupIdentity]*entry),
 		predecessors: make(map[string]uint64), clamped: make(map[string]uint64), seeds: make(map[string]uint64),
-		durationWrites: make(map[string]uint64)}, nil
+		durationWrites: make(map[string]uint64), earlierSkipped: make(map[string]uint64)}, nil
 }
 
 // Stats copies the counts.
@@ -301,6 +315,10 @@ func (controller *Controller) Stats() Stats {
 		for origin, count := range controller.seeds {
 			stats.Seeds[origin] = count
 		}
+	}
+	stats.EarlierSkipped = make(map[string]uint64, len(EarlierSkipReasons))
+	for _, reason := range EarlierSkipReasons {
+		stats.EarlierSkipped[reason] = controller.earlierSkipped[reason]
 	}
 	stats.QueryDurationWrites = make(map[string]uint64, len(QueryDurationWriteReasons))
 	for _, reason := range QueryDurationWriteReasons {
@@ -432,6 +450,13 @@ func (controller *Controller) ReadHold(qg execution.QueryGroupIdentity) time.Dur
 // nextCandidate is the hold the next earlier-read trial of record tries
 // (execution.CandidateReadHold), in milliseconds, and false when none is.
 func nextCandidate(record Record, step time.Duration) (int64, bool) {
+	// A group held at its limit has data arriving past the longest hold it
+	// may have: the earlier read and the formal read both come before the
+	// data, so their agreeing says the two are equally incomplete, not that
+	// the data was there. No trial, and no evidence taken from one.
+	if record.HeldAtLimit() {
+		return 0, false
+	}
 	floor, floored := time.Duration(0), record.EarlierFloorMillis != nil
 	if floored {
 		floor = time.Duration(*record.EarlierFloorMillis) * time.Millisecond
@@ -453,6 +478,12 @@ func (controller *Controller) EarlierCandidate(qg execution.QueryGroupIdentity) 
 	state := controller.group(qg)
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	if state.record.HeldAtLimit() {
+		// Asked once per Slot the lookback would reserve a trial for: each
+		// is a trial not run, counted by why, so a group never lowered for
+		// this says so (EarlierSkipReasons).
+		controller.counted(controller.earlierSkipped, EarlierSkipAtLimit)
+	}
 	hold, ok := nextCandidate(state.record, state.spec.Step)
 	return time.Duration(hold) * time.Millisecond, ok
 }
@@ -569,6 +600,7 @@ func clone(record Record) Record {
 		record.EarlierFloorMillis = &floor
 	}
 	record.Buckets = append([]int64(nil), record.Buckets...)
+	record.EarlyGaps = append([]EarlyGap(nil), record.EarlyGaps...)
 	record.Plans = append([]PlanRecord(nil), record.Plans...)
 	record.Transitions = append([]Transition(nil), record.Transitions...)
 	return record
@@ -1196,8 +1228,9 @@ func (controller *Controller) Observe(ctx context.Context, evidence Evidence) er
 		next.Noise++
 	} else {
 		now := controller.options.Now().UnixMilli()
-		if next.LastEarlyMillis > 0 {
-			next.MaxEarlyIntervalMillis = max(next.MaxEarlyIntervalMillis, now-next.LastEarlyMillis)
+		if next.LastEarlyMillis > 0 && now > next.LastEarlyMillis {
+			next.EarlyGaps = withEarlyGap(earlyGapsOf(next), now, now-next.LastEarlyMillis)
+			next.MaxEarlyIntervalMillis = 0
 		}
 		next.LastEarlyMillis, next.QuietSinceMillis, next.EarlierMatches = now, now, 0
 		// The group's own arrival replaces a seed outright: the seed was
@@ -1286,10 +1319,7 @@ func (controller *Controller) EarlierRead(ctx context.Context, evidence EarlierE
 	} else {
 		next.EarlierDifferents = 0
 		next.EarlierMatches = min(next.EarlierMatches+1, EarlierMatchesRequired)
-		quiet := next.MaxEarlyIntervalMillis
-		if quiet == 0 {
-			quiet = SingleEventQuiet.Milliseconds()
-		}
+		quiet := quietBar(next, now)
 		if next.QuietSinceMillis > 0 && now-next.QuietSinceMillis >= quiet && next.EarlierMatches >= EarlierMatchesRequired {
 			next.LoweredFromMillis = hold
 			next.PendingHoldMillis = &candidate

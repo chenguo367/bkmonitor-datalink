@@ -521,6 +521,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["alarmd_read_hold_retire_close_failed_total"] = "variableLabels: {}"
 	expected["alarmd_read_hold_close_previous_skipped_total"] = "variableLabels: {}"
 	expected["alarmd_read_hold_degraded_total"] = "variableLabels: {reason}"
+	expected["alarmd_read_hold_earlier_skipped_total"] = "variableLabels: {reason}"
 	expected["alarmd_read_hold_groups"] = "variableLabels: {source,kind}"
 	expected["alarmd_read_hold_max_seconds"] = "variableLabels: {source}"
 	expected["alarmd_lookback_first_read_bytes_total"] = "variableLabels: {source}"
