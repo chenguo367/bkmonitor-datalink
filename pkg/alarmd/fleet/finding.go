@@ -183,6 +183,13 @@ func checkOnCounts(anomaly Anomaly, schedule Schedule) (check Check, under bool,
 		return CheckRetainedShareApproaching, true, false
 	case anomaly.Kind == KindReadBeforeComplete:
 		return CheckReadBeforeComplete, true, false
+	case anomaly.Kind == KindReadHeld && anomaly.ReadHold != nil && anomaly.ReadHold.AtLimit:
+		// Held at the limit, its data landing past it: the rounds are read
+		// before the data is all there, which is what READ_BEFORE_COMPLETE
+		// says - detecting, its results not to be taken as they stand, the
+		// time_delay the strategy owner's to move - and not READ_HELD, whose
+		// rounds read the data whole.
+		return CheckReadBeforeComplete, true, false
 	case anomaly.Kind == KindReadHeld:
 		return CheckReadHeld, true, false
 	case anomaly.Kind == KindLatePastRound:

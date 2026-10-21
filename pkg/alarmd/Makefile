@@ -25,13 +25,19 @@ verify:
 	$(GO) mod verify
 	$(GO) mod tidy -diff
 
+# cmd/alarmd is the longest package: about 9 minutes plain and 12 under
+# -race on a developer machine, past go test's 10 minute default. The
+# timeouts leave it twice that and more.
+TEST_TIMEOUT ?= 20m
+RACE_TIMEOUT ?= 30m
+
 .PHONY: test
 test:
-	$(GO) test -count=1 ./...
+	$(GO) test -count=1 -timeout $(TEST_TIMEOUT) ./...
 
 .PHONY: race
 race:
-	$(GO) test -race -count=1 ./...
+	$(GO) test -race -count=1 -timeout $(RACE_TIMEOUT) ./...
 
 .PHONY: lint
 lint:

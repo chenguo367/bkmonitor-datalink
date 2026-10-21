@@ -1619,6 +1619,12 @@ Query Groups the heartbeat's retained-peak census holds a reading for on this re
 
 Observations the retained-peak census dropped since the process started because it was full. Non-zero is a replica whose census no roster has pruned; read as a counter, published from the census's own count.
 
+## alarmd_rounds_read_at_limit_total
+
+Labels: `source`
+
+Decided rounds (normal and retry) read at their Query Group's read hold limit while the group's data was measured landing past it, by the source the group reads (other while it is not known yet): each round was decided before all of its data was there, and the hold waits no longer. Every such round's slot_completed line carries read_at_limit; the group's row on the strategy page names the arrival age, the limit and the time_delay that would read it whole. Every source exists from the start.
+
 ## alarmd_run_one_return_total
 
 Labels: `outcome`

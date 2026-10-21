@@ -201,6 +201,11 @@ type Stats struct {
 	// at_limit, a group held at its limit, whose data arrives past the
 	// longest hold it may have.
 	ReadHoldEarlierSkipped map[string]uint64 `json:"read_hold_earlier_skipped,omitempty"`
+	// RoundsReadAtLimit is the decided rounds read at their group's hold
+	// limit while its data was measured landing past it, by the source the
+	// group reads (Sources): each a round decided before its data was all
+	// there.
+	RoundsReadAtLimit map[string]uint64 `json:"rounds_read_at_limit,omitempty"`
 	// ReadHoldClamped is the Slots frozen at the hold limit because a
 	// transition asked for more: known or fallback.
 	ReadHoldClamped map[string]uint64 `json:"read_hold_transition_clamped,omitempty"`

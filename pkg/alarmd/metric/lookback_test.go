@@ -40,6 +40,7 @@ func lookbackSeriesUpperBounds() map[string]int {
 		"read_hold_close_previous_skipped_total":     1,
 		"read_hold_degraded_total":                   len(readhold.DegradedReasons),
 		"read_hold_earlier_skipped_total":            len(readhold.EarlierSkipReasons),
+		"rounds_read_at_limit_total":                 len(lookback.Sources),
 		"read_hold_groups":                           len(lookback.Sources) * 3,
 		"read_hold_max_seconds":                      len(lookback.Sources),
 		"lookback_first_reads_total":                 sources,
@@ -129,6 +130,7 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	stats.PermitRefusals[scheduler.LookbackRefusedWaiting] = 9
 	stats.Pending, stats.PendingBytes = 3, 4096
 	stats.ReadHoldEarlierSkipped = map[string]uint64{readhold.EarlierSkipAtLimit: 15}
+	stats.RoundsReadAtLimit = map[string]uint64{logs: 16}
 	stats.ReadHoldGroups = map[string]lookback.ReadHoldGroups{}
 	for _, source := range lookback.Sources {
 		stats.ReadHoldGroups[source] = lookback.ReadHoldGroups{Held: 1, MaxMillis: 2000, MaxKnown: true}
@@ -213,6 +215,9 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	}
 	if got := value("alarmd_read_hold_earlier_skipped_total", map[string]string{"reason": readhold.EarlierSkipAtLimit}); got != 15 {
 		t.Fatalf("trials skipped at the limit = %v, want 15", got)
+	}
+	if got := value("alarmd_rounds_read_at_limit_total", map[string]string{"source": logs}); got != 16 {
+		t.Fatalf("rounds read at the limit = %v, want 16", got)
 	}
 }
 

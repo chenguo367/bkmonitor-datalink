@@ -2859,6 +2859,7 @@ func (executor observedProductionSlotExecutor) Execute(
 		}
 	}
 	var shortCompletion *observability.ShortPeriodCompletionFacts
+	readAtLimit := false
 	if err == nil && result.Completed && result.CompletionKind != "" {
 		// Lag from when the Slot was to be read: its evaluation time, read
 		// hold later. A read hold is not lag; it is the wait the Slot chose.
@@ -2868,11 +2869,15 @@ func (executor observedProductionSlotExecutor) Execute(
 		// evaluate stage. A Slot booked without a decision lags by its
 		// booking, not its detection; a replay, a probe and a supplement are
 		// late by what they are and would read as the rounds running late.
-		if executor.decisionLag != nil && result.CompletionKind != execution.CompletionGapSkipped &&
-			result.CompletionKind != execution.CompletionSnapshotUnavailable &&
-			(request.Operation == execution.OperationNormal || request.Operation == execution.OperationRetry) {
+		decided := result.CompletionKind != execution.CompletionGapSkipped && result.CompletionKind != execution.CompletionSnapshotUnavailable &&
+			(request.Operation == execution.OperationNormal || request.Operation == execution.OperationRetry)
+		if executor.decisionLag != nil && decided {
 			executor.decisionLag(lag)
 		}
+		// A decided round read at its group's hold limit says so on its own
+		// completion, every round, and is counted: the hold stops at the
+		// limit, the data does not, and nothing else marks the round.
+		readAtLimit = decided && executor.readHolds != nil && executor.readHolds.roundReadAtLimit(request.Contract)
 		if observability.IsShortPeriodCohort(request.ShortPeriodCohort) {
 			shortCompletion = &observability.ShortPeriodCompletionFacts{Cohort: request.ShortPeriodCohort, CompletionKind: string(result.CompletionKind),
 				LagSeconds: lag.Seconds(), AttemptNo: request.AttemptNo}
@@ -2958,7 +2963,7 @@ func (executor observedProductionSlotExecutor) Execute(
 		Component: observability.ComponentScheduler, Stage: observability.StageSlotCompleted,
 		Operation: observability.Operation(request.Operation), ShortPeriodCompletion: shortCompletion,
 		AwaitingView: notExecutable != nil && notExecutable.AwaitingView, RetryingAfterFailure: retryingAfterFailure,
-		HeldBy: heldBy, GapApplySite: gapApplySite,
+		ReadAtLimit: readAtLimit, HeldBy: heldBy, GapApplySite: gapApplySite,
 		DivertDecision: lostRoundDecision(ctx, queryLossResult(observedResult, result), retryingAfterFailure, budget),
 		QueryBudget:    lostRoundBudget(queryLossResult(observedResult, result), retryingAfterFailure, budget),
 		// The completion the Slot reached, beside the reason it reports. They

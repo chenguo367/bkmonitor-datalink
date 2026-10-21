@@ -2606,6 +2606,12 @@ type Observation struct {
 	// off and retries it: the line is retrying, with the failure's reason and
 	// error, at WARN, not the Slot's end at ERROR.
 	RetryingAfterFailure bool
+	// ReadAtLimit says a Slot's round was read at its Query Group's read hold
+	// limit while the group's data was measured landing past it: the round
+	// was decided before all of its data was there, and nothing holds it
+	// longer. Set only on slot_completed, and a successful line that carries
+	// it is written, not counted as routine (readAtLimitRound).
+	ReadAtLimit          bool
 	ViewStream           *ViewStreamFacts
 	CursorAdvance        *CursorAdvanceFacts
 	SourceRefresh        *SourceRefreshFacts

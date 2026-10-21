@@ -76,6 +76,10 @@ type productionReadHolds struct {
 	// by what failed (readhold.DegradedReasons).
 	degradedMu sync.Mutex
 	degraded   map[string]uint64
+	// readAtLimit counts the rounds read at their group's hold limit, by
+	// the source the group reads (roundReadAtLimit).
+	readAtLimitMu sync.Mutex
+	readAtLimit   map[string]uint64
 }
 
 type productionReadHoldGroup struct {
@@ -760,6 +764,36 @@ func (holds *productionReadHolds) PeekSlotReadHold(schedule execution.FrozenQuer
 func (holds *productionReadHolds) degradedHold(schedule execution.FrozenQueryGroupSchedule, at execution.EvaluationTime) time.Duration {
 	limit := min(holds.holdLimit(schedule), time.Duration(execution.MaxReadHoldMillis)*time.Millisecond)
 	return min(holds.controller.ReadHoldAt(schedule.Segment.QueryGroup, at), limit)
+}
+
+// roundReadAtLimit says the round of the Slot ref names was read at its
+// group's hold limit while the group's data was measured landing past it -
+// frozen with a hold at the limit its record keeps, the record's last
+// arrival reading wanting more - and counts it under the source the group
+// reads: one of lookback.Sources, other for a group whose source is not
+// known yet. The record is the group's now, not as the Slot was frozen: a
+// round read at the limit on the arrival that put it there.
+func (holds *productionReadHolds) roundReadAtLimit(ref execution.FrozenExecutionContractRef) bool {
+	record, known := holds.controller.Reading(ref.Slot.QueryGroup)
+	if !known || !record.AtLimit || record.LimitMillis <= 0 || ref.ReadHoldMillis < record.LimitMillis {
+		return false
+	}
+	holds.mu.Lock()
+	source := ""
+	if group := holds.groups[ref.Slot.QueryGroup]; group != nil {
+		source = group.semantics
+	}
+	holds.mu.Unlock()
+	if !slices.Contains(lookback.Sources, source) {
+		source = lookback.SourceOther
+	}
+	holds.readAtLimitMu.Lock()
+	if holds.readAtLimit == nil {
+		holds.readAtLimit = make(map[string]uint64, len(lookback.Sources))
+	}
+	holds.readAtLimit[source]++
+	holds.readAtLimitMu.Unlock()
+	return true
 }
 
 // countDegraded counts one degraded Slot under its reason, and says so in

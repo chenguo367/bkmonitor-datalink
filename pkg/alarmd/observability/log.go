@@ -83,7 +83,7 @@ func (p *BoundedLogPolicy) ShouldLog(observation Observation) bool {
 // and not written, and how many earlier lines of the same bucket were merged
 // into a logged one.
 func (p *BoundedLogPolicy) Admit(observation Observation) LogAdmission {
-	if routineResult(observation.Result) && !evaluationHeldQuery(observation) {
+	if routineResult(observation.Result) && !evaluationHeldQuery(observation) && !readAtLimitRound(observation) {
 		switch {
 		case roundStages[observation.Stage] && roundChanged(observation):
 			return LogAdmission{Allowed: true, Candidate: true}
@@ -911,6 +911,9 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if observation.RetryingAfterFailure {
 		attributes = append(attributes, slog.Bool("retrying_after_failure", true))
 	}
+	if observation.ReadAtLimit {
+		attributes = append(attributes, slog.Bool("read_at_limit", true))
+	}
 	if facts := observation.ExecutionHung; facts != nil {
 		attributes = append(attributes,
 			slog.String("hung_outcome", facts.Outcome),
@@ -1318,6 +1321,16 @@ func mandatoryLogStage(stage Stage) bool {
 	default:
 		return false
 	}
+}
+
+// readAtLimitRound is the slot_completed line of a round read at its read
+// hold limit (Observation.ReadAtLimit, set on no other line). Its result is
+// success and it is not routine: the round was decided before its data was
+// all there, and this line is what says so of the round itself. Written
+// under the repeated-line limit of its Query Group, which merges the rounds
+// it holds back into the next line it writes.
+func readAtLimitRound(observation Observation) bool {
+	return observation.ReadAtLimit
 }
 
 func repeatedLogObservation(observation Observation) bool {

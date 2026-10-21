@@ -147,6 +147,12 @@ func productionLookbackStats(engine *lookback.Engine, holds *productionReadHolds
 		for _, reason := range readhold.EarlierSkipReasons {
 			stats.ReadHoldEarlierSkipped[reason] = controller.EarlierSkipped[reason]
 		}
+		stats.RoundsReadAtLimit = make(map[string]uint64, len(lookback.Sources))
+		holds.readAtLimitMu.Lock()
+		for _, source := range lookback.Sources {
+			stats.RoundsReadAtLimit[source] = holds.readAtLimit[source]
+		}
+		holds.readAtLimitMu.Unlock()
 		stats.ReadHoldQueryDurationWrites = make(map[string]uint64, len(readhold.QueryDurationWriteReasons))
 		for _, reason := range readhold.QueryDurationWriteReasons {
 			stats.ReadHoldQueryDurationWrites[reason] = controller.QueryDurationWrites[reason]
