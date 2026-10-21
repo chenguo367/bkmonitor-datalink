@@ -194,6 +194,10 @@ type credentialGroup struct {
 // runtime binds to each of them (deploymentReads). Only Control and Worker
 // open the compatibility output's service Redis and Pod cache, and only
 // they talk to the linkd Console; only Channel serves the CLI.
+//
+// The alarmd chart mirrors this grouping when it mounts each role only the
+// credential keys it reads (credentialConnectionsByRole in the alarmd
+// subchart's templates/_credentials.tpl); a change here changes it there.
 func (c *Config) credentialGroups() []credentialGroup {
 	selected := c.EffectiveRoles()
 	business := selected.Has(roles.Control) || selected.Has(roles.Worker)
