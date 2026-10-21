@@ -79,7 +79,8 @@ func runWithRuntimeModeDependencies(
 	flags := flag.NewFlagSet("alarmd", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "", "path to alarmd YAML configuration")
-	checkConfig := flags.Bool("check-config", false, "validate configuration and exit")
+	checkConfig := flags.Bool("check-config", false, "validate configuration and exit; credential files are not opened")
+	resolveCredentials := flags.Bool("resolve-credentials", false, "with --check-config, also read every credential file the configuration names, for every role")
 	showVersion := flags.Bool("version", false, "print build information and exit")
 	checkCLIRelease := flags.Bool("check-cli-release", false, "verify the embedded alarmd-cli release against this binary and exit")
 	selectedRoles := flags.String("roles", "", "comma-separated process roles (default: control,worker,channel)")
@@ -98,6 +99,10 @@ func runWithRuntimeModeDependencies(
 	}
 	if terminalModes > 1 {
 		fmt.Fprintln(stderr, "--version, --check-config and --check-cli-release cannot be used together")
+		return 2
+	}
+	if *resolveCredentials && !*checkConfig {
+		fmt.Fprintln(stderr, "--resolve-credentials is used with --check-config")
 		return 2
 	}
 	if *showVersion {
@@ -137,7 +142,20 @@ func runWithRuntimeModeDependencies(
 			return 2
 		}
 	}
-	cfg, err := config.LoadWithRoles(*configPath, override)
+	// A process reads the credential files its roles use. --check-config
+	// opens none: release checks run it on the final YAML where no Secret
+	// is mounted, so it checks the references' shape and that each
+	// credential has one source. --resolve-credentials reads them all, for
+	// checking where the files are in place. No credential is printed in
+	// any mode.
+	credentials := config.CredentialsForRoles
+	if *checkConfig {
+		credentials = config.CredentialsUnread
+		if *resolveCredentials {
+			credentials = config.CredentialsAll
+		}
+	}
+	cfg, err := config.LoadWithCredentials(*configPath, override, credentials)
 	if err != nil {
 		fmt.Fprintf(stderr, "load configuration: %v\n", err)
 		return 1
