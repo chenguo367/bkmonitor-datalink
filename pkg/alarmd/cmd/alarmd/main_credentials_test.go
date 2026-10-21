@@ -153,3 +153,18 @@ func TestTheAdoptedLinkdConnectionCarriesAPasswordReadFromAFile(t *testing.T) {
 		}
 	}
 }
+
+// The file-free check catches the credential itself written where its path
+// belongs, and says so without printing it.
+func TestCheckConfigRefusesACredentialWrittenAsItsPathWithoutPrintingIt(t *testing.T) {
+	const token = "test-password-placeholder-00000000000000"
+	path := credentialApplicationYAML(t, "password_file: "+token)
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"--check-config", "--config", path}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "redis.password_file") || !strings.Contains(stderr.String(), "invalid_path") {
+		t.Fatalf("code %d, stderr %q", code, stderr.String())
+	}
+	if strings.Contains(stdout.String()+stderr.String(), token) {
+		t.Fatal("the refusal printed the value")
+	}
+}

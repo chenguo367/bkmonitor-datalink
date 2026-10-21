@@ -79,8 +79,10 @@ func runWithRuntimeModeDependencies(
 	flags := flag.NewFlagSet("alarmd", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "", "path to alarmd YAML configuration")
-	checkConfig := flags.Bool("check-config", false, "validate configuration and exit; credential files are not opened")
-	resolveCredentials := flags.Bool("resolve-credentials", false, "with --check-config, also read every credential file the configuration names, for every role")
+	checkConfig := flags.Bool("check-config", false, "validate configuration and exit; credential files are not opened, so the shape of "+
+		"a credential given by file (the CLI admin key's length and characters, a Redis username's whitespace) is checked only with --resolve-credentials")
+	resolveCredentials := flags.Bool("resolve-credentials", false, "with --check-config, also read every credential file the configuration names, "+
+		"for every role, and check what each holds")
 	showVersion := flags.Bool("version", false, "print build information and exit")
 	checkCLIRelease := flags.Bool("check-cli-release", false, "verify the embedded alarmd-cli release against this binary and exit")
 	selectedRoles := flags.String("roles", "", "comma-separated process roles (default: control,worker,channel)")
@@ -144,10 +146,11 @@ func runWithRuntimeModeDependencies(
 	}
 	// A process reads the credential files its roles use. --check-config
 	// opens none: release checks run it on the final YAML where no Secret
-	// is mounted, so it checks the references' shape and that each
-	// credential has one source. --resolve-credentials reads them all, for
-	// checking where the files are in place. No credential is printed in
-	// any mode.
+	// is mounted, so it checks that each reference is a plain absolute path
+	// and that each credential has one source, but cannot check what a file
+	// holds (the admin key's length and characters, a username's
+	// whitespace). --resolve-credentials reads them all, for checking where
+	// the files are in place. No credential is printed in any mode.
 	credentials := config.CredentialsForRoles
 	if *checkConfig {
 		credentials = config.CredentialsUnread

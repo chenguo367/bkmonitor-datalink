@@ -21,7 +21,9 @@ func TestTheConfigViewShowsCredentialReferencePathsAndMasksCredentials(t *testin
 		"  sentinel_password_file: /etc/alarmd/secrets/redis-sentinel-password\n" +
 		"platform_cache:\n  cmdb:\n    password: test-password-1\n" +
 		"cli:\n  admin_key_file: /etc/alarmd/secrets/cli-admin-key\n" +
-		"phase_two:\n  linkd:\n    username_file: /etc/alarmd/secrets/linkd-username\n    password_file: test-password-2\n"
+		"phase_two:\n  linkd:\n    username_file: /etc/alarmd/secrets/linkd-username\n    password_file: test-password-2\n" +
+		"kafka:\n  legacy_adapter:\n    service_redis:\n      password_file: test-password-placeholder-00000000000000\n" +
+		"      sentinel_password_file: secrets/sentinel-password\n      username_file: /Test0password0placeholder\n"
 	object := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "ConfigMap",
 		"metadata": map[string]any{"name": "alarmd", "namespace": "own"},
 		"data":     map[string]any{"alarmd.yaml": document}}}
@@ -34,7 +36,9 @@ func TestTheConfigViewShowsCredentialReferencePathsAndMasksCredentials(t *testin
 	}
 	// An inline credential stays masked, and so does a value under a _file
 	// name that is not a path.
-	for _, hidden := range []string{"test-password-1", "test-password-2"} {
+	// A credential written where its path belongs, or a relative path,
+	// fails the rule alarmd loads references by, and is masked.
+	for _, hidden := range []string{"test-password-1", "test-password-2", "test-password-placeholder-00000000000000", "secrets/sentinel-password", "Test0password0placeholder"} {
 		if strings.Contains(string(encoded), hidden) {
 			t.Errorf("the view shows %s: %s", hidden, encoded)
 		}

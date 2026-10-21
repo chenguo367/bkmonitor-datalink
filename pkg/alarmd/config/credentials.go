@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/redact"
 )
 
 // A credential may be given by reference: beside each credential field is
@@ -50,6 +51,12 @@ const (
 	// CredentialUnreadable is any other failure to read the path, a
 	// directory above all.
 	CredentialUnreadable = "unreadable"
+	// CredentialInvalidPath is a reference that is not a well-formed
+	// absolute path (redact.AcceptedCredentialPath). It is checked before
+	// anything is opened, in every mode, and the value is never echoed:
+	// the commonest such value is the credential itself, written where its
+	// path belongs.
+	CredentialInvalidPath = "invalid_path"
 )
 
 // CredentialMode says how loading treats credential references.
@@ -82,13 +89,21 @@ const unreadCredential = "credential-reference-not-read-by-check-config"
 type CredentialReferenceError struct {
 	// Field is the reference's configuration path, e.g. redis.password_file.
 	Field string
-	// Path is the file it names.
+	// Path is the file it names; empty for CredentialInvalidPath, whose
+	// value may be the credential itself. Error prints it only when it
+	// reads as plain (redact.ShownCredentialPath).
 	Path string
 	// Reason is one of the bounded reasons above.
 	Reason string
 }
 
 func (e *CredentialReferenceError) Error() string {
+	if e.Reason == CredentialInvalidPath || e.Path == "" {
+		return fmt.Sprintf("%s: credential file %s", e.Field, e.Reason)
+	}
+	if !redact.ShownCredentialPath(e.Path) {
+		return fmt.Sprintf("%s (path withheld): credential file %s", e.Field, e.Reason)
+	}
 	return fmt.Sprintf("%s %q: credential file %s", e.Field, e.Path, e.Reason)
 }
 
@@ -215,11 +230,16 @@ func (c *Config) credentialGroups() []credentialGroup {
 // the operator wrote. Each reference is cleared once resolved.
 func (c *Config) resolveCredentials(mode CredentialMode) error {
 	for _, group := range c.credentialGroups() {
-		// A credential and its reference both written is a malformed file,
-		// whoever reads it: checked for every reference, in every mode.
+		// A credential and its reference both written, or a reference that
+		// is not a well-formed absolute path, is a malformed file whoever
+		// reads it: checked for every reference, in every mode, before
+		// anything is opened.
 		for _, reference := range group.references {
 			if *reference.value != "" && *reference.file != "" {
 				return fmt.Errorf("%s and %s_file are both set", reference.field, reference.field)
+			}
+			if *reference.file != "" && !redact.AcceptedCredentialPath(*reference.file) {
+				return &CredentialReferenceError{Field: reference.field + "_file", Reason: CredentialInvalidPath}
 			}
 		}
 		consulted := group.used || mode == CredentialsAll

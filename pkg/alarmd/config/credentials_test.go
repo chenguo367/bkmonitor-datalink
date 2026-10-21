@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/redact"
 )
 
 const testAdminKey = "test-admin-key-placeholder-0000000000"
@@ -513,5 +514,158 @@ func TestInlineCredentialsStillLoad(t *testing.T) {
 	if cfg.Redis.Password != "test-password-1" || cfg.StrategySourceRedis().Password != "test-password-1" ||
 		cfg.CLI.AdminKey != testAdminKey || cfg.PhaseTwo.Linkd.Password != "test-password-2" {
 		t.Fatal("inline credentials were not loaded as written")
+	}
+}
+
+// testMistypedToken is a credential written where its path belongs: forty
+// characters, no slash.
+const testMistypedToken = "test-password-placeholder-00000000000000"
+
+// A reference must be a well-formed absolute path, checked before anything
+// is opened and in every mode, so --check-config catches it without the files.
+// The refusal names the field and the reason and never the value, which is
+// most often the credential itself.
+func TestAReferenceThatIsNotAPlainAbsolutePathIsRefusedWithoutEchoingIt(t *testing.T) {
+	clearCredentialEnvironment(t)
+	if len(testMistypedToken) != 40 {
+		t.Fatal("the fixture is not forty characters")
+	}
+	// The credential itself, a relative path, a control character, leading
+	// and trailing whitespace, and a path over the limit.
+	for _, value := range []string{testMistypedToken, "secrets/redis-password", "/etc/alarmd/secrets/redis\tpassword",
+		" /etc/alarmd/secrets/redis-password", "/etc/alarmd/secrets/redis-password ", "/" + strings.Repeat("p", 4096)} {
+		for _, test := range []struct {
+			path  string
+			roles roles.Set
+		}{
+			{"redis", nil},
+			// Shape is the file's, whoever reads it: refused even where the
+			// role does not open the connection.
+			{"kafka.legacy_adapter.service_redis", roles.Set{roles.Channel}},
+		} {
+			text := credentialConfig(map[string][]string{test.path: {fmt.Sprintf("password_file: %q", value)}})
+			path := writeConfig(t, text)
+			for _, mode := range []CredentialMode{CredentialsForRoles, CredentialsUnread, CredentialsAll} {
+				_, err := LoadWithCredentials(path, test.roles, mode)
+				var reference *CredentialReferenceError
+				if !errors.As(err, &reference) || reference.Reason != CredentialInvalidPath || reference.Field != test.path+".password_file" || reference.Path != "" {
+					t.Fatalf("%q at %s, mode %d: error = %v, want %s.password_file invalid_path", value, test.path, mode, err, test.path)
+				}
+				if want := test.path + ".password_file: credential file invalid_path"; err.Error() != want {
+					t.Fatalf("error = %q, want %q", err.Error(), want)
+				}
+			}
+		}
+	}
+}
+
+// The error never prints the value of a reference refused for its shape,
+// even when one is at hand.
+func TestAnInvalidPathErrorNamesOnlyTheField(t *testing.T) {
+	err := &CredentialReferenceError{Field: "redis.password_file", Path: testMistypedToken, Reason: CredentialInvalidPath}
+	if err.Error() != "redis.password_file: credential file invalid_path" {
+		t.Fatalf("error = %q", err.Error())
+	}
+}
+
+// Accepting a path is not judging how it reads: a path with a mixed-case
+// word and digits - an operator's choice, or a test's own temporary
+// directory - is opened and read. Printed in an error, a path that does not
+// read as plain is withheld; a plain one is shown.
+func TestAnyWellFormedAbsolutePathIsReadAndOnlyAPlainOneIsPrinted(t *testing.T) {
+	clearCredentialEnvironment(t)
+	if !redact.AcceptedCredentialPath("/etc/secrets/Redis6Password") || redact.ShownCredentialPath("/etc/secrets/Redis6Password") {
+		t.Fatal("/etc/secrets/Redis6Password must be accepted and not shown")
+	}
+	dir := t.TempDir()
+	present := filepath.Join(dir, "Redis6Password")
+	if err := os.WriteFile(present, []byte("test-password-1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadWithRoles(writeConfig(t, credentialConfig(map[string][]string{"redis": {"password_file: " + present}})), nil)
+	if err != nil {
+		t.Fatalf("a well-formed absolute path was refused: %v", err)
+	}
+	if cfg.Redis.Password != "test-password-1" {
+		t.Fatalf("password = %q", cfg.Redis.Password)
+	}
+
+	missing := filepath.Join(dir, "Missing6Password")
+	_, err = LoadWithRoles(writeConfig(t, credentialConfig(map[string][]string{"redis": {"password_file: " + missing}})), nil)
+	var reference *CredentialReferenceError
+	if !errors.As(err, &reference) || reference.Reason != CredentialNotFound {
+		t.Fatalf("error = %v, want not_found", err)
+	}
+	if want := "redis.password_file (path withheld): credential file not_found"; err.Error() != want {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
+	}
+
+	plain := "/nonexistent/alarmd/secrets/redis-password"
+	_, err = LoadWithRoles(writeConfig(t, credentialConfig(map[string][]string{"redis": {"password_file: " + plain}})), nil)
+	if err == nil || !strings.Contains(err.Error(), plain) || !strings.Contains(err.Error(), "not_found") {
+		t.Fatalf("error = %v, want the plain path and not_found", err)
+	}
+}
+
+// A value shaped like a key behind a slash is a well-formed path, so it is
+// accepted and opened; when it is missing, the error withholds it. This
+// pins the display check's job: the acceptance check alone would echo it.
+func TestAKeyShapedPathIsWithheldFromTheError(t *testing.T) {
+	clearCredentialEnvironment(t)
+	value := "/dGVzdC1wYXNzd29yZC1wbGFjZWhvbGRlci0wMDAw"
+	if len(value) != 41 || !redact.AcceptedCredentialPath(value) {
+		t.Fatal("the fixture is not a well-formed path of forty base64 characters")
+	}
+	_, err := LoadWithRoles(writeConfig(t, credentialConfig(map[string][]string{"redis": {"password_file: " + value}})), nil)
+	var reference *CredentialReferenceError
+	if !errors.As(err, &reference) || reference.Reason != CredentialNotFound {
+		t.Fatalf("error = %v, want not_found", err)
+	}
+	if !strings.Contains(err.Error(), "(path withheld)") || strings.Contains(err.Error(), value[1:]) {
+		t.Fatalf("error = %q, want the path withheld", err.Error())
+	}
+}
+
+// No error carries the operating system's text, which embeds the path:
+// only the bounded reason and a vetted or withheld path reach the message,
+// for every reason a file fails to open or read.
+func TestNoReferenceErrorCarriesTheOperatingSystemsText(t *testing.T) {
+	clearCredentialEnvironment(t)
+	dir := t.TempDir()
+	cases := map[string]func() string{
+		CredentialNotFound: func() string { return filepath.Join(dir, "Absent6Password") },
+		CredentialUnreadable: func() string {
+			path := filepath.Join(dir, "Directory6Password")
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		},
+	}
+	if os.Geteuid() != 0 {
+		cases[CredentialPermission] = func() string {
+			path := filepath.Join(dir, "Denied6Password")
+			if err := os.WriteFile(path, []byte("test-password-1\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, 0); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}
+	}
+	for reason, prepare := range cases {
+		path := prepare()
+		if redact.ShownCredentialPath(path) {
+			t.Fatalf("%s: the fixture path %q reads as plain", reason, path)
+		}
+		_, err := LoadWithRoles(writeConfig(t, credentialConfig(map[string][]string{"redis": {"password_file: " + path}})), nil)
+		want := "redis.password_file (path withheld): credential file " + reason
+		if err == nil || err.Error() != want {
+			t.Fatalf("error = %v, want %q", err, want)
+		}
+		if strings.Contains(err.Error(), filepath.Base(path)) || strings.Contains(err.Error(), dir) {
+			t.Fatalf("%s: the error carries the path: %q", reason, err.Error())
+		}
 	}
 }

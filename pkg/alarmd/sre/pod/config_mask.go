@@ -10,9 +10,10 @@ import (
 	"io"
 	"regexp"
 	"strings"
-	"unicode"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/redact"
 )
 
 // ConfigValueContract names how a ConfigMap value is shown: masked unless
@@ -47,84 +48,15 @@ var configKey = regexp.MustCompile(`(?i)(passw|passwd|pwd|secret|token|credentia
 
 var (
 	pemBlock   = regexp.MustCompile(`-----BEGIN [A-Z0-9 ]+-----`)
-	jwtLike    = regexp.MustCompile(`eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.`)
-	base64Run  = regexp.MustCompile(`[A-Za-z0-9+/_-]{22,}={0,2}`)
-	hexRun     = regexp.MustCompile(`(?i)\b[0-9a-f]{32,}\b`)
-	wordSplit  = regexp.MustCompile(`[\s,;:/=@?&#()\[\]{}"'<>|.]+`)
 	lineKeyVal = regexp.MustCompile(`^(\s*(?:export\s+)?)([A-Za-z0-9_.\-]+)(\s*[:=]\s*)(.*)$`)
 )
 
 // keyMaterial says text holds something shaped like a key, whatever it is
-// called.
-func keyMaterial(text string) bool {
-	if pemBlock.MatchString(text) || jwtLike.MatchString(text) || hexRun.MatchString(text) {
-		return true
-	}
-	for _, run := range base64Run.FindAllString(text, -1) {
-		if mixedCase(run) && (hasDigit(run) || longestSegment(run) >= 20) {
-			return true
-		}
-	}
-	return false
-}
+// called (redact.KeyMaterial).
+func keyMaterial(text string) bool { return redact.KeyMaterial(text) }
 
-// A run of base64 characters is key material when it reads like one: mixed
-// case with a digit somewhere, or a long stretch with no separator. A path
-// such as /etc/coredns/NodeHosts is also a long run of those characters,
-// but of short words between slashes and with no digit; 16 random bytes in
-// base64 almost never are.
-func hasDigit(text string) bool {
-	return strings.IndexFunc(text, unicode.IsDigit) >= 0
-}
-
-func longestSegment(run string) int {
-	longest := 0
-	for _, segment := range strings.FieldsFunc(run, func(r rune) bool { return r == '/' || r == '+' || r == '_' || r == '-' }) {
-		longest = max(longest, len(segment))
-	}
-	return longest
-}
-
-func mixedCase(text string) bool {
-	upper, lower := false, false
-	for _, r := range text {
-		upper = upper || unicode.IsUpper(r)
-		lower = lower || unicode.IsLower(r)
-	}
-	return upper && lower
-}
-
-// generated says a word reads like a generated string rather than a word: a
-// password, an identifier minted at random. Short words and words of one
-// kind of character (a host label, a number, a constant) are not.
-func generated(word string) bool {
-	upper, lower, digit := false, false, false
-	for _, r := range word {
-		switch {
-		case unicode.IsUpper(r):
-			upper = true
-		case unicode.IsLower(r):
-			lower = true
-		case unicode.IsDigit(r):
-			digit = true
-		}
-	}
-	return len(word) >= 8 && upper && lower && digit
-}
-
-// plainValue says a scalar can be shown: short enough to read, and every
-// word of it a word.
-func plainValue(text string) bool {
-	if len(text) > 512 || strings.ContainsAny(text, "\r\n") || keyMaterial(text) {
-		return false
-	}
-	for _, word := range wordSplit.Split(text, -1) {
-		if generated(word) {
-			return false
-		}
-	}
-	return true
-}
+// plainValue says a scalar can be shown (redact.PlainValue).
+func plainValue(text string) bool { return redact.PlainValue(text) }
 
 // configMasker masks one ConfigMap value and counts what it masked.
 type configMasker struct {
@@ -160,13 +92,14 @@ func (m *configMasker) leaf(name, text string) string {
 }
 
 // referencePath says a value is a credential reference: a name ending in
-// _file (password_file, admin_key_file) whose value is an absolute path.
-// The path says where a credential is mounted, not what it is, and showing
-// it is how a wrongly mounted key is diagnosed; so it is shown although the
-// name reads like a credential. A value that is not a plain absolute path
-// is masked as any other.
+// _file (password_file, admin_key_file) whose value alarmd would accept as
+// a path and that reads as plain (redact.ShownCredentialPath). The path says where
+// a credential is mounted, not what it is, and showing it is how a wrongly
+// mounted key is diagnosed; so it is shown although the name reads like a
+// credential. Any other value under such a name - the credential itself
+// written where its path belongs, most often - is masked as any other.
 func referencePath(name, text string) bool {
-	return strings.HasSuffix(strings.ToLower(name), "_file") && strings.HasPrefix(text, "/") && plainValue(text)
+	return strings.HasSuffix(strings.ToLower(name), "_file") && redact.ShownCredentialPath(text)
 }
 
 // value is one ConfigMap value under its key, as it may be shown.
