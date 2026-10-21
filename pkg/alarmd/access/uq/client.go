@@ -347,17 +347,23 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 		// class, the provider's trace id, and the body's start sanitized
 		// (providerErrorExcerpt), with the Query Group's last failure for an
 		// operator to read. A client error other than 408 and 429 is the
-		// provider refusing the query as written (QUERY_REJECTED); anything
+		// provider refusing the query as written (QUERY_REJECTED); 504 and
+		// 408 are the provider running out of time (QUERY_TIMEOUT); anything
 		// else is the provider not answering (QUERY_UNAVAILABLE).
 		body, _ := io.ReadAll(io.LimitReader(response.Body, errorBodyRead))
 		rejection := providerRejection(response.StatusCode, body, traceID)
 		if scanned != nil {
 			scanned.Bytes, scanned.errorExcerpt = uint64(len(body)), rejection.Excerpt
 		}
-		completion := client.unavailableCompletion(attempt, statusReason(response.StatusCode), execution.HTTPStatusRouteDetail(response.StatusCode))
+		reason := statusReason(response.StatusCode)
+		completion := client.unavailableCompletion(attempt, reason, execution.HTTPStatusRouteDetail(response.StatusCode))
 		completion.RouteFacts.Attempts[0].HTTPStatus = response.StatusCode
 		completion.RouteFacts.Attempts[0].Rejection = rejection
-		completion.RouteFacts.Attempts[0].Request = answeredRequest(nil)
+		request := answeredRequest(nil)
+		if reason == execution.ReasonCode(contract.ReasonQueryTimeout) {
+			request.TimeoutSource = observability.QueryTimeoutSourceProviderStatus
+		}
+		completion.RouteFacts.Attempts[0].Request = request
 		completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
 		completion.RouteFacts.Attempts[0].Timing = attemptTiming(attempt.Budget, started, client.now(), 0)
 		return completion, nil

@@ -101,10 +101,20 @@ func rejectedStatus(status int) bool {
 	return status >= 400 && status <= 499 && status != http.StatusRequestTimeout && status != http.StatusTooManyRequests
 }
 
+// timedOutStatus says a status is the provider saying it ran out of time:
+// 504 (its backend did not answer before its deadline) and 408. The number
+// decides, never the body.
+func timedOutStatus(status int) bool {
+	return status == http.StatusGatewayTimeout || status == http.StatusRequestTimeout
+}
+
 // statusReason is the reason a non-success status files a query under.
 func statusReason(status int) execution.ReasonCode {
-	if rejectedStatus(status) {
+	switch {
+	case rejectedStatus(status):
 		return execution.ReasonCode(contract.ReasonQueryRejected)
+	case timedOutStatus(status):
+		return execution.ReasonCode(contract.ReasonQueryTimeout)
 	}
 	return execution.ReasonCode(contract.ReasonQueryUnavailable)
 }

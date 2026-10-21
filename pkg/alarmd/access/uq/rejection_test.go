@@ -20,6 +20,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 var traceParentFormat = regexp.MustCompile(`^00-([0-9a-f]{32})-[0-9a-f]{16}-01$`)
@@ -132,7 +133,7 @@ func TestAClientErrorIsTheQueryRefusedAsWritten(t *testing.T) {
 		t.Fatalf("excerpt %q lost the provider's reason", rejection.Excerpt)
 	}
 
-	for _, status := range []int{http.StatusServiceUnavailable, http.StatusTooManyRequests, http.StatusRequestTimeout} {
+	for _, status := range []int{http.StatusServiceUnavailable, http.StatusTooManyRequests, http.StatusBadGateway, http.StatusInternalServerError} {
 		client, _ := headerServer(t, status, `{"error":"busy"}`)
 		completion, err := client.Execute(context.Background(), apmAttempt(t), &collectingSink{})
 		if err != nil {
@@ -141,6 +142,40 @@ func TestAClientErrorIsTheQueryRefusedAsWritten(t *testing.T) {
 		if got := completion.RouteFacts.Attempts[0].ReasonCode; got != execution.ReasonCode(contract.ReasonQueryUnavailable) {
 			t.Fatalf("status %d filed under %s", status, got)
 		}
+	}
+}
+
+// A provider that says by its status it ran out of time files a timeout,
+// named as the provider's, whatever its body says; a body that reads like a
+// timeout under any other status does not make one.
+func TestAProviderTimeoutStatusIsAQueryTimeout(t *testing.T) {
+	for _, status := range []int{http.StatusGatewayTimeout, http.StatusRequestTimeout} {
+		client, _ := headerServer(t, status, `{"error":"invalid query","trace_id":"`+rejectionTraceID+`"}`)
+		completion, err := client.Execute(context.Background(), apmAttempt(t), &collectingSink{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		attempt := completion.RouteFacts.Attempts[0]
+		if attempt.ReasonCode != execution.ReasonCode(contract.ReasonQueryTimeout) || attempt.HTTPStatus != status {
+			t.Fatalf("status %d: attempt %+v", status, attempt)
+		}
+		if attempt.Request == nil || attempt.Request.TimeoutSource != observability.QueryTimeoutSourceProviderStatus ||
+			attempt.Request.AnswerStatus != status {
+			t.Fatalf("status %d: request %+v", status, attempt.Request)
+		}
+		if attempt.Rejection == nil || attempt.Rejection.TraceID != rejectionTraceID {
+			t.Fatalf("status %d: rejection %+v", status, attempt.Rejection)
+		}
+	}
+
+	client, _ := headerServer(t, http.StatusBadRequest, `{"error":"Post http://backend.example.test/: context deadline exceeded"}`)
+	completion, err := client.Execute(context.Background(), apmAttempt(t), &collectingSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt := completion.RouteFacts.Attempts[0]
+	if attempt.ReasonCode != execution.ReasonCode(contract.ReasonQueryRejected) || attempt.Request == nil || attempt.Request.TimeoutSource != "" {
+		t.Fatalf("a 400 whose body reads like a timeout: attempt %+v request %+v", attempt, attempt.Request)
 	}
 }
 

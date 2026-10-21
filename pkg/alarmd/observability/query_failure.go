@@ -81,11 +81,16 @@ const (
 	// QueryTimeoutSourceRoundDeadline: the round ended the query at its own
 	// deadline with a bare cancellation or expiry the provider did not name.
 	QueryTimeoutSourceRoundDeadline = "round_deadline"
+	// QueryTimeoutSourceProviderStatus: the provider answered with a status
+	// that says it ran out of time (504, 408), its own backend's deadline
+	// rather than this request's.
+	QueryTimeoutSourceProviderStatus = "provider_status"
 )
 
 // QueryTimeoutSources is the closed list a rendered timeout_source comes from.
 var QueryTimeoutSources = []string{QueryTimeoutSourceDeadlinePassed, QueryTimeoutSourceTransportClass,
-	QueryTimeoutSourceBodyReadClass, QueryTimeoutSourceDelivery, QueryTimeoutSourceRoundDeadline}
+	QueryTimeoutSourceBodyReadClass, QueryTimeoutSourceDelivery, QueryTimeoutSourceRoundDeadline,
+	QueryTimeoutSourceProviderStatus}
 
 func validQueryTimeoutSource(source string) bool {
 	for _, known := range QueryTimeoutSources {
