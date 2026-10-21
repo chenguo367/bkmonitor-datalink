@@ -261,3 +261,41 @@ func TestDecodeRefusesMalformedEarlyGaps(t *testing.T) {
 		}
 	}
 }
+
+// A record holding something that carries no quiet - restored as written,
+// with nothing that started one - is not pinned at its hold: preparing its
+// next Slot starts its quiet, and once the group has gone its bar without
+// being read early it is tried and lowered like any other, at its limit or
+// under it.
+func TestARecordWithNoQuietIsTriedOnceQuietForItsBar(t *testing.T) {
+	for _, atLimit := range []bool{true, false} {
+		t.Run(map[bool]string{true: "at the limit", false: "under it"}[atLimit], func(t *testing.T) {
+			c, store, now := controllerFixture(t)
+			spec := groupSpec("qg", 0)
+			spec.HoldLimit = 10 * time.Minute
+			arrival, hold := (36*time.Minute + spec.SettlingWait).Milliseconds(), int64(600_000)
+			if !atLimit {
+				arrival, hold = (5*time.Minute + spec.SettlingWait).Milliseconds(), 300_000
+			}
+			store.values["qg"] = []byte(`{"hold_ms":` + strconv.FormatInt(hold, 10) + `,"since_slot":60,"segment_start":60,"arrival_age_ms":` +
+				strconv.FormatInt(arrival, 10) + `,"limit_ms":600000}`)
+			prepare(t, c, spec)
+			if _, err := c.SlotReadHold(context.Background(), scheduleFor(t, "qg", 60, nil), 120, holdFence("qg")); err != nil {
+				t.Fatal(err)
+			}
+			if record, _ := c.Reading("qg"); record.HeldAtLimit() != atLimit || record.QuietSinceMillis != now.UnixMilli() {
+				t.Fatalf("restored record %+v, want held at its limit %t with its quiet started now", record, atLimit)
+			}
+			*now = now.Add(SingleEventQuiet / 2)
+			if atLimit {
+				if candidate, ok := c.EarlierCandidate("qg"); ok {
+					t.Fatalf("tried at %v within its bar", candidate)
+				}
+			}
+			*now = now.Add(SingleEventQuiet)
+			if !agreeingTrials(t, c, 180) || c.ReadHold("qg") >= time.Duration(hold)*time.Millisecond {
+				t.Fatalf("a record without a quiet stayed at %v past its bar", c.ReadHold("qg"))
+			}
+		})
+	}
+}

@@ -831,6 +831,14 @@ func (controller *Controller) seed(state *entry, predecessors map[execution.Quer
 			next.EarlierMatches, next.QuietSinceMillis = 0, controller.options.Now().UnixMilli()
 			clearFloor(&next)
 		}
+		// A record holding something with no quiet on it starts its quiet
+		// here. A lowering waits for a quiet that has started, and a group
+		// at its limit is not tried until one has run its bar (atLimitHeld):
+		// with nothing to start one, a group whose data came back in time
+		// would keep its hold for good.
+		if current(next) > 0 && next.QuietSinceMillis <= 0 {
+			next.QuietSinceMillis = controller.options.Now().UnixMilli()
+		}
 	}
 	return next, nil
 }
