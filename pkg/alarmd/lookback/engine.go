@@ -222,7 +222,12 @@ type Options struct {
 	// trials' own evidence (readhold.Controller.EarlierCandidate). Nil tries
 	// half the base hold (execution.LoweredReadHold).
 	CurrentCandidate func(execution.QueryGroupIdentity) (time.Duration, bool)
-	ReadHoldAt       func(execution.QueryGroupIdentity, execution.EvaluationTime) time.Duration
+	// EarlierRefused hears a Slot Prepare would have reserved a trial for -
+	// the group's rest over, no sample or trial of it in flight - when
+	// CurrentCandidate gave it none (readhold.Controller.EarlierRefused).
+	// Nil hears nothing.
+	EarlierRefused func(execution.QueryGroupIdentity)
+	ReadHoldAt     func(execution.QueryGroupIdentity, execution.EvaluationTime) time.Duration
 	// Callbacks run outside the engine lock. Only confirmed whole-window
 	// arrival raises a hold; a decrease compares an earlier read with the
 	// formal first read, never with a later rung.
@@ -353,6 +358,9 @@ type group struct {
 	prepared *earlierSample
 	sample   *sample
 	nextAt   time.Time
+	// refused is the last Slot EarlierRefused heard of, so a Slot prepared
+	// again on a readiness retry is heard once.
+	refused execution.EvaluationTime
 	// period is the observed time between two of its Slots, lastSlot the
 	// latest one seen; a Query Group is sampled at its first reads, so how
 	// fresh its measurement can be depends on how often it reads.

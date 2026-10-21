@@ -18,42 +18,108 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
-// A group held at its limit runs no earlier-read trial: its data arrives
-// past the longest hold it may have, so an earlier read agreeing with the
-// formal read says both came before the data. However long it stays quiet
-// and however many reads agree, the hold is not lowered, and each trial not
-// run is counted as at_limit.
-func TestAGroupHeldAtItsLimitIsNotTriedLower(t *testing.T) {
-	c, _, now := controllerFixture(t)
+// heldAtTheLimit is a group measured landing 36 minutes late under a 10
+// minute limit, its hold frozen at the limit: one read-early arrival, so its
+// quiet bar is SingleEventQuiet.
+func heldAtTheLimit(t *testing.T, c *Controller) GroupSpec {
+	t.Helper()
 	spec := groupSpec("qg", 0)
 	spec.HoldLimit = 10 * time.Minute
 	prepare(t, c, spec)
 	observeEarly(t, c, "qg", 36*time.Minute+spec.SettlingWait, 0)
-	ctx := context.Background()
-	if _, err := c.SlotReadHold(ctx, scheduleFor(t, "qg", 60, nil), 120, holdFence("qg")); err != nil {
+	if _, err := c.SlotReadHold(context.Background(), scheduleFor(t, "qg", 60, nil), 120, holdFence("qg")); err != nil {
 		t.Fatal(err)
 	}
 	if record, _ := c.Reading("qg"); !record.HeldAtLimit() || c.ReadHold("qg") != 10*time.Minute {
 		t.Fatalf("fixture: record %+v hold %v, want held at the 10 minute limit", record, c.ReadHold("qg"))
 	}
-	*now = now.Add(200 * time.Hour)
-	if hold, ok := c.EarlierCandidate("qg"); ok {
-		t.Fatalf("a group held at its limit offers a %v trial", hold)
-	}
+	return spec
+}
+
+// agreeingTrials runs the earlier reads a lowering needs, each at the
+// candidate the controller offers then, from slot on, and says whether one
+// was offered.
+func agreeingTrials(t *testing.T, c *Controller, slot execution.EvaluationTime) bool {
+	t.Helper()
+	offered := false
 	for index := range EarlierMatchesRequired {
-		if err := c.EarlierRead(ctx, EarlierEvidence{Contract: holdContract("qg", 180+execution.EvaluationTime(index*60), 600_000),
-			CandidateHold: 5 * time.Minute, Observed: true, Equal: true}); err != nil {
+		candidate, ok := c.EarlierCandidate("qg")
+		if !ok {
+			candidate = 5 * time.Minute
+		}
+		offered = offered || ok
+		if err := c.EarlierRead(context.Background(), EarlierEvidence{Contract: holdContract("qg", slot+execution.EvaluationTime(index*60), 600_000),
+			CandidateHold: candidate, Observed: true, Equal: true}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if c.ReadHold("qg") != 10*time.Minute {
-		t.Fatalf("agreeing reads at the limit lowered the hold to %v", c.ReadHold("qg"))
+	return offered
+}
+
+// A group held at its limit runs no earlier-read trial while its data still
+// lands past it: an earlier read agreeing with the formal read says both
+// came before the data. Each trial refused for it is counted as at_limit; a
+// read-early arrival within the quiet bar starts the quiet over, so a source
+// still landing late is never tried.
+func TestAGroupHeldAtItsLimitIsNotTriedWhileItsDataIsLate(t *testing.T) {
+	c, _, now := controllerFixture(t)
+	spec := heldAtTheLimit(t, c)
+	*now = now.Add(50 * time.Minute)
+	if hold, ok := c.EarlierCandidate("qg"); ok {
+		t.Fatalf("a group held at its limit within its quiet bar offers a %v trial", hold)
 	}
-	if record, _ := c.Reading("qg"); record.EarlierMatches != 0 || record.PendingHoldMillis != nil && *record.PendingHoldMillis != 600_000 {
-		t.Fatalf("trials at the limit were taken as evidence: %+v", record)
-	}
+	c.EarlierRefused("qg")
 	if got := c.Stats().EarlierSkipped; got[EarlierSkipAtLimit] != 1 || len(got) != len(EarlierSkipReasons) {
 		t.Fatalf("skipped trials %v, want one at_limit", got)
+	}
+	// Still late: read early again, 50 minutes on - the bar is now that
+	// gap - and the quiet starts over: 40 minutes later it is within it.
+	observeEarly(t, c, "qg", 36*time.Minute+spec.SettlingWait, 600_000)
+	*now = now.Add(40 * time.Minute)
+	if agreeingTrials(t, c, 180) || c.ReadHold("qg") != 10*time.Minute {
+		t.Fatalf("a group still read early within its bar was tried, hold %v", c.ReadHold("qg"))
+	}
+	if record, _ := c.Reading("qg"); record.EarlierMatches != 0 {
+		t.Fatalf("trials at the limit were taken as evidence: %+v", record)
+	}
+}
+
+// A group held at its limit whose data comes back in time has no read-early
+// arrival to give: once it has been quiet for its bar its trials run again,
+// and three that agree lower the hold - in the process that held it, and in
+// one restarted from its record, which re-derives the limit from the
+// arrival age it kept. A refusal for anything but the limit is not counted.
+func TestAGroupAtItsLimitWhoseDataComesBackInTimeIsLowered(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		t.Run(map[bool]string{false: "same process", true: "restarted"}[restart], func(t *testing.T) {
+			c, store, now := controllerFixture(t)
+			spec := heldAtTheLimit(t, c)
+			*now = now.Add(SingleEventQuiet + time.Minute)
+			if restart {
+				restarted, err := NewController(Options{Control: store, Prefix: "schedule", MaxHold: 10 * time.Minute, Now: func() time.Time { return *now },
+					Owner: func(qg execution.QueryGroupIdentity) (Owner, error) {
+						return Owner{Fence: holdFence(qg), ContentScope: "view"}, nil
+					}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				c = restarted
+				prepare(t, c, spec)
+				if record, _ := c.Reading("qg"); !record.HeldAtLimit() {
+					t.Fatalf("fixture: the restarted record is not held at its limit: %+v", record)
+				}
+			}
+			if !agreeingTrials(t, c, 180) {
+				t.Fatal("a group quiet past its bar at the limit offered no trial")
+			}
+			if c.ReadHold("qg") >= 10*time.Minute {
+				t.Fatalf("three agreeing trials past the quiet bar left the hold at %v", c.ReadHold("qg"))
+			}
+			c.EarlierRefused("qg")
+			if got := c.Stats().EarlierSkipped[EarlierSkipAtLimit]; got != 0 {
+				t.Fatalf("%d trials counted skipped at the limit for a group no longer held there", got)
+			}
+		})
 	}
 }
 
@@ -150,11 +216,11 @@ func TestARestoredAllTimeGapMovesIntoEarlyGaps(t *testing.T) {
 	observeEarly(t, c, "qg", 180*time.Second, 150_000)
 	reading, _ := c.Reading("qg")
 	want := []EarlyGap{{Day: utcDay(last), Millis: 540_000_000}, {Day: utcDay(now.UnixMilli()), Millis: 26 * time.Hour.Milliseconds()}}
-	if reading.MaxEarlyIntervalMillis != 0 || len(reading.EarlyGaps) != 2 || reading.EarlyGaps[0] != want[0] || reading.EarlyGaps[1] != want[1] {
-		t.Fatalf("restored record after one arrival %+v, want gaps %v and no all-time gap", reading, want)
+	if reading.MaxEarlyIntervalMillis != 540_000_000 || len(reading.EarlyGaps) != 2 || reading.EarlyGaps[0] != want[0] || reading.EarlyGaps[1] != want[1] {
+		t.Fatalf("restored record after one arrival %+v, want gaps %v and their longest kept for an older reader", reading, want)
 	}
 	stored, err := Decode(store.values["qg"])
-	if err != nil || stored.MaxEarlyIntervalMillis != 0 || len(stored.EarlyGaps) != 2 {
+	if err != nil || stored.MaxEarlyIntervalMillis != 540_000_000 || len(stored.EarlyGaps) != 2 {
 		t.Fatalf("written record %s (%v)", store.values["qg"], err)
 	}
 }

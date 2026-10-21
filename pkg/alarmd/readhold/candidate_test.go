@@ -183,7 +183,7 @@ func TestARecordWithoutASearchTriesHalfItsHoldAndUnknownFieldsDecode(t *testing.
 	if err != nil || record.EarlierFloorMillis != nil || record.EarlierDifferents != 0 {
 		t.Fatalf("an old record: %+v %v", record, err)
 	}
-	if got, tries := nextCandidate(record, time.Minute); !tries || got != 60_000 {
+	if got, tries := nextCandidate(record, time.Minute, 0); !tries || got != 60_000 {
 		t.Fatalf("an old record's candidate %d %v, want half its hold", got, tries)
 	}
 	future := []byte(`{"hold_ms":120000,"since_slot":60,"earlier_floor_ms":60000,"earlier_differents":1,"a_later_field":{"x":1}}`)

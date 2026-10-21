@@ -47,8 +47,12 @@ type Record struct {
 	ArrivalAgeSeed  string `json:"arrival_age_seed,omitempty"`
 	LastEarlyMillis int64  `json:"last_early_ms,omitempty"`
 	// MaxEarlyIntervalMillis is the longest gap between two read-early
-	// arrivals a build before EarlyGaps kept, over the record's whole life.
-	// It is read once, into EarlyGaps (earlyGapsOf), and written no more.
+	// arrivals: over the record's whole life in a build before EarlyGaps,
+	// which reads it alone, and read once into EarlyGaps (earlyGapsOf) by
+	// this one. This build writes it as the longest of EarlyGaps
+	// (longestGap), so an older reader - a rollback, a mixed rollout - keeps
+	// a bar no shorter than this one's rather than falling to
+	// SingleEventQuiet.
 	MaxEarlyIntervalMillis int64 `json:"max_early_interval_ms,omitempty"`
 	// EarlyGaps is the longest gap between two read-early arrivals that
 	// ended on each UTC day, for the days within RecordTTL: the quiet a

@@ -19,7 +19,10 @@ import "time"
 // to it however the data arrives since. So the gaps are kept as the longest
 // that ended on each UTC day, the days within RecordTTL, and the bar is the
 // longest of those - a source still late every few hours keeps its bar, one
-// whose long gap is past the window is judged by the gaps it has now.
+// whose long gap is past the window is judged by the gaps it has now. A
+// source late about once a week or less often is judged so too: its gap
+// leaves the window at day 7, and the bar until its next late arrival is the
+// gaps since, or SingleEventQuiet.
 
 const dayMillis = int64(24 * time.Hour / time.Millisecond)
 
@@ -61,6 +64,16 @@ func withEarlyGap(gaps []EarlyGap, endedAt, gap int64) []EarlyGap {
 		kept = append(kept, EarlyGap{Day: day, Millis: gap})
 	}
 	return kept
+}
+
+// longestGap is the longest of gaps, zero for none: what a record keeps as
+// MaxEarlyIntervalMillis for a build that reads that field alone.
+func longestGap(gaps []EarlyGap) int64 {
+	longest := int64(0)
+	for _, entry := range gaps {
+		longest = max(longest, entry.Millis)
+	}
+	return longest
 }
 
 // quietBar is how long a group must stay without a read-early arrival before

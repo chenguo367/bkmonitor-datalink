@@ -1471,7 +1471,7 @@ New Slots frozen with the hold their Query Group last read -- zero for a group w
 
 Labels: `reason`
 
-Earlier-read trials not run, by why, one per Slot a trial would have been reserved for: at_limit (the group is held at its limit, so its data arrives past the longest hold it may have; a read below the hold and the formal read both come before the data, and their agreeing would say nothing of it). A group counted here keeps its hold at the limit, and its trials resume once an arrival reading wants a hold below the limit. Every reason exists from the start.
+Earlier-read trials not run, by why, one per Slot a trial would have been reserved for (its group's sampling rest over, nothing of it in flight): at_limit (the group is held at its limit and was read early within its quiet bar, so its data arrives past the longest hold it may have; a read below the hold and the formal read both come before the data, and their agreeing would say nothing of it). A group counted here keeps its hold at the limit; its trials resume once an arrival reading wants a hold below the limit, or once it has gone its quiet bar without being read early. Every reason exists from the start.
 
 ## alarmd_read_hold_groups
 

@@ -264,6 +264,7 @@ func TestASkippedEarlierTrialIsExportedWithTheReadHoldCounters(t *testing.T) {
 	if hold, ok := h.controller.EarlierCandidate("limited"); ok {
 		t.Fatalf("a group held at its limit offered a %v trial", hold)
 	}
+	h.controller.EarlierRefused("limited")
 	if got := productionLookbackStats(engine, h).ReadHoldEarlierSkipped; got[readhold.EarlierSkipAtLimit] != 1 {
 		t.Fatalf("skipped trials %v, want one at_limit", got)
 	}

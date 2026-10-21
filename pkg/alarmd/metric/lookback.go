@@ -91,11 +91,13 @@ func newLookbackCollector() *lookbackCollector {
 				"bound, which costs the successor's first Slots a later read and never a Slot -- record_open, "+
 				"record_corrupt, record_unreadable; and the links it skipped: self_link, invalid_link, expired.", "reason"),
 		readHoldEarlierSkip: desc("read_hold_earlier_skipped_total",
-			"Earlier-read trials not run, by why, one per Slot a trial would have been reserved for: at_limit (the "+
-				"group is held at its limit, so its data arrives past the longest hold it may have; a read below "+
+			"Earlier-read trials not run, by why, one per Slot a trial would have been reserved for (its group's "+
+				"sampling rest over, nothing of it in flight): at_limit (the group is held at its limit and was read "+
+				"early within its quiet bar, so its data arrives past the longest hold it may have; a read below "+
 				"the hold and the formal read both come before the data, and their agreeing would say nothing of "+
-				"it). A group counted here keeps its hold at the limit, and its trials resume once an arrival "+
-				"reading wants a hold below the limit. Every reason exists from the start.", "reason"),
+				"it). A group counted here keeps its hold at the limit; its trials resume once an arrival reading "+
+				"wants a hold below the limit, or once it has gone its quiet bar without being read early. Every "+
+				"reason exists from the start.", "reason"),
 		readHoldDuration: desc("read_hold_query_duration_writes_total",
 			"Read-hold records written for the query duration they keep, by why: changed (the owner's measured "+
 				"duration moved by a second, a minute or more after the last write) or refreshed (the same reading "+

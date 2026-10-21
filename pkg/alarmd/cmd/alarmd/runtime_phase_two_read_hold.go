@@ -868,6 +868,7 @@ func (holds *productionReadHolds) observation(contractRef execution.FrozenExecut
 func (holds *productionReadHolds) bindLookback(options *lookback.Options) {
 	options.CurrentReadHold, options.ReadHoldAt = holds.controller.ReadHold, holds.controller.ReadHoldAt
 	options.CurrentCandidate = holds.controller.EarlierCandidate
+	options.EarlierRefused = holds.controller.EarlierRefused
 	options.OnWholeWindowReadEarly = func(e lookback.ReadHoldEvidence) {
 		holds.observation(e.Contract, func(ctx context.Context) error {
 			return holds.controller.Observe(ctx, readhold.Evidence{Contract: e.Contract, ArrivalAge: e.ArrivalAge,

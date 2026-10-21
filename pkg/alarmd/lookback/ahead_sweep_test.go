@@ -293,3 +293,56 @@ func TestATrialTriesTheGivenCandidate(t *testing.T) {
 		})
 	}
 }
+
+// A Slot the controller gives no candidate for is heard as refused where a
+// trial would have been reserved for it - the group's rest over, nothing of
+// it in flight - once however often the Slot is prepared, and not at all
+// while the group rests. The trial a candidate was given for is not heard.
+func TestARefusedTrialIsHeardOnlyWhereOneWouldBeReserved(t *testing.T) {
+	f := newFixture(t)
+	f.engine.options.OnEarlierRead = func(EarlierReadEvidence) {}
+	tries := false
+	f.engine.options.CurrentCandidate = func(execution.QueryGroupIdentity) (time.Duration, bool) { return 90 * time.Second, tries }
+	var heard []execution.QueryGroupIdentity
+	f.engine.options.EarlierRefused = func(qg execution.QueryGroupIdentity) { heard = append(heard, qg) }
+	q := heldQuery(f)
+	f.engine.Prepare(q)
+	f.engine.Prepare(q)
+	if len(heard) != 1 || heard[0] != "qg" {
+		t.Fatalf("heard %v for one Slot prepared twice, want qg once", heard)
+	}
+	// The group resting past the next Slot's readiness: no trial would be
+	// reserved for it, and none is heard.
+	next := q
+	next.Contract.Slot.EvaluationTime += 60
+	next.ReadyAt = q.ReadyAt.Add(time.Minute)
+	f.engine.mu.Lock()
+	f.engine.groups["qg"].nextAt = next.ReadyAt.Add(time.Hour)
+	f.engine.mu.Unlock()
+	f.engine.Prepare(next)
+	if len(heard) != 1 {
+		t.Fatalf("heard %v for a Slot while its group rests", heard)
+	}
+	// A candidate given: a trial is reserved, and nothing is heard.
+	f.engine.mu.Lock()
+	f.engine.groups["qg"].nextAt = time.Time{}
+	f.engine.mu.Unlock()
+	tries = true
+	later := next
+	later.Contract.Slot.EvaluationTime += 60
+	later.ReadyAt = next.ReadyAt.Add(time.Minute)
+	f.engine.Prepare(later)
+	if len(heard) != 1 || preparedTrial(f) == nil {
+		t.Fatalf("a given candidate: heard %v, reserved %+v", heard, preparedTrial(f))
+	}
+	// Refused again while that reservation stands: no trial would be
+	// reserved for the next Slot either, and none is heard.
+	tries = false
+	last := later
+	last.Contract.Slot.EvaluationTime += 60
+	last.ReadyAt = later.ReadyAt.Add(time.Minute)
+	f.engine.Prepare(last)
+	if len(heard) != 1 {
+		t.Fatalf("heard %v while a reservation stands", heard)
+	}
+}

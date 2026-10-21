@@ -352,6 +352,29 @@ func (engine *Engine) groupLocked(query Query, now time.Time) *group {
 	return state
 }
 
+// refuseEarlier tells EarlierRefused of a Slot whose trial the controller
+// gave no candidate for, when Prepare would have reserved one for it: the
+// group's rest over at the Slot's readiness, and no sample, trial or
+// reservation of the group's in flight - once a Slot, however often its
+// readiness is retried. Nothing else of the group's state moves: a
+// reservation standing for an earlier Slot stays as it was.
+func (engine *Engine) refuseEarlier(query Query, now time.Time) {
+	if engine.options.EarlierRefused == nil {
+		return
+	}
+	engine.mu.Lock()
+	state := engine.groupLocked(query, now)
+	slot := query.Contract.Slot.EvaluationTime
+	due := state.prepared == nil && !state.capturing && state.sample == nil && !query.ReadyAt.Before(state.nextAt) && state.refused != slot
+	if due {
+		state.refused = slot
+	}
+	engine.mu.Unlock()
+	if due {
+		engine.options.EarlierRefused(query.Contract.Slot.QueryGroup)
+	}
+}
+
 // Prepare sees a normal, non-retry query before readiness waits. It reserves
 // exactly the sample Begin would take, once per Slot, so the h/2 read uses
 // existing sampling rather than an independent query schedule. Begin then
@@ -379,6 +402,7 @@ func (engine *Engine) Prepare(query Query) {
 	if hasGiven {
 		var tries bool
 		if given, tries = engine.options.CurrentCandidate(query.Contract.Slot.QueryGroup); !tries {
+			engine.refuseEarlier(query, now)
 			return
 		}
 	}
