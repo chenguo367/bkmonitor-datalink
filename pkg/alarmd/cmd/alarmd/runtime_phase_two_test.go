@@ -1274,6 +1274,8 @@ func TestPhaseTwoWorkerBundleNeverRegistersReadyAfterDraining(t *testing.T) {
 	control := &fakePhaseTwoControl{queryGroups: []execution.QueryGroupIdentity{"query-group-1"}}
 	renewalStarted := make(chan struct{})
 	releaseRenewal := make(chan struct{})
+	drainingObserved := make(chan struct{})
+	var drainingOnce sync.Once
 	var callsMu sync.Mutex
 	readyCalls := 0
 	owner := &fakePhaseTwoOwnership{assigned: []execution.QueryGroupIdentity{"query-group-1"}, runner: newFakePhaseTwoQueryGroup()}
@@ -1287,6 +1289,9 @@ func TestPhaseTwoWorkerBundleNeverRegistersReadyAfterDraining(t *testing.T) {
 				<-releaseRenewal
 				return
 			}
+		}
+		if registration.AssignmentReadiness == ownership.WorkerDraining {
+			drainingOnce.Do(func() { close(drainingObserved) })
 		}
 		callsMu.Unlock()
 	}
@@ -1304,6 +1309,14 @@ func TestPhaseTwoWorkerBundleNeverRegistersReadyAfterDraining(t *testing.T) {
 		defer bundle.mu.Unlock()
 		return bundle.draining
 	})
+	// An absence window: a DRAINING registration that does not wait for the
+	// held READY renewal lands within it, and the READY released after it
+	// then undoes it, which the last registration below catches; one that
+	// waits, as it must, lands after the renewal and sends nothing meanwhile.
+	select {
+	case <-drainingObserved:
+	case <-time.After(20 * time.Millisecond): // fixed-wait: the absence window above; a registration that waits sends no signal while it does
+	}
 	close(releaseRenewal)
 	if err := <-shutdownDone; err != nil {
 		t.Fatal(err)
