@@ -99,6 +99,12 @@ type streamedExecution struct {
 	// reader on another goroutine: access reads it across an in-place
 	// readiness wait while the series path keeps adding.
 	retainedInputNow atomic.Uint64
+	// retainedNow is retainedByPhase again for a reader on another goroutine
+	// (RetainedHolders), and heldSince when this execution first retained;
+	// holding says it is in the coordinator's holder registry.
+	retainedNow [retainPhaseCount]atomic.Uint64
+	heldSince   time.Time
+	holding     bool
 	// spentByPhase is this execution's wall clock split the same way, in
 	// nanoseconds, summed over every call of each phase.
 	spentByPhase [slotPhaseCount]uint64
@@ -216,8 +222,13 @@ const (
 // panics here rather than being dropped into the total unattributed.
 func (stream *streamedExecution) retainBytes(phase retainPhase, retained uint64) {
 	stream.retainedByPhase[phase] += retained
+	stream.retainedNow[phase].Add(retained)
 	if phase == retainPhaseInput {
 		stream.retainedInputNow.Add(retained)
+	}
+	if retained > 0 && !stream.holding {
+		stream.holding, stream.heldSince = true, time.Now()
+		stream.coordinator.holders.add(stream)
 	}
 }
 
@@ -280,6 +291,7 @@ func (stream *streamedExecution) unretainInput(bytes uint64) {
 	bytes = min(bytes, stream.retainedByPhase[retainPhaseInput])
 	stream.retainedByPhase[retainPhaseInput] -= bytes
 	stream.retainedInputNow.Add(^(bytes - 1))
+	stream.retainedNow[retainPhaseInput].Add(^(bytes - 1))
 	stream.coordinator.releaseProvisional(0, bytes)
 }
 
@@ -478,6 +490,13 @@ func (stream *streamedExecution) releaseProvisional() {
 	stream.namedOutputs = nil
 	stream.series, stream.retainedByPhase, stream.namedReserved = 0, [retainPhaseCount]uint64{}, 0
 	stream.retainedInputNow.Store(0)
+	for phase := range stream.retainedNow {
+		stream.retainedNow[phase].Store(0)
+	}
+	if stream.holding {
+		stream.holding = false
+		stream.coordinator.holders.remove(stream)
+	}
 }
 
 // retainNamedOutputs settles what the Slot holds for the named outputs its

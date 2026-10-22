@@ -25,6 +25,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategycache"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/worker"
 )
 
 // controlPlaneExpectation reads the authoritative object set from the control
@@ -326,6 +327,9 @@ type fleetPublisher struct {
 	// and why. Nil on a publisher built by hand, and the snapshot then
 	// carries none.
 	tracing *fleet.TracingFacts
+	// retainedHolders reads what holds this replica's retained pool at the
+	// moment of publishing. Nil on a publisher built by hand.
+	retainedHolders func() *fleet.RetainedHolderFacts
 }
 
 // fleetOverdueWakeCeiling bounds how many parked objects one publish carries.
@@ -628,6 +632,37 @@ func fleetTracingFacts(cfg config.Config, built bool) *fleet.TracingFacts {
 	return &fleet.TracingFacts{State: fleet.TracingOn, EndpointHost: host, SampleRatio: &ratio, MaxTracesPerSecond: &rate}
 }
 
+// retainedHolderFacts reads what holds coordinator's retained pool, for the
+// fleet snapshot: the largest RetainedHoldersListed Slots and the oldest.
+func retainedHolderFacts(coordinator *worker.SlotExecutionCoordinator, strategies func(string) []fleet.StrategyRef) func() *fleet.RetainedHolderFacts {
+	return func() *fleet.RetainedHolderFacts {
+		return retainedHolderFactsOf(worker.RetainedHolders(coordinator, fleet.RetainedHoldersListed), strategies)
+	}
+}
+
+// retainedHolderFactsOf is a reading of the retained pool as the snapshot
+// carries it, each Slot named by the strategies this replica has seen its
+// object evaluate.
+func retainedHolderFactsOf(reading worker.RetainedHolderReading, strategies func(string) []fleet.StrategyRef) *fleet.RetainedHolderFacts {
+	name := func(holder worker.RetainedHolder) fleet.RetainedHolderRef {
+		queryGroup := string(holder.Slot.QueryGroup)
+		return fleet.NameRetainedHolder(fleet.RetainedHolderRef{
+			QueryGroup: queryGroup, EvaluationTime: int64(holder.Slot.EvaluationTime), Operation: string(holder.Operation),
+			Since: holder.Since, Bytes: holder.Bytes, ByKind: holder.ByKind,
+		}, strategies(queryGroup))
+	}
+	facts := &fleet.RetainedHolderFacts{Holders: make([]fleet.RetainedHolderRef, 0, len(reading.Holders)),
+		Total: reading.Total, AttributedBytes: reading.Attributed, HeldBytes: reading.Held}
+	for _, holder := range reading.Holders {
+		facts.Holders = append(facts.Holders, name(holder))
+	}
+	if reading.Oldest != nil {
+		oldest := name(*reading.Oldest)
+		facts.Oldest = &oldest
+	}
+	return facts
+}
+
 // fleetOutputProtocolFacts is the choice this process runs with: the word the
 // reconciler was configured with -- the same call, so the fleet cannot
 // publish one word while the Plans are built under another -- and whether the
@@ -794,6 +829,9 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 		snapshot.Retention = &facts
 	}
 	snapshot.Tracing = fleet.CopyTracingFacts(publisher.tracing)
+	if publisher.retainedHolders != nil {
+		snapshot.RetainedHolders = publisher.retainedHolders()
+	}
 	// What the tracker keeps to read holes by, and the object keeping the
 	// most: the metrics carry the counts, only the snapshot can name it.
 	roundMemory := publisher.tracker.RoundMemory().Summary()

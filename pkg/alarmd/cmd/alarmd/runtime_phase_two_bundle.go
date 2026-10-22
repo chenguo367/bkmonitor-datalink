@@ -1401,6 +1401,8 @@ func openProductionPhaseTwoBundleAssembly(
 		retention: fleetRetentionFacts(cfg),
 		// The export built above, on or off.
 		tracing: tracingFacts,
+		// The coordinator that owns the pool the retained gauge reads.
+		retainedHolders: retainedHolderFacts(coordinator, fleetTracker.StrategiesFor),
 	}
 	// The heartbeat reports the same acknowledgement and occupancy the fleet
 	// snapshot publishes, from the same sources.

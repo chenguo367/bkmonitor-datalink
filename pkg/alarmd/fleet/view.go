@@ -2166,6 +2166,11 @@ type Snapshot struct {
 	// object is named only here, because a label per object is not a metric
 	// anyone can bound. Absent on a build before this fact existed.
 	RoundMemory *RoundMemorySummary `json:"round_memory,omitempty"`
+	// RetainedHolders is what held this replica's retained pool as it
+	// published, Slot by Slot. The usage is a metric too; the Slots holding
+	// it are named only here, for the same reason. Absent on a build before
+	// this fact existed.
+	RetainedHolders *RetainedHolderFacts `json:"retained_holders,omitempty"`
 }
 
 // OutputProtocolFacts is one process's output protocol choice: the word in
@@ -3045,6 +3050,11 @@ type ReplicaView struct {
 	// bytes its tracker keeps and the object keeping the most. Absent when it
 	// published none (an older build).
 	RoundMemory *RoundMemorySummary `json:"round_memory,omitempty"`
+	// RetainedHolders is this replica's, as it published it: the Slots
+	// holding the most of its retained pool, the one holding the longest,
+	// and the pool's figure beside theirs. Absent when it published none (an
+	// older build).
+	RetainedHolders *RetainedHolderFacts `json:"retained_holders,omitempty"`
 }
 
 // copyRoundMemory copies a published round memory summary, the largest
@@ -3679,6 +3689,7 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		// And what its tracker keeps, copied so a later read cannot alias
 		// the snapshot's.
 		perReplica.RoundMemory = copyRoundMemory(snapshot.RoundMemory)
+		perReplica.RetainedHolders = CopyRetainedHolderFacts(snapshot.RetainedHolders)
 		view.OutputProtocols = addToOutputProtocolGroup(view.OutputProtocols, snapshot.OutputProtocol, replica)
 		view.Tracings = addToTracingGroup(view.Tracings, snapshot.Tracing, replica)
 		view.Retentions = addToRetentionGroup(view.Retentions, snapshot.Retention, replica)

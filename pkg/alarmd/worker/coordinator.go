@@ -19,6 +19,7 @@ import (
 	"net"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -125,6 +126,9 @@ type SlotExecutionCoordinator struct {
 	// effect for this process, the bound below which a window hole's minute
 	// is not judged against the schedule. See out_of_hours.go.
 	effectiveSeen effectiveTimeSeen
+	// holders is who holds the retained budget now, by Slot
+	// (RetainedHolders): the pool's figure says how much, this says whose.
+	holders retainedHolderRegistry
 }
 
 type processProvisionalReservations struct {
@@ -275,6 +279,14 @@ func frameRetainedBytes(frame *execution.EncodedStateFrame) uint64 {
 type heldFrames struct {
 	coordinator *SlotExecutionCoordinator
 	bytes       uint64
+	// slot and operation name whose frames these are, and since when they are
+	// held, for the retained-holder reading; bytesNow is bytes for it, and
+	// holding says the frames are in the coordinator's holder registry.
+	slot      execution.SlotIdentity
+	operation execution.Operation
+	since     time.Time
+	bytesNow  atomic.Uint64
+	holding   bool
 	// refused is set once the budget did not take a chunk: the Plan keeps
 	// the frames reserved before it and lets every later one go.
 	refused  bool
@@ -298,6 +310,11 @@ func (held *heldFrames) keep(chunk []admittedState) {
 	}
 	if !held.refused && held.coordinator.tryAcquireRetained(total) {
 		held.bytes += total
+		held.bytesNow.Store(held.bytes)
+		if !held.holding {
+			held.holding, held.since = true, time.Now()
+			held.coordinator.holders.add(held)
+		}
 		return
 	}
 	held.refused = true
@@ -322,6 +339,7 @@ func (held *heldFrames) settle(kept []admittedState) {
 	if total < held.bytes {
 		held.coordinator.releaseProvisional(0, held.bytes-total)
 		held.bytes = total
+		held.bytesNow.Store(total)
 	}
 }
 
@@ -334,6 +352,10 @@ func (held *heldFrames) release() {
 	}
 	held.released = true
 	held.coordinator.releaseProvisional(0, held.bytes)
+	held.bytesNow.Store(0)
+	if held.holding {
+		held.coordinator.holders.remove(held)
+	}
 }
 
 // Execute performs one already-scheduled attempt. normal, retry, replay and
@@ -2194,7 +2216,7 @@ func (coordinator *SlotExecutionCoordinator) admitState(
 	started := time.Now()
 	deterministic := make(map[execution.StateKeyIdentity]execution.ReasonCode)
 	encodedBytes := make([]admittedState, len(mutations))
-	held := &heldFrames{coordinator: coordinator}
+	held := &heldFrames{coordinator: coordinator, slot: contractRef.Slot, operation: operation}
 	var totals applyTotals
 	err := forEachChunk(ctx, len(mutations), coordinator.applyChunkItems(coordinator.budget.MaxStateMutations), func(chunk applyChunk) error {
 		chunkItems := mutations[chunk.start:chunk.end]
