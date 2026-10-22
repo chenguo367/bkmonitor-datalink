@@ -95,6 +95,21 @@ func leasesOutliveTheRun(cfg *config.Config) {
 	cfg.PhaseTwo.Worker.RegistrationTTL, cfg.PhaseTwo.Ownership.ControlLeaderTTL, cfg.PhaseTwo.Ownership.LeaseTTL = week, week, week
 }
 
+// nextFixtureWake is where a run on the fixture's clock moves it next, as the process's loops wake on production's:
+// the lookback's next tick after lastStep, the Runner's next Slot due, or the lookback's next early read - a trial's
+// or a probe's, started when its start comes, not at the first tick after - whichever comes first.
+func nextFixtureWake(f *cutoverStallFixture, engine *lookback.Engine, lastStep time.Time) time.Time {
+	now := f.now()
+	next := lastStep.Add(lookbackTick)
+	if wake := f.runner.NextReadyAt(); wake.After(now) && wake.Before(next) {
+		next = wake.Add(time.Millisecond)
+	}
+	if early := engine.NextEarlyWake(); early.After(now) && early.Before(next) {
+		next = early
+	}
+	return next
+}
+
 // heldTrialRun drives a held group's Slots through the production Worker, the clock taken to each Slot's first
 // attempt as the dispatcher wakes it and stepped between, the lookback stepped as its loop steps it, for up to
 // span or until done says so. The group's data is measured landing arrival late, which raises its hold. It
@@ -123,7 +138,6 @@ func heldTrialRun(t *testing.T, f *cutoverStallFixture, arrival, span time.Durat
 	if trialPartial {
 		f.uqPartial = func(end int64) bool { return f.now().Before(time.Unix(end, 0).Add(raised)) }
 	}
-	const step = 5 * time.Second
 	immediate := 0
 	outcomesNow := func() map[string]uint64 {
 		counts := map[string]uint64{}
@@ -136,9 +150,10 @@ func heldTrialRun(t *testing.T, f *cutoverStallFixture, arrival, span time.Durat
 	}
 	started := f.now()
 	// The lookback's loop reads the due rechecks once every lookbackTick of
-	// the process's clock (Engine.Run). That loop runs on the wall clock and
-	// this one on the fixture's, which leaps, so the run takes those steps
-	// itself, at the same cadence on its own clock; left to the wall clock,
+	// the process's clock (Engine.Run), and wakes between for its early reads
+	// when the next is due. That loop runs on the wall clock and this one on
+	// the fixture's, which leaps, so the run takes those steps itself, at the
+	// same moments on its own clock (nextFixtureWake); left to the wall clock,
 	// they came only as often as the run paused.
 	lastStep := started
 	for deadline := started.Add(span); f.now().Before(deadline); {
@@ -180,11 +195,7 @@ func heldTrialRun(t *testing.T, f *cutoverStallFixture, arrival, span time.Durat
 			continue
 		}
 		immediate = 0
-		next := f.now().Add(step)
-		if wake.After(f.now()) && wake.Before(next) {
-			next = wake.Add(time.Millisecond)
-		}
-		f.clock.Store(next.UnixMilli())
+		f.clock.Store(nextFixtureWake(f, engine, lastStep).UnixMilli())
 	}
 	outcomes, overtaken = map[string]uint64{}, map[string]uint64{}
 	for _, source := range engine.Stats().Sources {

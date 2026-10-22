@@ -463,9 +463,10 @@ func (engine *Engine) StepEarly(ctx context.Context) {
 	}
 }
 
-// nextEarlyWake is when the loop is next needed for the early reads, zero
-// when none waits.
-func (engine *Engine) nextEarlyWake() time.Time {
+// NextEarlyWake is when the loop is next needed for the early reads, zero
+// when none waits: Run wakes then, and a caller that runs the engine on a
+// clock of its own steps that clock there for the same reads.
+func (engine *Engine) NextEarlyWake() time.Time {
 	if engine == nil {
 		return time.Time{}
 	}

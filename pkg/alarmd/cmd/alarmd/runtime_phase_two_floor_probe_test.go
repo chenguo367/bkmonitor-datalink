@@ -93,14 +93,14 @@ func ageFloor(t *testing.T, f *cutoverStallFixture, age time.Duration) {
 }
 
 // heldRounds runs the fixture's group as heldTrialRun does, without raising its hold first: each Slot when the
-// dispatcher would run it, the early reads due started and answered before the clock moves, and the lookback's due
-// rechecks read every lookbackTick of the fixture's clock, as its own loop reads them on production's. It stops
+// dispatcher would run it, each early read when its start comes, started and answered before the clock moves, and
+// the lookback's due rechecks read every lookbackTick of the fixture's clock, as its own loop reads them on
+// production's. It stops
 // when done says so or after span, and returns the Slots skipped unevaluated.
 func heldRounds(t *testing.T, f *cutoverStallFixture, span time.Duration, done func(elapsed time.Duration) bool) (skipped int) {
 	t.Helper()
 	ctx := context.Background()
 	engine := f.bundle.dependencies.Lookback
-	const step = 5 * time.Second
 	immediate := 0
 	started := f.now()
 	lastStep := started
@@ -136,11 +136,7 @@ func heldRounds(t *testing.T, f *cutoverStallFixture, span time.Duration, done f
 			continue
 		}
 		immediate = 0
-		next := f.now().Add(step)
-		if wake.After(f.now()) && wake.Before(next) {
-			next = wake.Add(time.Millisecond)
-		}
-		f.clock.Store(next.UnixMilli())
+		f.clock.Store(nextFixtureWake(f, engine, lastStep).UnixMilli())
 	}
 	t.Fatalf("the run did not end within %v", span)
 	return skipped
@@ -261,11 +257,12 @@ func TestAStuckGroupsFloorIsProbedAndItsHoldComesDownWithNoRoundReadEarly(t *tes
 }
 
 // A group whose data lands late within its window - one of its series, every fifth round, twenty seconds after the
-// window - is probed at halves from its 48 s hold over a floor of none: a half read before the series is there fails
-// on that round, the point the formal read had and the probe's read did not (points_added), and is the floor; a half
-// read after it passes and is the hold. The hold comes down only through verified lowerings, and never below where
-// the series is there by the formal read - 19.5 s, with the fixture's half-second readiness - nor above the last
-// failed half and the probes' resolution.
+// window - is probed at halves from its 48 s hold over a floor of none. A probe's read at a half starts
+// lookback.RecheckTimeout before the half's readiness, as every earlier read does, and the fixture's readiness is
+// under a second past the window: a half under 25 s is read before the series is there and fails on that round - the
+// point the formal read had and the probe's read did not (points_added) - and is the floor; a half from 25 s is read
+// after it, passes, and is the hold. 24 s fails; 36, 30 and 27 s pass; 27 s is within readhold.MidpointResolution of
+// 24 s. The hold comes down through 48, 36, 30 and 27 s, every lowering a verified one, over a floor of 24 s.
 func TestAProbeComesDownToWhereItsDataIsWholeAndNoFurther(t *testing.T) {
 	t.Parallel()
 	f := startCutoverFixture(t, leasesOutliveTheRun)
@@ -294,16 +291,18 @@ func TestAProbeComesDownToWhereItsDataIsWholeAndNoFurther(t *testing.T) {
 		}
 	}
 	record, _ := holds.controller.Reading(f.queryGroup)
-	t.Logf("held %v: came down through %v, floor %v; probe events %v, rounds %v, changes %v", hold, came, record.EarlierFloorMillis, events, rounds, changes)
-	final := came[len(came)-1]
-	if len(came) < 2 || final < 19500*time.Millisecond || record.EarlierFloorMillis == nil ||
-		final-time.Duration(*record.EarlierFloorMillis)*time.Millisecond > readhold.MidpointResolution {
-		t.Fatalf("came down through %v to a floor of %v; want down from 48 s, to no less than 19.5 s, within %v of the floor",
-			came, record.EarlierFloorMillis, readhold.MidpointResolution)
+	floor := int64(-1)
+	if record.EarlierFloorMillis != nil {
+		floor = *record.EarlierFloorMillis
 	}
-	if holds.controller.Stats().FloorProbes[readhold.FloorProbeFloorRaised] == 0 || events[lookback.FloorProbeFailed] == 0 ||
-		changes[lookback.ChangePointsAdded] == 0 {
-		t.Fatalf("controller %v, probe events %v, changes %v; want a half that failed on the late series' point, raising the floor",
+	t.Logf("held %v: came down through %v, floor %d ms; probe events %v, rounds %v, changes %v", hold, came, floor, events, rounds, changes)
+	want := []time.Duration{48 * time.Second, 36 * time.Second, 30 * time.Second, 27 * time.Second}
+	if fmt.Sprint(came) != fmt.Sprint(want) || floor != 24000 {
+		t.Fatalf("came down through %v to a floor of %d ms; want %v, to a floor of 24000 ms", came, floor, want)
+	}
+	if holds.controller.Stats().FloorProbes[readhold.FloorProbeFloorRaised] != 1 || events[lookback.FloorProbeFailed] != 1 ||
+		events[lookback.FloorProbePassed] != 3 || changes[lookback.ChangePointsAdded] != 1 {
+		t.Fatalf("controller %v, probe events %v, changes %v; want the half at 24 s failed on the late series' point, raising the floor, and the three above it passed",
 			holds.controller.Stats().FloorProbes, events, changes)
 	}
 	if skipped != 0 || !holds.controller.LoweringVerified(f.queryGroup) {

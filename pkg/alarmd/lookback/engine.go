@@ -948,7 +948,7 @@ func (engine *Engine) Run(ctx context.Context, tick time.Duration) {
 			engine.StepEarly(ctx)
 		}
 		wait := time.Until(nextStep)
-		if at := engine.nextEarlyWake(); !at.IsZero() {
+		if at := engine.NextEarlyWake(); !at.IsZero() {
 			wait = min(wait, max(at.Sub(engine.options.Now()), time.Millisecond))
 		}
 		if !timer.Stop() {
