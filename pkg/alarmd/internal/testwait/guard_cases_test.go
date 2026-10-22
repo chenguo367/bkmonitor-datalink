@@ -48,6 +48,7 @@ func TestWaits(t *testing.T) {
 	c.Sleep(time.Second)
 	time.Sleep(time.Second) // fixed-wait: nothing may arrive within the second
 	time.Sleep(time.Second) /* want time.Sleep */ // fixed-wait:
+	time.Sleep(time.Second) /* fixed-wait: a reason, in a block comment */ /* want time.Sleep */
 	<-time.After(time.Second) // fixed-wait: the window the absence is shown in
 	<-time.After(time.Second) /* want time.After */
 	time.AfterFunc(time.Second, func() {}) /* want time.AfterFunc */
@@ -209,6 +210,62 @@ func handedOutDeadline(t *testing.T, extend func(*time.Time)) {
 	}
 }
 
+// The clock set into a variable on a line of its own and tested later in the
+// loop is the clock the loop watches.
+func clockSetInTheBody(t *testing.T, start time.Time, d time.Duration, done func() bool) {
+	for !done() { /* want clock loop */
+		expired := time.Since(start) > d
+		if expired {
+			return
+		}
+	}
+	var now time.Time
+	for !done() { /* want clock loop */
+		now = time.Now()
+		if now.After(start.Add(d)) {
+			return
+		}
+	}
+	deadline := testwait.Deadline(t)
+	for !done() {
+		now := time.Now()
+		if now.After(deadline) {
+			t.Fatal("not done")
+		}
+	}
+	for left := time.Until(deadline); !done(); left = time.Until(deadline) {
+		if left <= 0 {
+			t.Fatal("not done")
+		}
+	}
+}
+
+// The test's deadline moved by a constant is a fixed time again, whichever
+// side of the comparison carries the arithmetic.
+func shortenedDeadline(t *testing.T, done func() bool) {
+	deadline := testwait.Deadline(t)
+	for time.Now().Before(deadline.Add(-119 * time.Second)) { /* want clock loop */
+	}
+	for time.Until(deadline) > 119*time.Second { /* want clock loop */
+	}
+	for time.Now().Add(119 * time.Second).Before(deadline) { /* want clock loop */
+	}
+	for !done() && deadline.After(time.Now()) {
+	}
+}
+
+// A goroutine started in a loop runs apart from it: its clock is not the one
+// the loop waits on.
+func goroutineInALoop(cases []int, start time.Time, d time.Duration) {
+	for range cases {
+		go func() {
+			if time.Since(start) > d {
+				return
+			}
+		}()
+	}
+}
+
 func givenDeadline(deadline time.Time) {
 	for time.Now().Before(deadline) { /* want clock loop */
 	}
@@ -252,6 +309,24 @@ func dotted(d Duration) {
 	<-After(d) // fixed-wait: the window the absence is shown in
 }
 `,
+}
+
+// The guard reads every test file and the test helpers under internal/, and
+// no other code: a helper under internal/ waits as every test that calls it.
+func TestTheGuardReadsTheTestsAndTheirHelpers(t *testing.T) {
+	for path, read := range map[string]bool{
+		"fleet/store_test.go":           true,
+		"cmd/alarmd/runtime_test.go":    true,
+		"internal/redistest/start.go":   true,
+		"internal/testwait/testwait.go": true,
+		"fleet/store.go":                false,
+		"cmd/alarmd/main.go":            false,
+		"internal/redistest/README.md":  false,
+	} {
+		if guarded(path) != read {
+			t.Errorf("guarded(%q) = %t, want %t", path, !read, read)
+		}
+	}
 }
 
 // The guard reports each way a fixed wait has been hidden from it, at the

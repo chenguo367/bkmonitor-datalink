@@ -266,39 +266,61 @@ func (w *waitWalk) parentKind(expr ast.Expr) string {
 // compares the clock with holds the test's deadline: it is then a wait on its
 // condition, bounded by the test.
 func (w *waitWalk) loop(at token.Pos, enclosing []ast.Node, header []ast.Node, body *ast.BlockStmt) {
-	var compared []ast.Node
-	for _, part := range header {
-		if part != nil {
-			compared = append(compared, w.clockComparisons(part)...)
+	// The variables the loop sets straight from the clock, in its header or
+	// anywhere in its body: a condition that reads one reads the clock
+	// (expired := time.Since(start) > d; if expired), wherever it was set.
+	clockVars := map[*ast.Object]ast.Expr{}
+	collect := func(n ast.Node) {
+		switch n := n.(type) {
+		case *ast.AssignStmt:
+			if len(n.Lhs) != len(n.Rhs) {
+				return
+			}
+			for i, value := range n.Rhs {
+				if set, ok := n.Lhs[i].(*ast.Ident); ok && set.Obj != nil && w.readsClockStraight(value) {
+					clockVars[set.Obj] = value
+				}
+			}
+		case *ast.ValueSpec:
+			for i, value := range n.Values {
+				if i < len(n.Names) && n.Names[i].Obj != nil && w.readsClockStraight(value) {
+					clockVars[n.Names[i].Obj] = value
+				}
+			}
 		}
 	}
-	ast.Inspect(body, func(n ast.Node) bool {
-		var init ast.Stmt
-		var tests []ast.Node
+	var conditions []ast.Node
+	for i, part := range header {
+		if part == nil {
+			continue
+		}
+		// Init and post set, the condition tests (for init; cond; post).
+		if i == 1 {
+			conditions = append(conditions, part)
+		} else {
+			inLoop(part, func(n ast.Node) { collect(n) })
+		}
+	}
+	inLoop(body, func(n ast.Node) {
+		collect(n)
 		switch n := n.(type) {
-		case *ast.FuncLit, *ast.ForStmt, *ast.RangeStmt:
-			return false
 		case *ast.IfStmt:
-			init, tests = n.Init, []ast.Node{n.Cond}
+			conditions = append(conditions, n.Cond)
 		case *ast.SwitchStmt:
-			init = n.Init
 			if n.Tag != nil {
-				tests = append(tests, n.Tag)
+				conditions = append(conditions, n.Tag)
 			}
 			for _, clause := range n.Body.List {
 				for _, test := range clause.(*ast.CaseClause).List {
-					tests = append(tests, test)
+					conditions = append(conditions, test)
 				}
 			}
-		default:
-			return true
 		}
-		for _, test := range tests {
-			compared = append(compared, w.clockComparisons(test)...)
-		}
-		compared = append(compared, w.clockTestedThrough(init, tests)...)
-		return true
 	})
+	var compared []ast.Node
+	for _, condition := range conditions {
+		compared = append(compared, w.clockComparisons(condition, clockVars)...)
+	}
 	if len(compared) == 0 {
 		return
 	}
@@ -313,17 +335,38 @@ func (w *waitWalk) loop(at token.Pos, enclosing []ast.Node, header []ast.Node, b
 			break
 		}
 	}
-	if fn != nil && w.allOnTestDeadline(compared, fn) {
+	if fn != nil && w.allOnTestDeadline(compared, fn, clockVars) {
 		return
 	}
 	w.report(at, "clock loop")
 }
 
+// inLoop visits n and what is under it, leaving out function literals, which
+// run apart from the loop, and the loops inside it, which are judged at their
+// own for.
+func inLoop(n ast.Node, visit func(ast.Node)) {
+	ast.Inspect(n, func(child ast.Node) bool {
+		switch child.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.ForStmt, *ast.RangeStmt:
+			if child != n {
+				return false
+			}
+		}
+		if child != nil {
+			visit(child)
+		}
+		return true
+	})
+}
+
 // clockComparisons returns, for each clock read in n outside function
-// literals, the comparison it takes part in: the nearest enclosing
-// relational expression or time comparison method call, or the read itself
-// when it is compared with nothing.
-func (w *waitWalk) clockComparisons(n ast.Node) []ast.Node {
+// literals - a clock call, or a variable the loop set from one - the
+// comparison it takes part in: the nearest enclosing relational expression
+// or time comparison method call, or else the read itself (for a variable,
+// the value it was set to, as for a bool set from a comparison).
+func (w *waitWalk) clockComparisons(n ast.Node, clockVars map[*ast.Object]ast.Expr) []ast.Node {
 	var found []ast.Node
 	var path []ast.Node
 	ast.Inspect(n, func(n ast.Node) bool {
@@ -334,8 +377,15 @@ func (w *waitWalk) clockComparisons(n ast.Node) []ast.Node {
 		if _, ok := n.(*ast.FuncLit); ok {
 			return false
 		}
+		var read ast.Node
 		if call, ok := n.(*ast.CallExpr); ok && clockReads[w.qualified(call.Fun)] {
-			comparison := ast.Node(call)
+			read = call
+		}
+		if id, ok := n.(*ast.Ident); ok && id.Obj != nil && clockVars[id.Obj] != nil {
+			read = clockVars[id.Obj]
+		}
+		if read != nil {
+			comparison := read
 			for i := len(path) - 1; i >= 0; i-- {
 				if w.isComparison(path[i]) {
 					comparison = path[i]
@@ -347,38 +397,6 @@ func (w *waitWalk) clockComparisons(n ast.Node) []ast.Node {
 		path = append(path, n)
 		return true
 	})
-	return found
-}
-
-// clockTestedThrough returns the clock reads an if or switch tests through a
-// variable its init statement sets, as in
-// if left := time.Until(deadline); left <= 0. Only a variable set straight
-// from the clock counts: time.Now() passed into some other call in the init
-// is data for that call, not the clock being watched.
-func (w *waitWalk) clockTestedThrough(init ast.Stmt, tests []ast.Node) []ast.Node {
-	assign, ok := init.(*ast.AssignStmt)
-	if !ok || len(assign.Lhs) != len(assign.Rhs) {
-		return nil
-	}
-	var found []ast.Node
-	for i, value := range assign.Rhs {
-		set, ok := assign.Lhs[i].(*ast.Ident)
-		if !ok || set.Obj == nil || !w.readsClockStraight(value) {
-			continue
-		}
-		tested := false
-		for _, test := range tests {
-			ast.Inspect(test, func(n ast.Node) bool {
-				if id, ok := n.(*ast.Ident); ok && id.Obj == set.Obj {
-					tested = true
-				}
-				return !tested
-			})
-		}
-		if tested {
-			found = append(found, value)
-		}
-	}
 	return found
 }
 
@@ -418,49 +436,61 @@ func (w *waitWalk) isComparison(n ast.Node) bool {
 	return false
 }
 
-// allOnTestDeadline reports whether every comparison compares the clock only
-// with variables of fn holding the test's deadline. A comparison with no such
-// variable at all (time.Now() on its own, a constant duration) is not one.
-func (w *waitWalk) allOnTestDeadline(comparisons []ast.Node, fn ast.Node) bool {
+// allOnTestDeadline reports whether every comparison is on the test's
+// deadline (onTestDeadline).
+func (w *waitWalk) allOnTestDeadline(comparisons []ast.Node, fn ast.Node, clockVars map[*ast.Object]ast.Expr) bool {
 	for _, comparison := range comparisons {
-		operands := w.operands(comparison)
-		if len(operands) == 0 {
+		if !w.onTestDeadline(comparison, fn, clockVars) {
 			return false
-		}
-		for _, operand := range operands {
-			if !w.holdsTestDeadline(operand, fn) {
-				return false
-			}
 		}
 	}
 	return true
 }
 
-// operands returns the identifiers a comparison is made of, leaving out the
-// names of packages, of fields and methods, and the predeclared constants.
-func (w *waitWalk) operands(comparison ast.Node) []*ast.Ident {
-	var operands []*ast.Ident
-	var visit func(ast.Node) bool
-	visit = func(n ast.Node) bool {
-		switch n := n.(type) {
-		case *ast.SelectorExpr:
-			ast.Inspect(n.X, visit)
-			return false
-		case *ast.Ident:
-			if n.Obj == nil {
-				if _, isPackage := w.imports[n.Name]; isPackage {
-					return false
-				}
-				if n.Name == "true" || n.Name == "false" || n.Name == "nil" {
-					return false
-				}
-			}
-			operands = append(operands, n)
+// onTestDeadline reports whether comparison compares the clock as read with
+// the test's deadline as set: time.Now() against a variable of fn holding
+// testwait.Deadline (Before, After, Equal or Compare, either way round), or
+// time.Until of such a variable against 0. A clock variable stands for the
+// value it was set to. Arithmetic on either side - the deadline moved by a
+// constant, the clock pushed forward, a duration other than 0 - makes it a
+// fixed time again, and does not count.
+func (w *waitWalk) onTestDeadline(comparison ast.Node, fn ast.Node, clockVars map[*ast.Object]ast.Expr) bool {
+	as := func(expr ast.Expr) ast.Expr {
+		expr = ast.Unparen(expr)
+		if id, ok := expr.(*ast.Ident); ok && id.Obj != nil && clockVars[id.Obj] != nil {
+			return ast.Unparen(clockVars[id.Obj])
 		}
-		return true
+		return expr
 	}
-	ast.Inspect(comparison, visit)
-	return operands
+	now := func(expr ast.Expr) bool {
+		call, ok := expr.(*ast.CallExpr)
+		return ok && len(call.Args) == 0 && w.qualified(call.Fun) == "time.Now"
+	}
+	deadline := func(expr ast.Expr) bool {
+		id, ok := expr.(*ast.Ident)
+		return ok && w.holdsTestDeadline(id, fn)
+	}
+	until := func(expr ast.Expr) bool {
+		call, ok := expr.(*ast.CallExpr)
+		return ok && len(call.Args) == 1 && w.qualified(call.Fun) == "time.Until" && deadline(ast.Unparen(call.Args[0]))
+	}
+	zero := func(expr ast.Expr) bool {
+		literal, ok := expr.(*ast.BasicLit)
+		return ok && literal.Kind == token.INT && literal.Value == "0"
+	}
+	switch c := comparison.(type) {
+	case *ast.CallExpr:
+		sel, ok := c.Fun.(*ast.SelectorExpr)
+		if !ok || len(c.Args) != 1 || !timeComparisons[sel.Sel.Name] {
+			return false
+		}
+		receiver, argument := as(sel.X), as(c.Args[0])
+		return now(receiver) && deadline(argument) || deadline(receiver) && now(argument)
+	case *ast.BinaryExpr:
+		x, y := as(c.X), as(c.Y)
+		return until(x) && zero(y) || zero(x) && until(y)
+	}
+	return false
 }
 
 // holdsTestDeadline reports whether id is a variable declared in fn that is
@@ -526,6 +556,17 @@ func (w *waitWalk) isDeadlineCall(expr ast.Expr) bool {
 	return ok && w.qualified(call.Fun) == testwaitPath+".Deadline"
 }
 
+// guarded reports whether the guard reads the file at relative, a path from
+// the module root: every test file, and the test helpers under internal/,
+// which every test that calls them waits as. Production code is not read: it
+// waits as its design says, and its bounds are reviewed as such.
+func guarded(relative string) bool {
+	if !strings.HasSuffix(relative, ".go") {
+		return false
+	}
+	return strings.HasSuffix(relative, "_test.go") || strings.HasPrefix(relative, "internal/")
+}
+
 // No test in this module waits a fixed time for something that should
 // happen: on a loaded host the time runs out first and the test fails for
 // nothing. Such a wait is on the condition (Until, Expired, Context). A fixed
@@ -533,6 +574,11 @@ func (w *waitWalk) isDeadlineCall(expr ast.Expr) bool {
 // the test simulates - says why on its own line. The test helpers under
 // internal/ are held to the same rule, since every test that calls them
 // waits as they do.
+//
+// Out of its reach, and left to review: a loop on a helper that reads the
+// clock for it (for !waited(start, d)); a loop capped by a count of rounds,
+// whose poll sleep carries its own marker; Timer.Reset; a deadline set on a
+// connection (SetDeadline) and the timeouts in a client's options.
 func TestNoTestWaitsAFixedTimeWithoutSayingWhy(t *testing.T) {
 	root, err := filepath.Abs("../..")
 	if err != nil {
@@ -559,8 +605,7 @@ func TestNoTestWaitsAFixedTimeWithoutSayingWhy(t *testing.T) {
 			return err
 		}
 		relative = filepath.ToSlash(relative)
-		helper := strings.HasPrefix(relative, "internal/") && strings.HasSuffix(relative, ".go")
-		if !strings.HasSuffix(relative, "_test.go") && !helper {
+		if !guarded(relative) {
 			return nil
 		}
 		scanned++
