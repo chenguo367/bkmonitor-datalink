@@ -76,9 +76,11 @@ type StoreOutageRow struct {
 // span's last, the objects and strategies whose windows were given up in
 // it, and the store failures, by code, the spans were attributed to.
 type StoreOutage struct {
-	From    time.Time `json:"from"`
-	To      time.Time `json:"to"`
-	Objects int       `json:"objects"`
+	From time.Time `json:"from"`
+	To   time.Time `json:"to"`
+	// Objects is the distinct objects: an object handed over in the outage
+	// can have a span given up on each of two replicas.
+	Objects int `json:"objects"`
 	// Strategies is the distinct strategies; StrategiesAtLeast says the
 	// count stopped at its bound and is a floor.
 	Strategies        int            `json:"strategies"`
@@ -92,6 +94,7 @@ type StoreOutage struct {
 	RowsCut bool             `json:"rows_cut,omitempty"`
 
 	strategyKeys map[string]struct{}
+	objectKeys   map[string]struct{}
 }
 
 // StoreOutageReplica is one publishing replica's coverage: what it can have
@@ -183,13 +186,14 @@ func foldStoreOutages(spans []StoreOutageRow, tolerance time.Duration, rows int)
 	var outages []StoreOutage
 	for _, span := range spans {
 		if n := len(outages); n == 0 || span.FirstAt.After(outages[n-1].To.Add(tolerance)) {
-			outages = append(outages, StoreOutage{From: span.FirstAt, To: span.At, Reasons: map[string]int{}, strategyKeys: map[string]struct{}{}})
+			outages = append(outages, StoreOutage{From: span.FirstAt, To: span.At, Reasons: map[string]int{},
+				strategyKeys: map[string]struct{}{}, objectKeys: map[string]struct{}{}})
 		}
 		outage := &outages[len(outages)-1]
 		if span.At.After(outage.To) {
 			outage.To = span.At
 		}
-		outage.Objects++
+		outage.objectKeys[span.QueryGroup] = struct{}{}
 		outage.Slots += span.Slots
 		outage.Reasons[span.DependencyReason]++
 		outage.addStrategies(span.Strategies)
@@ -223,7 +227,7 @@ func (outage *StoreOutage) addStrategies(strategies []StrategyRef) {
 
 // settle fills the count and the line from what was folded in.
 func (outage *StoreOutage) settle() {
-	outage.Strategies = len(outage.strategyKeys)
+	outage.Objects, outage.Strategies = len(outage.objectKeys), len(outage.strategyKeys)
 	strategies := fmt.Sprint(outage.Strategies)
 	if outage.StrategiesAtLeast {
 		strategies = "至少 " + strategies

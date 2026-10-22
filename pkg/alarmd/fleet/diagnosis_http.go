@@ -161,6 +161,10 @@ type diagnosisEntry struct {
 	view      *View
 	readError string
 	expires   time.Time
+	// stallAfter is the replay window the view was decided under, and the
+	// tolerance the strategy page folds its store outages by, as the
+	// overview does.
+	stallAfter time.Duration
 	// universeTook and viewTook are how long the read that filled the entry
 	// took for each; viewTook is nil where there is no service to read.
 	universeTook *int64
@@ -572,7 +576,7 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 }
 
 func readDiagnosisEntry(ctx context.Context, service *Service, universe UniverseReader, at time.Time, stallAfter time.Duration) *diagnosisEntry {
-	entry := &diagnosisEntry{readAt: at, expires: at.Add(DiagnosisCacheTTL)}
+	entry := &diagnosisEntry{readAt: at, expires: at.Add(DiagnosisCacheTTL), stallAfter: stallAfter}
 	started := time.Now()
 	ids, err := universe(ctx)
 	entry.universeTook = millisOf(time.Since(started))
@@ -637,7 +641,7 @@ func countDiagnosis(counted *summaryCache, entry *diagnosisEntry, replica string
 	counted.at, counted.body = at, &summary
 	counted.board = buildBoard(entry.id, at, entry.digest, entry.universe, row, lines, due, census, open, waits)
 	if entry.view != nil {
-		counted.board.outages = strategyStoreOutages(entry.view, at, 0)
+		counted.board.outages = strategyStoreOutages(entry.view, at, entry.stallAfter)
 		counted.board.noOutage = noStrategyStoreOutage(entry.view, at)
 	}
 	return &summary

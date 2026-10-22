@@ -289,3 +289,91 @@ func TestEveryDependencyCodeSaysWhetherItIsTheStore(t *testing.T) {
 		}
 	}
 }
+
+// The strategy page's read says the outages its own objects lost windows in,
+// from the board's computation, and a strategy that lost none reads as none
+// seen since the replicas' start.
+func TestTheStrategyPageSaysItsStoreOutages(t *testing.T) {
+	snapshots := healthySnapshots()
+	failedAt := now.Add(-20 * time.Minute)
+	for index := range snapshots {
+		snapshots[index].StartedAt = now.Add(-2 * time.Hour)
+	}
+	snapshots[0].GapSkips = map[string]SkippedSpan{"qg-4101-a": {FirstSlot: 1000, LastSlot: 1060, Slots: 2,
+		FirstAt: now.Add(-18 * time.Minute), At: now.Add(-17 * time.Minute), Replica: "pod-a",
+		Strategies: []StrategyRef{{StrategyID: "4101", BusinessID: "2"}}, DependencyReason: "REDIS_UNAVAILABLE", DependencyAt: &failedAt}}
+	rig := newDiagnosisRigFrom(t, diagnosisFacts(), nil, snapshots)
+	rig.universe = []string{"4101", "4102"}
+	if code, _, _ := rig.board(t, "board=1"); code != http.StatusOK {
+		t.Fatalf("board status %d", code)
+	}
+	read := func(strategy string) StoreOutageSummary {
+		recorder := httptest.NewRecorder()
+		rig.handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/diagnose?view=1&strategy_id="+strategy, nil))
+		var view StrategyViewActual
+		if recorder.Code != http.StatusOK || json.Unmarshal(recorder.Body.Bytes(), &view) != nil {
+			t.Fatalf("view %s: %d %s", strategy, recorder.Code, recorder.Body.String())
+		}
+		return view.StoreOutages
+	}
+	if lost := read("4101"); lost.State != StoreOutageStateOutages || len(lost.Outages) != 1 || lost.Outages[0].Slots != 2 ||
+		!strings.HasPrefix(lost.Line, "Redis 不可用 ") {
+		t.Fatalf("4101 reads %+v, want its outage", lost)
+	}
+	if none := read("4102"); none.State != StoreOutageStateNoneSeen || none.Since == nil || !none.Since.Equal(now.Add(-2*time.Hour)) {
+		t.Fatalf("4102 reads %+v, want none seen since the start", none)
+	}
+}
+
+// The strategy page folds by the deployment's replay window, as the outage
+// read does: two spans a quarter of an hour apart are one outage under a
+// half-hour window.
+func TestTheStrategyPageFoldsByTheReplayWindow(t *testing.T) {
+	snapshots := healthySnapshots()
+	failedAt := now.Add(-50 * time.Minute)
+	ref := []StrategyRef{{StrategyID: "4101", BusinessID: "2"}}
+	snapshots[0].GapSkips = map[string]SkippedSpan{
+		"qg-4101-a": {FirstSlot: 1000, LastSlot: 1000, Slots: 1, FirstAt: now.Add(-45 * time.Minute), At: now.Add(-45 * time.Minute),
+			Replica: "pod-a", Strategies: ref, DependencyReason: "REDIS_UNAVAILABLE", DependencyAt: &failedAt},
+		"qg-other": {FirstSlot: 1900, LastSlot: 1900, Slots: 1, FirstAt: now.Add(-30 * time.Minute), At: now.Add(-30 * time.Minute),
+			Replica: "pod-a", Strategies: ref, DependencyReason: "REDIS_UNAVAILABLE", DependencyAt: &failedAt},
+	}
+	rig := newDiagnosisRigWithin(t, diagnosisFacts(), nil, snapshots, 30*time.Minute)
+	rig.universe = []string{"4101"}
+	if code, _, _ := rig.board(t, "board=1"); code != http.StatusOK {
+		t.Fatalf("board status %d", code)
+	}
+	recorder := httptest.NewRecorder()
+	rig.handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/diagnose?view=1&strategy_id=4101", nil))
+	var view StrategyViewActual
+	if recorder.Code != http.StatusOK || json.Unmarshal(recorder.Body.Bytes(), &view) != nil {
+		t.Fatalf("view: %d %s", recorder.Code, recorder.Body.String())
+	}
+	if len(view.StoreOutages.Outages) != 1 || view.StoreOutages.Outages[0].Objects != 2 {
+		t.Fatalf("4101 reads %+v, want one outage of both objects under the half-hour window", view.StoreOutages)
+	}
+}
+
+// The overview folds the spans of every replica's part: an object handed
+// over mid-outage, with a span given up on each replica, is one object of
+// the outage, and a part that cut its spans says the merge is cut.
+func TestMergedPartsCountAHandedOverObjectOnce(t *testing.T) {
+	failedAt := now.Add(-20 * time.Minute)
+	row := func(replica string, at time.Time) StoreOutageRow {
+		return StoreOutageRow{QueryGroup: "qg-a", Replica: replica, Strategies: []StrategyRef{{StrategyID: "11", BusinessID: "2"}},
+			FirstSlot: at.Unix(), LastSlot: at.Unix(), Slots: 1, FirstAt: at, At: at, DependencyReason: "REDIS_UNAVAILABLE", DependencyAt: &failedAt}
+	}
+	merged := MergeReplicaParts(ReplicaPart{StoreOutageSpans: []StoreOutageRow{row("pod-b", now.Add(-10*time.Minute))}},
+		ReplicaPart{StoreOutageSpans: []StoreOutageRow{row("pod-a", now.Add(-15*time.Minute))}, StoreOutageSpansCut: true})
+	if len(merged.StoreOutageSpans) != 2 || merged.StoreOutageSpans[0].Replica != "pod-a" || !merged.StoreOutageSpansCut {
+		t.Fatalf("merged spans %+v cut %v, want both oldest first, cut", merged.StoreOutageSpans, merged.StoreOutageSpansCut)
+	}
+	view := View{PerReplica: []ReplicaView{{Replica: "pod-a", StartedAt: now.Add(-time.Hour)}}}
+	summary := StoreOutagesOverview(&view, merged, now, 0)
+	if len(summary.Outages) != 1 || summary.Outages[0].Objects != 1 || summary.Outages[0].Slots != 2 {
+		t.Fatalf("overview %+v, want one object losing two Slots", summary)
+	}
+	if !slices.ContainsFunc(summary.Limitations, func(line string) bool { return strings.Contains(line, "只折算了最新的部分") }) {
+		t.Fatalf("limitations %v, want the cut named", summary.Limitations)
+	}
+}

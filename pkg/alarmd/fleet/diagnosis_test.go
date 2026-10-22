@@ -83,6 +83,14 @@ func newDiagnosisRigHolding(t *testing.T, facts map[string]StrategyLookupFacts, 
 // newDiagnosisRigFrom is the rig over the given replicas' snapshots.
 func newDiagnosisRigFrom(t *testing.T, facts map[string]StrategyLookupFacts, progress ProgressReader, snapshots []Snapshot) *diagnosisRig {
 	t.Helper()
+	return newDiagnosisRigWithin(t, facts, progress, snapshots, 0)
+}
+
+// newDiagnosisRigWithin is the rig deciding under the deployment's replay
+// window stallAfter.
+func newDiagnosisRigWithin(t *testing.T, facts map[string]StrategyLookupFacts, progress ProgressReader, snapshots []Snapshot,
+	stallAfter time.Duration) *diagnosisRig {
+	t.Helper()
 	rig := &diagnosisRig{clock: now}
 	service := mustService(t, stubExpectations{expectation: Expectation{QueryGroups: 3, Known: true, IDs: []string{"qg-4101-a", "qg-4101-b", "qg-other"}}},
 		stubRegistry{replicas: replicas()}, stubSnapshots{snapshots: snapshots})
@@ -99,9 +107,9 @@ func newDiagnosisRigFrom(t *testing.T, facts map[string]StrategyLookupFacts, pro
 		rig.universeReads++
 		return append([]string(nil), rig.universe...), rig.universeErr
 	}
-	rig.warmer = NewDiagnosisWarmer(service, lookup, universe, progress, func() time.Time { return rig.clock }, 0)
+	rig.warmer = NewDiagnosisWarmer(service, lookup, universe, progress, func() time.Time { return rig.clock }, stallAfter)
 	rig.handler = WithDiagnosis(http.NotFoundHandler(), service, lookup, nil, universe, progress, "pod-a",
-		func() time.Time { return rig.clock }, 0, rig.warmer)
+		func() time.Time { return rig.clock }, stallAfter, rig.warmer)
 	return rig
 }
 
