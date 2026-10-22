@@ -3730,6 +3730,16 @@ const (
 	// alerts are each filed under the business they are about, and a close
 	// must carry it; the alert is not closed this round. Counts alerts.
 	EffectiveCloseBusinessUnknown ReasonCode = "close_business_unknown"
+	// EffectiveCloseSourceLastKnown is a step whose read of this
+	// deployment's event source failed, or waited out its back-off, and
+	// whose closes were decided on the source last read: a deployment
+	// property that an outage of the alert link's Console does not change.
+	// One per step, not per Query Group.
+	EffectiveCloseSourceLastKnown ReasonCode = "source_last_known"
+	// EffectiveCloseSourceUnknown is a step whose closes were deferred: the
+	// event source could not be read and none has been read yet, by this
+	// loop or by the open-alert copy. One per step.
+	EffectiveCloseSourceUnknown ReasonCode = "source_unknown"
 )
 
 // EffectiveCloseOutcomes is every outcome, for the metric to pre-create each
@@ -3739,7 +3749,7 @@ var EffectiveCloseOutcomes = []ReasonCode{
 	EffectiveCloseMaintenanceBusy, EffectiveClosePlanUncompilable, EffectiveCloseIdentityInvalid,
 	EffectiveCloseEffectiveTimeUnknown, EffectiveCloseLegacyUnavailable, EffectiveCloseUnavailable, EffectiveCloseUnsupportedRunner,
 	EffectiveCloseViewNotExecutable, EffectiveCloseCalendarDeletionUnsettled, EffectiveCloseBoundaryActive,
-	EffectiveCloseBusinessUnknown,
+	EffectiveCloseBusinessUnknown, EffectiveCloseSourceLastKnown, EffectiveCloseSourceUnknown,
 }
 
 // Maintenance details are bounded log reasons, not new metric label dimensions.

@@ -109,6 +109,8 @@ const (
 	closeOutcomeDeletionUnsettled    = string(observability.EffectiveCloseCalendarDeletionUnsettled)
 	closeOutcomeBoundaryActive       = string(observability.EffectiveCloseBoundaryActive)
 	closeOutcomeBusinessUnknown      = string(observability.EffectiveCloseBusinessUnknown)
+	closeOutcomeSourceLastKnown      = string(observability.EffectiveCloseSourceLastKnown)
+	closeOutcomeSourceUnknown        = string(observability.EffectiveCloseSourceUnknown)
 )
 
 // maintenanceGroup is what the loop knows about one owned Query Group from
@@ -145,6 +147,12 @@ type effectiveMaintenance struct {
 	// target the alert link's Console lists for this deployment, read rather
 	// than configured.
 	sourceOf func(context.Context) (string, error)
+	// sourceRetryAt is when the source is read again after a failed read,
+	// sourceBackoff the wait that set it and sourceErr the failure, kept for
+	// the steps that wait it out.
+	sourceRetryAt time.Time
+	sourceBackoff time.Duration
+	sourceErr     error
 	// businesses answers, for a global business Plan, which business each
 	// of its alerts was filed under; nil without the link's Console, where
 	// such a Plan's alerts are not closed.
@@ -197,7 +205,13 @@ type maintenanceOutcome struct {
 	FirstAt    time.Time `json:"first_at"`
 	LastAt     time.Time `json:"last_at"`
 	Count      uint64    `json:"count"`
+	// FirstError is the error's text at FirstAt, and Error the latest, with
+	// ErrorSince when that text was first seen: a run whose failure changed
+	// - timeouts, then a 502 - reads as both, each with its own time, so the
+	// first time is never read as the latest error's.
+	FirstError string    `json:"first_error,omitempty"`
 	Error      string    `json:"error,omitempty"`
+	ErrorSince time.Time `json:"error_since"`
 }
 
 // maintenanceReading is the loop's counts and the Query Groups it did not
@@ -248,7 +262,10 @@ func (m *effectiveMaintenance) remember(trace observability.TraceFields, outcome
 	for index := range list {
 		kept := &list[index]
 		if kept.QueryGroup == trace.QueryGroupKey && kept.StrategyID == trace.StrategyID && kept.BusinessID == trace.BusinessID {
-			kept.LastAt, kept.Count, kept.Error = at, kept.Count+1, text
+			if text != kept.Error {
+				kept.Error, kept.ErrorSince = text, at
+			}
+			kept.LastAt, kept.Count = at, kept.Count+1
 			return
 		}
 		if oldest < 0 || kept.LastAt.Before(list[oldest].LastAt) {
@@ -256,7 +273,7 @@ func (m *effectiveMaintenance) remember(trace observability.TraceFields, outcome
 		}
 	}
 	entry := maintenanceOutcome{QueryGroup: trace.QueryGroupKey, StrategyID: trace.StrategyID, BusinessID: trace.BusinessID,
-		FirstAt: at, LastAt: at, Count: 1, Error: text}
+		FirstAt: at, LastAt: at, Count: 1, FirstError: text, Error: text, ErrorSince: at}
 	if len(list) < maintenanceRecentKept {
 		m.recent[outcome] = append(list, entry)
 		return
@@ -451,25 +468,54 @@ const effectiveSourceCoverage = time.Minute
 
 // readSource reads, once a step, the source the closes are for, when any
 // group has a Plan it may close: a Console that does not answer is asked
-// once, not once for each owned group in turn. The error is what every
-// group with a closable Plan reports this step.
+// once, not once for each owned group in turn.
+//
+// The source is a property of this deployment, used to keep the closes to
+// its own alerts; a Console outage does not change it. So a failed read is
+// stale-if-error: the closes go on with the source last read - by this loop,
+// or else by the open-alert copy's last calibration - under
+// source_last_known, once per step. Only with no source read yet are the
+// closes deferred, under source_unknown, and the error returned is what
+// tells closeInactive to hold them. A failed read is not repeated every
+// step: it waits from one step, doubling, up to effectiveSourceCoverage.
 func (m *effectiveMaintenance) readSource(ctx context.Context, groups []execution.QueryGroupIdentity,
 	runners map[execution.QueryGroupIdentity]maintenanceRunner) error {
 	if m.sourceOf == nil {
 		return nil
 	}
+	wanted := false
 	for _, qg := range groups {
 		if known := m.groups[qg]; known != nil && runners[qg] != nil && len(known.closable) > 0 {
-			source, err := m.sourceOf(ctx)
-			if err != nil {
-				return err
-			}
-			m.sourceID = source
-			return nil
+			wanted = true
+			break
 		}
 	}
-	return nil
+	if !wanted {
+		return nil
+	}
+	if now := m.bundle.dependencies.Now(); !now.Before(m.sourceRetryAt) {
+		source, err := m.sourceOf(ctx)
+		if err == nil {
+			m.sourceID, m.sourceRetryAt, m.sourceBackoff, m.sourceErr = source, time.Time{}, 0, nil
+			return nil
+		}
+		m.sourceBackoff = min(max(2*m.sourceBackoff, effectiveSourceRetryFloor), effectiveSourceCoverage)
+		m.sourceRetryAt, m.sourceErr = now.Add(m.sourceBackoff), err
+	}
+	if m.sourceID == "" {
+		m.sourceID = m.cache.OwnEventSourceID()
+	}
+	if m.sourceID != "" {
+		m.observe(ctx, "", closeOutcomeSourceLastKnown, m.sourceErr, 0)
+		return nil
+	}
+	m.observe(ctx, "", closeOutcomeSourceUnknown, m.sourceErr, 0)
+	return m.sourceErr
 }
+
+// effectiveSourceRetryFloor is the first wait after a failed source read:
+// one step of the loop.
+const effectiveSourceRetryFloor = time.Second
 
 // readUnderCurrentLease is the groups whose Plans were read under the lease
 // their owner holds now. A group whose lease moved holds Plans from before
@@ -685,7 +731,8 @@ func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.Q
 		return
 	}
 	if sourceErr != nil {
-		m.observe(ctx, qg, closeOutcomeUnavailable, sourceErr, 0)
+		// Counted once for the step by readSource (source_unknown), not
+		// again for each Query Group it holds back.
 		return
 	}
 	at := m.bundle.dependencies.Now()
@@ -1092,6 +1139,6 @@ func cliMaintenanceOperation(source *maintenanceSource) obchannel.Operation {
 			}
 			return obchannel.Outcome{Value: reading, Complete: reading.Running,
 				Limitations: []string{"Use meta.answered_by to identify this process: each replica maintains the Query Groups it owns, and another replica's outcomes are read by targeting it.",
-					"Counts and outcomes are this process's since it started: first_at is when this process first saw the Query Group under the word, not when the condition began. At most 32 Query Groups are kept per word, the one seen longest ago giving way; each error's text is cut to 256 bytes."}}
+					"Counts and outcomes are this process's since it started: first_at is when this process first saw the Query Group under the word, not when the condition began. first_error is the text at first_at and error the latest, which has been the text since error_since: read a time only with its own text. At most 32 Query Groups are kept per word, the one seen longest ago giving way; each error's text is cut to 256 bytes."}}
 		}}
 }
