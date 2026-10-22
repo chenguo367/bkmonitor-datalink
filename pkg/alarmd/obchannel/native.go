@@ -195,7 +195,7 @@ func NativeOperationsWith(handler http.Handler, options NativeOptions) []Operati
 		}),
 		makeOp("outage.list", "列出本部署自己的 Redis 存储不可用造成的漏检：每次一行（“Redis 不可用 T1–T2：N 个对象、M 条策略丢了这些窗口”），下列每个对象被放弃的那段 Slot（策略、首尾 Slot、Slot 数、归因的存储失败 dependency_reason 及其时刻、该 Slot 自己最后一次查询失败 reason）。"+
 			"归因规则：一个对象被放弃的跨度，若同一对象的轮次在跨度首次放弃前一个回放窗口（tolerance_seconds）到这次放弃之间报过 codes 里的存储失败（失败或重试），就归到这次存储不可用；时间相距不超过一个回放窗口的跨度合成一次。"+
-			"没有就是 state=none_seen，只表示 coverage.since 以来没见到，不是从来没有：存储失败只在副本内存里，副本重启前的看不到，更早的构建不归因，一个对象只保留最近一段跨度；没有副本给出启动时刻时答 coverage_unknown。"+
+			"没有就是 state=none_seen，只表示 coverage.since 以来没见到，不是从来没有：存储失败只在副本内存里，副本重启前的看不到，更早的构建不归因，一个对象只保留最近一段跨度；没有副本给出启动时刻时答 coverage_unknown。coverage.unattributed_spans 是被放弃但未归因到存储的跨度数，与结论并列说出（另一原因，或存储失败发生在对象换手前的进程里）；SNAPSHOT_UNAVAILABLE 只在恢复期限内读不到 Snapshot（SNAPSHOT_UNAVAILABLE_PAST_BOUND）时算存储失败。"+
 			"不新增存储；rows 超出范围按名字拒绝（invalid_rows）。", map[string]Field{
 			"rows":        integer("每次停机下列出的对象行上限；默认50。", 1, int64(fleet.StoreOutageMaxRows)),
 			"strategy_id": text("只看这条策略的对象。", "用户给定或 strategy.board 行"),

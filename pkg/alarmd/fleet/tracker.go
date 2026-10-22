@@ -1059,6 +1059,29 @@ type storeFailure struct {
 	at   time.Time
 }
 
+// storeFailureOf is the store failure observation reports, or empty. A round
+// that failed, or is retried, under a store code; or a Slot finalized
+// SNAPSHOT_UNAVAILABLE because its Snapshot could not be read until the
+// recovery bound. The same completion word under a corrupt Snapshot (a
+// defect), an expired replay (the skip itself) or another resolve failure is
+// not a store failure, so SNAPSHOT_UNAVAILABLE is taken only from the
+// completion that names the cause.
+func storeFailureOf(observation observability.Observation) string {
+	code := string(observation.ReasonCode)
+	switch {
+	case observation.Stage == observability.StageProgressCommitted &&
+		observation.ProgressCompletionKind == snapshotUnavailableCompletion &&
+		observation.ProgressCompletionCause == string(model.CauseSnapshotUnavailablePastBound):
+		return snapshotUnavailableCompletion
+	case code == snapshotUnavailableCompletion:
+		return ""
+	case observation.Stage == observability.StageSlotCompleted && storeOutageCode(code) &&
+		(observation.Result == observability.Result(observability.ResultFailed) || observation.Result == observability.ResultRetrying):
+		return code
+	}
+	return ""
+}
+
 // SetAwaitingViewBound is how long a Query Group may wait for its Worker's
 // view to carry it before the wait is listed: the deployment's own timings,
 // derived by the caller. Zero lists the wait as any blocked run, after
@@ -1214,9 +1237,8 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	}
 	// A round that failed, or is retried, on this deployment's own store:
 	// remembered for the span its Slots behind it may be given up in.
-	if observation.Stage == observability.StageSlotCompleted && storeOutageCode(string(observation.ReasonCode)) &&
-		(observation.Result == observability.Result(observability.ResultFailed) || observation.Result == observability.ResultRetrying) {
-		state.lastStoreFailure = &storeFailure{code: string(observation.ReasonCode), at: at}
+	if code := storeFailureOf(observation); code != "" {
+		state.lastStoreFailure = &storeFailure{code: code, at: at}
 	}
 	if shareSkip != nil {
 		state.noteShareRefusal(shareSkip.Share, shareSkip.FirstSlot, shareSkip.LastSlot, shareSkip.SlotCount, at)

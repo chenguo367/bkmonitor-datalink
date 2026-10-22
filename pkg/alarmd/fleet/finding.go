@@ -716,7 +716,11 @@ var codeChecks = map[string]verdict{
 	"KAFKA_UNAVAILABLE":       otherDown(),
 	"STATE_WRITE_RETRYABLE":   storeDown(),
 	"OUTPUT_ACK_UNKNOWN":      otherDown(),
-	"SNAPSHOT_UNAVAILABLE":    otherDown(),
+	// This deployment's own Snapshot store not answering until the Slot's
+	// recovery bound. The word is shared with a corrupt Snapshot and an
+	// expired replay; the outage record takes it only from the completion
+	// naming SNAPSHOT_UNAVAILABLE_PAST_BOUND (storeFailureOf).
+	"SNAPSHOT_UNAVAILABLE": storeDown(),
 	// A target read from the CMDB caches: in part is the caches as they
 	// stand - members dropped, nodes missing - and the round runs on what
 	// resolved; not at all is the caches unreadable. Target lines reach no

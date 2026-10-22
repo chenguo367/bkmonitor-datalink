@@ -83,11 +83,14 @@ type StoreOutage struct {
 	Objects int `json:"objects"`
 	// Strategies is the distinct strategies; StrategiesAtLeast says the
 	// count stopped at its bound and is a floor.
-	Strategies        int            `json:"strategies"`
-	StrategiesAtLeast bool           `json:"strategies_at_least,omitempty"`
-	Slots             int            `json:"slots"`
-	Reasons           map[string]int `json:"reasons"`
-	Line              string         `json:"line"`
+	Strategies        int  `json:"strategies"`
+	StrategiesAtLeast bool `json:"strategies_at_least,omitempty"`
+	// AtLeast says the outage's spans were cut at the part bound
+	// (storeOutagePartMaxSpans): its counts are floors.
+	AtLeast bool           `json:"at_least,omitempty"`
+	Slots   int            `json:"slots"`
+	Reasons map[string]int `json:"reasons"`
+	Line    string         `json:"line"`
 	// Rows are the spans, oldest first, cut to the read's bound; RowsCut
 	// says some were left out (Objects counts them all).
 	Rows    []StoreOutageRow `json:"rows,omitempty"`
@@ -111,6 +114,10 @@ type StoreOutageCoverage struct {
 	Since       *time.Time           `json:"since,omitempty"`
 	Replicas    []StoreOutageReplica `json:"replicas"`
 	Limitations []string             `json:"limitations"`
+	// Unattributed is the retained spans given up with no store failure
+	// behind them (unattributedSkips): a store failure this process did not
+	// see stays among them, so "none seen" is said beside their count.
+	Unattributed int `json:"unattributed_spans"`
 }
 
 // StoreOutagesResponse is the outage.list answer.
@@ -228,12 +235,15 @@ func (outage *StoreOutage) addStrategies(strategies []StrategyRef) {
 // settle fills the count and the line from what was folded in.
 func (outage *StoreOutage) settle() {
 	outage.Objects, outage.Strategies = len(outage.objectKeys), len(outage.strategyKeys)
-	strategies := fmt.Sprint(outage.Strategies)
-	if outage.StrategiesAtLeast {
+	objects, strategies := fmt.Sprint(outage.Objects), fmt.Sprint(outage.Strategies)
+	if outage.AtLeast {
+		objects = "至少 " + objects
+	}
+	if outage.AtLeast || outage.StrategiesAtLeast {
 		strategies = "至少 " + strategies
 	}
-	outage.Line = fmt.Sprintf("Redis 不可用 %s–%s：%d 个对象、%s 条策略丢了这些窗口",
-		outageClock(outage.From), outageClock(outage.To), outage.Objects, strategies)
+	outage.Line = fmt.Sprintf("Redis 不可用 %s–%s：%s 个对象、%s 条策略丢了这些窗口",
+		outageClock(outage.From), outageClock(outage.To), objects, strategies)
 }
 
 func outageClock(at time.Time) string {
@@ -245,7 +255,8 @@ func storeOutageCoverage(view *View) StoreOutageCoverage {
 	coverage := StoreOutageCoverage{Replicas: []StoreOutageReplica{}, Limitations: []string{
 		"只看得到各进程启动以后的存储失败：失败只记在进程内存里，进程重启就丢；",
 		"更早的构建不归因，它们留下的跨度不列；",
-		"一个对象只保留最近一段被放弃的 Slot，同一对象更早的一段已被它替换。",
+		"一个对象只保留最近一段被放弃的 Slot，同一对象更早的一段已被它替换；",
+		"对象换到别的进程后，新进程看不到旧进程见过的存储失败，换手前后被放弃的窗口可能未归因。",
 	}}
 	known := true
 	for _, replica := range view.PerReplica {
@@ -299,7 +310,22 @@ func storeOutages(response http.ResponseWriter, request *http.Request, service *
 // strategyID when it is set. tolerance is the replay window; zero or less
 // is DefaultSkipDependencyWindow.
 func StoreOutagesOf(view *View, now time.Time, tolerance time.Duration, rows int, strategyID string) StoreOutagesResponse {
-	return storeOutagesFromSpans(storeOutageSpans(view, strategyID), storeOutageCoverage(view), now, tolerance, rows, false)
+	coverage := storeOutageCoverage(view)
+	coverage.Unattributed = unattributedSkips(view, strategyID)
+	return storeOutagesFromSpans(storeOutageSpans(view, strategyID), coverage, now, tolerance, rows, false)
+}
+
+// unattributedSkips counts the view's retained spans, optionally of one
+// strategy, given up with no store failure attributed to them.
+func unattributedSkips(view *View, strategyID string) int {
+	count := 0
+	for _, span := range view.GapSkips {
+		if storeOutageCode(span.DependencyReason) || strategyID != "" && !servesStrategy(span.Strategies, strategyID) {
+			continue
+		}
+		count++
+	}
+	return count
 }
 
 // StoreOutageSummary is the outages as a page shows them: the lines and the
@@ -312,6 +338,8 @@ type StoreOutageSummary struct {
 	OutagesCut  bool          `json:"outages_cut,omitempty"`
 	Since       *time.Time    `json:"since,omitempty"`
 	Limitations []string      `json:"limitations"`
+	// Unattributed is StoreOutageCoverage.Unattributed.
+	Unattributed int `json:"unattributed_spans"`
 }
 
 // summary is the answer without its rows, replicas and codes.
@@ -322,7 +350,7 @@ func (response StoreOutagesResponse) summary() StoreOutageSummary {
 		outages = append(outages, outage)
 	}
 	summary := StoreOutageSummary{State: response.State, Line: response.Line, Outages: outages, OutagesCut: response.OutagesCut,
-		Limitations: response.Coverage.Limitations}
+		Limitations: response.Coverage.Limitations, Unattributed: response.Coverage.Unattributed}
 	if since := response.Coverage.Since; since != nil {
 		at := *since
 		summary.Since = &at
@@ -333,7 +361,9 @@ func (response StoreOutagesResponse) summary() StoreOutageSummary {
 // StoreOutagesOverview is the overview's line: the merged parts' spans
 // folded the same way.
 func StoreOutagesOverview(view *View, part ReplicaPart, now time.Time, tolerance time.Duration) StoreOutageSummary {
-	return storeOutagesFromSpans(part.StoreOutageSpans, storeOutageCoverage(view), now, tolerance, 0, part.StoreOutageSpansCut).summary()
+	coverage := storeOutageCoverage(view)
+	coverage.Unattributed = part.StoreOutageUnattributed
+	return storeOutagesFromSpans(part.StoreOutageSpans, coverage, now, tolerance, 0, part.StoreOutageSpansCut).summary()
 }
 
 // strategyStoreOutages is each strategy's outages, for the drawer: the
@@ -350,9 +380,28 @@ func strategyStoreOutages(view *View, now time.Time, tolerance time.Duration) ma
 			}
 		}
 	}
+	unattributed := map[string]int{}
+	for _, span := range view.GapSkips {
+		if storeOutageCode(span.DependencyReason) {
+			continue
+		}
+		seen := map[string]bool{}
+		for _, ref := range span.Strategies {
+			if !seen[ref.StrategyID] {
+				seen[ref.StrategyID] = true
+				unattributed[ref.StrategyID]++
+				if _, listed := byStrategy[ref.StrategyID]; !listed {
+					byStrategy[ref.StrategyID] = nil
+				}
+			}
+		}
+	}
 	outages := make(map[string]StoreOutageSummary, len(byStrategy))
 	for id, spans := range byStrategy {
-		outages[id] = storeOutagesFromSpans(spans, coverage, now, tolerance, 0, false).summary()
+		own := coverage
+		own.Limitations = append([]string(nil), coverage.Limitations...)
+		own.Unattributed = unattributed[id]
+		outages[id] = storeOutagesFromSpans(spans, own, now, tolerance, 0, false).summary()
 	}
 	return outages
 }
@@ -378,6 +427,12 @@ func storeOutagesFromSpans(spans []StoreOutageRow, coverage StoreOutageCoverage,
 		coverage.Limitations = append(coverage.Limitations, fmt.Sprintf("跨度超过 %d 段，只折算了最新的部分。", storeOutagePartMaxSpans))
 	}
 	outages := foldStoreOutages(spans, tolerance, rows)
+	// The cut keeps the newest spans: only the oldest outage can have lost
+	// some, and its counts are floors.
+	if spansCut && len(outages) > 0 {
+		outages[0].AtLeast = true
+		outages[0].settle()
+	}
 	sort.Slice(outages, func(l, r int) bool { return outages[l].From.After(outages[r].From) })
 	response := StoreOutagesResponse{Outages: []StoreOutage{}, Coverage: coverage, Codes: StoreOutageCodes(),
 		ToleranceSeconds: int64(tolerance / time.Second), ReadAt: now.UTC()}
@@ -399,6 +454,9 @@ func storeOutagesFromSpans(spans []StoreOutageRow, coverage StoreOutageCoverage,
 	default:
 		response.State = StoreOutageStateNoneSeen
 		response.Line = "自 " + outageClock(*response.Coverage.Since) + " 起未见 Redis 不可用造成的漏检窗口"
+	}
+	if response.Coverage.Unattributed > 0 {
+		response.Line += fmt.Sprintf("；另有 %d 段被放弃的窗口未归因到存储", response.Coverage.Unattributed)
 	}
 	return response
 }

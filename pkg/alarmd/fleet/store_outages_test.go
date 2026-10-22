@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+	model "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
@@ -55,6 +56,18 @@ func (w *outageWorld) skipped(queryGroup, strategy string, offset time.Duration,
 	w.at.at = time.Date(2026, 10, 22, 2, 0, 0, 0, time.UTC).Add(offset)
 	w.tracker.Observe(context.Background(), observability.Observation{
 		ProgressCompletionKind: "GAP_SKIPPED", ProgressCompletionReason: "GAP_SKIPPED",
+		Trace: observability.TraceFields{QueryGroupKey: queryGroup, StrategyID: strategy, BusinessID: "2", EvaluationTime: slot},
+	})
+}
+
+// finalized is the object's Slot finalized without a query, SNAPSHOT_UNAVAILABLE
+// under cause, as the coordinator's completion reports it.
+func (w *outageWorld) finalized(queryGroup, strategy string, cause model.CompletionCause, offset time.Duration, slot int64) {
+	w.at.at = time.Date(2026, 10, 22, 2, 0, 0, 0, time.UTC).Add(offset)
+	w.tracker.Observe(context.Background(), observability.Observation{
+		Component: observability.ComponentProgress, Stage: observability.StageProgressCommitted,
+		Result: observability.ResultDegraded, ReasonCode: observability.ReasonCode("SNAPSHOT_UNAVAILABLE"),
+		ProgressCompletionKind: "SNAPSHOT_UNAVAILABLE", ProgressCompletionCause: string(cause),
 		Trace: observability.TraceFields{QueryGroupKey: queryGroup, StrategyID: strategy, BusinessID: "2", EvaluationTime: slot},
 	})
 }
@@ -191,6 +204,11 @@ func TestNoStoreOutageSaysSinceWhenNotNever(t *testing.T) {
 	if seen.State != StoreOutageStateNoneSeen || len(seen.Outages) != 0 || !strings.Contains(seen.Line, "2026-10-22 01:00:00Z") {
 		t.Fatalf("none seen %+v", seen)
 	}
+	// The Kafka span is a window given up that no store failure explains:
+	// "none seen" is said beside it, not instead of it.
+	if seen.Coverage.Unattributed != 1 || !strings.HasSuffix(seen.Line, "；另有 1 段被放弃的窗口未归因到存储") {
+		t.Fatalf("none seen %q with %d unattributed, want the Kafka span said beside it", seen.Line, seen.Coverage.Unattributed)
+	}
 	other := w.snapshot(w.started.Add(30 * time.Minute))
 	other.Replica = "pod-b"
 	_, both, _ := getOutages(t, handlerWith(t, []Snapshot{w.snapshot(w.started), other}, Expectation{}, []string{"pod-a", "pod-b"}), "")
@@ -275,7 +293,7 @@ func TestEveryDependencyCodeSaysWhetherItIsTheStore(t *testing.T) {
 		}
 	}
 	codes := StoreOutageCodes()
-	for _, want := range []string{"REDIS_UNAVAILABLE", "STATE_WRITE_RETRYABLE", "GAP_WRITE_RETRYABLE", "PROGRESS_BEGIN_FAILED"} {
+	for _, want := range []string{"REDIS_UNAVAILABLE", "STATE_WRITE_RETRYABLE", "GAP_WRITE_RETRYABLE", "PROGRESS_BEGIN_FAILED", "SNAPSHOT_UNAVAILABLE"} {
 		if !slices.Contains(codes, want) {
 			t.Errorf("store outage codes %v lack %s", codes, want)
 		}
@@ -283,7 +301,7 @@ func TestEveryDependencyCodeSaysWhetherItIsTheStore(t *testing.T) {
 	// A read too large for its deadline is a defect, not an outage - the
 	// lesson that once filed 163 of them a day as a Redis incident - and
 	// Kafka is not this deployment's store.
-	for _, other := range []string{"STATE_READ_TIMEOUT", "STATE_READ_DEADLINE", "KAFKA_UNAVAILABLE", "SNAPSHOT_UNAVAILABLE"} {
+	for _, other := range []string{"STATE_READ_TIMEOUT", "STATE_READ_DEADLINE", "KAFKA_UNAVAILABLE"} {
 		if slices.Contains(codes, other) {
 			t.Errorf("store outage codes %v include %s", codes, other)
 		}
@@ -373,7 +391,62 @@ func TestMergedPartsCountAHandedOverObjectOnce(t *testing.T) {
 	if len(summary.Outages) != 1 || summary.Outages[0].Objects != 1 || summary.Outages[0].Slots != 2 {
 		t.Fatalf("overview %+v, want one object losing two Slots", summary)
 	}
+	if !summary.Outages[0].AtLeast || !strings.Contains(summary.Outages[0].Line, "至少 1 个对象、至少 1 条策略") {
+		t.Fatalf("outage %+v, want its counts said as floors: a part cut its spans", summary.Outages[0])
+	}
 	if !slices.ContainsFunc(summary.Limitations, func(line string) bool { return strings.Contains(line, "只折算了最新的部分") }) {
 		t.Fatalf("limitations %v, want the cut named", summary.Limitations)
+	}
+}
+
+// A Snapshot the store did not answer until the Slot's recovery bound is a
+// store failure: an outage whose Slots only ever failed that way is still
+// attributed. A corrupt Snapshot finalizes under the same word and is a
+// defect, not an outage.
+func TestASnapshotTheStoreDidNotAnswerAttributesTheSpan(t *testing.T) {
+	w := newOutageWorld(t)
+	w.finalized("qg-a", "11", model.CauseSnapshotUnavailablePastBound, 0, 1000)
+	w.skipped("qg-a", "11", 2*time.Minute, 1060)
+	w.finalized("qg-b", "12", model.CauseSnapshotCorrupt, 0, 1000)
+	w.skipped("qg-b", "12", 2*time.Minute, 1060)
+	_, response, body := getOutages(t, handlerWith(t, []Snapshot{w.snapshot(w.started)}, Expectation{}, []string{"pod-a"}), "")
+	if response.State != StoreOutageStateOutages || len(response.Outages) != 1 || response.Outages[0].Objects != 1 ||
+		response.Outages[0].Rows[0].QueryGroup != "qg-a" || response.Outages[0].Rows[0].DependencyReason != "SNAPSHOT_UNAVAILABLE" {
+		t.Fatalf("answer %s, want qg-a alone attributed to SNAPSHOT_UNAVAILABLE", body)
+	}
+}
+
+// The overview and a strategy's page say the windows given up that no store
+// failure explains, each counting its own: a strategy that lost windows only
+// to another cause reads none seen with its count, not the shared answer.
+func TestUnattributedSpansAreCountedBesideNoneSeen(t *testing.T) {
+	w := newOutageWorld(t)
+	w.failed("qg-a", "11", "KAFKA_UNAVAILABLE", time.Minute, 1000)
+	w.skipped("qg-a", "11", 3*time.Minute, 1060)
+	w.skipped("qg-b", "11", 4*time.Minute, 1060)
+	w.skipped("qg-c", "12", 4*time.Minute, 1060)
+	handler := handlerWith(t, []Snapshot{w.snapshot(w.started)}, Expectation{}, []string{"pod-a"})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/overview", nil))
+	var overview struct {
+		StoreOutages StoreOutageSummary `json:"store_outages"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &overview); err != nil {
+		t.Fatal(err)
+	}
+	if overview.StoreOutages.State != StoreOutageStateNoneSeen || overview.StoreOutages.Unattributed != 3 ||
+		!strings.Contains(overview.StoreOutages.Line, "另有 3 段") {
+		t.Fatalf("overview %+v, want none seen beside 3 unattributed", overview.StoreOutages)
+	}
+	view := Aggregate(Expectation{}, []Snapshot{w.snapshot(w.started)}, []string{"pod-a"}, w.at.at, time.Minute)
+	byStrategy := strategyStoreOutages(&view, w.at.at, 0)
+	if own := byStrategy["11"]; own.State != StoreOutageStateNoneSeen || own.Unattributed != 2 {
+		t.Fatalf("strategy 11 reads %+v, want none seen beside its 2", own)
+	}
+	if own := byStrategy["12"]; own.Unattributed != 1 {
+		t.Fatalf("strategy 12 reads %+v, want its 1", own)
+	}
+	if _, only, _ := getOutages(t, handler, "?strategy_id=12"); only.Coverage.Unattributed != 1 {
+		t.Fatalf("outage.list for 12 counts %d, want 1", only.Coverage.Unattributed)
 	}
 }

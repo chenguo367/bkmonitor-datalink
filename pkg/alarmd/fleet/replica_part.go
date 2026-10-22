@@ -74,13 +74,16 @@ type ReplicaPart struct {
 	// kept; StoreOutageSpansCut says older ones were left out. The overview
 	// folds the merged spans into outages, which a first-screen cut would
 	// undercount.
-	StoreOutageSpans    []StoreOutageRow   `json:"store_outage_spans,omitempty"`
-	StoreOutageSpansCut bool               `json:"store_outage_spans_cut,omitempty"`
-	PrunedSkipsTotal    int                `json:"pruned_skips_total"`
-	RetainedShare       []RetainedShareRef `json:"retained_share,omitempty"`
-	RetainedShareTotal  int                `json:"retained_share_total"`
-	ReadEarly           []ReadEarlyRef     `json:"read_early,omitempty"`
-	ReadEarlyTotal      int                `json:"read_early_total"`
+	StoreOutageSpans    []StoreOutageRow `json:"store_outage_spans,omitempty"`
+	StoreOutageSpansCut bool             `json:"store_outage_spans_cut,omitempty"`
+	// StoreOutageUnattributed is the replica's spans given up with no store
+	// failure behind them (unattributedSkips), counted.
+	StoreOutageUnattributed int                `json:"store_outage_unattributed,omitempty"`
+	PrunedSkipsTotal        int                `json:"pruned_skips_total"`
+	RetainedShare           []RetainedShareRef `json:"retained_share,omitempty"`
+	RetainedShareTotal      int                `json:"retained_share_total"`
+	ReadEarly               []ReadEarlyRef     `json:"read_early,omitempty"`
+	ReadEarlyTotal          int                `json:"read_early_total"`
 	// Truncated is the columns this replica published cut, a bit per
 	// position in columnNames; merged, the columns any replica cut. A check
 	// line is a sample when any column its rows came from was cut on any
@@ -149,6 +152,7 @@ func ReplicaPartOf(view View, now time.Time) ReplicaPart {
 	part.Metrics = metricRowsOf(&view, part.CheckRows, census, graceUnknown)
 	pruned, retained, readEarly := prunedSkipList(view.PrunedSkips), retainedShareList(view.RetainedShare), readEarlyList(view.ReadEarly)
 	part.StoreOutageSpans, part.StoreOutageSpansCut = boundStoreOutageSpans(storeOutageSpans(&view, ""))
+	part.StoreOutageUnattributed = unattributedSkips(&view, "")
 	part.PrunedSkips, part.PrunedSkipsTotal = firstScreenList(pruned), len(pruned)
 	part.RetainedShare, part.RetainedShareTotal = firstScreenList(retained), len(retained)
 	part.ReadEarly, part.ReadEarlyTotal = firstScreenList(readEarly), len(readEarly)
@@ -206,6 +210,7 @@ func MergeReplicaParts(parts ...ReplicaPart) ReplicaPart {
 		merged.PrunedSkips, merged.PrunedSkipsTotal = append(merged.PrunedSkips, part.PrunedSkips...), merged.PrunedSkipsTotal+part.PrunedSkipsTotal
 		merged.StoreOutageSpans = append(merged.StoreOutageSpans, part.StoreOutageSpans...)
 		merged.StoreOutageSpansCut = merged.StoreOutageSpansCut || part.StoreOutageSpansCut
+		merged.StoreOutageUnattributed += part.StoreOutageUnattributed
 		merged.RetainedShare = append(merged.RetainedShare, part.RetainedShare...)
 		merged.RetainedShareTotal += part.RetainedShareTotal
 		merged.ReadEarly, merged.ReadEarlyTotal = append(merged.ReadEarly, part.ReadEarly...), merged.ReadEarlyTotal+part.ReadEarlyTotal
