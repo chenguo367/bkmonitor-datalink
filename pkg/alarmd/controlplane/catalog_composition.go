@@ -494,6 +494,10 @@ var AlwaysReportedWithheld = []WithheldKey{
 	// "No strategy here pays a one-off Redis cost for a no-data group bound
 	// above the default."
 	{Disposition: DispositionConfigNoted, Reason: ReasonNoDataGroupBoundAboveDefault},
+	// "No strategy here ends its alerts other than as it wrote."
+	{Disposition: DispositionConfigNoted, Reason: ReasonRecoveryStatusSetterDefaulted},
+	{Disposition: DispositionConfigNoted, Reason: ReasonRecoveryCloseUnsupported},
+	{Disposition: DispositionConfigNoted, Reason: ReasonRecoveryNoDataUnsupported},
 }
 
 // WithheldKey pairs what happened to an object with why. Neither half answers

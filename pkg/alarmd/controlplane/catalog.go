@@ -345,6 +345,23 @@ const ReasonNoDataGroupBoundAboveDefault = "NO_DATA_GROUP_BOUND_ABOVE_DEFAULT"
 // defaults the whole strategy there (recover.py:253-267).
 const ReasonRecoveryConfigDefaulted = "RECOVERY_CONFIG_DEFAULTED"
 
+// ReasonRecoveryStatusSetterDefaulted names a Level whose
+// recovery_config.status_setter is none of recovery, close, recovery-nodata
+// and close-nodata, read the way the recovery checker reads it: closed when
+// the part before "-" is "close", recovered otherwise.
+const ReasonRecoveryStatusSetterDefaulted = "RECOVERY_STATUS_SETTER_DEFAULTED"
+
+// ReasonRecoveryCloseUnsupported names a Level written to end its alert
+// closed (status_setter close or close-nodata). This build ends it
+// recovered: a close is a message of its own on the alert link, and which
+// one the link takes for this is not settled.
+const ReasonRecoveryCloseUnsupported = "RECOVERY_CLOSE_UNSUPPORTED"
+
+// ReasonRecoveryNoDataUnsupported names a Level written to end its alert when
+// no data arrives through the recovery window (status_setter *-nodata). This
+// build ends it only on points, as without the suffix.
+const ReasonRecoveryNoDataUnsupported = "RECOVERY_NODATA_UNSUPPORTED"
+
 // The item fields a strategy cannot be compiled without, each refused under
 // its own name with the field it names, as a rejected configuration (the
 // last good Plan stays). They used to be one word, filed as PLAN_INVALID, and
@@ -2578,6 +2595,20 @@ func compilePlan(
 			}
 			dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigNoted,
 				Reason: ReasonRecoveryConfigDefaulted, FieldPath: "detects[*].recovery_config.check_window", Detail: detail})
+		}
+		// The status_setter of a level the checker reads its own recovery
+		// for; a strategy-wide default and a borrowed trigger take
+		// "recovery" with the default window, as the checker does.
+		if !recoveryDefaulted && !borrowed {
+			setter := readLegacyRecoveryStatusSetter(detect.Recovery)
+			if setter.malformed {
+				recoveryWindows = uint32(legacyDefaultRecoveryWindows)
+				dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigNoted,
+					Reason: ReasonRecoveryConfigDefaulted, FieldPath: "detects[*].recovery_config.status_setter",
+					Detail: fmt.Sprintf("recovery_windows=%d; status_setter %s is not read", legacyDefaultRecoveryWindows,
+						strconv.Quote(boundedRecoveryStatusSetter(setter.written)))})
+			}
+			dispositions = append(dispositions, setter.notes(sourceID, levelID)...)
 		}
 		triggerFields := map[string]any{"required_anomalies": count, "step_seconds": step.Seconds, "window_size": window}
 		if len(detect.Trigger.Uptime) > 0 && string(detect.Trigger.Uptime) != "null" {

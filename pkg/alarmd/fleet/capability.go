@@ -123,6 +123,9 @@ var capabilityByReason = map[string]CapabilityClass{
 	"LEVEL_TRIGGER_BORROWED":            {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported},
 	"AGG_INTERVAL_DEFAULTED":            {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported},
 	"RECOVERY_CONFIG_DEFAULTED":         {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported},
+	"RECOVERY_STATUS_SETTER_DEFAULTED":  {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported},
+	"RECOVERY_CLOSE_UNSUPPORTED":        {Area: CapabilityOutput, Outcome: CapabilityNotYetSupported},
+	"RECOVERY_NODATA_UNSUPPORTED":       {Area: CapabilityAlgorithm, Outcome: CapabilityNotYetSupported},
 
 	"PRIORITY_IGNORED": {IgnoredByDesign: true},
 }

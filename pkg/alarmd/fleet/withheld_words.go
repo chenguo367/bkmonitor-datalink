@@ -118,6 +118,24 @@ var withheldReasonWords = map[string]WithheldReasonWords{
 		What:   "无数据告警要连续缺席的时长达到或超过追踪期限：第 N 个连续缺席点出现在首次缺席后（连续周期数−1）×周期 秒，而追踪在缺席满追踪期限的那一轮停止且不出裁决，所以这条无数据永远发不出告警（详情里写明连续周期数、周期、最早可告警时刻、追踪期限及其来源）——策略在检测，阈值检测和无数据的追踪、停止、恢复都照常，不是被扣住",
 		Next:   "策略负责人把连续周期数调小，或调大追踪期限（来源是 STRATEGY 时改策略的无数据配置，是 PLATFORM 时改平台配置）；改好后下一轮刷新这一行消失",
 		Action: ActionStrategyEdit},
+	// Under CONFIG_NOTED too: the level recovers as the platform reads what
+	// was written, and the ending it was written with is said.
+	"RECOVERY_STATUS_SETTER_DEFAULTED": {Kind: WithheldStrategyDefinition,
+		What:   "这一级别恢复配置的 status_setter 不是 recovery、close、recovery-nodata、close-nodata 之一，已按平台的读法读：\"-\" 前是 close 就按关闭结束，否则按恢复结束（详情里写明原值与读法）——策略在检测，不是被扣住",
+		Next:   "策略负责人把 status_setter 改成四个取值之一；改好后下一轮刷新这一行消失",
+		Action: ActionStrategyEdit},
+	// Under CONFIG_NOTED too: the alert ends recovered where the owner wrote
+	// closed; how the alert link takes a close for this is not settled.
+	"RECOVERY_CLOSE_UNSUPPORTED": {Kind: WithheldStrategyDefinition,
+		What:   "这一级别写的是恢复时关闭告警（status_setter 为 close 或 close-nodata），本构建在同样的时刻按恢复结束告警，不是关闭（详情里写明原值）——策略在检测，阈值与恢复判定都照常，不是被扣住",
+		Next:   "不需要策略负责人处理：关闭的结束方式待平台与告警链路对齐后支持；在那之前要关闭的告警会显示为已恢复",
+		Action: ActionNone},
+	// Under CONFIG_NOTED too: the alert ends only on points where the owner
+	// wrote that no data through the recovery window ends it.
+	"RECOVERY_NODATA_UNSUPPORTED": {Kind: WithheldStrategyDefinition,
+		What:   "这一级别写了恢复检测周期内无数据也结束告警（status_setter 带 -nodata），本构建只在有数据点、且连续若干周期不满足触发条件时结束告警；这一组一直没有数据时告警保持打开（详情里写明原值）——策略在检测，不是被扣住",
+		Next:   "不需要策略负责人处理：无数据结束待产品裁定后支持；在那之前没有数据的组的告警要等数据回来或人工处理",
+		Action: ActionNone},
 	// Under CONFIG_NOTED too: the Plan runs with the bound its owner raised,
 	// and the words state the one-off cost that was chosen with it. Nobody is
 	// asked to act: the cost was the owner's choice, and an owner who did not
