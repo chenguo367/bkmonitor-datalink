@@ -312,9 +312,9 @@ func TestAPanickingOverviewComputationDoesNotStrandTheNextCaller(t *testing.T) {
 // A caller already waiting on a computation that panics is released and
 // computes again; it is not left waiting on a computation that never ends.
 func TestACallerWaitingOnAPanickingComputationIsReleased(t *testing.T) {
-	var calls atomic.Int32
+	var calls, clockReads atomic.Int32
 	started, release := make(chan struct{}), make(chan struct{})
-	cache := newOverviewCache(time.Now, func() Overview {
+	cache := newOverviewCache(func() time.Time { clockReads.Add(1); return time.Now() }, func() Overview {
 		if calls.Add(1) == 1 {
 			close(started)
 			<-release
@@ -322,6 +322,9 @@ func TestACallerWaitingOnAPanickingComputationIsReleased(t *testing.T) {
 		}
 		return Overview{Verdict: OverviewVerdict{State: OverviewOK}}
 	})
+	// A stale answer, so each caller reads the clock before it looks for the
+	// computation in flight: the second read is the waiter about to take it.
+	cache.at = time.Now().Add(-2 * OverviewMaxAge)
 	go func() {
 		defer func() { _ = recover() }()
 		cache.get()
@@ -329,7 +332,7 @@ func TestACallerWaitingOnAPanickingComputationIsReleased(t *testing.T) {
 	<-started
 	waiter := make(chan Overview, 1)
 	go func() { waiter <- cache.get() }()
-	time.Sleep(50 * time.Millisecond) // fixed-wait: a beat for the waiter to reach the computation in progress; nothing observable marks that it waits on it (open)
+	testwait.Until(t, "the second caller reaching the computation in flight", func() bool { return clockReads.Load() >= 2 })
 	close(release)
 	select {
 	case got := <-waiter:

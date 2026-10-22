@@ -297,13 +297,15 @@ func TestARequestWaitingOnAReadThatPanicsIsAnswered(t *testing.T) {
 	}()
 	<-reading
 	waited := make(chan *diagnosisEntry, 1)
+	// It calls Done first as it waits on the entry being read.
+	waiting := &doneWatch{Context: context.Background()}
 	go func() {
-		entry, _ := cache.get(context.Background(), "d-1", now, func(context.Context) *diagnosisEntry {
+		entry, _ := cache.get(waiting, "d-1", now, func(context.Context) *diagnosisEntry {
 			return &diagnosisEntry{readError: "a second read"}
 		})
 		waited <- entry
 	}()
-	time.Sleep(100 * time.Millisecond) // fixed-wait: a beat for the second request to wait on the read in progress; nothing observable marks that it waits on the entry (open)
+	testwait.Until(t, "the second request waiting on the read in progress", func() bool { return waiting.calls.Load() > 0 })
 	close(fail)
 	select {
 	case entry := <-waited:

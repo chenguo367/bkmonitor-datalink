@@ -153,10 +153,23 @@ func TestAYieldAfterTheReadsContextEndedIsStillWatched(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	engine.Step(ctx)
 	<-started
-	cancel()                          // the read's context ends; the read does not
-	time.Sleep(50 * time.Millisecond) // fixed-wait: a beat for the cancelled read; nothing observable marks that it has seen the cancel (open)
+	cancel() // the read's context ends; the read does not
+	// An absence window: a yield watcher that wrongly ended with the read's context has quit by now, so the yield
+	// below finds nobody and the case fails every time rather than by select order; correct code reacts to nothing.
+	time.Sleep(50 * time.Millisecond) // fixed-wait: the absence window above; an absence sends no signal to wait on
 	close(yield)
-	time.Sleep(50 * time.Millisecond) // fixed-wait: a beat for the yield watcher; nothing observable marks that it has taken the yield (open)
+	testwait.Until(t, "the yield watcher stamping the yield", func() bool {
+		engine.mu.Lock()
+		defer engine.mu.Unlock()
+		for _, state := range engine.groups {
+			for _, candidate := range append([]*sample{state.sample, state.probe}, state.probations...) {
+				if candidate != nil && !candidate.yieldAt.IsZero() {
+					return true
+				}
+			}
+		}
+		return false
+	})
 	c.set(c.now().Add(RecheckTimeout + time.Second))
 	engine.Step(context.Background())
 	if n := engine.Stats().Faults[FaultYieldOverdue]; n != 1 {

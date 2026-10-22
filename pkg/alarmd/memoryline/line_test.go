@@ -250,20 +250,25 @@ func TestTheReserveIsTakenAsTheCollectionEnds(t *testing.T) {
 func TestAClosedLineIsToldOfNoMoreCollections(t *testing.T) {
 	line := New()
 	line.Close()
-	// The collection whose finalizer sees the line closed.
-	runtime.GC()
-	time.Sleep(20 * time.Millisecond) // fixed-wait: a beat for the finalizer of the collection after Close to run; nothing observable marks that it has run, since it returns at once on a closed line (open)
-	line.mu.Lock()
-	cycle := line.cycle
-	line.mu.Unlock()
-	for range 3 {
+	cycleOf := func() uint64 {
+		line.mu.Lock()
+		defer line.mu.Unlock()
+		return line.cycle
+	}
+	// A finalizer that passed its check just before Close still tells the
+	// line once - that collection ends its watch - and nothing marks when it
+	// has: so the line may move once over these four collections, and a line
+	// still told moves at each.
+	cycle, moves := cycleOf(), 0
+	for range 4 {
 		runtime.GC()
 		time.Sleep(20 * time.Millisecond) // fixed-wait: a window for each collection's finalizer in which the closed line's cycle must not move; an absence sends no signal to wait on
+		if now := cycleOf(); now != cycle {
+			cycle, moves = now, moves+1
+		}
 	}
-	line.mu.Lock()
-	defer line.mu.Unlock()
-	if line.cycle != cycle {
-		t.Fatalf("a closed line moved from cycle %d to %d with no reading of its own", cycle, line.cycle)
+	if moves > 1 {
+		t.Fatalf("a closed line moved %d times over four collections, at cycle %d, with no reading of its own", moves, cycle)
 	}
 }
 

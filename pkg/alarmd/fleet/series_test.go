@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,6 +24,19 @@ func trendsReading(trends *Trends, window SeriesWindow) bool {
 	trends.mu.Lock()
 	defer trends.mu.Unlock()
 	return trends.inFlight[window.Key] != nil
+}
+
+// doneWatch is a context that counts the calls of its Done. A caller that
+// waits on a read another started selects on that read or its own context,
+// and calls Done as it begins to wait; nothing else marks that it waits.
+type doneWatch struct {
+	context.Context
+	calls atomic.Int32
+}
+
+func (watch *doneWatch) Done() <-chan struct{} {
+	watch.calls.Add(1)
+	return watch.Context.Done()
 }
 
 type rangeCall struct {
@@ -381,14 +395,17 @@ func TestConcurrentReadsOfAWindowShareOneRead(t *testing.T) {
 	window, _ := lookupSeriesWindow("1h")
 	at := time.Unix(1789006380, 0)
 	var group sync.WaitGroup
+	// The caller that starts the read reads on its own context, never this
+	// one: the other three each call Done as they join it.
+	callers := &doneWatch{Context: context.Background()}
 	for range 4 {
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			trends.read(context.Background(), window, at)
+			trends.read(callers, window, at)
 		}()
 	}
-	time.Sleep(50 * time.Millisecond) // fixed-wait: a beat for the four callers to reach the read in progress; nothing observable marks that a caller waits on a trends flight (open)
+	testwait.Until(t, "three callers joining the read in progress", func() bool { return callers.calls.Load() == 3 })
 	close(release)
 	group.Wait()
 	lines := 0
@@ -440,8 +457,9 @@ func TestTheStartingCallerLeavingDoesNotCancelTheSharedRead(t *testing.T) {
 	go trends.read(starting, window, at)
 	testwait.Until(t, "the starting caller's read in progress", func() bool { return trendsReading(trends, window) })
 	waiting := make(chan TrendsAnswer, 1)
-	go func() { waiting <- trends.read(context.Background(), window, at) }()
-	time.Sleep(20 * time.Millisecond) // fixed-wait: a beat for the waiting caller to join the read in progress; nothing observable marks that a caller waits on a trends flight (open)
+	joining := &doneWatch{Context: context.Background()}
+	go func() { waiting <- trends.read(joining, window, at) }()
+	testwait.Until(t, "the waiting caller joining the read in progress", func() bool { return joining.calls.Load() > 0 })
 	cancel()
 	close(release)
 	answer := <-waiting
