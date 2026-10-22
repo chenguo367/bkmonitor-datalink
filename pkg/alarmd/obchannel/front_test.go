@@ -21,6 +21,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/cliauth"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/redistest"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obevidence"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/pod"
 )
@@ -165,7 +166,7 @@ func TestTheFrontReadsAStrategyConfigByItsSourceViewOnly(t *testing.T) {
 			Fields: map[string]Field{"view": {Type: "string", Enum: []string{"source", "published"}}, "strategy_id": {Type: "string"}},
 			Run: func(context.Context, Params) Outcome {
 				ran++
-				return Outcome{Complete: true, Value: map[string]string{"status": "ok"}}
+				return Outcome{Complete: true, Value: obevidence.Result{Status: "ok"}}
 			}}}})
 	if err != nil {
 		t.Fatal(err)
@@ -221,5 +222,67 @@ func TestTheFrontAnswerOfAStrategyConfigLeavesOutTheStoreLocation(t *testing.T) 
 		if !strings.Contains(body, kept) {
 			t.Errorf("the front answer lost %q: %s", kept, body)
 		}
+	}
+}
+
+// The real strategy.config, through the front: what it read and from where
+// comes back without the store's address, database, prefix and key.
+func TestTheRealStrategyConfigReadThroughTheFrontLeavesOutTheStore(t *testing.T) {
+	client := redistest.Start(t).Client()
+	service := obevidence.New(obevidence.Options{SourceStrategy: obevidence.RedisBinding{Client: client,
+		Location: obevidence.Location{Role: "source", Address: "store.example:6379", DB: 3, Prefix: "cache"}}})
+	var config Operation
+	for _, op := range StoreOperations(service) {
+		if op.ID == "strategy.config" {
+			config = op
+		}
+	}
+	if config.ID == "" {
+		t.Fatal("strategy.config is not among the store operations")
+	}
+	c, err := New(Options{Auth: postObservationAuth{}, EnvironmentID: "test", Replica: "replica-1", Operations: []Operation{config}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(map[string]any{"channel_version": Version, "mode": "invoke", "operation": "strategy.config", "params": map[string]any{"view": "source", "strategy_id": "80"}})
+	w := httptest.NewRecorder()
+	c.FrontReadHandler(func(*http.Request) error { return nil }).ServeHTTP(w, httptest.NewRequest(http.MethodPost, cliauth.FrontReadPath, bytes.NewReader(raw)))
+	body := w.Body.String()
+	var answer struct {
+		Result struct {
+			Status   string         `json:"status"`
+			Location map[string]any `json:"location"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &answer); err != nil || answer.Result.Status == "" {
+		t.Fatalf("front read answered %d %s, want the config read's status", w.Code, body)
+	}
+	for _, private := range []string{"store.example", `"db":3`, `"prefix":"cache"`, "cache."} {
+		if strings.Contains(body, private) {
+			t.Errorf("the front answer carries %q: %s", private, body)
+		}
+	}
+	if answer.Result.Location["role"] != "source" {
+		t.Errorf("location %v, want the store's role kept", answer.Result.Location)
+	}
+}
+
+// A strategy.config answer of a shape the trim does not know is withheld,
+// not passed through: a change to the result can only fail closed.
+func TestAStrategyConfigAnswerTheFrontCannotShapeIsWithheld(t *testing.T) {
+	c, err := New(Options{Auth: postObservationAuth{}, EnvironmentID: "test", Replica: "replica-1",
+		Operations: []Operation{{ID: "strategy.config", Summary: "config",
+			Fields: map[string]Field{"view": {Type: "string"}, "strategy_id": {Type: "string"}},
+			Run: func(context.Context, Params) Outcome {
+				return Outcome{Complete: true, Value: map[string]any{"location": map[string]any{"address": "store.example:6379"}}}
+			}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(map[string]any{"channel_version": Version, "mode": "invoke", "operation": "strategy.config", "params": map[string]any{"view": "source", "strategy_id": "80"}})
+	w := httptest.NewRecorder()
+	c.FrontReadHandler(func(*http.Request) error { return nil }).ServeHTTP(w, httptest.NewRequest(http.MethodPost, cliauth.FrontReadPath, bytes.NewReader(raw)))
+	if w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), "front_answer_unshaped") || strings.Contains(w.Body.String(), "store.example") {
+		t.Fatalf("an unshaped answer = %d %s, want 502 front_answer_unshaped without the address", w.Code, w.Body.String())
 	}
 }

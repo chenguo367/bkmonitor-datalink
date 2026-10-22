@@ -57,16 +57,19 @@ var FrontParams = map[string]map[string]string{
 // strategy.config names where it read from - the store's address, database,
 // prefix and key - and, on a failed read, the error's own text; those are the
 // cluster's, not alarmd's, so the front answer drops them. The CLI, which
-// reads addresses already, keeps them.
-var frontAnswers = map[string]func(any) any{
-	"strategy.config": func(value any) any {
+// reads addresses already, keeps them. A value of any other shape than the
+// one the trim knows is not passed through: the front answers that it could
+// not shape it, so a change to the operation's result can only withhold, never
+// leak.
+var frontAnswers = map[string]func(any) (any, bool){
+	"strategy.config": func(value any) (any, bool) {
 		result, ok := value.(obevidence.Result)
 		if !ok {
-			return value
+			return nil, false
 		}
 		result.Location = obevidence.Location{Role: result.Location.Role}
 		result.ReasonText = ""
-		return result
+		return result, true
 	},
 }
 
@@ -181,8 +184,13 @@ func (c *Channel) serveFront(w http.ResponseWriter, r *http.Request, authorize f
 	} else {
 		out = c.runHere(execCtx, op, req, params, meta)
 	}
-	if trim := frontAnswers[req.Operation]; trim != nil {
-		out.Result = trim(out.Result)
+	if trim := frontAnswers[req.Operation]; trim != nil && out.Result != nil {
+		trimmed, shaped := trim(out.Result)
+		if !shaped {
+			fail(502, "front_answer_unshaped", "The front surface could not reduce this answer to what a page may hold; use the CLI.")
+			return
+		}
+		out.Result = trimmed
 	}
 	code := 200
 	if out.Status == "error" {
