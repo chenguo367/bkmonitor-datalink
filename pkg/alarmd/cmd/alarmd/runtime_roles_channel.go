@@ -247,6 +247,7 @@ func openProductionRoleChannel(cfg config.Config, binding ChannelBinding) (_ *ro
 		return cliLinkdReconcileOperation(nil)
 	}))
 	ops = append(ops, cliLifecycleOperation(diagnosticRuntime, lifecycleRecordKey(cfg)))
+	ops = append(ops, changesOperation(cfg, binding, diagnosticRuntime))
 	for i := range workload {
 		if workload[i].ID != "k8s.workloads" {
 			workload[i].Targetable = true
