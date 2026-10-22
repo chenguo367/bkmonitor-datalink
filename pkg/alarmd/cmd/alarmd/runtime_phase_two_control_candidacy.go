@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
@@ -209,6 +210,24 @@ func (watch *controlHandbackWatch) observe(candidates []ownership.InstanceRegist
 	return "", false
 }
 
+// lapsed says whether this reading comes too long after the last one for a
+// window being counted to carry on, and how long it has been: observe will
+// start such a window again, and a watch with nothing counted loses nothing.
+func (watch *controlHandbackWatch) lapsed(at time.Time, maxGap time.Duration) (time.Duration, bool) {
+	if len(watch.readySince) == 0 || watch.observedAt.IsZero() || maxGap <= 0 {
+		return 0, false
+	}
+	gap := at.Sub(watch.observedAt)
+	return gap, gap > maxGap
+}
+
+// noteHandbackWatchReset counts one start-over of the handback watch and
+// writes the line that says why.
+func (bundle *phaseTwoWorkerBundle) noteHandbackWatchReset(ctx context.Context, reason string, result observability.Result, err error) {
+	bundle.dependencies.Recorder.RecordControlHandbackWatchReset(reason)
+	bundle.observe(ctx, observability.ComponentControlPlane, observability.StageControlHandbackWatch, result, err)
+}
+
 // reset forgets every window: a round that could not read the candidates
 // knows of no unbroken readiness, and a new term starts watching afresh.
 func (watch *controlHandbackWatch) reset() {
@@ -336,10 +355,17 @@ func (bundle *phaseTwoWorkerBundle) considerHandback(ctx context.Context) {
 	candidates, err := reader.ListPreferredControlCandidates(ctx, at)
 	if err != nil {
 		bundle.handback.reset()
+		bundle.noteHandbackWatchReset(ctx, metric.ControlHandbackWatchResetListFailed, observability.ResultFailed,
+			fmt.Errorf("read the preferred control candidates: %w", err))
 		return
 	}
+	maxGap := controlHandbackMaxGap(bundle.dependencies.Config)
+	if gap, lapsed := bundle.handback.lapsed(at, maxGap); lapsed {
+		bundle.noteHandbackWatchReset(ctx, metric.ControlHandbackWatchResetGap, observability.ResultDegraded,
+			fmt.Errorf("no candidate reading for %s, past the %s a handback watch may go without one", gap, maxGap))
+	}
 	successor, due := bundle.handback.observe(candidates, bundle.dependencies.Config.PhaseTwo.Worker.ID, at,
-		controlCandidacyWindow(bundle.dependencies.Config), controlHandbackMaxGap(bundle.dependencies.Config))
+		controlCandidacyWindow(bundle.dependencies.Config), maxGap)
 	if !due {
 		return
 	}

@@ -66,6 +66,10 @@ const (
 	StageObjectRead           = "object_read"
 	StageFrozenPlanGeneration = "frozen_plan_generation"
 	StageActivationHold       = "activation_hold"
+	// StageControlHandbackWatch names a fallback Leader's handback watch
+	// starting over (control_handback_watch_resets_total): the round could
+	// not read the candidates, or went too long without a reading.
+	StageControlHandbackWatch = "control_handback_watch"
 	// StageStateCarryDecided is the Control Leader deciding what an
 	// activation whose state generation moved may carry; StageStateCarried
 	// is a Worker carrying it for each series. See StateCarryFacts.
@@ -3638,6 +3642,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentState, StageNoDataMemoryWritten},
 	{ComponentControlPlane, StageSourceWithheld},
 	{ComponentControlPlane, StageNoDataSuspended},
+	{ComponentControlPlane, StageControlHandbackWatch},
 	{ComponentState, StageSideEffectAdmission}, {ComponentState, StageGapGuardCommitted},
 	{ComponentState, StageMutationCompared}, {ComponentState, StageStateAdmission}, {ComponentState, StageWarmingPeak},
 	{ComponentState, StageStateApplied}, {ComponentState, StageOutputUnapplied},

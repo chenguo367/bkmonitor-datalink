@@ -431,6 +431,12 @@ Labels: `fact`, `reason`
 
 Control-plane reads that came back without the fact, by fact and by which answer the store gave. reason=missing is the record not being there, which somebody has to write back; reason=read_failed is the store not answering, which retrying fixes. Neither ends the process: a replica that cannot read the facts waits under them, so this rising and then stopping is what a recovered outage looks like, and this rising without stopping is a replica that never joined.
 
+## alarmd_control_handback_watch_resets_total
+
+Labels: `reason`
+
+Times a fallback Leader's handback watch started over, by why: list_failed (the round could not read the preferred candidates) or gap (more than two reconcile rounds went without a reading while a candidate's window was being counted). Each one puts the handback a whole candidacy window later; the fallback keeps leading meanwhile, so this is the answer to "why has the lease not been given back" beside control_leader_transitions_total{reason="handback"}, and the line control_handback_watch beside it carries the error or the gap.
+
 ## alarmd_control_health_facts_total
 
 Labels: `status`
