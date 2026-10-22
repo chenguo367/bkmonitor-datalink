@@ -59,12 +59,9 @@ func floorStanding(retests int) time.Duration {
 	return min(standing, RecordTTL)
 }
 
-// undatedFloorAge is how long ago a floor written before floors were dated
-// is taken as learned, at the first reading of it: a share of a day the
-// group's identity fixes, so the groups stuck under such floors when this
-// build arrives start their probes spread over its first day rather than in
-// its first round together, and a group's share is the same in every
-// process that reads it.
+// undatedFloorAge is a share of a day the group's identity fixes: how far
+// before the day it is first read on a floor written before floors were dated
+// is taken as learned (undatedFloorAt).
 func undatedFloorAge(qg execution.QueryGroupIdentity) time.Duration {
 	hash := fnv.New64a()
 	_, _ = hash.Write([]byte(qg))
@@ -78,6 +75,18 @@ func undatedFloorAge(qg execution.QueryGroupIdentity) time.Duration {
 	x *= 0x94d049bb133111eb
 	x ^= x >> 31
 	return time.Duration(float64(x>>11) / (1 << 53) * float64(FloorStanding))
+}
+
+// undatedFloorAt is when a floor written before floors were dated is taken
+// as learned, read at now: the start of now's UTC day less the group's
+// undatedFloorAge, so the groups stuck under such floors when this build
+// arrives start their probes spread over that day rather than in its first
+// round together, and every process that reads the floor that day - a
+// restart, a takeover - dates it alike until a write keeps the date; and no
+// earlier than the Slot the group's hold was frozen at, so a hold that came
+// to it within the day still waits from there.
+func undatedFloorAt(qg execution.QueryGroupIdentity, record Record, now int64) int64 {
+	return max(utcDay(now)*dayMillis-undatedFloorAge(qg).Milliseconds(), int64(record.SinceSlot)*1000)
 }
 
 // probeFloor is the floor a shadow probe of record would read at now, and
@@ -100,8 +109,8 @@ func probeFloor(record Record, step time.Duration, now int64) (int64, bool) {
 
 // FloorProbe is the floor the group's shadow probe reads its rounds at, and
 // false when there is none to probe (probeFloor). A floor written before
-// floors were dated is dated here, at its first reading, undatedFloorAge
-// ago; the date is kept in memory and written with the record's next change.
+// floors were dated is dated here, at its first reading (undatedFloorAt); the
+// date is kept in memory and written with the record's next change.
 func (controller *Controller) FloorProbe(qg execution.QueryGroupIdentity) (time.Duration, bool) {
 	state := controller.group(qg)
 	state.mu.Lock()
@@ -111,7 +120,7 @@ func (controller *Controller) FloorProbe(qg execution.QueryGroupIdentity) (time.
 	}
 	now := controller.options.Now()
 	if state.record.EarlierFloorMillis != nil && state.record.EarlierFloorAtMillis == 0 {
-		state.record.EarlierFloorAtMillis = now.Add(-undatedFloorAge(qg)).UnixMilli()
+		state.record.EarlierFloorAtMillis = undatedFloorAt(qg, state.record, now.UnixMilli())
 	}
 	floor, ok := probeFloor(state.record, state.spec.Step, now.UnixMilli())
 	return time.Duration(floor) * time.Millisecond, ok

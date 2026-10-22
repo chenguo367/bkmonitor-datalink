@@ -195,41 +195,57 @@ func TestAFloorsStandingStartsOverWhenItIsClearedOrChanges(t *testing.T) {
 	})
 }
 
-// A floor written before floors were dated is dated at its first reading,
-// within the day before it, at a point its group's identity fixes: the
-// groups such floors hold start their probes spread over the first day, not
-// in the first round together, and a group starts at the same point in any
-// process that reads it at the same moment.
-func TestAnUndatedFloorIsProbedWithinADayAtAPointItsGroupFixes(t *testing.T) {
-	undated := `{"hold_ms":120000,"since_slot":60,"earlier_floor_ms":100000}`
-	eligible := func(qg execution.QueryGroupIdentity) time.Duration {
+// A floor written before floors were dated is dated at its first reading by the UTC day it is read on and its
+// group: every process that reads it that day - a restart hours later, a takeover - dates it alike, so restarts
+// several times a day do not keep moving its first probe on; the groups such floors hold are probed spread over that
+// day, each by the end of it; and a group whose hold was frozen within the day waits its standing from there.
+func TestAnUndatedFloorIsDatedByItsDayAndGroup(t *testing.T) {
+	read := func(qg execution.QueryGroupIdentity, record string, at time.Duration) (int64, time.Time) {
 		t.Helper()
 		c, store, now := controllerFixture(t)
 		spec := groupSpec(qg, 0)
 		spec.Step = 30 * time.Second
-		store.values[qg] = []byte(undated)
+		store.values[qg] = []byte(record)
 		prepare(t, c, spec)
+		*now = now.Add(at)
+		c.FloorProbe(qg)
+		reading, _ := c.Reading(qg)
 		start := *now
-		for step := time.Duration(0); step <= FloorStanding; step += 10 * time.Minute {
+		for step := time.Duration(0); step <= 2*FloorStanding; step += 10 * time.Minute {
 			*now = start.Add(step)
 			if _, probing := c.FloorProbe(qg); probing {
-				return step
+				return reading.EarlierFloorAtMillis, *now
 			}
 		}
-		t.Fatalf("%s: an undated floor not probed within a day of its first reading", qg)
-		return 0
+		t.Fatalf("%s: an undated floor read %v into the day not probed within two days", qg, at)
+		return 0, time.Time{}
 	}
-	hours := map[time.Duration]bool{}
+	// Read two days on from the fixture's start, its hold frozen days before.
+	const day = 48 * time.Hour
+	undated := `{"hold_ms":120000,"since_slot":60,"earlier_floor_ms":100000}`
+	endOfDay := time.Unix(1800, 0).Add(day).Truncate(24 * time.Hour).Add(24 * time.Hour)
+	hours := map[int64]bool{}
 	for index := range 24 {
 		qg := execution.QueryGroupIdentity(fmt.Sprintf("qg-%d", index))
-		at := eligible(qg)
-		if again := eligible(qg); again != at {
-			t.Fatalf("%s probed %v after its first reading in one process and %v in another", qg, at, again)
+		dated, probed := read(qg, undated, day)
+		if again, _ := read(qg, undated, day+6*time.Hour); again != dated {
+			t.Fatalf("%s dated %d by a process at the start of the day and %d by one six hours on", qg, dated, again)
 		}
-		hours[at.Truncate(time.Hour)] = true
+		if stood := time.UnixMilli(dated).Add(FloorStanding); stood.After(endOfDay) || probed.After(stood.Add(10*time.Minute)) {
+			t.Fatalf("%s stands until %s, first probed at %s; want it standing by the end of the day it was first read on, probed then",
+				qg, stood.UTC(), probed.UTC())
+		}
+		hours[dated/time.Hour.Milliseconds()] = true
 	}
 	if len(hours) < 8 {
-		t.Fatalf("24 groups' first probes fell in %d hours of the day, want them spread", len(hours))
+		t.Fatalf("24 groups' floors dated in %d hours, want them spread over the day", len(hours))
+	}
+	// Frozen at its hold within the day it is read on: it stands a day from then.
+	frozen := time.Unix(1800, 0).Add(day).Add(-time.Hour)
+	recent := fmt.Sprintf(`{"hold_ms":120000,"since_slot":%d,"earlier_floor_ms":100000}`, frozen.Unix())
+	if dated, probed := read("qg-recent", recent, day); dated != frozen.UnixMilli() || probed.Before(frozen.Add(FloorStanding)) {
+		t.Fatalf("a floor under a hold frozen at %s dated %d, first probed at %s; want dated then and probed a day on",
+			frozen.UTC(), dated, probed.UTC())
 	}
 }
 
