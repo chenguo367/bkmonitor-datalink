@@ -375,7 +375,7 @@ func TestTheFlowRatesAreTheCountersOverTwoComputations(t *testing.T) {
 	after.QueryFailures = map[string]uint64{"timeout": 6}
 	after.QueryDuration = FlowHistogram{Buckets: cumulative(0, 0, 0, 270, 0, 0, 0, 0, 0, 0), Count: 400}
 	after.Detections, after.StateWrites, after.EventsEmitted, after.EventsRejected = 110, 130, 10, 3
-	after.DecisionLag = FlowHistogram{Buckets: cumulative(0, 0, 0, 0, 60, 0, 0, 0, 0, 0), Count: 60}
+	after.DecisionLag = FlowHistogram{Buckets: cumulative(0, 0, 0, 0, 60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), Count: 60}
 
 	flows := newOverviewFlows()
 	one := overviewOf(flowHealth(first, started, before), nil, false, first)
@@ -674,5 +674,68 @@ func TestTheConsoleDependencyReadsTheConsolesOwnWord(t *testing.T) {
 	health.Dependencies[3].Console.State = LinkdConsoleReachable
 	if got := flowStage(overviewOf(health, nil, false, time.Now()), "output").Dependencies[1].State; got != OverviewOK {
 		t.Fatalf("a reachable Console whose last failure is older than its last answer reads %s, want ok", got)
+	}
+}
+
+// A replica whose histograms have another number of buckets than this
+// process's bounds - an older build during the rollout that changed them -
+// is not added in by position. An old replica whose ten decision-lag buckets
+// put every decision in (10, 30] reads a P95 of 29 s against its own bounds;
+// read against fifteen it would land at about 14.75 s and pass as measured.
+// It is left out, said in coverage, and counted once it has rolled.
+func TestAReplicaWithOtherBucketBoundsIsNotAddedByPosition(t *testing.T) {
+	started := time.Date(2026, 10, 13, 11, 0, 0, 0, time.UTC)
+	first := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	empty := func(n int) FlowHistogram { return FlowHistogram{Buckets: make([]uint64, n)} }
+	// The previous build's decision-lag bounds: ten, with nothing between
+	// 10 s and 30 s.
+	const oldLagBuckets = 10
+	facts := func(lagBuckets int, decisions uint64) *FlowFacts {
+		lag := empty(lagBuckets)
+		// Every decision past 10 s and within 30 s: the bucket for 30 s is
+		// index 6 in the old bounds and index 9 in the new.
+		thirty := 6
+		if lagBuckets == len(FlowDecisionBounds) {
+			thirty = 9
+		}
+		for index := thirty; index < lagBuckets; index++ {
+			lag.Buckets[index] = decisions
+		}
+		lag.Count = decisions
+		return &FlowFacts{QueryDuration: empty(len(FlowQueryBounds)), DecisionLag: lag, RuntimeRedis: empty(len(FlowRedisBounds)),
+			Detections: decisions}
+	}
+	flows := newOverviewFlows()
+	for step, old := range []bool{true, true, false, false} {
+		at := first.Add(time.Duration(step) * time.Minute)
+		lagBuckets := len(FlowDecisionBounds)
+		if old {
+			lagBuckets = oldLagBuckets
+		}
+		health := flowHealth(at, started, facts(lagBuckets, uint64(60*(step+1))))
+		overview := overviewOf(health, nil, false, at)
+		flows.apply(&overview, health, at)
+		evaluate := flowStage(overview, "evaluate")
+		switch step {
+		case 1:
+			// Old layout on both readings: not counted, and said why.
+			if evaluate.LatencyP95MS.Measured || overview.FlowCoverage != (OverviewCoverage{Expected: 1, LayoutMismatched: 1}) ||
+				overview.Verdict.State == OverviewOK {
+				t.Fatalf("an old-layout replica = P95 %+v coverage %+v verdict %s, want unmeasured, mismatched and not OK",
+					evaluate.LatencyP95MS, overview.FlowCoverage, overview.Verdict.State)
+			}
+		case 2:
+			// Rolled between the readings: the pair spans two layouts.
+			if evaluate.LatencyP95MS.Measured || overview.FlowCoverage.LayoutMismatched != 1 || overview.FlowCoverage.Counted != 0 {
+				t.Fatalf("a replica read across its rollout = P95 %+v coverage %+v, want neither reading added", evaluate.LatencyP95MS, overview.FlowCoverage)
+			}
+		case 3:
+			// Both readings in these bounds: counted, and the P95 is the
+			// (25, 30] bucket's, not a position borrowed from another layout.
+			if !evaluate.LatencyP95MS.Measured || overview.FlowCoverage != (OverviewCoverage{Counted: 1, Expected: 1}) ||
+				evaluate.LatencyP95MS.Value <= 25000 || evaluate.LatencyP95MS.Value > 30000 {
+				t.Fatalf("a rolled replica = P95 %+v coverage %+v, want counted with a P95 in (25 s, 30 s]", evaluate.LatencyP95MS, overview.FlowCoverage)
+			}
+		}
 	}
 }

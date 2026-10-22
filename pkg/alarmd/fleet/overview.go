@@ -809,6 +809,12 @@ type OverviewCoverage struct {
 	// earlier reading to be a difference from. They are not expected yet and
 	// do not hold the verdict; from their second computation they are.
 	Warming int `json:"warming,omitempty"`
+	// LayoutMismatched are the expected replicas whose histograms carry a
+	// different number of buckets from this process's bounds - a build with
+	// other bucket bounds, as during a rollout that changes them. Their
+	// buckets cannot be added to this process's by position, so they are not
+	// counted, and Counted falls short of Expected by them.
+	LayoutMismatched int `json:"layout_mismatched,omitempty"`
 }
 
 func (flows *overviewFlows) apply(overview *Overview, health HealthResponse, at time.Time) {
@@ -842,6 +848,15 @@ func (flows *overviewFlows) apply(overview *Overview, health HealthResponse, at 
 			continue
 		}
 		coverage.Expected++
+		if !sameLayout(previous.flow) || !sameLayout(reading.flow) {
+			// Not a difference this process can read: bucket i of the
+			// replica's histogram is not bucket i of these bounds. The
+			// reading is still the next one to measure from (a replica that
+			// has rolled to these bounds is counted from its second reading),
+			// and no earlier rate is carried for it.
+			coverage.LayoutMismatched++
+			continue
+		}
 		if contribution, fresh := contributionOf(previous, reading); fresh {
 			sum.add(contribution)
 			coverage.Counted++
@@ -935,6 +950,16 @@ func overviewDependencyNumbers(stage *OverviewStage, role string, latency, failu
 
 // overviewQueryFailureOrder is the order the pull stage lists causes in.
 var overviewQueryFailureOrder = []string{"timeout", "refused", "not_found", "transport", "decode", "other"}
+
+// sameLayout says a replica's flow histograms have one bucket per bound of
+// this process's: the only layout whose buckets can be added to this
+// process's by position. An older build with ten decision-lag bounds read
+// against fifteen would put its (10, 30] bucket at 15 s, and an overview
+// with every replica counted would show a measured P95 the replica never had.
+func sameLayout(flow FlowFacts) bool {
+	return len(flow.QueryDuration.Buckets) == len(FlowQueryBounds) && len(flow.DecisionLag.Buckets) == len(FlowDecisionBounds) &&
+		len(flow.RuntimeRedis.Buckets) == len(FlowRedisBounds)
+}
 
 // contributionOf is a replica's rates between two readings, and whether
 // they are a difference of anything: the same process, a reading that
