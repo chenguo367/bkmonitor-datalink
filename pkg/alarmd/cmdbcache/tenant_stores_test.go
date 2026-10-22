@@ -157,3 +157,17 @@ func TestATenantsFirstReadWaitsOnlyWithinTheCallersDeadline(t *testing.T) {
 		t.Fatalf("after the read landed the store reads %q, want usable", reason)
 	}
 }
+
+// A target plan resolving for a tenant nothing has read yet waits, within
+// its caller's context, for that tenant's first read, so the first
+// resolution already sees the tenant's own hosts.
+func TestATenantsFirstResolutionSeesItsOwnHosts(t *testing.T) {
+	stores, _ := tenantStoresWith(t)
+	plan := &contract.TargetPlanV1{SchemaVersion: 1, ModelID: "cw-Host", Rule: contract.TargetPlanRuleModelInstID,
+		Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}, StaticKeys: []string{},
+		StaticMembers: []contract.TargetPlanMemberV1{{ModelID: "cw-Host", ModelInstID: "740002"}}}
+	resolver := NewTargetResolver(nil, stores, time.Now)
+	if got := resolver.ResolveFor(context.Background(), "tenant-a", plan, time.Minute); got.State != targetplan.ResolutionComplete || !got.Contains("740002") {
+		t.Fatalf("a tenant's first resolution = %s, contains 740002 %v; want its own host", got.State, got.Contains("740002"))
+	}
+}

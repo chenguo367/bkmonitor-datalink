@@ -97,7 +97,8 @@ func (stores *TenantStores) For(tenant string) *Store {
 
 // ForWithin is For, waiting for the tenant's first read until ctx ends: the
 // caller's deadline, not one of the store's own, bounds how long a Slot
-// waits for a tenant it is the first to read.
+// waits for a tenant it is the first to read. A ctx with no deadline waits
+// at most the read's own firstLoadBound.
 func (stores *TenantStores) ForWithin(ctx context.Context, tenant string) *Store {
 	store, loaded := stores.lookup(tenant)
 	if loaded != nil {

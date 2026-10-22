@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/admission"
@@ -67,3 +68,39 @@ func (noPrimeAdmission) Admit(admission.PlanContext, *admission.Facts) (bool, st
 // The admission production hands a Source is a chain, and a chain primes:
 // without this a query's tenants would silently never be primed.
 var _ TenantPrimer = (*admission.Chain)(nil)
+
+// primeOrderFuller notes, for every record it fills, whether the record's
+// tenant had been primed first.
+type primeOrderFuller struct {
+	mu       sync.Mutex
+	primed   map[string]bool
+	filled   int
+	unprimed int
+}
+
+func (fuller *primeOrderFuller) Name() string { return "prime_order" }
+func (fuller *primeOrderFuller) PrimeFor(_ context.Context, tenant string) {
+	fuller.mu.Lock()
+	defer fuller.mu.Unlock()
+	fuller.primed[tenant] = true
+}
+func (fuller *primeOrderFuller) Fill(_ map[string]json.RawMessage, facts *admission.Facts) {
+	fuller.mu.Lock()
+	defer fuller.mu.Unlock()
+	fuller.filled++
+	if !fuller.primed[facts.TenantID] {
+		fuller.unprimed++
+	}
+}
+
+// Through the Source: a query's series are enriched only after their Plans'
+// tenant was primed, so a tenant's first read lands, within the query's
+// deadline, before the first record of it is filled.
+func TestAQuerysSeriesAreEnrichedAfterTheirTenantIsPrimed(t *testing.T) {
+	fuller := &primeOrderFuller{primed: map[string]bool{}}
+	chain := admission.NewChain([]admission.Fuller{admission.IdentityFuller{}, fuller}, nil)
+	executeScopedThrough(t, chain, nil, "192.0.2.10", "192.0.2.11")
+	if fuller.filled == 0 || fuller.unprimed != 0 {
+		t.Fatalf("filled %d records, %d before their tenant was primed; want every one after", fuller.filled, fuller.unprimed)
+	}
+}
