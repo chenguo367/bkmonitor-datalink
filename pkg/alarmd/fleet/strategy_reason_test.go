@@ -359,7 +359,7 @@ func TestAnUndeterminedOwnersSentenceIsNotAVerdictOnThisService(t *testing.T) {
 		if strings.Count(sentence, "本服务故障") != strings.Count(sentence, "不是已知的本服务故障") {
 			t.Errorf("%s names a fault of this service as known: %q", check, sentence)
 		}
-		if check != CheckConfigUnresolved && !strings.Contains(sentence, "由 alarmd 查明是谁的") {
+		if check != CheckConfigUnresolved && !strings.Contains(sentence, "由 alarmd 维护方查明是谁的") {
 			t.Errorf("%s does not say who finds out: %q", check, sentence)
 		}
 	}
