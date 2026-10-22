@@ -275,6 +275,33 @@ func (s *SREReceipts) List(ctx context.Context, filter SREReceiptFilter) (SRERec
 	return page, nil
 }
 
+// Read is every receipt one list keeps, in one read, newest first by the
+// receipts' own times, with how many entries did not decode. changes.list
+// reads each list once this way rather than paging List, which reads both
+// lists whole on every page.
+func (s *SREReceipts) Read(ctx context.Context, effect string) ([]SREAction, int, error) {
+	kept := MaxSREAccessReceipts
+	if effect == SREEffectChange {
+		kept = MaxSREChangeReceipts
+	}
+	raw, err := s.client.LRange(ctx, s.keyOf(effect), 0, int64(kept-1)).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return nil, 0, err
+	}
+	receipts, undecoded := make([]SREAction, 0, len(raw)), 0
+	for _, entry := range raw {
+		var action SREAction
+		if json.Unmarshal([]byte(entry), &action) != nil {
+			undecoded++
+			continue
+		}
+		action.Effect = effect
+		receipts = append(receipts, action)
+	}
+	sort.SliceStable(receipts, func(i, j int) bool { return receipts[i].At.After(receipts[j].At) })
+	return receipts, undecoded, nil
+}
+
 func (f SREReceiptFilter) matches(action SREAction) bool {
 	if !f.Since.IsZero() && action.At.Before(f.Since) {
 		return false

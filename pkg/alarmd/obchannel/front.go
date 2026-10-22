@@ -32,6 +32,9 @@ var FrontReads = map[string]bool{
 	"object.get":               true,
 	"diagnose.environment":     true,
 	"runtime.get":              true,
+	// The changes page: the channel's change receipts and alarmd's starts
+	// and stops, by name only (changes.list).
+	"changes.list": true,
 }
 
 // FrontReadHandler serves the front surface's read: an invoke of one of
