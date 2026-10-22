@@ -58,6 +58,7 @@ func (resolver *TargetResolver) ResolveFor(ctx context.Context, tenant string, p
 	}
 	if resolver != nil && resolver.stores != nil {
 		bound := *resolver
+		PrimeTenant(ctx, resolver.stores, tenant)
 		bound.hosts = resolver.stores.For(tenant)
 		resolver = &bound
 	}

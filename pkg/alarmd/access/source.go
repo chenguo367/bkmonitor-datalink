@@ -484,6 +484,7 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 				scopeSink: source.config.ScopeDrops, outputs: outputs, round: int64(request.Contract.Slot.EvaluationTime),
 				lookback: kept}
 			adapters[index] = adapter
+			primeQueryTenants(queryCtx, source.config.Admission, query)
 			completion, err := source.executeWithPermit(queryCtx, attempt, adapter, permit)
 			// A failed physical query says which input it was and the
 			// deadlines it was planned under, its own rather than the

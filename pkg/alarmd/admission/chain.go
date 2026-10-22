@@ -15,6 +15,7 @@
 package admission
 
 import (
+	"context"
 	"encoding/json"
 	"sort"
 	"strconv"
@@ -356,6 +357,28 @@ func NewChain(fullers []Fuller, filters []Filter) *Chain {
 // Enrich derives the facts of one series once.
 func (chain *Chain) Enrich(dimensions map[string]json.RawMessage) Facts {
 	return chain.EnrichFor("", dimensions)
+}
+
+// Primer is a fuller whose source has a tenant's facts to read before it can
+// answer for that tenant: the CMDB host index of a tenant first referenced.
+type Primer interface {
+	PrimeFor(ctx context.Context, tenant string)
+}
+
+// PrimeFor waits, within ctx, for every fuller to have the tenant's facts to
+// fill from. A caller on a Slot's path calls it with its own deadline before
+// enriching that tenant's records, so the first Slot to read a tenant decides
+// on its facts and still never waits past its deadline for them; Fill itself
+// never waits.
+func (chain *Chain) PrimeFor(ctx context.Context, tenant string) {
+	if chain == nil {
+		return
+	}
+	for _, fuller := range chain.fullers {
+		if primer, ok := fuller.(Primer); ok {
+			primer.PrimeFor(ctx, tenant)
+		}
+	}
 }
 
 // EnrichFor is Enrich for a record read for a tenant's Plan: the fullers

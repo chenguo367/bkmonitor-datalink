@@ -6,6 +6,7 @@
 package access
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -27,6 +28,33 @@ import (
 type SeriesAdmission interface {
 	EnrichFor(tenant string, dimensions map[string]json.RawMessage) admission.Facts
 	Admit(plan admission.PlanContext, facts *admission.Facts) (bool, string, string)
+}
+
+// TenantPrimer is a SeriesAdmission that has a tenant's facts to read before
+// it can enrich that tenant's records (admission.Chain.PrimeFor). A query
+// primes its Plans' tenants within its own deadline before it is sent.
+type TenantPrimer interface {
+	PrimeFor(ctx context.Context, tenant string)
+}
+
+// primeQueryTenants primes, within ctx, the tenant of every Plan the query
+// feeds, each once, before its series are enriched.
+func primeQueryTenants(ctx context.Context, admission SeriesAdmission, query PlannedQuery) {
+	primer, ok := admission.(TenantPrimer)
+	if !ok {
+		return
+	}
+	primed := make(map[string]struct{})
+	for _, requirement := range query.Requirements {
+		for _, consumer := range requirement.Consumers {
+			tenant := consumer.Consumer.Plan.TenantID
+			if _, done := primed[tenant]; done {
+				continue
+			}
+			primed[tenant] = struct{}{}
+			primer.PrimeFor(ctx, tenant)
+		}
+	}
 }
 
 // AdmissionObserver counts decisions. It is called once per series per plan, so

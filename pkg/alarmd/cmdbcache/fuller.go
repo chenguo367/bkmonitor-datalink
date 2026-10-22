@@ -7,6 +7,7 @@ package cmdbcache
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"strings"
 
@@ -41,6 +42,14 @@ type HostTopologyFuller struct {
 
 // NewHostTopologyFuller places records against the host index of the tenant
 // each is read for (Facts.TenantID).
+// PrimeFor waits, within ctx, for the tenant's host index to be first read
+// (admission.Chain.PrimeFor).
+func (fuller *HostTopologyFuller) PrimeFor(ctx context.Context, tenant string) {
+	if fuller != nil {
+		PrimeTenant(ctx, fuller.stores, tenant)
+	}
+}
+
 func NewHostTopologyFuller(stores StoreSource) *HostTopologyFuller {
 	return &HostTopologyFuller{stores: stores}
 }
@@ -444,6 +453,14 @@ type ServiceInstanceTopologyFuller struct {
 
 // NewServiceInstanceTopologyFuller places instance records against the
 // index of the tenant each is read for.
+// PrimeFor waits, within ctx, for the tenant's host index to be first read
+// (admission.Chain.PrimeFor).
+func (fuller *ServiceInstanceTopologyFuller) PrimeFor(ctx context.Context, tenant string) {
+	if fuller != nil {
+		PrimeTenant(ctx, fuller.stores, tenant)
+	}
+}
+
 func NewServiceInstanceTopologyFuller(stores StoreSource) *ServiceInstanceTopologyFuller {
 	return &ServiceInstanceTopologyFuller{stores: stores}
 }
