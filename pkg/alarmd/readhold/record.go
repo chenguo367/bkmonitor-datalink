@@ -64,13 +64,15 @@ type Record struct {
 	EarlierMatches   int                      `json:"earlier_matches,omitempty"`
 	LastEarlierSlot  execution.EvaluationTime `json:"last_earlier_slot,omitempty"`
 	// EarlierFloorMillis is the largest candidate shown too early under the
-	// current hold (execution.CandidateReadHold), nil while none is; and
-	// EarlierDifferents the different trials in a row at the current
-	// candidate, which move the floor once there are FloorDifferentsRequired
-	// of them. Both are cleared when the hold is raised or seeded and at
-	// each renewal.
-	EarlierFloorMillis *int64 `json:"earlier_floor_ms,omitempty"`
-	EarlierDifferents  int    `json:"earlier_differents,omitempty"`
+	// current hold (execution.CandidateReadHold), nil while none is, and
+	// EarlierFloorAtMillis when it was learned, zero for a floor written
+	// before floors were dated; and EarlierDifferents the different trials
+	// in a row at the current candidate, which move the floor once there are
+	// FloorDifferentsRequired of them. They are cleared when the hold is
+	// raised or seeded and at each renewal.
+	EarlierFloorMillis   *int64 `json:"earlier_floor_ms,omitempty"`
+	EarlierFloorAtMillis int64  `json:"earlier_floor_at_ms,omitempty"`
+	EarlierDifferents    int    `json:"earlier_differents,omitempty"`
 	// LoweredFromMillis is the hold the last lowering came from, while the
 	// group stays Lowered: a raise right after it goes back there at least.
 	LoweredFromMillis   int64  `json:"lowered_from_ms,omitempty"`
@@ -119,7 +121,7 @@ func Decode(raw []byte) (Record, error) {
 	if !inRange(record.HoldMillis) || !inRange(record.PreviousHoldMillis) || record.SinceSlot <= 0 ||
 		record.PreviousSinceSlot < 0 || record.PreviousSinceSlot > record.SinceSlot ||
 		(record.PendingHoldMillis != nil && !inRange(*record.PendingHoldMillis)) ||
-		(record.EarlierFloorMillis != nil && *record.EarlierFloorMillis < 0) || record.EarlierDifferents < 0 || record.LoweredFromMillis < 0 ||
+		(record.EarlierFloorMillis != nil && *record.EarlierFloorMillis < 0) || record.EarlierFloorAtMillis < 0 || record.EarlierDifferents < 0 || record.LoweredFromMillis < 0 ||
 		record.ArrivalAgeMillis < 0 || record.MaxEarlyIntervalMillis < 0 ||
 		record.EarlierMatches < 0 || record.EarlierMatches > EarlierMatchesRequired || !inRange(record.LimitMillis) ||
 		record.SegmentStart < 0 || record.QueryDurationMillis < 0 || record.QueryDurationAtMillis < 0 {

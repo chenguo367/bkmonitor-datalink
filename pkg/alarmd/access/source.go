@@ -286,12 +286,14 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 		return completeBudgetExhaustedQueries(execution.QueryExecutionCompletion{}, prepared.Queries, request.AttemptNo), nil
 	}
 	firstRead := slotFirstRead(prepared.Queries)
-	// An earlier-read trial is one more read of the same backend: none is
-	// reserved while the Query Group's queries are failing.
-	if request.Operation == execution.OperationNormal && source.config.Lookback != nil && !execution.BackendFailing(ctx) {
+	// While the Query Group's queries are failing the lookback reserves no
+	// earlier-read trial, one more read of the same backend, and counts why.
+	if request.Operation == execution.OperationNormal && source.config.Lookback != nil {
+		failing := execution.BackendFailing(ctx)
 		for index, query := range prepared.Queries {
-			source.config.Lookback.Prepare(lookbackQuery(ctx, request, query.Spec, request.AttemptNo, query.ReadyAtUnixMilli,
-				index != firstRead))
+			seen := lookbackQuery(ctx, request, query.Spec, request.AttemptNo, query.ReadyAtUnixMilli, index != firstRead)
+			seen.BackendFailing = failing
+			source.config.Lookback.Prepare(seen)
 		}
 	}
 	if readyAt, pending := slotPendingReadinessOf(prepared.Queries, request.Contract.ReadHoldMillis, source.now()); !readyAt.IsZero() {

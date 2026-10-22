@@ -271,6 +271,10 @@ type Query struct {
 	// per physical query, and a Slot whose other queries were not kept
 	// cannot be supplemented (it is set aside as multi_query).
 	Secondary bool
+	// BackendFailing marks a query whose Query Group's queries are failing
+	// (execution.BackendFailing): Prepare reserves it no trial, a trial being
+	// one more read of the same backend, and counts it backend_failing.
+	BackendFailing bool
 }
 
 // Engine is the lookback of one process.
@@ -358,9 +362,10 @@ type group struct {
 	prepared *earlierSample
 	sample   *sample
 	nextAt   time.Time
-	// refused is the last Slot EarlierRefused heard of, so a Slot prepared
-	// again on a readiness retry is heard once.
-	refused execution.EvaluationTime
+	// decided is the last Slot Prepare reserved a trial for or counted
+	// skipped (skipLocked), so a Slot prepared again on a readiness retry is
+	// counted, and EarlierRefused told of it, once.
+	decided execution.EvaluationTime
 	// period is the observed time between two of its Slots, lastSlot the
 	// latest one seen; a Query Group is sampled at its first reads, so how
 	// fresh its measurement can be depends on how often it reads.

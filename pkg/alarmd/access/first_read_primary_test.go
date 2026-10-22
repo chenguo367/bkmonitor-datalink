@@ -246,6 +246,19 @@ func heldSlotTrialRead(t *testing.T, dependencyFirst, failing bool) {
 		if len(recheck.specs) != 0 {
 			t.Fatalf("a Slot whose backend is failing made %d trial reads", len(recheck.specs))
 		}
+		// Counted as what kept it from a trial, once though its readiness was asked twice.
+		_, _ = source.Execute(execution.WithBackendFailing(context.Background(), failing), request, &recordingConsumer{})
+		skipped := map[string]uint64{}
+		for _, source := range engine.Stats().Sources {
+			for reason, count := range source.EarlierSkipped {
+				if count > 0 {
+					skipped[reason] += count
+				}
+			}
+		}
+		if len(skipped) != 1 || skipped[lookback.EarlierSkipBackendFailing] != 1 {
+			t.Fatalf("a Slot whose backend is failing was counted skipped %v, want once, backend_failing", skipped)
+		}
 		return
 	}
 	// Wait for the trial read to have finished, not only to have asked: the

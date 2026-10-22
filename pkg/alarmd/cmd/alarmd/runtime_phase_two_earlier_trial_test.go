@@ -328,3 +328,53 @@ func TestAnIncompleteTrialFromThePreviousSlotLeavesTheHold(t *testing.T) {
 		t.Fatalf("an incomplete trial lowered the hold %v -> %v: %v", raised, lowest, outcomes)
 	}
 }
+
+// A group lowered under its search floor - a raise right after a lowering makes the lowered hold the floor, and
+// halfway between it and the hold leaves a gap no wider than a step - has nothing left to try, and says so: the
+// controller counts each trial it refuses search_done, the group's lookback reading counts the same Slots
+// no_candidate, and its record says when the floor was learned. In one deployment four groups lowered so sat at
+// 46-58 s for 57 hours, and the only reason counted was at_limit, another group's.
+func TestAGroupStuckUnderItsSearchFloorSaysWhy(t *testing.T) {
+	t.Parallel()
+	f := startCutoverFixture(t, nil)
+	engine, holds := f.bundle.dependencies.Lookback, f.bundle.dependencies.ReadHolds
+	refused := func() map[string]uint64 { return productionLookbackStats(engine, holds).ReadHoldEarlierSkipped }
+	const arrival = 96500 * time.Millisecond
+	// Raised, then lowered to no hold by its trials of no hold: a candidate every time, none refused.
+	if lowest, raised, outcomes, overtaken, _ := heldTrialRun(t, f, arrival, 12*time.Hour, false,
+		func(_, lowest, _ time.Duration, _ map[string]uint64) bool { return lowest == 0 }); lowest != 0 {
+		t.Fatalf("fixture: the hold %v never came down to none: trials %v, overtaken by %v", raised, outcomes, overtaken)
+	}
+	if got := refused(); got[readhold.EarlierSkipSearchDone] != 0 {
+		t.Fatalf("trials refused search_done while the search had candidates: %v", got)
+	}
+	// Its data lands late again right after that lowering: the hold goes back to where it came from, and none,
+	// the lowered hold, is the floor, learned now. Halfway is the step left; there the gap is under the minute.
+	learnedAt := f.now()
+	steppedAt := time.Duration(-1)
+	lowest, raised, outcomes, overtaken, _ := heldTrialRun(t, f, arrival, 12*time.Hour, false,
+		func(elapsed, lowest, raised time.Duration, _ map[string]uint64) bool {
+			if steppedAt < 0 && lowest < raised {
+				steppedAt = elapsed
+			}
+			return steppedAt >= 0 && elapsed >= steppedAt+3*time.Hour
+		})
+	if steppedAt < 0 || lowest != raised/2 {
+		t.Fatalf("fixture: from %v the hold came to %v, want halfway to the floor of none: trials %v, overtaken by %v",
+			raised, lowest, outcomes, overtaken)
+	}
+	record, _ := holds.controller.Reading(f.queryGroup)
+	if record.EarlierFloorMillis == nil || *record.EarlierFloorMillis != 0 || record.EarlierFloorAtMillis != learnedAt.UnixMilli() {
+		t.Fatalf("the record's floor %v learned at %d, want none, learned at the raise %d", record.EarlierFloorMillis,
+			record.EarlierFloorAtMillis, learnedAt.UnixMilli())
+	}
+	reading, _ := engine.GroupReading(f.queryGroup)
+	got := refused()
+	if got[readhold.EarlierSkipSearchDone] == 0 || got[readhold.EarlierSkipAtLimit] != 0 {
+		t.Fatalf("three hours stuck under its floor: refusals counted %v, want search_done alone", got)
+	}
+	// One Slot, one count, on both sides: the controller hears exactly the Slots the lookback counts.
+	if noCandidate := reading.EarlierSkipped[lookback.EarlierSkipNoCandidate]; noCandidate != got[readhold.EarlierSkipSearchDone] {
+		t.Fatalf("the group's reading counts %d Slots no_candidate, the controller %d search_done", noCandidate, got[readhold.EarlierSkipSearchDone])
+	}
+}

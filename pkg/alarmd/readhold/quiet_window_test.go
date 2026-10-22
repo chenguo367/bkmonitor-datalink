@@ -69,7 +69,7 @@ func TestAGroupHeldAtItsLimitIsNotTriedWhileItsDataIsLate(t *testing.T) {
 		t.Fatalf("a group held at its limit within its quiet bar offers a %v trial", hold)
 	}
 	c.EarlierRefused("qg")
-	if got := c.Stats().EarlierSkipped; got[EarlierSkipAtLimit] != 1 || len(got) != len(EarlierSkipReasons) {
+	if got := c.Stats().EarlierSkipped; got[EarlierSkipAtLimit] != 1 || got[EarlierSkipSearchDone] != 0 || len(got) != len(EarlierSkipReasons) {
 		t.Fatalf("skipped trials %v, want one at_limit", got)
 	}
 	// Still late: read early again, 50 minutes on - the bar is now that

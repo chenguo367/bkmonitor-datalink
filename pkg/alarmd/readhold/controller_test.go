@@ -213,6 +213,10 @@ func TestLoweringNeedsQuietAndThreeObservedEarlierReads(t *testing.T) {
 	if c.ReadHold("qg") != 150*time.Second || reading.RaisedAfterLowering != 1 {
 		t.Fatalf("raise after lowering was not counted: %+v", reading)
 	}
+	// The lowered hold is the search's floor, dated when the raise learned it.
+	if reading.EarlierFloorMillis == nil || *reading.EarlierFloorMillis != 75_000 || reading.EarlierFloorAtMillis != now.UnixMilli() {
+		t.Fatalf("raise after lowering: floor %v learned at %d, want 75 s at %d", reading.EarlierFloorMillis, reading.EarlierFloorAtMillis, now.UnixMilli())
+	}
 	*now = now.Add(2 * time.Hour)
 	observeEarly(t, c, "qg", 180*time.Second, 150_000)
 	reading, _ = c.Reading("qg")

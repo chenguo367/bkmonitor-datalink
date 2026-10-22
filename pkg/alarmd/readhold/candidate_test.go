@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"reflect"
 	"testing"
 	"time"
 
@@ -150,14 +151,19 @@ func TestTheSearchIsForgottenOnARaiseAndAtRenewal(t *testing.T) {
 		if got, _ := c.EarlierCandidate("qg"); got != 225*time.Second {
 			t.Fatalf("fixture: candidate %v, want 225 s", got)
 		}
+		// Dated when the second different trial in a row learned it.
+		if reading, _ := c.Reading("qg"); reading.EarlierFloorAtMillis != now.UnixMilli() {
+			t.Fatalf("fixture: floor learned at %d, want %d", reading.EarlierFloorAtMillis, now.UnixMilli())
+		}
 		return c, now
 	}
 	t.Run("raise", func(t *testing.T) {
 		c, _ := floored(t)
 		observeEarly(t, c, "qg", 400*time.Second, 300_000)
 		reading, _ := c.Reading("qg")
-		if got, _ := c.EarlierCandidate("qg"); reading.EarlierFloorMillis != nil || got != 185*time.Second {
-			t.Fatalf("after a raise to %v: floor %v, candidate %v, want none and half the hold", c.ReadHold("qg"), reading.EarlierFloorMillis, got)
+		if got, _ := c.EarlierCandidate("qg"); reading.EarlierFloorMillis != nil || reading.EarlierFloorAtMillis != 0 || got != 185*time.Second {
+			t.Fatalf("after a raise to %v: floor %v at %d, candidate %v, want none and half the hold", c.ReadHold("qg"),
+				reading.EarlierFloorMillis, reading.EarlierFloorAtMillis, got)
 		}
 	})
 	t.Run("renewal", func(t *testing.T) {
@@ -167,8 +173,9 @@ func TestTheSearchIsForgottenOnARaiseAndAtRenewal(t *testing.T) {
 			t.Fatal(err)
 		}
 		reading, _ := c.Reading("qg")
-		if got, _ := c.EarlierCandidate("qg"); reading.EarlierFloorMillis != nil || got != 150*time.Second {
-			t.Fatalf("after renewal: floor %v, candidate %v, want none and half the hold", reading.EarlierFloorMillis, got)
+		if got, _ := c.EarlierCandidate("qg"); reading.EarlierFloorMillis != nil || reading.EarlierFloorAtMillis != 0 || got != 150*time.Second {
+			t.Fatalf("after renewal: floor %v at %d, candidate %v, want none and half the hold", reading.EarlierFloorMillis,
+				reading.EarlierFloorAtMillis, got)
 		}
 	})
 }
@@ -191,7 +198,50 @@ func TestARecordWithoutASearchTriesHalfItsHoldAndUnknownFieldsDecode(t *testing.
 	if err != nil || record.EarlierFloorMillis == nil || *record.EarlierFloorMillis != 60_000 {
 		t.Fatalf("a record with a later field: %+v %v", record, err)
 	}
-	if _, err := Decode([]byte(`{"hold_ms":120000,"since_slot":60,"earlier_floor_ms":-1}`)); err == nil {
-		t.Fatal("a negative floor decoded")
+	if record.EarlierFloorAtMillis != 0 {
+		t.Fatalf("a floor written before floors were dated: learned at %d, want none said", record.EarlierFloorAtMillis)
+	}
+	for _, field := range []string{`"earlier_floor_ms":-1`, `"earlier_floor_at_ms":-1`} {
+		if _, err := Decode([]byte(`{"hold_ms":120000,"since_slot":60,` + field + `}`)); err == nil {
+			t.Fatalf("a record with %s decoded", field)
+		}
+	}
+}
+
+// A trial the controller gives no candidate for is counted by why: at_limit
+// for a group held at its limit (TestAGroupHeldAtItsLimitIsNotTriedWhileItsDataIsLate),
+// search_done for a held group whose search below the hold has run out - the
+// gap between its floor and the hold no wider than a step - and nothing for a
+// group with no hold, which is not refused a trial but has none to try.
+func TestARefusedTrialIsCountedSearchDoneWhereTheSearchRanOut(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		record string
+		want   map[string]uint64
+	}{
+		{"floor a step below", `{"hold_ms":47998,"since_slot":60,"lowered":true,"earlier_floor_ms":0,"earlier_floor_at_ms":1800000}`,
+			map[string]uint64{EarlierSkipSearchDone: 1}},
+		{"no hold", `{"hold_ms":0,"since_slot":60}`, map[string]uint64{}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			c, store, _ := controllerFixture(t)
+			spec := groupSpec("qg", 0)
+			spec.Step = time.Minute
+			store.values["qg"] = []byte(test.record)
+			prepare(t, c, spec)
+			if got, tries := c.EarlierCandidate("qg"); tries {
+				t.Fatalf("fixture: candidate %v, want none", got)
+			}
+			c.EarlierRefused("qg")
+			got := map[string]uint64{}
+			for reason, count := range c.Stats().EarlierSkipped {
+				if count > 0 {
+					got[reason] = count
+				}
+			}
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("refusals counted %v, want %v", got, test.want)
+			}
+		})
 	}
 }

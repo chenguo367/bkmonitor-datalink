@@ -1025,6 +1025,12 @@ Labels: `source`, `outcome`
 
 Candidate h/2 read trials by how they ended, by source: equal or different from the formal first read, or why they supplied no evidence. Reader: the read-hold acceptance after each deploy, which needs completed trials (equal plus different) above zero; a deployment without the CLI reads it only here, since its lookback route is not public.
 
+## alarmd_lookback_earlier_skipped_total
+
+Labels: `source`, `reason`
+
+Held Slots whose first attempt reserved no earlier-read trial, once a Slot, by source and why: not_owned (the group is not this process's; counted at each attempt), no_hold (its hold came down to none since the Slot was frozen), backend_failing (its queries are failing), no_candidate (the read-hold controller gave none; read_hold_earlier_skipped_total says why), trial_reserved (a trial is reserved for a later Slot), sample_in_flight (its sample is being taken or read), resting (its sample rests past the Slot's readiness). Reader: why a held group is not tried; the group's own counts are on its lookback reading.
+
 ## alarmd_lookback_faults_total
 
 Labels: `reason`
@@ -1483,7 +1489,7 @@ New Slots frozen with the hold their Query Group last read -- zero for a group w
 
 Labels: `reason`
 
-Earlier-read trials not run, by why, one per Slot a trial would have been reserved for (its group's sampling rest over, nothing of it in flight): at_limit (the group is held at its limit and was read early within its quiet bar, so its data arrives past the longest hold it may have; a read below the hold and the formal read both come before the data, and their agreeing would say nothing of it). A group counted here keeps its hold at the limit; its trials resume once an arrival reading wants a hold below the limit, or once it has gone its quiet bar without being read early. Every reason exists from the start.
+Earlier-read trials not run, by why, one per Slot a trial would have been reserved for (its group's sampling rest over, nothing of it in flight): at_limit (the group is held at its limit and was read early within its quiet bar, so its data arrives past the longest hold it may have; a read below the hold and the formal read both come before the data, and their agreeing would say nothing of it). A group counted here keeps its hold at the limit; its trials resume once an arrival reading wants a hold below the limit, or once it has gone its quiet bar without being read early. search_done (the search below the hold has run out: the gap between its floor and the hold is no wider than a step; the group's read-hold record says when the floor was learned, earlier_floor_at_ms). Every reason exists from the start.
 
 ## alarmd_read_hold_groups
 

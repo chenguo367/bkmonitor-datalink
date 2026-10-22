@@ -117,11 +117,17 @@ type Stats struct {
 // Why an earlier-read trial was not run, closed. at_limit: the group is held
 // at its limit (Record.HeldAtLimit) and has not been quiet for its bar since
 // (atLimitHeld), so its data arrives past the longest hold and a trial below
-// it can show nothing about the hold.
-const EarlierSkipAtLimit = "at_limit"
+// it can show nothing about the hold. search_done: the search below the hold
+// has run out, the gap between its floor and the hold no wider than a step
+// (execution.CandidateReadHold); its record says when the floor was learned
+// (Record.EarlierFloorAtMillis).
+const (
+	EarlierSkipAtLimit    = "at_limit"
+	EarlierSkipSearchDone = "search_done"
+)
 
 // EarlierSkipReasons is every reason a trial is not run.
-var EarlierSkipReasons = []string{EarlierSkipAtLimit}
+var EarlierSkipReasons = []string{EarlierSkipAtLimit, EarlierSkipSearchDone}
 
 // Control uses the existing ownership store. A value and its Plan
 // evidence are one fenced CAS in the owning Query Group's Redis hash slot.
@@ -494,7 +500,13 @@ func (record Record) AtLimitHeld(now int64) bool {
 // clearFloor forgets the search below the hold: the hold moved up or was
 // set anew, so what was too early under the old one says nothing now.
 func clearFloor(record *Record) {
-	record.EarlierFloorMillis, record.EarlierDifferents = nil, 0
+	record.EarlierFloorMillis, record.EarlierFloorAtMillis, record.EarlierDifferents = nil, 0, 0
+}
+
+// setFloor makes floor the search's floor, learned at now, and starts the
+// different trials in a row over: they count at the candidate above it.
+func setFloor(record *Record, floor, now int64) {
+	record.EarlierFloorMillis, record.EarlierFloorAtMillis, record.EarlierDifferents = &floor, now, 0
 }
 
 // EarlierCandidate is the hold the group's next earlier-read trial tries,
@@ -511,14 +523,17 @@ func (controller *Controller) EarlierCandidate(qg execution.QueryGroupIdentity) 
 // EarlierRefused hears that the lookback would have reserved a trial for one
 // of the group's Slots and EarlierCandidate gave it none: a trial not run,
 // counted by why, so a group never lowered for it says so
-// (EarlierSkipReasons). A refusal for another reason - the search below the
-// hold run out - is not one of these.
+// (EarlierSkipReasons).
 func (controller *Controller) EarlierRefused(qg execution.QueryGroupIdentity) {
 	state := controller.group(qg)
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if atLimitHeld(state.record, controller.options.Now().UnixMilli()) {
+	switch now := controller.options.Now().UnixMilli(); {
+	case atLimitHeld(state.record, now):
 		controller.counted(controller.earlierSkipped, EarlierSkipAtLimit)
+	case current(state.record) > 0:
+		// Held, and not at the limit: no candidate is left above the floor.
+		controller.counted(controller.earlierSkipped, EarlierSkipSearchDone)
 	}
 }
 
@@ -1314,7 +1329,7 @@ func (controller *Controller) Observe(ctx context.Context, evidence Evidence) er
 			if next.Lowered {
 				hold = min(max(hold, next.LoweredFromMillis), limit)
 				if raisedFrom < hold {
-					next.EarlierFloorMillis = &raisedFrom
+					setFloor(&next, raisedFrom, now)
 				}
 			}
 			next.PendingHoldMillis = &hold
@@ -1355,8 +1370,7 @@ func (controller *Controller) EarlierRead(ctx context.Context, evidence EarlierE
 		// between it and the hold.
 		next.EarlierDifferents++
 		if next.EarlierDifferents >= FloorDifferentsRequired {
-			floor := candidate
-			next.EarlierFloorMillis, next.EarlierDifferents = &floor, 0
+			setFloor(&next, candidate, now)
 		}
 	} else {
 		next.EarlierDifferents = 0

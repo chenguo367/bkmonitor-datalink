@@ -64,6 +64,7 @@ func lookbackSeriesUpperBounds() map[string]int {
 		"lookback_earlier_reads_total":               sources * len(lookback.EarlierReadOutcomes),
 		"lookback_earlier_overtaken_total":           sources * len(lookback.EarlierOvertakenPaths),
 		"lookback_earlier_ahead_total":               sources * len(lookback.EarlierAheadSlots),
+		"lookback_earlier_skipped_total":             sources * len(lookback.EarlierSkipReasons),
 		"lookback_probation_rereads_total":           sources * len(lookback.ProbationOutcomes),
 		"lookback_probation_groups":                  sources,
 		"read_hold_query_duration_writes_total":      len(readhold.QueryDurationWriteReasons),
@@ -126,10 +127,11 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	entry.ReadHoldIgnored[lookback.IgnoredNoWholeWindowArrival] = 7
 	entry.EarlyUndecided = 13
 	entry.EarlyReadBytes = 14
+	entry.EarlierSkipped[lookback.EarlierSkipResting] = 17
 	stats.Sources[logs] = entry
 	stats.PermitRefusals[scheduler.LookbackRefusedWaiting] = 9
 	stats.Pending, stats.PendingBytes = 3, 4096
-	stats.ReadHoldEarlierSkipped = map[string]uint64{readhold.EarlierSkipAtLimit: 15}
+	stats.ReadHoldEarlierSkipped = map[string]uint64{readhold.EarlierSkipAtLimit: 15, readhold.EarlierSkipSearchDone: 18}
 	stats.RoundsReadAtLimit = map[string]uint64{logs: 16}
 	stats.ReadHoldGroups = map[string]lookback.ReadHoldGroups{}
 	for _, source := range lookback.Sources {
@@ -212,6 +214,12 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	}
 	if got := value("alarmd_lookback_directed_early_read_bytes_total", map[string]string{"source": logs}); got != 14 {
 		t.Fatalf("early read bytes = %v", got)
+	}
+	if got := value("alarmd_lookback_earlier_skipped_total", map[string]string{"source": logs, "reason": lookback.EarlierSkipResting}); got != 17 {
+		t.Fatalf("held Slots skipped resting = %v, want 17", got)
+	}
+	if got := value("alarmd_read_hold_earlier_skipped_total", map[string]string{"reason": readhold.EarlierSkipSearchDone}); got != 18 {
+		t.Fatalf("trials refused search_done = %v, want 18", got)
 	}
 	if got := value("alarmd_read_hold_earlier_skipped_total", map[string]string{"reason": readhold.EarlierSkipAtLimit}); got != 15 {
 		t.Fatalf("trials skipped at the limit = %v, want 15", got)

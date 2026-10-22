@@ -86,6 +86,11 @@ func TestASlotPastItsTrialStartReservesTheNextSlotsTrial(t *testing.T) {
 	if preparedTrial(f) != trial || trial.formal || trial.done {
 		t.Fatal("the reserving Slot's retry or read ended the next Slot's trial")
 	}
+	// The reserving Slot reserved a trial: its retry, which finds that reservation standing, is not a Slot
+	// without one.
+	if sources, group := skippedBy(f); len(sources) != 0 || len(group) != 0 {
+		t.Fatalf("the reserving Slot's retry was counted skipped: %v, on its group %v", sources, group)
+	}
 	f.clock.set(trial.at)
 	f.answers <- full(point(int64(next.Contract.Slot.EvaluationTime), "1"))
 	f.engine.StepEarly(context.Background())

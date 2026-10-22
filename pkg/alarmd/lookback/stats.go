@@ -62,7 +62,10 @@ type counters struct {
 	// earlierAhead is source|slots: trials reserved ahead, by how many Slots
 	// ahead (EarlierAheadSlots).
 	earlierAhead map[string]uint64
-	earlierBytes map[string]uint64
+	// earlierSkipped is source|reason: held Slots Prepare reserved no trial
+	// for, by why (EarlierSkipReasons).
+	earlierSkipped map[string]uint64
+	earlierBytes   map[string]uint64
 	// probations is source|outcome: probation rereads by what they came to
 	// (ProbationOutcomes).
 	probations  map[string]uint64
@@ -96,7 +99,7 @@ func newCounters(sources, refusals []string) counters {
 		early: map[string]uint64{}, earlyUndecided: map[string]uint64{}, earlyBytes: map[string]uint64{},
 		earlierReads: map[string]uint64{}, earlierBytes: map[string]uint64{}, holdIgnored: map[string]uint64{},
 		earlierOvertaken: map[string]uint64{}, earlierPreparedLateMax: map[string]time.Duration{}, earlierAhead: map[string]uint64{},
-		probations:      map[string]uint64{},
+		earlierSkipped: map[string]uint64{}, probations: map[string]uint64{},
 		emptyCompletion: map[string]uint64{}, refusals: map[string]uint64{RefusedOther: 0}, faults: map[string]uint64{}, plans: map[string]uint64{},
 		maxCompletion: map[string]time.Duration{}, recheckBytes: map[string]uint64{}, unknownLookback: map[string]uint64{},
 		yieldReleases: map[string]uint64{}, yieldReleaseSeconds: map[string]float64{}, yieldReleaseMax: map[string]time.Duration{}}
@@ -158,6 +161,9 @@ func newCounters(sources, refusals []string) counters {
 		}
 		for _, slots := range EarlierAheadSlots {
 			c.earlierAhead[key2(source, slots)] = 0
+		}
+		for _, reason := range EarlierSkipReasons {
+			c.earlierSkipped[key2(source, reason)] = 0
 		}
 		c.earlierPreparedLateMax[source] = 0
 		c.earlierBytes[source] = 0
@@ -368,7 +374,10 @@ type SourceStats struct {
 	// EarlierAhead is trials reserved ahead by how many Slots ahead
 	// (EarlierAheadSlots): a group whose hold is far past its period needs
 	// more than one.
-	EarlierAhead     map[string]uint64 `json:"earlier_ahead"`
+	EarlierAhead map[string]uint64 `json:"earlier_ahead"`
+	// EarlierSkipped is held Slots whose first attempt reserved no trial, by
+	// why (EarlierSkipReasons).
+	EarlierSkipped   map[string]uint64 `json:"earlier_skipped"`
 	EarlierReadBytes uint64            `json:"earlier_read_bytes"`
 	ReadHoldIgnored  map[string]uint64 `json:"read_hold_ignored"`
 	// ProbationRereads is the rounds of Query Groups in probation read again,
@@ -426,8 +435,9 @@ type GroupLateness struct {
 var GroupReadHoldClasses = []string{"h0", "h_positive"}
 
 // groupCounts has only the closed dimensions: two hold classes, six rungs,
-// five sample classes, two ignored reasons, eight earlier-read outcomes and
-// six paths an earlier-read trial is overtaken by.
+// five sample classes, two ignored reasons, eight earlier-read outcomes, six
+// paths an earlier-read trial is overtaken by, four distances ahead and
+// seven reasons a held Slot reserved no trial.
 // It belongs to the live group and is discarded by Forget, like supplements.
 type groupCounts struct {
 	since        time.Time
@@ -438,6 +448,7 @@ type groupCounts struct {
 	earlier      [8]uint64
 	overtaken    [6]uint64
 	ahead        [4]uint64
+	skipped      [7]uint64
 	earlierBytes uint64
 }
 
@@ -477,7 +488,11 @@ type GroupReading struct {
 	EarlierOvertaken map[string]uint64 `json:"earlier_overtaken"`
 	// EarlierAhead is the group's trials reserved ahead by how many Slots
 	// ahead (EarlierAheadSlots).
-	EarlierAhead     map[string]uint64 `json:"earlier_ahead"`
+	EarlierAhead map[string]uint64 `json:"earlier_ahead"`
+	// EarlierSkipped is the group's held Slots whose first attempt reserved
+	// no trial, by why (EarlierSkipReasons): a group never lowered says here
+	// what stood in its trials' way.
+	EarlierSkipped   map[string]uint64 `json:"earlier_skipped"`
 	EarlierReadBytes uint64            `json:"earlier_read_bytes"`
 }
 
@@ -530,7 +545,7 @@ func (engine *Engine) GroupReading(queryGroup execution.QueryGroupIdentity) (Gro
 	reading := GroupReading{QueryGroup: queryGroup, Source: source, Since: counts.since,
 		Compared: map[string]map[string]uint64{}, ChangedWindows: map[string]map[string]uint64{},
 		Classes: map[string]uint64{}, ReadHoldIgnored: map[string]uint64{}, EarlierReads: map[string]uint64{}, EarlierOvertaken: map[string]uint64{},
-		EarlierAhead: map[string]uint64{}, EarlierReadBytes: counts.earlierBytes}
+		EarlierAhead: map[string]uint64{}, EarlierSkipped: map[string]uint64{}, EarlierReadBytes: counts.earlierBytes}
 	for hold, name := range GroupReadHoldClasses {
 		reading.Compared[name], reading.ChangedWindows[name] = map[string]uint64{}, map[string]uint64{}
 		for rung, word := range RungNames {
@@ -552,6 +567,9 @@ func (engine *Engine) GroupReading(queryGroup execution.QueryGroupIdentity) (Gro
 	}
 	for index, slots := range EarlierAheadSlots {
 		reading.EarlierAhead[slots] = counts.ahead[index]
+	}
+	for index, reason := range EarlierSkipReasons {
+		reading.EarlierSkipped[reason] = counts.skipped[index]
 	}
 	return reading, true
 }
@@ -684,6 +702,10 @@ func (engine *Engine) Stats() Stats {
 		entry.EarlierAhead = map[string]uint64{}
 		for _, slots := range EarlierAheadSlots {
 			entry.EarlierAhead[slots] = engine.counts.earlierAhead[key2(source, slots)]
+		}
+		entry.EarlierSkipped = map[string]uint64{}
+		for _, reason := range EarlierSkipReasons {
+			entry.EarlierSkipped[reason] = engine.counts.earlierSkipped[key2(source, reason)]
 		}
 		entry.ProbationRereads, entry.ProbationGroups = map[string]uint64{}, probationGroups[source]
 		for _, outcome := range ProbationOutcomes {
