@@ -88,7 +88,7 @@ func (f *rebindFixture) target() openalerts.TargetBinding {
 
 // waitUntil waits for condition until the test's deadline. The duration its
 // callers pass is the bound it once had and is not read.
-func waitUntil(t *testing.T, _ time.Duration, what string, condition func() bool) {
+func waitUntil(t *testing.T, what string, condition func() bool) {
 	t.Helper()
 	deadline := testwait.Deadline(t)
 	for !condition() {
@@ -136,7 +136,7 @@ func TestAProcessThatCouldNotAskAtStartupMovesItsReadsWhenTheConsoleAnswers(t *t
 	}
 	go f.index.Location.retry(ctx, f.cfg, discover, 10*time.Millisecond, 20*time.Millisecond)
 
-	waitUntil(t, 10*time.Second, "the copy reads the link's set after the move", func() bool {
+	waitUntil(t, "the copy reads the link's set after the move", func() bool {
 		stats := cache.Stats()
 		return stats.Loaded == 1 && stats.Members == 1 && stats.LocationConfirmed
 	})
@@ -250,7 +250,7 @@ func TestAMoveOfTheReadsForgetsWhatTheCopyHeld(t *testing.T) {
 	}
 	// The first round finds the link's place and moves there; a later one
 	// confirms it and calibrates the strategy at it.
-	waitUntil(t, 5*time.Second, "the strategy calibrated at the place the Console names", func() bool {
+	waitUntil(t, "the strategy calibrated at the place the Console names", func() bool {
 		cache.RequestCalibration()
 		cache.Refresh(ctx)
 		return cache.Stats().Calibrated == 1
@@ -286,7 +286,7 @@ func TestARetryAfterAReconciliationFoundTheLinkLeavesTheReadsAlone(t *testing.T)
 		defer close(done)
 		f.index.Location.retry(ctx, f.cfg, discover, 300*time.Millisecond, time.Second)
 	}()
-	waitUntil(t, 5*time.Second, "the reconciliation moved the reads and the strategy is calibrated there", func() bool {
+	waitUntil(t, "the reconciliation moved the reads and the strategy is calibrated there", func() bool {
 		cache.RequestCalibration()
 		cache.Refresh(ctx)
 		return cache.Stats().Calibrated == 1

@@ -297,20 +297,20 @@ func TestAControlLoopStuckInACallFailsLivenessAndRecovers(t *testing.T) {
 	// Past the dispatch bound but inside the control loop's: the held control
 	// loop is not yet late, which is what tells the two bounds apart.
 	clock.advance(dispatchLoopStallBound + time.Second)
-	waitUntil(t, 5*time.Second, "the dispatch loop turns under the moved clock", func() bool {
+	waitUntil(t, "the dispatch loop turns under the moved clock", func() bool {
 		return livenessTurnAge(bundle.liveness, livenessLoopDispatch) < time.Second
 	})
 	if got := stalledLoops(bundle.liveness); len(got) != 0 {
 		t.Fatalf("inside the control loop's bound: stalled %v", got)
 	}
 	clock.advance(controlLoopStallBound - dispatchLoopStallBound)
-	waitUntil(t, 5*time.Second, "only the control loop is named", func() bool {
+	waitUntil(t, "only the control loop is named", func() bool {
 		return sameLoops(stalledLoops(bundle.liveness), livenessLoopControl)
 	})
 
 	owner.armed.Store(false)
 	close(owner.release)
-	waitUntil(t, 5*time.Second, "the probe recovers once the call returns", func() bool {
+	waitUntil(t, "the probe recovers once the call returns", func() bool {
 		return len(stalledLoops(bundle.liveness)) == 0
 	})
 }
@@ -360,7 +360,7 @@ func TestAControlLoopFailingOnADependencyStaysAlive(t *testing.T) {
 	// it too before the probe is read; waiting on the control loop alone
 	// raced the dispatch loop's next tick.
 	clock.advance(controlLoopStallBound + time.Minute)
-	waitUntil(t, 5*time.Second, "the failing control loop keeps turning", func() bool {
+	waitUntil(t, "the failing control loop keeps turning", func() bool {
 		return livenessTurnAge(bundle.liveness, livenessLoopControl) < time.Second &&
 			livenessTurnAge(bundle.liveness, livenessLoopDispatch) < time.Second
 	})
@@ -414,7 +414,7 @@ func TestASlotHeldPastItsDeadlineThroughTheDispatcherFailsLiveness(t *testing.T)
 	}()
 	waitSignal(t, entered, "the run holds the only slot")
 	clock.advance(deadline.Add(executionPastDeadlineGrace).Sub(clock.Now()) + executionsStuckBound - time.Second)
-	waitUntil(t, 5*time.Second, "both loops turn under the moved clock", func() bool {
+	waitUntil(t, "both loops turn under the moved clock", func() bool {
 		return livenessTurnAge(bundle.liveness, livenessLoopControl) < time.Second &&
 			livenessTurnAge(bundle.liveness, livenessLoopDispatch) < time.Second
 	})
@@ -422,12 +422,12 @@ func TestASlotHeldPastItsDeadlineThroughTheDispatcherFailsLiveness(t *testing.T)
 		t.Fatalf("a second inside the bound: stalled %v", got)
 	}
 	clock.advance(2 * time.Second)
-	waitUntil(t, 5*time.Second, "the held slot is named", func() bool {
+	waitUntil(t, "the held slot is named", func() bool {
 		return sameLoops(stalledLoops(bundle.liveness), livenessExecutions)
 	})
 	close(release)
 	released = true
-	waitUntil(t, 5*time.Second, "the probe recovers once the run returns", func() bool {
+	waitUntil(t, "the probe recovers once the run returns", func() bool {
 		return len(stalledLoops(bundle.liveness)) == 0
 	})
 }
@@ -484,7 +484,7 @@ func TestASlotHeldByALateReplayIsJudgedByItsOwnDeadlineThroughTheDispatcher(t *t
 	waitSignal(t, entered, "the replay holds the only slot")
 	// Past the queued deadline by the grace and the bound, inside its own.
 	clock.advance(queued.Add(executionPastDeadlineGrace).Sub(clock.Now()) + executionsStuckBound + time.Second)
-	waitUntil(t, 5*time.Second, "both loops turn under the moved clock", func() bool {
+	waitUntil(t, "both loops turn under the moved clock", func() bool {
 		return livenessTurnAge(bundle.liveness, livenessLoopControl) < time.Second &&
 			livenessTurnAge(bundle.liveness, livenessLoopDispatch) < time.Second
 	})
@@ -496,7 +496,7 @@ func TestASlotHeldByALateReplayIsJudgedByItsOwnDeadlineThroughTheDispatcher(t *t
 	}
 	// Past its own by the grace and the bound: a stall.
 	clock.advance(own.Add(executionPastDeadlineGrace).Sub(clock.Now()) + executionsStuckBound + time.Second)
-	waitUntil(t, 5*time.Second, "the held slot is named past its own deadline", func() bool {
+	waitUntil(t, "the held slot is named past its own deadline", func() bool {
 		return sameLoops(stalledLoops(bundle.liveness), livenessExecutions)
 	})
 }

@@ -156,7 +156,7 @@ func TestATakeoverKeepsTheFleetViewDecidedBeforeTheNewLeadersFirstWrite(t *testi
 	if err := first.Shutdown(ctx); err != nil {
 		t.Fatalf("first Shutdown() error = %v", err)
 	}
-	waitPhaseTwoCondition(t, 10*time.Second, "second replica takes the control lease", func() bool {
+	waitPhaseTwoCondition(t, "second replica takes the control lease", func() bool {
 		if err := second.refreshAndReconcile(ctx, true); err != nil {
 			return false
 		}

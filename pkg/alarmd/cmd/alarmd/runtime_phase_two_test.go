@@ -1847,7 +1847,7 @@ func TestPhaseTwoWorkerBundleAppliesAssignmentDiffWithoutRestart(t *testing.T) {
 	waitSignal(t, first.leaseFinished, "removed query-group lease cancellation")
 	waitSignal(t, second.leaseStarted, "new query-group lease maintenance")
 	// The lease is released after its maintenance has ended, not with it.
-	waitUntil(t, signalWaitBound, "removed runner release", func() bool { return first.releaseCount() > 0 })
+	waitUntil(t, "removed runner release", func() bool { return first.releaseCount() > 0 })
 	if first.releaseCount() != 1 {
 		t.Fatalf("removed runner release calls = %d, want 1", first.releaseCount())
 	}
@@ -1999,7 +1999,7 @@ func TestPhaseTwoWorkerBundleReportsOwnedQueryGroupsAndFixedOwnershipTransitions
 	assertOwnedQueryGroupGauge(t, recorder, 0)
 	// The loss is observed after the lease is released, which follows the end
 	// of its maintenance rather than coming with it.
-	waitUntil(t, signalWaitBound, "the removed Query Group's loss", func() bool {
+	waitUntil(t, "the removed Query Group's loss", func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		for _, observation := range observations {
@@ -2873,10 +2873,10 @@ func TestPhaseTwoWorkerBundleRegistrationRenewalSurvivesTransientStoreFailure(t 
 	}
 	readyBefore := readyRegistrationCount(owner)
 	started.Store(true)
-	waitPhaseTwoCondition(t, 3*time.Second, "READY renewals after the transient failure", func() bool {
+	waitPhaseTwoCondition(t, "READY renewals after the transient failure", func() bool {
 		return failed.Load() && readyRegistrationCount(owner) >= readyBefore+2
 	})
-	waitPhaseTwoCondition(t, 3*time.Second, "registration renewal failure and resumption observations", func() bool {
+	waitPhaseTwoCondition(t, "registration renewal failure and resumption observations", func() bool {
 		return hasRegistrationRenewalObservation(observations(), observability.ResultFailed, phaseTwoControlDependencyReason) &&
 			hasRegistrationRenewalObservation(observations(), observability.ResultResumed, observability.ReasonNone)
 	})
@@ -2932,7 +2932,7 @@ func TestPhaseTwoWorkerBundleRegistrationRenewalCutsHungStoreCall(t *testing.T) 
 	if deadlineMissing.Load() {
 		t.Fatal("registration renewal attempt ran without a per-attempt deadline")
 	}
-	waitPhaseTwoCondition(t, 3*time.Second, "READY renewals after the hung call", func() bool {
+	waitPhaseTwoCondition(t, "READY renewals after the hung call", func() bool {
 		return readyRegistrationCount(owner) >= readyBefore+2
 	})
 	// The failure is observed by the goroutine whose call hung, after the
@@ -3070,25 +3070,10 @@ func hasRegistrationRenewalObservation(
 	return false
 }
 
-func waitPhaseTwoCondition(t *testing.T, timeout time.Duration, name string, condition func() bool) {
+func waitPhaseTwoCondition(t *testing.T, name string, condition func() bool) {
 	t.Helper()
-	deadline := testwait.Deadline(t)
-	for time.Now().Before(deadline) {
-		if condition() {
-			return
-		}
-		time.Sleep(time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
-	}
-	t.Fatalf("timed out waiting for %s", name)
+	testwait.Until(t, name, condition)
 }
-
-// eventWatchdog is how long a test waits for something it expects to happen
-// before calling it missing. It bounds a hang, not a speed: these waits ran
-// at 20 to 200 ms, and on a machine busy with other test runs the process
-// stalls longer than that while nothing is wrong, which failed them. The
-// property each one guards - the event comes at all while the test holds
-// the rest still - is the same at ten seconds.
-const eventWatchdog = 10 * time.Second
 
 func (*fakePhaseTwoQueryGroup) DeclineHung(time.Time, time.Duration) (string, time.Time, bool) {
 	return "", time.Time{}, false

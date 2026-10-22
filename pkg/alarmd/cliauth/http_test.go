@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/go-redis/redis/v8"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 func noStoreManager(t *testing.T) *Manager {
@@ -377,7 +379,8 @@ func TestSlowBodyReleasesHTTPAdmissionSlot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	// The answer the case waits for comes by the test's deadline or not at all.
+	if err := conn.SetDeadline(testwait.Deadline(t)); err != nil {
 		t.Fatal(err)
 	}
 	_, err = fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: example.test\r\nOrigin: https://example.test\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: 16\r\n\r\n{", grantsPath, testAdminKey)

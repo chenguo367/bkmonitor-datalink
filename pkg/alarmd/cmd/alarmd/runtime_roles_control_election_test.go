@@ -525,7 +525,7 @@ func TestAWorkerLeadsWhileTheControlProcessIsGoneAndHandsBackOnceItIsSteady(t *t
 	fixture.tick()
 	kept := fixture.redis.Get(fixture.ctx, planKey).Val()
 	plansBefore := map[string]uint64{}
-	waitPhaseTwoCondition(t, 15*time.Second, "every Worker has a plan set from the control process", func() bool {
+	waitPhaseTwoCondition(t, "every Worker has a plan set from the control process", func() bool {
 		for _, worker := range workers {
 			if plansBefore[worker.name] = worker.bundle.dependencies.ViewClient.Stats().LookbackPlanSets; plansBefore[worker.name] == 0 {
 				return false
@@ -562,7 +562,7 @@ func TestAWorkerLeadsWhileTheControlProcessIsGoneAndHandsBackOnceItIsSteady(t *t
 	}
 	// Every Worker finds the fallback Leader's view stream through its
 	// instance record, as it found the control process's.
-	waitPhaseTwoCondition(t, 15*time.Second, "Workers stream from the fallback Leader", func() bool {
+	waitPhaseTwoCondition(t, "Workers stream from the fallback Leader", func() bool {
 		for _, worker := range workers {
 			stats := worker.bundle.dependencies.ViewClient.Stats()
 			if !stats.Connected || stats.Leader.WorkerID != fallbackLeader.name || stats.Leader.ControlEpoch != fallbackEpoch ||
@@ -630,7 +630,7 @@ func TestAWorkerLeadsWhileTheControlProcessIsGoneAndHandsBackOnceItIsSteady(t *t
 	// the fixture ticks again at the same instant until one has rather than
 	// read a single round as the answer; a handback that never comes still
 	// fails here, and the rounds above still hold that none came early.
-	waitPhaseTwoCondition(t, 30*time.Second, "the fallback Leader hands back once the window has passed", func() bool {
+	waitPhaseTwoCondition(t, "the fallback Leader hands back once the window has passed", func() bool {
 		fixture.tick()
 		return fixture.transitions("preferred", "handback") >= 1
 	})
@@ -655,7 +655,7 @@ func TestAWorkerLeadsWhileTheControlProcessIsGoneAndHandsBackOnceItIsSteady(t *t
 	}
 	// Handed back, the control process plans again and every Worker gets its
 	// set on the stream it opened to it.
-	waitPhaseTwoCondition(t, 15*time.Second, "every Worker has a plan set from the returned control process", func() bool {
+	waitPhaseTwoCondition(t, "every Worker has a plan set from the returned control process", func() bool {
 		for _, worker := range workers {
 			if worker.bundle.dependencies.ViewClient.Stats().LookbackPlanSets <= plansBefore[worker.name] {
 				return false
@@ -965,7 +965,7 @@ func TestAWorkerLeadingAsTheFallbackRunsTheDeletedStrategyClose(t *testing.T) {
 	}
 	// Each loop takes its first round when the process starts; the next is
 	// five minutes away. Both have run by the time the counts move.
-	waitPhaseTwoCondition(t, 10*time.Second, "the Leader's first deleted-strategy round", func() bool {
+	waitPhaseTwoCondition(t, "the Leader's first deleted-strategy round", func() bool {
 		return rounds(leading) >= 1 && outcome(following, absentalerts.OutcomeNotLeader) >= 1
 	})
 	if got := outcome(leading, absentalerts.OutcomeNotLeader); got != 0 {
@@ -1140,5 +1140,5 @@ func TestALeadersLookbackPlanReachesTheOwningWorkersLookbackOverTheViewStream(t 
 	}
 	ownershipRuntime.lookbackPlanner.newTerm()
 	fixture.tick()
-	waitPhaseTwoCondition(t, 15*time.Second, "the Worker's lookback holds the planned entry", func() bool { return held() == 1 })
+	waitPhaseTwoCondition(t, "the Worker's lookback holds the planned entry", func() bool { return held() == 1 })
 }

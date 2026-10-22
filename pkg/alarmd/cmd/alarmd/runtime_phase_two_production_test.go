@@ -2710,7 +2710,7 @@ func TestProductionMaintainLeaseRetriesTransientRenewFailureInsideTTL(t *testing
 	leaseDone := make(chan error, 1)
 	go func() { leaseDone <- runner.MaintainLease(leaseCtx, time.Millisecond, time.Minute) }()
 
-	waitPhaseTwoCondition(t, 3*time.Second, "lease renewal retries", func() bool { return fixture.store.renewCount() >= 6 })
+	waitPhaseTwoCondition(t, "lease renewal retries", func() bool { return fixture.store.renewCount() >= 6 })
 	select {
 	case err := <-leaseDone:
 		t.Fatalf("MaintainLease() returned %v while the lease was still inside its TTL", err)
@@ -2724,7 +2724,7 @@ func TestProductionMaintainLeaseRetriesTransientRenewFailureInsideTTL(t *testing
 	}
 
 	failure.set(nil)
-	waitPhaseTwoCondition(t, 3*time.Second, "lease renewal recovery", func() bool {
+	waitPhaseTwoCondition(t, "lease renewal recovery", func() bool {
 		return countLeaseRenewalObservations(fixture.observations(), observability.ResultSuccess, observability.ReasonNone) > 0
 	})
 	// Every renewal line names the lease it is about: the Query Group and
@@ -2800,7 +2800,7 @@ func TestProductionMaintainControlLeaderRetriesTransientRenewFailureInsideTTL(t 
 		leaderDone <- fixture.production.MaintainControlLeader(leaderCtx, time.Millisecond, time.Minute)
 	}()
 
-	waitPhaseTwoCondition(t, 3*time.Second, "control leader renewal retries", func() bool {
+	waitPhaseTwoCondition(t, "control leader renewal retries", func() bool {
 		return fixture.store.renewLeaderCount() >= 6
 	})
 	select {
@@ -2816,7 +2816,7 @@ func TestProductionMaintainControlLeaderRetriesTransientRenewFailureInsideTTL(t 
 	}
 
 	failure.set(nil)
-	waitPhaseTwoCondition(t, 3*time.Second, "control leader renewal recovery", func() bool {
+	waitPhaseTwoCondition(t, "control leader renewal recovery", func() bool {
 		return countLeaseRenewalObservations(fixture.observations(), observability.ResultSuccess, observability.ReasonNone) > 0
 	})
 	// The control leader's renewal lines name its lease too: the leader key
