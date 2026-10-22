@@ -1231,12 +1231,11 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.levelAbnormal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: metricSubsystem, Name: "level_abnormal_total",
 		Help: "Level verdicts of ABNORMAL, by whether the detection window they were reached on was " +
-			"full. The trigger decides ABNORMAL before it reads completeness, and the output contract " +
-			"pins that order: WARMING and GAPPED history permit only monotonic ABNORMAL. Under N-of-M " +
-			"that is sound -- anomalies counted across a hole are a lower bound, so an incomplete window " +
-			"never over-fires -- but an alert opened on one cannot close until the window is FULL again, " +
-			"and a window that stays short holds it open for ever. window=incomplete is how much alerting " +
-			"rides on that; read it against window=full, never alone, because zero of zero and zero of " +
+			"full. The trigger decides ABNORMAL before it reads completeness: under N-of-M anomalies " +
+			"counted across a hole are a lower bound, so an incomplete window never over-fires. An alert " +
+			"opened on one closes by a RECOVERY whose own window evidence carries it (decision-022); " +
+			"only NORMAL waits for the window to be FULL again. window=incomplete is how much alerting " +
+			"rides on incomplete windows; read it against window=full, never alone, because zero of zero and zero of " +
 			"ten thousand are different readings. Both series exist from start so zero is a reading. " +
 			"This is the number a decision to discard state on leaving the degraded pool is judged " +
 			"against: after such a change the incomplete cell should stop moving.",
