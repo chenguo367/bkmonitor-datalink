@@ -198,6 +198,9 @@ type fleetPublisher struct {
 	// hold is then unknown. onOverdue hears an episode begin (began) and end.
 	holdOf    func(string) (int64, bool)
 	onOverdue func(episode fleet.OverdueEpisode, began bool)
+	// onRestoreUnread hears an object whose record the restore read did not
+	// get, by why (restoreUnreadReason).
+	onRestoreUnread func(reason string)
 	// overdueOpen is the episodes begun and not ended, by object;
 	// overdueEpisodes the latest ended ones, at most fleet.MaxOverdueEpisodes,
 	// which the next snapshot carries. Only publishOnce touches them.
@@ -406,6 +409,9 @@ func (publisher *fleetPublisher) restoreOwned(ctx context.Context, owned []execu
 			}
 			publisher.tracker.Restore(string(queryGroup), state, at, publisher.staleAfter)
 		case errors.As(errs[index], &unread):
+			if publisher.onRestoreUnread != nil {
+				publisher.onRestoreUnread(restoreUnreadReason(unread))
+			}
 		default:
 			publisher.restoreAttempts[queryGroup]++
 		}

@@ -108,6 +108,7 @@ type phaseTwoMetrics struct {
 	scheduleCutoverQueryGroups     *prometheus.CounterVec
 	scheduleCutoverReadHoldLinks   *prometheus.CounterVec
 	fleetOverdueEpisodes           *prometheus.CounterVec
+	fleetRestoreUnread             *prometheus.CounterVec
 	scheduleCutoverTimelinesRead   prometheus.Gauge
 	// The last successful cutover's exact duration, set with its payload and
 	// timelines read so the three describe one cutover; the first
@@ -960,6 +961,11 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		"Which objects they were is in the diagnosis's overdue_episodes, kept in the replica's memory: a restart or a rollout starts it empty."}, []string{"hold"})
 	for _, hold := range fleet.OverdueHoldClasses {
 		metrics.fleetOverdueEpisodes.WithLabelValues(hold)
+	}
+	metrics.fleetRestoreUnread = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "fleet_restore_unread_total", Help: "Objects whose recorded Progress the fleet restore read did not get, by why: redis_error, Redis answered the object's key with an error (LOADING while it loads a dataset, BUSY behind a script); unreached, the read did not reach Redis. " +
+		"Such an object spends none of its restore attempts and is read again at the next publish, so a count that keeps rising is restore that is not happening, not records that are bad: a record read and found unusable is not counted here."}, []string{"reason"})
+	for _, reason := range FleetRestoreUnreadReasons {
+		metrics.fleetRestoreUnread.WithLabelValues(reason)
 	}
 	metrics.replayExpiries = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: metricSubsystem, Name: "replay_expired_total",
@@ -1876,7 +1882,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetRedis,
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.retainedShareApproaching, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
-		m.scheduleCutoverQueryGroups, m.scheduleCutoverReadHoldLinks, m.fleetOverdueEpisodes, m.scheduleCutoverTimelinesRead, m.scheduleCutoverFirstDuration,
+		m.scheduleCutoverQueryGroups, m.scheduleCutoverReadHoldLinks, m.fleetOverdueEpisodes, m.fleetRestoreUnread, m.scheduleCutoverTimelinesRead, m.scheduleCutoverFirstDuration,
 		m.scheduleCutoverFirstTimelines, m.replayExpiries, m.replayTakeovers, m.slotDiversions, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
 		m.queryFailures,
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectCatalogWrittenBytes, m.objectReads, m.stateGenerationSkew, m.stateCarry,
@@ -2704,6 +2710,25 @@ func (r *Recorder) FleetOverdueEpisodeBegan(hold string) {
 		return
 	}
 	r.phaseTwo.fleetOverdueEpisodes.WithLabelValues(hold).Inc()
+}
+
+// The reasons a fleet restore read did not get an object's record, closed.
+const (
+	FleetRestoreUnreadRedisError = "redis_error"
+	FleetRestoreUnreadUnreached  = "unreached"
+)
+
+// FleetRestoreUnreadReasons is the closed list fleet_restore_unread_total's
+// reason comes from.
+var FleetRestoreUnreadReasons = []string{FleetRestoreUnreadRedisError, FleetRestoreUnreadUnreached}
+
+// FleetRestoreUnread counts an object whose record the restore read did not
+// get, by reason (FleetRestoreUnreadReasons).
+func (r *Recorder) FleetRestoreUnread(reason string) {
+	if r == nil || r.phaseTwo.fleetRestoreUnread == nil {
+		return
+	}
+	r.phaseTwo.fleetRestoreUnread.WithLabelValues(reason).Inc()
 }
 
 func (r *Recorder) ControlLeaderStepDown() {

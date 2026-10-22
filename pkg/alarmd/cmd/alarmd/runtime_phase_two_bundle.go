@@ -1326,7 +1326,8 @@ func openProductionPhaseTwoBundleAssembly(
 		lookbackLate: lookbackLateRungs(lookbackEngine),
 		readHolds:    readHolds.fleetFacts,
 		holdOf:       readHolds.holdOf, onOverdue: overdueEpisodeObserver(logger, recorder),
-		applied: repository.AppliedActivationRevision,
+		onRestoreUnread: recorder.FleetRestoreUnread,
+		applied:         repository.AppliedActivationRevision,
 		// The due index is the only thing that knows an object was passed over
 		// rather than evaluated. It lives on the bundle precisely so a reader
 		// outside the dispatch loop can ask it.

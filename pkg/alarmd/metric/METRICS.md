@@ -725,6 +725,12 @@ Objects by which column of the split they are in. Unlike fleet_objects these DO 
 
 Visible objects isolated by external source_backend query cooldown, including expired permits awaiting a real query; demoted objects are counted, since holding a cooldown is what demotes an object. Lower bound when the anomaly or demoted list is truncated or fleet coverage is incomplete.
 
+## alarmd_fleet_restore_unread_total
+
+Labels: `reason`
+
+Objects whose recorded Progress the fleet restore read did not get, by why: redis_error, Redis answered the object's key with an error (LOADING while it loads a dataset, BUSY behind a script); unreached, the read did not reach Redis. Such an object spends none of its restore attempts and is read again at the next publish, so a count that keeps rising is restore that is not happening, not records that are bad: a record read and found unusable is not counted here.
+
 ## alarmd_fleet_round_memory_bytes
 
 Bytes those rounds hold: the kept rounds' slices at their capacity, sixteen bytes a round.

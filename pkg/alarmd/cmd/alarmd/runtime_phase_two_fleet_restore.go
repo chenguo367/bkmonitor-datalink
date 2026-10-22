@@ -14,8 +14,11 @@ import (
 	"errors"
 	"time"
 
+	"github.com/go-redis/redis/v8"
+
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 )
 
@@ -77,6 +80,16 @@ func (err *errRestoreUnread) Error() string {
 	return "alarmd: restore record unread: " + err.err.Error()
 }
 func (err *errRestoreUnread) Unwrap() error { return err.err }
+
+// restoreUnreadReason is why a record was unread: Redis answering its key
+// with an error is a reply (redis.Error); anything else did not reach it.
+func restoreUnreadReason(err error) string {
+	var reply redis.Error
+	if errors.As(err, &reply) {
+		return metric.FleetRestoreUnreadRedisError
+	}
+	return metric.FleetRestoreUnreadUnreached
+}
 
 // readAndUnusable reports whether a read's error is a fact about the record:
 // one that did not decode or named another object (a deterministic control
