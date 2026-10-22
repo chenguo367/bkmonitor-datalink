@@ -135,10 +135,16 @@ func TestTheEffectiveTimeIsSaidAsDetectionRunsIt(t *testing.T) {
 	}{
 		"all day as one 00:00-23:59 range": {[]string{`{"time_ranges":[{"start":"00:00","end":"23:59"}]}`}, "全天生效"},
 		"a limited window":                 {[]string{`{"time_ranges":[{"start":"09:00","end":"18:00"}]}`}, "每天 09:00-18:00 检测"},
-		"all day except holidays": {[]string{`{"time_ranges":[{"start":"00:00","end":"23:59"}],"calendars":[7]}`},
-			"全天检测，日历 7 中的日子不检测"},
-		"only on calendar days, two windows": {[]string{`{"time_ranges":[{"start":"20:00","end":"22:00"},{"start":"08:00","end":"12:00"}],"active_calendars":[12]}`},
-			"日历 12 中的日子每天 08:00-12:00、20:00-22:00 检测"},
+		"whole day outside a calendar's periods": {[]string{`{"time_ranges":[{"start":"00:00","end":"23:59"}],"calendars":[7]}`},
+			"除日历 7 的时段外检测"},
+		// A calendar's items are periods, often within a day (12:00-21:01, say),
+		// so a whole-day range with an active calendar is not all day.
+		"whole day inside an active calendar": {[]string{`{"time_ranges":[{"start":"00:00","end":"23:59"}],"active_calendars":[5]}`},
+			"只在日历 5 的时段内检测"},
+		"two windows and an active calendar": {[]string{`{"time_ranges":[{"start":"20:00","end":"22:00"},{"start":"08:00","end":"12:00"}],"active_calendars":[12]}`},
+			"每天 08:00-12:00、20:00-22:00 且在日历 12 的时段内检测"},
+		"a window outside a calendar's periods": {[]string{`{"time_ranges":[{"start":"09:00","end":"18:00"}],"calendars":[7]}`},
+			"每天 09:00-18:00 检测，日历 7 的时段内不检测"},
 		"levels that differ": {[]string{`{"time_ranges":[{"start":"09:00","end":"18:00"}]}`, `{"time_ranges":[{"start":"00:00","end":"23:59"}]}`},
 			"致命：每天 09:00-18:00 检测；预警：全天检测"},
 	}
@@ -160,8 +166,12 @@ func TestTheEffectiveTimeIsSaidAsDetectionRunsIt(t *testing.T) {
 			if len(configs.Items) == 0 {
 				t.Fatalf("no item: %+v", configs)
 			}
-			if got := expectedItemOf(configs.Items[0]).EffectiveTime; got != c.want {
+			got := expectedItemOf(configs.Items[0]).EffectiveTime
+			if got != c.want {
 				t.Fatalf("effective time = %q, want %q", got, c.want)
+			}
+			if strings.Contains(got, "日历") && (strings.Contains(got, "全天") || strings.Contains(got, "日子")) {
+				t.Fatalf("a calendar is periods, not days: %q", got)
 			}
 		})
 	}

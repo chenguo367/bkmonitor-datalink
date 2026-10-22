@@ -265,27 +265,40 @@ func effectiveTimeWord(config StrategyPlanConfig) string {
 	return strings.Join(levels, "；")
 }
 
-// requirementWord is one normalized effective time in words, "" for all day:
-// "每天 09:00-18:00 检测", "日历 12 中的日子全天检测", "全天检测，日历 7 中的日子不检测".
+// requirementWord is one normalized effective time in words, "" for all day.
+// A calendar's items are periods (within a day or absolute), not whole days,
+// so a calendar is said as its periods and never next to "all day":
+// "每天 09:00-18:00 检测", "只在日历 5 的时段内检测",
+// "每天 08:00-12:00 且在日历 12 的时段内检测", "除日历 7 的时段外检测".
 func requirementWord(requirement strategy.EffectiveTimeRequirement) string {
 	if requirement.Kind() == strategy.EffectiveTimeAlways {
 		return ""
 	}
-	when := "全天"
+	var window string
 	// With calendars, detection keeps a whole-day range rather than dropping it.
 	if ranges := requirement.TimeRanges(); len(ranges) > 0 && !(len(ranges) == 1 && ranges[0].StartMinute() == 0 && ranges[0].EndMinute() == 24*60-1) {
 		windows := make([]string, 0, len(ranges))
 		for _, r := range ranges {
 			windows = append(windows, clockWord(r.StartMinute())+"-"+clockWord(r.EndMinute()))
 		}
-		when = "每天 " + strings.Join(windows, "、") + " "
+		window = "每天 " + strings.Join(windows, "、")
 	}
-	word := when + "检测"
-	if active := requirement.ActiveCalendarIDs(); len(active) > 0 {
-		word = "日历 " + calendarWord(active) + " 中的日子" + word
+	active, inactive := requirement.ActiveCalendarIDs(), requirement.InactiveCalendarIDs()
+	var word string
+	switch {
+	case window != "" && len(active) > 0:
+		word = window + " 且在日历 " + calendarWord(active) + " 的时段内检测"
+	case len(active) > 0:
+		word = "只在日历 " + calendarWord(active) + " 的时段内检测"
+	case window != "":
+		word = window + " 检测"
+	case len(inactive) > 0:
+		return "除日历 " + calendarWord(inactive) + " 的时段外检测"
+	default:
+		return ""
 	}
-	if inactive := requirement.InactiveCalendarIDs(); len(inactive) > 0 {
-		word += "，日历 " + calendarWord(inactive) + " 中的日子不检测"
+	if len(inactive) > 0 {
+		word += "，日历 " + calendarWord(inactive) + " 的时段内不检测"
 	}
 	return word
 }
