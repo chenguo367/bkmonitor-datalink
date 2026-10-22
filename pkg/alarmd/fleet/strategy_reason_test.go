@@ -339,3 +339,31 @@ func TestARunningStrategySaysItsRowsCauseNotADispositionBesideIt(t *testing.T) {
 		t.Fatalf("reason under the disposition's own check %+v, want the disposition's", reason)
 	}
 }
+
+// A check whose owner the evidence does not decide (check.go files it
+// UNDETERMINED) stays on this deployment's side of the page, but its sentence
+// must not read as a verdict that alarmd is at fault: it says alarmd will find
+// out whose it is. Before, WINDOW_UNDECIDED said "由本服务处理" for windows
+// whose holes nobody could attribute.
+func TestAnUndeterminedOwnersSentenceIsNotAVerdictOnThisService(t *testing.T) {
+	undetermined := 0
+	for check, answer := range checkAnswers {
+		if answer.Owner != OwnerUndetermined {
+			continue
+		}
+		undetermined++
+		sentence := checkSentences[check]
+		if strings.Contains(sentence, "本服务处理") {
+			t.Errorf("%s says %q, a verdict on this service", check, sentence)
+		}
+		if strings.Count(sentence, "本服务故障") != strings.Count(sentence, "不是已知的本服务故障") {
+			t.Errorf("%s names a fault of this service as known: %q", check, sentence)
+		}
+		if check != CheckConfigUnresolved && !strings.Contains(sentence, "由 alarmd 查明是谁的") {
+			t.Errorf("%s does not say who finds out: %q", check, sentence)
+		}
+	}
+	if undetermined == 0 {
+		t.Fatal("no check is filed UNDETERMINED; the table this test reads has moved")
+	}
+}
