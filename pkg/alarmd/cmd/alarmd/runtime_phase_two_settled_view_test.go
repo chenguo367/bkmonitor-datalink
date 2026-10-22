@@ -11,10 +11,12 @@ package main
 
 import (
 	"context"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"net"
 	"net/http"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -137,6 +139,26 @@ func settleExecutableView(ctx context.Context, bundle *phaseTwoWorkerBundle, wai
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// requireSettledView waits, until the test's deadline, for every Query Group
+// of the bundle to be executable from the view with its lease at the
+// record's timeline revision (viewSettled), and fails t if that never comes.
+// A case asserting what a settled round reads needs the settled state, not
+// settleExecutableView's bounded best effort: past that bound the round runs
+// on a lease behind the record, and its stale hint is answered through the
+// activation header.
+func requireSettledView(t *testing.T, ctx context.Context, bundle *phaseTwoWorkerBundle) {
+	t.Helper()
+	production, ok := bundle.dependencies.Ownership.(*productionPhaseTwoOwnership)
+	if bundle.dependencies.ViewClient == nil || !ok {
+		return
+	}
+	serveControlStreamForTest(bundle)
+	testwait.Until(t, "the view settling with every lease at its record's timeline revision", func() bool {
+		renewLapsedRegistrationForTest(ctx, bundle, production)
+		return viewSettled(ctx, bundle, production)
+	})
 }
 
 // renewLapsedRegistrationForTest re-registers the Worker when its own
