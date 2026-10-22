@@ -16,47 +16,46 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/redact"
 )
 
-// ConfigValueContract names how a ConfigMap value is shown: masked unless
-// it is shown to be plain configuration.
-const ConfigValueContract = "config_values_deny_by_default_v1"
+// ConfigValueContract names how a ConfigMap value is shown: in clear,
+// except what is named or shaped like a credential.
+const ConfigValueContract = "config_values_blacklist_v1"
 
-// A ConfigMap is configuration, and configuration carries keys: crypt root
-// keys and their IVs, instance keys, signing keys, rendered next to hosts and
-// ports under names no list of credential words covers. Masking the values
-// whose key names look like credentials showed every other value, and those
-// keys with them.
+// A ConfigMap is configuration, and the channel exists so that an agent can
+// read and fix it without a person in the loop. A view that masks everything
+// it cannot prove plain hides the very files an agent needs - a Corefile or
+// a hosts file came back nearly every line masked - so the rule is a
+// blacklist: a value is shown as it is, except
 //
-// So a value is shown only when it is shown to be plain configuration, and
-// otherwise masked as its size and fingerprint. The decision is made per
-// value - per leaf of a YAML or JSON document, per line of other text - so
-// a configuration file keeps its hosts, ports, switches and paths readable
-// while the keys inside it are masked:
+//   - a value under a credential-like name (configKey) - password, secret,
+//     token, an API or access key, a private key - is masked whole;
+//   - a part of any value, under any name, that is shaped like a credential
+//     is masked where it stands (redact.CredentialSpans): a PEM block, a JWT,
+//     a long run of base64 or hex that reads like key material, the userinfo
+//     of a URL, an Authorization or Bearer value, a token under a known
+//     provider prefix.
 //
-//   - a value under a credential-like name (configKey) is masked;
-//   - a value that looks like key material (keyMaterial) is masked under any
-//     name: a PEM block, a JWT, a run of base64 or hex of 16 bytes or more;
-//   - otherwise it is shown only if it is plain (plainValue): a number, a
-//     boolean, or text whose every word is short or reads like a word - a
-//     host, a path, a duration - and not like a generated string.
-//
-// A line of other text - a Corefile directive, a hosts entry, a comment - is
-// shown only when the whole line is plain and names nothing credential-like
-// (configKey anywhere in it); every other line is masked.
+// The decision is made per value - per leaf of a YAML or JSON document, per
+// line of other text, comments included - and a masked part keeps its size
+// and fingerprint, so a host, a port or a path next to it stays readable.
+// Secrets are not ConfigMaps: their values are never shown (secret.get).
 
 // configKey is a name whose value is secret by what it names.
 var configKey = regexp.MustCompile(`(?i)(passw|passwd|pwd|secret|token|credential|auth|cookie|session|private|crypt|cipher|sign|cert|salt|seed|nonce|apikey|api[_-]?key|access[_-]?key|(^|[_.\-])(key|iv|pin)([_.\-]|$)|(key|iv)$)`)
 
 var (
 	pemBlock   = regexp.MustCompile(`-----BEGIN [A-Z0-9 ]+-----`)
-	lineKeyVal = regexp.MustCompile(`^(\s*(?:export\s+)?)([A-Za-z0-9_.\-]+)(\s*[:=]\s*)(.*)$`)
+	lineKeyVal = regexp.MustCompile(`^([A-Za-z0-9_.\-]+)(\s*[:=]\s*)(.*)$`)
+	// lineLeadPattern is a line's indentation, comment marker and export.
+	lineLeadPattern = regexp.MustCompile(`^\s*(?:(?:#+|//|;)\s*)?(?:export\s+)?`)
 )
 
 // keyMaterial says text holds something shaped like a key, whatever it is
 // called (redact.KeyMaterial).
 func keyMaterial(text string) bool { return redact.KeyMaterial(text) }
 
-// plainValue says a scalar can be shown (redact.PlainValue).
-func plainValue(text string) bool { return redact.PlainValue(text) }
+// credentialShaped says text holds something shaped like a credential
+// (redact.CredentialShaped).
+func credentialShaped(text string) bool { return redact.CredentialShaped(text) }
 
 // configMasker masks one ConfigMap value and counts what it masked.
 type configMasker struct {
@@ -77,7 +76,10 @@ func (m *configMasker) mask(text string) string {
 	return fmt.Sprintf("<redacted bytes=%d fingerprint=%s>", len(text), m.fingerprints.sum([]byte(text)))
 }
 
-// leaf is text under name, shown or masked.
+// leaf is text under name: masked whole under a credential-like name,
+// otherwise shown with its credential-shaped parts masked where they stand.
+// Text of several lines - a file held in one value - is read as a value of
+// its own (value).
 func (m *configMasker) leaf(name, text string) string {
 	if text == "" {
 		return text
@@ -85,10 +87,30 @@ func (m *configMasker) leaf(name, text string) string {
 	if referencePath(name, text) {
 		return text
 	}
-	if configKey.MatchString(name) || !plainValue(text) {
+	if configKey.MatchString(name) {
 		return m.mask(text)
 	}
-	return text
+	if strings.Contains(text, "\n") {
+		return m.value(name, text)
+	}
+	return m.spans(text)
+}
+
+// spans is text with every credential-shaped part masked where it stands.
+func (m *configMasker) spans(text string) string {
+	found := redact.CredentialSpans(text)
+	if len(found) == 0 {
+		return text
+	}
+	var out strings.Builder
+	last := 0
+	for _, span := range found {
+		out.WriteString(text[last:span[0]])
+		out.WriteString(m.mask(text[span[0]:span[1]]))
+		last = span[1]
+	}
+	out.WriteString(text[last:])
+	return out.String()
 }
 
 // referencePath says a value is a credential reference: a name ending in
@@ -186,14 +208,23 @@ func (m *configMasker) document(text string) (string, bool) {
 	return out.String(), true
 }
 
+// comments reads a node's comments as text of their own (lines): a
+// comment is shown, with what it names or holds like a credential masked.
+func (m *configMasker) comments(node *yaml.Node) {
+	for _, comment := range []*string{&node.HeadComment, &node.LineComment, &node.FootComment} {
+		if *comment != "" {
+			*comment = m.lines(*comment)
+		}
+	}
+}
+
 func (m *configMasker) walk(node *yaml.Node, name string) {
-	// A comment is free text; it is not shown.
-	node.HeadComment, node.LineComment, node.FootComment = "", "", ""
+	m.comments(node)
 	switch node.Kind {
 	case yaml.MappingNode:
 		for index := 0; index+1 < len(node.Content); index += 2 {
 			keyNode := node.Content[index]
-			keyNode.HeadComment, keyNode.LineComment, keyNode.FootComment = "", "", ""
+			m.comments(keyNode)
 			key := keyNode.Value
 			value := node.Content[index+1]
 			if value.Kind == yaml.ScalarNode {
@@ -232,17 +263,21 @@ func (m *configMasker) scalar(node *yaml.Node, name string) {
 	}
 	shown := m.leaf(name, node.Value)
 	if shown != node.Value {
-		node.Value, node.Tag, node.Style = shown, "!!str", 0
+		node.Value, node.Tag = shown, "!!str"
+		if node.Style != yaml.LiteralStyle && node.Style != yaml.FoldedStyle {
+			node.Style = 0
+		}
 	}
-	node.LineComment, node.HeadComment, node.FootComment = "", "", ""
+	m.comments(node)
 }
 
-// lines is text that is not a document, line by line: a line of key and
-// value decided as a leaf, a blank kept, and any other line kept only when
-// the whole of it is plain and no word in it names a credential. Every line
-// of a PEM block, from its BEGIN line to its END line (or the end of the
-// text), is masked: the block's last line can be a short run that reads as
-// plain on its own.
+// lines is text that is not a document, line by line, comments included: a
+// line of key and value decided as a leaf; a directive whose name is
+// credential-like (password, token...) with its arguments masked; any other
+// line shown with its credential-shaped parts masked where they stand. Every
+// line of a PEM block, from its BEGIN line to its END line (or the end of
+// the text), is masked: the block's last line can be a short run that reads
+// as plain on its own.
 func (m *configMasker) lines(text string) string {
 	lines := strings.Split(text, "\n")
 	inPEM := false
@@ -263,14 +298,44 @@ func (m *configMasker) lines(text string) string {
 		if trimmed == "" {
 			continue
 		}
-		if match := lineKeyVal.FindStringSubmatch(line); match != nil {
-			lines[index] = match[1] + match[2] + match[3] + m.leaf(match[2], strings.Trim(match[4], `"'`))
+		prefix, rest := lineLead(line)
+		if match := lineKeyVal.FindStringSubmatch(rest); match != nil {
+			value := strings.Trim(match[3], `"'`)
+			if shown := m.leaf(match[1], value); shown != value {
+				lines[index] = prefix + match[1] + match[2] + shown
+			}
 			continue
 		}
-		if plainValue(trimmed) && !configKey.MatchString(trimmed) {
+		if at := credentialWordEnd(rest); at > 0 {
+			lines[index] = prefix + rest[:at] + " " + m.mask(strings.TrimSpace(rest[at:]))
 			continue
 		}
-		lines[index] = m.mask(line)
+		lines[index] = prefix + m.spans(rest)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// credentialWordEnd is where, in a line of words, the first word that names a
+// credential (configKey) ends, when words follow it - "password hunter2",
+// "api token abc" - so that what follows is masked; 0 when no such word has
+// anything after it.
+func credentialWordEnd(rest string) int {
+	offset := 0
+	fields := strings.Fields(rest)
+	for index, field := range fields {
+		at := strings.Index(rest[offset:], field) + offset
+		offset = at + len(field)
+		if index < len(fields)-1 && configKey.MatchString(strings.TrimRight(field, ":=")) {
+			return offset
+		}
+	}
+	return 0
+}
+
+// lineLead splits a line into its lead - indentation, a comment marker, an
+// export - and the rest, so that a key and value or a directive is read the
+// same in a comment as outside one.
+func lineLead(line string) (string, string) {
+	lead := lineLeadPattern.FindString(line)
+	return lead, line[len(lead):]
 }

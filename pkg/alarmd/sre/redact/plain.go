@@ -5,6 +5,7 @@ package redact
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 )
@@ -58,6 +59,84 @@ func KeyMaterial(text string) bool {
 		}
 	}
 	return false
+}
+
+// The credential shapes CredentialSpans finds inside a line of text, beside
+// the key-material runs KeyMaterial reads.
+var (
+	// urlUserinfo is the user:password part of a URL (scheme://user:pass@host).
+	urlUserinfo = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.\-]*://([^/\s:@]+:[^/\s@]+)@`)
+	// authHeader is an Authorization value: a Bearer or Basic credential, or
+	// whatever follows an Authorization: or Authorization= header name.
+	authHeader = regexp.MustCompile(`(?i)\b(?:bearer|basic)\s+([A-Za-z0-9._~+/=\-]{8,})|\bauthorization\s*[:=]\s*(\S+(?:\s+\S+)?)`)
+	// keyPrefix is a token minted by a provider under a known prefix.
+	keyPrefix = regexp.MustCompile(`\b(?:(?:AKIA|ASIA)[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abprs]-[A-Za-z0-9\-]{10,}|sk-[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_\-]{20,})\b`)
+)
+
+// CredentialShaped says text holds something shaped like a credential,
+// whatever it is called: key material (KeyMaterial), URL userinfo, an
+// Authorization or Bearer value, or a token under a known provider prefix.
+func CredentialShaped(text string) bool {
+	return pemBlock.MatchString(text) || len(CredentialSpans(text)) > 0
+}
+
+// CredentialSpans are the byte ranges of text that are shaped like a
+// credential, in order and not overlapping: a JWT, a run of hex or base64
+// that reads like key material, the userinfo of a URL, an Authorization or
+// Bearer value, a token under a known provider prefix. Everything outside
+// them is ordinary text. A PEM block spans lines and is not found here
+// (CredentialShaped reports it).
+func CredentialSpans(text string) [][2]int {
+	var spans [][2]int
+	add := func(start, end int) {
+		if start >= 0 && end > start {
+			spans = append(spans, [2]int{start, end})
+		}
+	}
+	for _, at := range jwtLike.FindAllStringIndex(text, -1) {
+		end := at[1]
+		for end < len(text) && strings.ContainsRune("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-", rune(text[end])) {
+			end++
+		}
+		add(at[0], end)
+	}
+	for _, at := range hexRun.FindAllStringIndex(text, -1) {
+		add(at[0], at[1])
+	}
+	for _, at := range base64Run.FindAllStringIndex(text, -1) {
+		if run := text[at[0]:at[1]]; mixedCase(run) && (hasDigit(run) || longestSegment(run) >= 20) {
+			add(at[0], at[1])
+		}
+	}
+	for _, at := range urlUserinfo.FindAllStringSubmatchIndex(text, -1) {
+		add(at[2], at[3])
+	}
+	for _, at := range authHeader.FindAllStringSubmatchIndex(text, -1) {
+		add(at[2], at[3])
+		add(at[4], at[5])
+	}
+	for _, at := range keyPrefix.FindAllStringIndex(text, -1) {
+		add(at[0], at[1])
+	}
+	return mergeSpans(spans)
+}
+
+// mergeSpans sorts spans and joins the ones that overlap or touch.
+func mergeSpans(spans [][2]int) [][2]int {
+	if len(spans) < 2 {
+		return spans
+	}
+	sort.Slice(spans, func(i, j int) bool { return spans[i][0] < spans[j][0] })
+	merged := spans[:1]
+	for _, span := range spans[1:] {
+		last := &merged[len(merged)-1]
+		if span[0] <= last[1] {
+			last[1] = max(last[1], span[1])
+			continue
+		}
+		merged = append(merged, span)
+	}
+	return merged
 }
 
 // A run of base64 characters is key material when it reads like one: mixed

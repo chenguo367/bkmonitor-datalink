@@ -179,9 +179,9 @@ func (p *Provider) EditConfigMapText(ctx context.Context, request ConfigMapEditR
 		return receipt, refuseEdit(EditFingerprintChanged, "the key's fingerprint is not expected_fingerprint: it changed since it was read, "+
 			"or it was read under another fingerprint key (this answer's scope is "+receipt.FingerprintScope+"); read it again with configmap.get")
 	}
-	if !plainValue(request.NewText) {
-		return receipt, refuseEdit(EditNewTextNotPlain, "new_text would be masked as key material or a generated string: "+
-			"configuration that is a key goes in through secret handling, not an edit of shown text")
+	if strings.ContainsAny(request.NewText, "\r\n") || credentialShaped(request.NewText) {
+		return receipt, refuseEdit(EditNewTextNotPlain, "new_text spans lines or would be masked as shaped like a credential: "+
+			"a credential goes in through secret handling, not an edit of shown text")
 	}
 	render := func(value string) string {
 		masker := &configMasker{fingerprints: fingerprints}

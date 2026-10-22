@@ -48,3 +48,44 @@ func TestAPathIsNotKeyMaterialButBase64Is(t *testing.T) {
 		}
 	}
 }
+
+// Every credential shape is masked where it stands, under a plain name and
+// on a plain line, while everything around it - and hosts, addresses and
+// paths on their own - is shown as it is.
+func TestEachCredentialShapeIsMaskedAndEverythingElseShown(t *testing.T) {
+	client, _ := fixture()
+	provider := mustProvider(t, Options{Client: client, DefaultNamespace: "own", FingerprintKey: testFingerprintKey})
+	shapes := map[string]struct{ text, secret string }{
+		"url userinfo":    {"upstream https://ops:Hunter9pw@mirror.example.test/repo", "Hunter9pw"},
+		"bearer":          {"curl -H 'Authorization: Bearer abcDEF123ghiJKL456' https://api.example.test", "abcDEF123ghiJKL456"},
+		"basic":           {"header Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA=="},
+		"authorization":   {"Authorization=opaque-value-77", "opaque-value-77"},
+		"jwt":             {"session eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.c2lnbmF0dXJlLXBhcnQ", "eyJzdWIiOiIxMjM0In0"},
+		"hex run":         {"checksum 9f3a9f3a9f3a9f3a9f3a9f3a9f3a9f3a9f3a", "9f3a9f3a9f3a9f3a9f3a9f3a9f3a9f3a"},
+		"base64 key":      {"Xk7pQ2mZ9wLrT4vB8nC1dF6gH3jK5sA0", "Xk7pQ2mZ9wLrT4vB8nC1dF6gH3jK5sA0"},
+		"aws access key":  {"export AWS_ID=AKIA0123456789ABCDEF", "AKIA0123456789ABCDEF"},
+		"github token":    {"clone with ghp_0123456789abcdefghijABCDEFGHIJ", "ghp_0123456789abcdefghijABCDEFGHIJ"},
+		"credential word": {"password hunter2", "hunter2"},
+		"credential key":  {"db.password: hunter2", "hunter2"},
+		"in a comment":    {"# api_key: hunter2", "hunter2"},
+	}
+	for name, shape := range shapes {
+		t.Run(name, func(t *testing.T) {
+			masker := &configMasker{fingerprints: provider.newFingerprints()}
+			shown := masker.value("notes", shape.text+"\nhost: mirror.example.test")
+			if strings.Contains(shown, shape.secret) || masker.masked == 0 {
+				t.Fatalf("%q shown as %q", shape.text, shown)
+			}
+			if !strings.Contains(shown, "host: mirror.example.test") {
+				t.Fatalf("the plain line around it was lost: %q", shown)
+			}
+		})
+	}
+	for _, plain := range []string{"mirror.example.test", "192.0.2.14 node-192-0-2-14", "fe80::1 node-a", "forward . /etc/resolv.conf",
+		"hosts /etc/coredns/NodeHosts {", "server.port=8080", "timeout: 30s"} {
+		masker := &configMasker{fingerprints: provider.newFingerprints()}
+		if shown := masker.value("notes", plain+"\nloop"); shown != plain+"\nloop" || masker.masked != 0 {
+			t.Errorf("plain %q shown as %q", plain, shown)
+		}
+	}
+}

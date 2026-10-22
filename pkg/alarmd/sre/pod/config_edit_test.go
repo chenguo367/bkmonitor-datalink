@@ -32,7 +32,7 @@ crypt:
   iv: 0123456789abcdef0123456789abcdef
 database:
   dsn_password: Sh0rtPw9xyz
-# the old address was http://old.example.test:8080/api
+# the address before that was http://older.example.test:8080/api
 `
 
 func editConfigMap(value string) *unstructured.Unstructured {
@@ -85,7 +85,7 @@ func carriesNoSecret(t *testing.T, receipt ConfigMapEditReceipt, err error) {
 
 // A URL inside a whole YAML file is re-pointed where configmap.get shows it:
 // the stored value changes in exactly that place (not in the comment, which
-// is not shown), under a patch that tests the uid, the resourceVersion and
+// names another address), under a patch that tests the uid, the resourceVersion and
 // the stored value; the receipt says where and gives fingerprints, never a
 // stored value.
 func TestAShownURLInsideAConfigFileIsRepointed(t *testing.T) {

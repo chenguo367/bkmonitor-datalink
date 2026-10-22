@@ -166,13 +166,14 @@ func TestAConfigMapIsAlwaysRedacted(t *testing.T) {
 	requireCode(t, err, CodeNotFound)
 }
 
-// A ConfigMap shows a value only where it is plain configuration. Keys
-// rendered into configuration under names no credential word covers - a
-// crypt root key and its IV, an instance key, a signing key - are masked,
-// in a file-valued key leaf by leaf and in a plain key whole, while the
-// hosts, ports and switches beside them stay readable; a PEM block or a
-// generated string is masked under any name.
-func TestAConfigMapShowsOnlyPlainConfiguration(t *testing.T) {
+// A ConfigMap masks only what is named or shaped like a credential. Keys
+// rendered into configuration under credential-like names - a crypt root key
+// and its IV, an instance key, a signing secret - are masked, in a
+// file-valued key leaf by leaf and in a plain key whole, while the hosts,
+// ports and switches beside them stay readable; a PEM block or a long run of
+// key material is masked under any name. A short value under a plain name is
+// shown as it is: the rule is a blacklist.
+func TestAConfigMapMasksOnlyWhatIsNamedOrShapedLikeACredential(t *testing.T) {
 	random := func(n int) string {
 		const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 		out := make([]byte, n)
@@ -200,7 +201,7 @@ func TestAConfigMapShowsOnlyPlainConfiguration(t *testing.T) {
 		t.Fatalf("read: %+v err=%v", receipt, err)
 	}
 	encoded, _ := json.Marshal(receipt)
-	for _, material := range []string{rootKey, iv, instanceKey, signing, shortPassword, hexKey, "MIIBVgIBADANBgkq", "BEGIN PRIVATE KEY"} {
+	for _, material := range []string{rootKey, iv, instanceKey, signing, hexKey, "MIIBVgIBADANBgkq", "BEGIN PRIVATE KEY"} {
 		if strings.Contains(string(encoded), material) {
 			t.Fatalf("key material %q returned: %s", material[:8], encoded)
 		}
@@ -212,13 +213,13 @@ func TestAConfigMapShowsOnlyPlainConfiguration(t *testing.T) {
 			t.Errorf("%s: fingerprint %q, want the whole value's", key.Key, key.Fingerprint)
 		}
 	}
-	for _, plain := range []string{"DB_HOST", "DB_PORT", "FEATURE_X"} {
+	for _, plain := range []string{"DB_HOST", "DB_PORT", "FEATURE_X", "LABEL"} {
 		if keys[plain].Value != configMaps["data/platform-config"].Data[plain] || keys[plain].Masked != 0 {
 			t.Errorf("plain %s = %+v, want it shown", plain, keys[plain])
 		}
 	}
 	// A value that reads like a word is still masked under a key's name.
-	for _, secret := range []string{"CRYPT_ROOT_KEY", "CRYPT_ROOT_IV", "INSTANCE_KEY", "TRACE_SIGNING_SECRET", "CA_BUNDLE", "LABEL", "SIGNING_KEY"} {
+	for _, secret := range []string{"CRYPT_ROOT_KEY", "CRYPT_ROOT_IV", "INSTANCE_KEY", "TRACE_SIGNING_SECRET", "CA_BUNDLE", "SIGNING_KEY"} {
 		if !strings.HasPrefix(keys[secret].Value, "<redacted bytes=") || keys[secret].Masked != 1 {
 			t.Errorf("%s = %+v, want masked", secret, keys[secret])
 		}
@@ -233,22 +234,22 @@ func TestAConfigMapShowsOnlyPlainConfiguration(t *testing.T) {
 		t.Errorf("config.yaml masked %d: %s", document.Masked, document.Value)
 	}
 	properties := keys["app.properties"]
-	if !strings.Contains(properties.Value, "server.port=8080") || properties.Masked != 1 {
+	if !strings.Contains(properties.Value, "server.port=8080") || !strings.Contains(properties.Value, "# comment") || properties.Masked != 1 {
 		t.Errorf("app.properties = %+v", properties)
 	}
 }
 
 // Plain text that is neither a document nor lines of key and value - a
-// Corefile, a hosts file - is shown line by line where each line is plain,
-// and a line that names a credential, or carries something shaped like one,
-// is still masked.
+// Corefile, a hosts file - is shown as it is; on a line that names a
+// credential, what follows the name is masked, and a token shaped like one
+// is masked where it stands, alone on its line or not.
 func TestPlainTextConfigurationIsShownLineByLine(t *testing.T) {
 	corefile := ".:1053 {\n    errors\n    health {\n       lameduck 5s\n    }\n    ready\n" +
 		"    kubernetes cluster.local in-addr.arpa ip6.arpa {\n       pods insecure\n       fallthrough in-addr.arpa ip6.arpa\n       ttl 30\n    }\n" +
 		"    hosts /etc/coredns/NodeHosts {\n      ttl 60\n      reload 15s\n      fallthrough\n    }\n    prometheus :9153\n" +
 		"    forward . /etc/resolv.conf\n    cache 30\n    loop\n    reload\n    loadbalance\n}\n"
 	hosts := "192.0.2.13 node-192-0-2-13\n192.0.2.14 node-192-0-2-14\n192.0.2.20 node-192-0-2-20\n"
-	credentials := "upstream mirror.example.com\npassword hunter2\napi token abcdefgh\nmirror Xk7pQ2mZ9wLr\n"
+	credentials := "upstream mirror.example.com\npassword hunter2\napi token abcdefgh\nXk7pQ2mZ9wLrT4vB8nC1dF6gH3jK5sA0\n"
 	client, _ := fixture()
 	configMaps := configMapFixture{"kube-system/coredns": {ObjectMeta: metav1.ObjectMeta{Namespace: "kube-system", Name: "coredns", UID: "cm-uid"},
 		Data: map[string]string{"Corefile": corefile, "NodeHosts": hosts, "notes": credentials}}}
