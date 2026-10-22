@@ -41,7 +41,14 @@ type dueIndexMetrics struct {
 	crowdedOut     *prometheus.CounterVec
 	turnaways      *prometheus.CounterVec
 	auditOvershoot *prometheus.HistogramVec
+	// scheduleObjects is the census's late and overdue owned objects, as the
+	// fleet snapshot counts them.
+	scheduleObjects *prometheus.GaugeVec
 }
+
+// ScheduleObjectClasses are the census classes scheduleObjects publishes:
+// past due by at most one period, and by more.
+var ScheduleObjectClasses = []string{"late", "overdue"}
 
 // The horizon is how far ahead a bound sits. The buckets are the evaluation
 // periods the deployment actually runs, not a generic latency ladder: their job
@@ -169,6 +176,18 @@ func newDueIndexMetrics() dueIndexMetrics {
 				"samples one phase and reports it as a level.",
 		}, []string{"by"}),
 		auditOvershoot: newDueIndexAuditOvershoot(),
+		// The trends read late objects over time from here. The census is the
+		// same one the board's late count and the overview's overdue line read,
+		// taken at each fleet publish over this replica's owned objects only,
+		// so the replicas add up. A count of late strategies is not published:
+		// a strategy's objects span replicas, and no replica's count of them
+		// adds to another's.
+		scheduleObjects: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Subsystem: metricSubsystem, Name: "schedule_objects",
+			Help: "Owned Query Groups past their due time at the last fleet publish, by class: late is past due by at most one " +
+				"period (or with no known period), overdue by more. The same census the strategy board's late count reads; " +
+				"sum over replicas for the deployment.",
+		}, []string{"class"}),
 		horizon: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Subsystem: metricSubsystem, Name: "due_index_horizon_seconds",
 			Help:    "How far ahead of now a newly written due index bound sits.",
@@ -197,14 +216,26 @@ func newDueIndexMetrics() dueIndexMetrics {
 	for _, holder := range dispatchCrowdedOutHolders {
 		metrics.crowdedOut.WithLabelValues(holder)
 	}
+	for _, class := range ScheduleObjectClasses {
+		metrics.scheduleObjects.WithLabelValues(class)
+	}
 	return metrics
 }
 
 func (m dueIndexMetrics) collectors() []prometheus.Collector {
 	return []prometheus.Collector{
 		m.entries, m.predictions, m.recomputes, m.versionChecks, m.horizon, m.skipped, m.crowdedOut, m.turnaways,
-		m.auditOvershoot,
+		m.auditOvershoot, m.scheduleObjects,
 	}
+}
+
+// SetScheduleObjects publishes the census's late and overdue owned objects.
+func (r *Recorder) SetScheduleObjects(late, overdue int) {
+	if r == nil {
+		return
+	}
+	r.phaseTwo.dueIndex.scheduleObjects.WithLabelValues("late").Set(float64(max(late, 0)))
+	r.phaseTwo.dueIndex.scheduleObjects.WithLabelValues("overdue").Set(float64(max(overdue, 0)))
 }
 
 // SetDueIndexEntries publishes how many bounds the index holds.

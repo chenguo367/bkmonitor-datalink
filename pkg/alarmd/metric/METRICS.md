@@ -1683,6 +1683,12 @@ Labels: `result`, `reason`
 
 Publication cutovers by result and, when they failed, why. The cutover is what moves the fleet onto newly published execution content: it closes the open Segment of every Query Group whose content changed and opens a new one naming the new object. A cutover that fails leaves every Segment where it is, so the fleet keeps executing what it was executing and every later publication fails the same way at the same place -- the leader compiles, publishes and writes objects normally the whole time, and what a reader sees is that changes made in the source stop taking effect. Read failure by reason: activation_record_missing is the activation and the open Segments disagreeing about which Plans exist; segment_conflict is an open Segment not in the state the cutover requires; digest_mismatch is stored content that does not hash to its name; conflict is losing a compare-and-set, which is expected occasionally and clears itself; unavailable is content that is not stored or has expired; invalid_request is being asked for something that is not a cutover; io is the store failing underneath. other must stay at zero: every failure the cutover can return is named above, so a non-zero other is a failure path that was added without a name -- which is the state this family was created out of. Every label exists from startup, and a sustained non-zero on any reason but conflict means the fleet is frozen on the content it already had. Reported by the leader only.
 
+## alarmd_schedule_objects
+
+Labels: `class`
+
+Owned Query Groups past their due time at the last fleet publish, by class: late is past due by at most one period (or with no known period), overdue by more. The same census the strategy board's late count reads; sum over replicas for the deployment.
+
 ## alarmd_schedule_prune_skipped_total
 
 Labels: `reason`

@@ -78,3 +78,24 @@ func exportedFamily(exported map[string]*dto.MetricFamily, name string) bool {
 	}
 	return false
 }
+
+// The late-objects chart reads every class the census publishes and nothing
+// else: one line per class the recorder sets, by the label value it sets.
+func TestTheLateObjectsChartReadsEachCensusClass(t *testing.T) {
+	var lines []fleet.TrendLine
+	for _, definition := range fleet.TrendCatalog {
+		if definition.Key == "late_objects" {
+			lines = definition.Lines
+		}
+	}
+	if len(lines) != len(metric.ScheduleObjectClasses) {
+		t.Fatalf("late_objects has %d lines, want one per census class %v", len(lines), metric.ScheduleObjectClasses)
+	}
+	scope := fleet.TrendScope{Namespace: "alarmd-ns", Container: "alarmd"}
+	for index, class := range metric.ScheduleObjectClasses {
+		expression := lines[index].PromQL(scope, "5m")
+		if want := `sum(alarmd_schedule_objects{class="` + class + `"})`; expression != want {
+			t.Errorf("line %q reads %s, want %s", lines[index].Name, expression, want)
+		}
+	}
+}

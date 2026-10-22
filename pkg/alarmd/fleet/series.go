@@ -128,6 +128,19 @@ var trendCatalog = []TrendDefinition{
 		}}},
 	},
 	{
+		// The late count the board shows at one instant, over time: the same
+		// census, published by each replica over its own objects at every
+		// fleet publish, so the lines add up across replicas. Late strategies
+		// are not charted: a strategy's objects span replicas, and no
+		// replica's count of them adds to another's.
+		Key: "late_objects", Title: "迟到与超期的检测对象", Unit: "objects", Space: TrendSpaceSelf,
+		Help: "schedule_objects：各副本每次发布快照时调度普查里迟到（过了应检测时刻不到一个周期）与超期（超过一个周期）的自有检测对象，全部副本合计；与策略页迟到数是同一普查。迟到策略数不画：一个策略的对象分在多个副本上，各副本的数不能相加。",
+		Lines: []TrendLine{
+			{Name: "迟到", PromQL: scheduleObjects("late")},
+			{Name: "超期", PromQL: scheduleObjects("overdue")},
+		},
+	},
+	{
 		Key: "queries_per_second", Title: "每秒查询数", Unit: "query/s", Space: TrendSpaceSelf,
 		Help: "worker_work_total{work_kind=\"physical_query\"} 的速率：合并后实际发往统一查询的物理查询，全部副本合计。",
 		Lines: []TrendLine{{Name: "物理查询", PromQL: func(_ TrendScope, rate string) string {
@@ -164,6 +177,13 @@ var trendCatalog = []TrendDefinition{
 			containerLimit("memory", "kube_pod_container_resource_limits_memory_bytes"),
 		},
 	},
+}
+
+// scheduleObjects is one census class summed over the replicas.
+func scheduleObjects(class string) func(TrendScope, string) string {
+	return func(TrendScope, string) string {
+		return fmt.Sprintf(`sum(%sschedule_objects{class=%q})`, metricPrefix, class)
+	}
 }
 
 func perMinute(name, matcher string) func(TrendScope, string) string {

@@ -1332,9 +1332,12 @@ func openProductionPhaseTwoBundleAssembly(
 		// The due index is the only thing that knows an object was passed over
 		// rather than evaluated. It lives on the bundle precisely so a reader
 		// outside the dispatch loop can ask it.
-		overdue:    bundle.ensureDueIndex(),
-		schedule:   bundle.ensureDueIndex(),
-		strategies: fleetTracker.StrategiesFor,
+		overdue:  bundle.ensureDueIndex(),
+		schedule: bundle.ensureDueIndex(),
+		// The census just taken, as the series the trends chart late objects
+		// from: the same counts the snapshot carries, at the same instant.
+		scheduleObjects: recorder.SetScheduleObjects,
+		strategies:      fleetTracker.StrategiesFor,
 		// Whether anything can be parked at all, from the same bundle. The
 		// overdue count above is only readable next to this: on a build that
 		// suppresses nothing it can only be zero.

@@ -228,6 +228,9 @@ type fleetPublisher struct {
 	// cycle and how the rounds have been finishing. Nil with overdue, and the
 	// snapshot then carries no census and no wake facts on its rows.
 	schedule fleet.ScheduleSource
+	// scheduleObjects hears the census's late and overdue counts at each
+	// publish, the series the trends read late objects from; nil hears none.
+	scheduleObjects func(late, overdue int)
 	// strategies names the strategies behind a Query Group, so an overdue
 	// object arrives in the list identified the way every other anomaly is. A
 	// row nobody can trace back to a strategy is a row nobody can act on.
@@ -876,6 +879,9 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 			census = publisher.schedule.Census(at, len(owned))
 		}
 		snapshot.Schedule = &census
+		if publisher.scheduleObjects != nil {
+			publisher.scheduleObjects(census.Late, census.Overdue)
+		}
 		for _, column := range [][]fleet.Anomaly{snapshot.Anomalies, snapshot.Demoted, snapshot.Undecidable, snapshot.ByDesign, snapshot.NoData, snapshot.NoDataMemory, snapshot.RetainedShare, snapshot.ReadEarly, snapshot.ReadHeld} {
 			for index := range column {
 				wake := publisher.schedule.WakeOf(column[index].QueryGroup)
