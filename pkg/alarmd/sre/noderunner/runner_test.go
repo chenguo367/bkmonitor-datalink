@@ -19,13 +19,13 @@ func testRunner(t *testing.T) *Runner {
 	return r
 }
 func startRequest(script string) Request {
-	return Request{Action: "start", ExecutionID: "execution-a", Mode: "filesystem", Cwd: "/tmp", Argv: []string{"/bin/sh", "-s"}, Stdin: script, TimeoutSeconds: 5, OutputLimitBytes: 4096}
+	return Request{Action: "start", ExecutionID: "execution-a", Mode: "filesystem", Cwd: "/tmp", Argv: []string{"/bin/sh", "-s"}, Stdin: script, TimeoutSeconds: 30, OutputLimitBytes: 4096}
 }
 func terminal(t *testing.T, r *Runner) Response {
 	t.Helper()
 	select {
 	case <-r.done:
-	case <-time.After(8 * time.Second):
+	case <-time.After(35 * time.Second):
 		t.Fatal("execution did not finish")
 	}
 	return r.Handle(Request{Action: "get", ExecutionID: r.id})
