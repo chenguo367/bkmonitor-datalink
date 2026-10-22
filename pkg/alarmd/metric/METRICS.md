@@ -2167,7 +2167,7 @@ Reads of a strategy's manual closes (decision-024) that failed, by where. memory
 
 Labels: `representation`
 
-One per Plan per round that read its absence memory, by which stored shape it came from. PER_GROUP is the record this build writes, NONE is a Plan with no memory yet or one whose read failed. The two add up to the Plans that were asked for, so the sum is checkable rather than assumed, and every label exists at startup so a zero is a zero rather than a label nothing wrote.
+One per Plan per execution that read its absence memory -- a normal round, a replay or a supplement alike, so the count runs above Plans times rounds whenever replays or supplements ran -- by which stored shape it came from. PER_GROUP is the record this build writes, NONE is a Plan with no memory yet or one whose read failed. The two add up to the Plans that were asked for, so the sum is checkable rather than assumed, and every label exists at startup so a zero is a zero rather than a label nothing wrote.
 
 ## alarmd_worker_no_data_memory_refusals_total
 
