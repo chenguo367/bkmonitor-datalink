@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"slices"
 	"sync"
 	"testing"
@@ -256,12 +257,18 @@ func lookbackReadEarlyReachesTheSnapshot(t *testing.T, partial bool) {
 		completed := func() uint64 {
 			return engine.Stats().Sources[controlplane.SupportedSourceSemantics[0]].Samples[lookback.OutcomeCompleted]
 		}
+		// A step starts its rung's reads on their own goroutines, marking them
+		// running under the engine's lock before it returns; the next rung's
+		// moment is set only once none is in flight, so a slow host cannot
+		// move the clock under a read still running.
+		idle := func() bool {
+			busy, _ := engine.Busy(queryGroup)
+			return busy.ReadsInFlight == 0
+		}
 		for rung := range lookback.RungSteps {
 			set(readAt.Add(time.Duration(lookback.RungSteps[rung] * float64(time.Minute))))
 			engine.Step(context.Background())
-			for settle := time.Now().Add(200 * time.Millisecond); time.Now().Before(settle) && completed() <= uint64(sample); {
-				time.Sleep(time.Millisecond)
-			}
+			testwait.Until(t, fmt.Sprintf("sample %d's reads at rung %d finishing", sample, rung), idle)
 			if completed() > uint64(sample) {
 				break
 			}
