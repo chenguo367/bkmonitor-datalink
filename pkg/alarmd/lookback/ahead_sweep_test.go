@@ -295,9 +295,10 @@ func TestATrialTriesTheGivenCandidate(t *testing.T) {
 }
 
 // A Slot the controller gives no candidate for is heard as refused where a
-// trial would have been reserved for it - the group's rest over, nothing of
-// it in flight - once however often the Slot is prepared, and not at all
-// while the group rests. The trial a candidate was given for is not heard.
+// trial would have been reserved for it - the group's rest over, its sample
+// not in flight, no trial reserved ahead for a later Slot - once however
+// often the Slot is prepared, and not at all while the group rests or a
+// trial is reserved ahead. The trial a candidate was given for is not heard.
 func TestARefusedTrialIsHeardOnlyWhereOneWouldBeReserved(t *testing.T) {
 	f := newFixture(t)
 	f.engine.options.OnEarlierRead = func(EarlierReadEvidence) {}
@@ -335,14 +336,31 @@ func TestARefusedTrialIsHeardOnlyWhereOneWouldBeReserved(t *testing.T) {
 	if len(heard) != 1 || preparedTrial(f) == nil {
 		t.Fatalf("a given candidate: heard %v, reserved %+v", heard, preparedTrial(f))
 	}
-	// Refused again while that reservation stands: no trial would be
-	// reserved for the next Slot either, and none is heard.
+	// Refused at the next Slot while that trial still waits for its own
+	// Slot's formal read: with a candidate, Prepare would drop it and reserve
+	// the next Slot's, so it stands in nothing's way and the refusal is heard.
 	tries = false
 	last := later
 	last.Contract.Slot.EvaluationTime += 60
 	last.ReadyAt = later.ReadyAt.Add(time.Minute)
 	f.engine.Prepare(last)
-	if len(heard) != 1 {
-		t.Fatalf("heard %v while a reservation stands", heard)
+	if len(heard) != 2 {
+		t.Fatalf("heard %v at the Slot after a trial still waiting, want it heard", heard)
+	}
+	// A trial reserved ahead, for a Slot after this one: this Slot's own trial
+	// would not be reserved, it is counted trial_reserved and not heard.
+	final := last
+	final.Contract.Slot.EvaluationTime += 60
+	final.ReadyAt = last.ReadyAt.Add(time.Minute)
+	f.engine.mu.Lock()
+	f.engine.groups["qg"].prepared = &earlierSample{query: final, ahead: true, aheadSlots: 1, group: f.engine.groups["qg"]}
+	f.engine.groups["qg"].prepared.query.Contract.Slot.EvaluationTime += 60
+	f.engine.mu.Unlock()
+	f.engine.Prepare(final)
+	if len(heard) != 2 {
+		t.Fatalf("heard %v while a trial is reserved ahead", heard)
+	}
+	if sources, _ := skippedBy(f); sources[EarlierSkipTrialReserved] != 1 {
+		t.Fatalf("skipped %v, want the Slot behind a trial reserved ahead counted trial_reserved", sources)
 	}
 }

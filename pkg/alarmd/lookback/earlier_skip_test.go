@@ -160,3 +160,49 @@ func TestASlotThatReservedItsTrialIsNotCountedWhenARetryIsRefused(t *testing.T) 
 		t.Fatalf("a Slot with its trial, refused on its retry: skipped %v, on its group %v, heard %d", sources, group, heard)
 	}
 }
+
+// Under a hold past the period a Slot's readiness retry comes after the next
+// Slot's first attempt. Each Slot is still counted once.
+func TestASlotRetriedAfterTheNextSlotsFirstAttemptIsNotCountedAgain(t *testing.T) {
+	f := newFixture(t)
+	f.engine.options.OnEarlierRead = func(EarlierReadEvidence) {}
+	q := heldQuery(f)
+	q.BackendFailing = true
+	next := q
+	next.Contract.Slot.EvaluationTime += 60
+	next.ReadyAt = q.ReadyAt.Add(time.Minute)
+	f.engine.Prepare(q)
+	f.engine.Prepare(next)
+	f.engine.Prepare(q)
+	f.engine.Prepare(next)
+	if sources, group := skippedBy(f); sources[EarlierSkipBackendFailing] != 2 || group[EarlierSkipBackendFailing] != 2 {
+		t.Fatalf("two Slots, each retried after the other's first attempt: skipped %v, on its group %v, want two", sources, group)
+	}
+}
+
+// A Slot whose retry comes late and reserves its trial does not take the
+// group back to it: the next Slot, already counted, is not counted again.
+func TestASlotThatReservesLateDoesNotUncountTheNextSlot(t *testing.T) {
+	f := newFixture(t)
+	f.engine.options.OnEarlierRead = func(EarlierReadEvidence) {}
+	q := heldQuery(f)
+	next := q
+	next.Contract.Slot.EvaluationTime += 60
+	next.ReadyAt = q.ReadyAt.Add(time.Minute)
+	resting := func(until time.Time) { withGroup(f, q, func(state *group) { state.nextAt = until }) }
+	resting(next.ReadyAt.Add(time.Hour))
+	f.engine.Prepare(q)
+	f.engine.Prepare(next)
+	// The rest ends: the first Slot's late retry reserves its trial.
+	resting(time.Time{})
+	f.engine.Prepare(q)
+	if preparedTrial(f) == nil {
+		t.Fatal("fixture: the late retry reserved no trial")
+	}
+	// The group rests again by the next Slot's retry.
+	resting(next.ReadyAt.Add(time.Hour))
+	f.engine.Prepare(next)
+	if sources, group := skippedBy(f); sources[EarlierSkipResting] != 2 || group[EarlierSkipResting] != 2 {
+		t.Fatalf("skipped %v, on its group %v, want each Slot counted resting once", sources, group)
+	}
+}

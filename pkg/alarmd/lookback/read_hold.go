@@ -85,7 +85,7 @@ var EarlierOvertakenPaths = []string{OvertakenPreparedLate, OvertakenNextSlot, O
 //     more read of the same backend.
 //   - no_candidate: the read-hold controller gives no candidate to try, and
 //     counts why (readhold.EarlierSkipReasons).
-//   - trial_reserved: a trial is already reserved, for a later Slot.
+//   - trial_reserved: a trial is already reserved ahead, for a later Slot.
 //   - sample_in_flight: the group's sample is being taken or read, and a
 //     trial rides the next one.
 //   - resting: the group's sample rests past the Slot's readiness, and a
@@ -109,10 +109,14 @@ var EarlierSkipReasons = []string{EarlierSkipNotOwned, EarlierSkipNoHold, Earlie
 
 // skipLocked counts the Slot of query skipped for reason on its group's
 // state, once a Slot: the first Prepare of a Slot decides it, and its
-// readiness retries are not counted again. It says whether it counted.
+// readiness retries are not counted again - nor is any Slot before the
+// latest decided, whose retry can come after the next Slot's first attempt
+// under a hold past the period. A group's first attempts come in Slot
+// order, so none is missed; a Slot replayed out of order is not counted,
+// rather than counted twice. It says whether it counted.
 func (engine *Engine) skipLocked(state *group, query Query, reason string) bool {
 	slot := query.Contract.Slot.EvaluationTime
-	if state.decided == slot {
+	if slot <= state.decided {
 		return false
 	}
 	state.decided = slot
@@ -407,19 +411,21 @@ func (engine *Engine) groupLocked(query Query, now time.Time) *group {
 
 // refuseEarlier counts a Slot whose trial the controller gave no candidate
 // for: no_candidate, and EarlierRefused told of it, when Prepare would have
-// reserved one for it - the group's rest over at the Slot's readiness, and
-// no sample, trial or reservation of the group's in flight; otherwise by
-// what of those stood first. Once a Slot, however often its readiness is
+// reserved one for it - the group's rest over at the Slot's readiness, its
+// sample not in flight and no trial reserved ahead for a later Slot -
+// otherwise by what of those stood first. A trial still waiting for an
+// earlier Slot's formal read stands in nothing's way: Prepare drops it as
+// the next Slot arrives. Once a Slot, however often its readiness is
 // retried. Nothing else of the group's state moves: a reservation standing
 // for an earlier Slot stays as it was.
 func (engine *Engine) refuseEarlier(query Query, now time.Time) {
 	engine.mu.Lock()
 	state := engine.groupLocked(query, now)
 	reason := EarlierSkipNoCandidate
-	switch {
+	switch previous := state.prepared; {
 	case state.capturing || state.sample != nil:
 		reason = EarlierSkipSampleInFlight
-	case state.prepared != nil:
+	case previous != nil && previous.ahead && previous.query.Contract.Slot.EvaluationTime > query.Contract.Slot.EvaluationTime:
 		reason = EarlierSkipTrialReserved
 	case query.ReadyAt.Before(state.nextAt):
 		reason = EarlierSkipResting
@@ -485,7 +491,7 @@ func (engine *Engine) Prepare(query Query) {
 			if query.Spec.Digest == previous.query.Spec.Digest && query.Contract.ReadHoldMillis == previous.query.Contract.ReadHoldMillis &&
 				query.ReadyAt.Equal(previous.query.ReadyAt) {
 				previous.query = query
-				state.decided = query.Contract.Slot.EvaluationTime
+				state.decided = max(state.decided, query.Contract.Slot.EvaluationTime)
 				engine.mu.Unlock()
 				return
 			}
@@ -534,7 +540,7 @@ func (engine *Engine) Prepare(query Query) {
 	// next Slot's trial is reserved now instead.
 	if now.After(start) {
 		if ahead := engine.aheadTrialLocked(state, query, hold, base, candidate, now); ahead != nil {
-			state.prepared, state.decided = ahead, query.Contract.Slot.EvaluationTime
+			state.prepared, state.decided = ahead, max(state.decided, query.Contract.Slot.EvaluationTime)
 			engine.counts.earlierAhead[key2(state.source, aheadSlotsLabel(ahead.aheadSlots))]++
 			state.reading.ahead[wordIndex(EarlierAheadSlots, aheadSlotsLabel(ahead.aheadSlots))]++
 			heap.Push(&engine.earlyWork, earlyWork{at: ahead.at, trial: ahead})
@@ -555,7 +561,7 @@ func (engine *Engine) Prepare(query Query) {
 		engine.mu.Unlock()
 		return
 	}
-	state.decided = query.Contract.Slot.EvaluationTime
+	state.decided = max(state.decided, query.Contract.Slot.EvaluationTime)
 	state.prepared = &earlierSample{query: query, source: state.source, candidateHold: candidate,
 		group: state,
 		// Start within the existing recheck budget before the candidate

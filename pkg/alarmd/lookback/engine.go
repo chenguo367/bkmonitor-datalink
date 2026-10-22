@@ -362,9 +362,10 @@ type group struct {
 	prepared *earlierSample
 	sample   *sample
 	nextAt   time.Time
-	// decided is the last Slot Prepare reserved a trial for or counted
-	// skipped (skipLocked), so a Slot prepared again on a readiness retry is
-	// counted, and EarlierRefused told of it, once.
+	// decided is the latest Slot Prepare reserved a trial for or counted
+	// skipped (skipLocked), so a Slot prepared again on a readiness retry -
+	// even after a later Slot's first attempt - is counted, and
+	// EarlierRefused told of it, once.
 	decided execution.EvaluationTime
 	// period is the observed time between two of its Slots, lastSlot the
 	// latest one seen; a Query Group is sampled at its first reads, so how
