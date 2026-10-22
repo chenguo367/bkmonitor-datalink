@@ -85,7 +85,12 @@ type floorProbeState struct {
 
 // FloorProbeEnd is how a probe ended (FloorProbeEvents but started): the Slot
 // of the round that ended it - only the Query Group for one that left the
-// process - its floor and hold, its clean rounds and the Slot it started at.
+// process - the hold its rounds were read at (Floor: the floor or a midpoint
+// above it) and the hold of their formal reads, its clean rounds and the Slot
+// it started at. A probe that failed has, in Changes, how the formal read of
+// its last round differed from the read at Floor, its buckets counted by
+// change class (Changes): points_added is points the formal read had that
+// were not yet there for the probe - a series or a point not yet visible.
 type FloorProbeEnd struct {
 	Contract execution.FrozenExecutionContractRef
 	Source   string
@@ -94,6 +99,7 @@ type FloorProbeEnd struct {
 	Hold     time.Duration
 	Clean    int
 	Started  execution.EvaluationTime
+	Changes  map[string]int
 }
 
 // GroupFloorProbe is a Query Group's probe now, for its group reading.
@@ -319,6 +325,7 @@ func (read *Read) completeFloorProbe(completion execution.ProviderCompletion, er
 	owned := engine.options.Owns(qg)
 	engine.mu.Lock()
 	outcome := FloorProbeClean
+	var changes map[string]int
 	switch {
 	case !owned:
 		outcome = ""
@@ -332,8 +339,10 @@ func (read *Read) completeFloorProbe(completion execution.ProviderCompletion, er
 		outcome = FloorProbeReadFailed
 	case round.outcome == EarlierOvertaken:
 		outcome = FloorProbeOvertaken
-	case len(compareSummaries(round.summary, trimSummary(read.summary.buckets, round.keptFrom))) > 0:
-		outcome = FloorProbeDifferent
+	default:
+		if changes = compareSummaries(round.summary, trimSummary(read.summary.buckets, round.keptFrom)); len(changes) > 0 {
+			outcome = FloorProbeDifferent
+		}
 	}
 	round.summary = nil
 	probe := round.probe
@@ -344,6 +353,9 @@ func (read *Read) completeFloorProbe(completion execution.ProviderCompletion, er
 	if outcome != "" {
 		engine.countProbeRoundLocked(round.group, round.source, outcome)
 	}
+	for class, buckets := range changes {
+		engine.counts.floorProbeChanges[key2(round.source, class)] += uint64(buckets)
+	}
 	if state := engine.groups[qg]; state != nil && state.floorProbe == probe && round.query.Contract.ReadHoldMillis == probe.hold.Milliseconds() {
 		switch outcome {
 		case FloorProbeClean:
@@ -352,6 +364,7 @@ func (read *Read) completeFloorProbe(completion execution.ProviderCompletion, er
 			}
 		case FloorProbeDifferent:
 			engine.endProbeLocked(state, FloorProbeFailed, round.query.Contract)
+			engine.probeEnds[len(engine.probeEnds)-1].Changes = changes
 		}
 	}
 	engine.mu.Unlock()

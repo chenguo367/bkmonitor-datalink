@@ -66,6 +66,7 @@ type lookbackCollector struct {
 	floorProbeRounds    *prometheus.Desc
 	floorProbes         *prometheus.Desc
 	floorProbeGroups    *prometheus.Desc
+	floorProbeChanges   *prometheus.Desc
 	readHoldFloorProbes *prometheus.Desc
 	holdIgnored         *prometheus.Desc
 	readHoldTransition  *prometheus.Desc
@@ -120,7 +121,9 @@ func newLookbackCollector() *lookbackCollector {
 			"Shadow probes of a floor whose end the read-hold controller took, by what it made of it: lowered (the "+
 				"probe read lookback.ProbationRounds rounds in a row the same at the floor as at the hold, and the hold "+
 				"comes down to the floor with no probation after it), relearned (a round read differently: the floor "+
-				"stays, dated now, and stands twice as long as before before the next probe), stale (the record had "+
+				"stays, dated now, and stands twice as long as before before the next probe), floor_raised (a round read "+
+				"differently at a hold between the floor and the hold: that hold is the floor now, and the next probe "+
+				"reads the midpoint above it), stale (the record had "+
 				"moved since the probe began - its hold, its floor or its search - and the probe changed nothing). "+
 				"Probes that did not end are on lookback_floor_probes_total. Every outcome exists from the start.", "outcome"),
 		readHoldDuration: desc("read_hold_query_duration_writes_total",
@@ -281,6 +284,12 @@ func newLookbackCollector() *lookbackCollector {
 				"never live to finish, as under rollouts more frequent than a probe's rounds.", "source", "event"),
 		floorProbeGroups: desc("lookback_floor_probe_groups",
 			"The source's Query Groups whose floor is being probed now.", "source"),
+		floorProbeChanges: desc("lookback_floor_probe_changes_total",
+			"Buckets the formal read of a different probe round differed in from the read at the probe's hold, by "+
+				"source and change: points_added (the formal read had points the probe's read did not - a series or a "+
+				"point not yet there, as a source that shows a point only seconds after its time reads), points_removed, "+
+				"series_changed, values_changed. Reader: why probes fail; the failing round's are on its "+
+				"floor_probe_ended line.", "source", "change"),
 		holdIgnored: desc("lookback_read_hold_ignored_total", "Findings that cannot raise a whole-window read hold, by source and reason.", "source", "reason"),
 		readBytes: desc("lookback_first_read_bytes_total",
 			"Bytes the formal first reads delivered, by source, counted as the rechecks' are.", "source"),
@@ -325,7 +334,7 @@ func newLookbackCollector() *lookbackCollector {
 
 func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, desc := range []*prometheus.Desc{c.firstReads, c.checks, c.changed, c.changes, c.classes, c.readEarly, c.seriesLate, c.supplementWindows, c.supplementUnobserved, c.supplementSeries,
-		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.earlierBytes, c.earlierReads, c.earlierOvertaken, c.earlierPreparedLate, c.earlierAhead, c.earlierSkipped, c.probationRereads, c.probationGroups, c.floorProbeRounds, c.floorProbes, c.floorProbeGroups, c.holdIgnored, c.readBytes, c.checkBytes, c.unknown, c.coverage,
+		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.earlierBytes, c.earlierReads, c.earlierOvertaken, c.earlierPreparedLate, c.earlierAhead, c.earlierSkipped, c.probationRereads, c.probationGroups, c.floorProbeRounds, c.floorProbes, c.floorProbeGroups, c.floorProbeChanges, c.holdIgnored, c.readBytes, c.checkBytes, c.unknown, c.coverage,
 		c.pending, c.yields, c.refused, c.faults, c.plans, c.planHeld, c.readHoldTransition, c.readHoldOvertaken,
 		c.readHoldPredecessor, c.readHoldSeed, c.readHoldDuration, c.readHoldEarlierSkip, c.readHoldFloorProbes, c.roundsReadAtLimit, c.readHoldClamped, c.readHoldCorrupt, c.readHoldRetireClose, c.readHoldCloseSkip, c.readHoldDegraded,
 		c.readHoldGroups, c.readHoldMax} {
@@ -441,6 +450,9 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 			counter(c.floorProbes, source.FloorProbes[event], name, event)
 		}
 		gauge(c.floorProbeGroups, float64(source.FloorProbeGroups), name)
+		for _, change := range lookback.Changes {
+			counter(c.floorProbeChanges, source.FloorProbeChanges[change], name, change)
+		}
 		gauge(c.earlierPreparedLate, source.EarlierPreparedLateMaxSeconds, name)
 		for _, slots := range lookback.EarlierAheadSlots {
 			counter(c.earlierAhead, source.EarlierAhead[slots], name, slots)

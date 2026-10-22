@@ -1049,6 +1049,12 @@ Labels: `source`
 
 Formal first reads seen, by source - the data source the Query Group reads, labelled as the directory labels its Query Groups, so every lookback family reads beside them: the denominator of the query volume the lookback adds (lookback_rechecks_total over it).
 
+## alarmd_lookback_floor_probe_changes_total
+
+Labels: `source`, `change`
+
+Buckets the formal read of a different probe round differed in from the read at the probe's hold, by source and change: points_added (the formal read had points the probe's read did not - a series or a point not yet there, as a source that shows a point only seconds after its time reads), points_removed, series_changed, values_changed. Reader: why probes fail; the failing round's are on its floor_probe_ended line.
+
 ## alarmd_lookback_floor_probe_groups
 
 Labels: `source`
@@ -1513,7 +1519,7 @@ Earlier-read trials not run, by why, one per Slot a trial would have been reserv
 
 Labels: `outcome`
 
-Shadow probes of a floor whose end the read-hold controller took, by what it made of it: lowered (the probe read lookback.ProbationRounds rounds in a row the same at the floor as at the hold, and the hold comes down to the floor with no probation after it), relearned (a round read differently: the floor stays, dated now, and stands twice as long as before before the next probe), stale (the record had moved since the probe began - its hold, its floor or its search - and the probe changed nothing). Probes that did not end are on lookback_floor_probes_total. Every outcome exists from the start.
+Shadow probes of a floor whose end the read-hold controller took, by what it made of it: lowered (the probe read lookback.ProbationRounds rounds in a row the same at the floor as at the hold, and the hold comes down to the floor with no probation after it), relearned (a round read differently: the floor stays, dated now, and stands twice as long as before before the next probe), floor_raised (a round read differently at a hold between the floor and the hold: that hold is the floor now, and the next probe reads the midpoint above it), stale (the record had moved since the probe began - its hold, its floor or its search - and the probe changed nothing). Probes that did not end are on lookback_floor_probes_total. Every outcome exists from the start.
 
 ## alarmd_read_hold_groups
 

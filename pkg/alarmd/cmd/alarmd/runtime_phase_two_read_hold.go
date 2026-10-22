@@ -931,10 +931,26 @@ func (holds *productionReadHolds) bindLookback(options *lookback.Options) {
 	options.FloorProbe, options.LoweringVerified = holds.controller.FloorProbe, holds.controller.LoweringVerified
 	options.OnFloorProbe = func(e lookback.FloorProbeEnd) {
 		if holds.logger != nil {
-			holds.logger.Info("lookback", "floor_probe_ended", 0, 0, slog.String("query_group", string(e.Contract.Slot.QueryGroup)),
+			// probe_ms is the hold the probe's rounds were read at; floor_ms the
+			// group's floor as the controller has it when the line is written
+			// (-1 while none): the two are one while the probe reads the floor
+			// itself, apart while it reads a midpoint above it. A failed probe
+			// says how its last round's formal read differed, in buckets by
+			// change class.
+			floor := int64(-1)
+			if record, loaded := holds.controller.Reading(e.Contract.Slot.QueryGroup); loaded && record.EarlierFloorMillis != nil {
+				floor = *record.EarlierFloorMillis
+			}
+			attrs := []slog.Attr{slog.String("query_group", string(e.Contract.Slot.QueryGroup)),
 				slog.Int64("slot", int64(e.Contract.Slot.EvaluationTime)), slog.String("source", e.Source), slog.String("event", e.Event),
-				slog.Int64("floor_ms", e.Floor.Milliseconds()), slog.Int64("read_hold_ms", e.Hold.Milliseconds()),
-				slog.Int("clean_rounds", e.Clean), slog.Int64("started_slot", int64(e.Started)))
+				slog.Int64("probe_ms", e.Floor.Milliseconds()), slog.Int64("floor_ms", floor), slog.Int64("read_hold_ms", e.Hold.Milliseconds()),
+				slog.Int("clean_rounds", e.Clean), slog.Int64("started_slot", int64(e.Started))}
+			if e.Event == lookback.FloorProbeFailed {
+				for _, change := range lookback.Changes {
+					attrs = append(attrs, slog.Int(change, e.Changes[change]))
+				}
+			}
+			holds.logger.Info("lookback", "floor_probe_ended", 0, 0, attrs...)
 		}
 		if e.Event != lookback.FloorProbePassed && e.Event != lookback.FloorProbeFailed {
 			return

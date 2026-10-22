@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -173,55 +174,83 @@ func probationRereads(engine *lookback.Engine) uint64 {
 	return total
 }
 
-// A group stuck above a floor of none, its floor stood a day, has every round read at the floor beside its formal
-// read at the hold; once lookback.ProbationRounds of them read the same, the hold comes down to none. Until then
-// every round is frozen at the hold - none is decided on a read at the floor - and no probation follows the
-// lowering: the probe read those rounds already. A hold past the period less the reread bound has each Slot's
-// round reserved at the Slot before it, and passes the same way. No Slot is skipped on the way.
+// descent runs the fixture's group while its probes go on, until its hold has stayed put for a probe's worth of
+// rounds after the last one ended or span runs out, and fails the moment its hold moves without a probe having passed
+// just before: every lowering is a verified one, and nothing else moves the hold. It returns the holds it came down
+// through, the Slots skipped, and the probation rereads there had been when the hold first came down, those of rounds
+// before it still being read among them: a lowering ends the probation, not the rereads it already took.
+func descent(t *testing.T, f *cutoverStallFixture, span time.Duration) (holds []time.Duration, skipped int, reread uint64) {
+	t.Helper()
+	engine, controller := f.bundle.dependencies.Lookback, f.bundle.dependencies.ReadHolds.controller
+	holds = []time.Duration{controller.ReadHold(f.queryGroup)}
+	passed, settled := uint64(0), time.Duration(0)
+	skipped = heldRounds(t, f, span, func(elapsed time.Duration) bool {
+		events, _ := probeCounts(engine)
+		if now := controller.ReadHold(f.queryGroup); now != holds[len(holds)-1] {
+			if now > holds[len(holds)-1] || events[lookback.FloorProbePassed] == passed {
+				t.Fatalf("the hold moved from %v to %v with no probe passed since", holds[len(holds)-1], now)
+			}
+			if len(holds) == 1 {
+				busy, _ := engine.Busy(f.queryGroup)
+				reread = probationRereads(engine) + uint64(busy.ProbationRereads)
+			}
+			holds, passed, settled = append(holds, now), events[lookback.FloorProbePassed], elapsed
+		}
+		_, probing := controller.FloorProbe(f.queryGroup)
+		groups := uint64(0)
+		for _, source := range engine.Stats().Sources {
+			groups += source.FloorProbeGroups
+		}
+		return !probing && groups == 0 && elapsed >= settled+30*time.Minute
+	})
+	return holds, skipped, reread
+}
+
+// A group stuck above a floor of none, its floor stood a day, its data whole whenever it is read, is probed at halves
+// between its floor and its hold, each read beside the formal read at the hold for lookback.ProbationRounds rounds
+// before the hold comes down to it: 48 s comes down to 24, 12, 6 and 3 s, and then, the floor near enough, to the
+// floor itself. Until each probe passed every round was frozen at the hold before it - none decided on a read at the
+// probe's hold - and no probation follows a lowering, the probe having read those rounds. A hold past the period less
+// the reread bound has each Slot's round reserved at the Slot before it, and comes down the same way. No Slot is
+// skipped on the way.
 func TestAStuckGroupsFloorIsProbedAndItsHoldComesDownWithNoRoundReadEarly(t *testing.T) {
 	t.Parallel()
 	for _, c := range []struct {
 		name    string
 		arrival time.Duration
+		holds   []time.Duration
 	}{
-		{"under the period less the reread bound", 96500 * time.Millisecond},
-		{"past it, rounds reserved a Slot ahead", 117500 * time.Millisecond},
+		{"under the period less the reread bound", 96500 * time.Millisecond,
+			[]time.Duration{48 * time.Second, 24 * time.Second, 12 * time.Second, 6 * time.Second, 3 * time.Second, 0}},
+		{"past it, rounds reserved a Slot ahead", 117500 * time.Millisecond,
+			[]time.Duration{58500 * time.Millisecond, 29250 * time.Millisecond, 14625 * time.Millisecond, 7312 * time.Millisecond, 3656 * time.Millisecond, 0}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			f := startCutoverFixture(t, leasesOutliveTheRun)
 			engine, holds := f.bundle.dependencies.Lookback, f.bundle.dependencies.ReadHolds
 			hold := stuckUnderFloor(t, f, c.arrival)
-			if _, probing := holds.controller.FloorProbe(f.queryGroup); probing {
-				t.Fatal("a floor learned now was probed before it stood")
+			if hold != c.holds[0] {
+				t.Fatalf("fixture: stuck at %v, want %v", hold, c.holds[0])
 			}
 			ageFloor(t, f, readhold.FloorStanding)
-			loweredAt, reread := time.Duration(-1), uint64(0)
-			skipped := heldRounds(t, f, 8*time.Hour, func(elapsed time.Duration) bool {
-				now := holds.controller.ReadHold(f.queryGroup)
-				events, _ := probeCounts(engine)
-				switch {
-				case loweredAt < 0 && now != hold && events[lookback.FloorProbePassed] == 0:
-					t.Fatalf("the hold moved to %v before the probe passed", now)
-				case loweredAt < 0 && now != hold:
-					loweredAt, reread = elapsed, probationRereads(engine)
-				}
-				return loweredAt >= 0 && elapsed >= loweredAt+30*time.Minute
-			})
+			came, skipped, reread := descent(t, f, 16*time.Hour)
 			events, rounds := probeCounts(engine)
-			t.Logf("held %v: probe events %v, rounds %v, lowered %v into the run", hold, events, rounds, loweredAt)
-			if events[lookback.FloorProbePassed] != 1 || events[lookback.FloorProbeFailed] != 0 ||
-				holds.controller.Stats().FloorProbes[readhold.FloorProbeLowered] != 1 {
-				t.Fatalf("probe events %v, controller %v; want one passed and lowered", events, holds.controller.Stats().FloorProbes)
+			t.Logf("held %v: came down through %v; probe events %v, rounds %v", hold, came, events, rounds)
+			if fmt.Sprint(came) != fmt.Sprint(c.holds) {
+				t.Fatalf("the hold came down through %v, want %v", came, c.holds)
 			}
-			if rounds[lookback.FloorProbeClean] < uint64(lookback.ProbationRounds) || rounds[lookback.FloorProbeDifferent] != 0 {
-				t.Fatalf("probe rounds %v, want at least %d clean and none different", rounds, lookback.ProbationRounds)
+			lowerings := uint64(len(c.holds) - 1)
+			if events[lookback.FloorProbePassed] != lowerings || events[lookback.FloorProbeFailed] != 0 ||
+				holds.controller.Stats().FloorProbes[readhold.FloorProbeLowered] != lowerings {
+				t.Fatalf("probe events %v, controller %v; want %d passed and lowered", events, holds.controller.Stats().FloorProbes, lowerings)
 			}
-			if got := holds.controller.ReadHold(f.queryGroup); got != 0 || !holds.controller.LoweringVerified(f.queryGroup) {
-				t.Fatalf("after the probe the hold is %v, verified %v; want none, verified", got, holds.controller.LoweringVerified(f.queryGroup))
+			if rounds[lookback.FloorProbeClean] < lowerings*uint64(lookback.ProbationRounds) || rounds[lookback.FloorProbeDifferent] != 0 {
+				t.Fatalf("probe rounds %v, want at least %d clean and none different", rounds, lowerings*uint64(lookback.ProbationRounds))
 			}
-			if _, probation := engine.InProbation(f.queryGroup); probation || probationRereads(engine) != reread {
-				t.Fatalf("in probation %v, %d rounds reread since the lowering; want none", probation, probationRereads(engine)-reread)
+			if _, probation := engine.InProbation(f.queryGroup); probation || probationRereads(engine) != reread || !holds.controller.LoweringVerified(f.queryGroup) {
+				t.Fatalf("in probation %v, %d rounds reread since the hold first came down, verified %v; want none, verified",
+					probation, probationRereads(engine)-reread, holds.controller.LoweringVerified(f.queryGroup))
 			}
 			if skipped != 0 {
 				t.Fatalf("%d Slots skipped unevaluated as the hold came down from %v", skipped, hold)
@@ -230,11 +259,13 @@ func TestAStuckGroupsFloorIsProbedAndItsHoldComesDownWithNoRoundReadEarly(t *tes
 	}
 }
 
-// A group whose data lands near its floor - one of its series, every fifth round, twenty seconds after the window,
-// past a read at the floor and before the formal read at the hold - has its probe fail at the first such round: the
-// hold stays where it was, every round is frozen there, and the floor is relearned where it was, dated then, to
-// stand two days before the next probe.
-func TestAProbeOfAFloorTheDataLandsNearFailsAndTheFloorStandsLonger(t *testing.T) {
+// A group whose data lands late within its window - one of its series, every fifth round, twenty seconds after the
+// window - is probed at halves from its 48 s hold over a floor of none: a half read before the series is there fails
+// on that round, the point the formal read had and the probe's read did not (points_added), and is the floor; a half
+// read after it passes and is the hold. The hold comes down only through verified lowerings, and never below where
+// the series is there by the formal read - 19.5 s, with the fixture's half-second readiness - nor above the last
+// failed half and the probes' resolution.
+func TestAProbeComesDownToWhereItsDataIsWholeAndNoFurther(t *testing.T) {
 	t.Parallel()
 	f := startCutoverFixture(t, leasesOutliveTheRun)
 	var jitter atomic.Bool
@@ -248,30 +279,30 @@ func TestAProbeOfAFloorTheDataLandsNearFailsAndTheFloorStandsLonger(t *testing.T
 	hold := stuckUnderFloor(t, f, 96500*time.Millisecond)
 	ageFloor(t, f, readhold.FloorStanding)
 	jitter.Store(true)
-	failedAt := time.Time{}
-	heldRounds(t, f, 4*time.Hour, func(time.Duration) bool {
-		if now := holds.controller.ReadHold(f.queryGroup); now != hold {
-			t.Fatalf("the hold moved to %v during the probe", now)
-		}
-		if events, _ := probeCounts(engine); events[lookback.FloorProbeFailed] > 0 && failedAt.IsZero() {
-			failedAt = f.now()
-		}
-		return !failedAt.IsZero()
-	})
+	came, skipped, _ := descent(t, f, 16*time.Hour)
 	events, rounds := probeCounts(engine)
-	t.Logf("held %v: probe events %v, rounds %v, failed at %s", hold, events, rounds, failedAt.UTC().Format(time.TimeOnly))
-	if events[lookback.FloorProbeFailed] != 1 || events[lookback.FloorProbePassed] != 0 || rounds[lookback.FloorProbeDifferent] != 1 ||
-		holds.controller.Stats().FloorProbes[readhold.FloorProbeRelearned] != 1 {
-		t.Fatalf("probe events %v, rounds %v, controller %v; want one failed on one different round, relearned",
-			events, rounds, holds.controller.Stats().FloorProbes)
+	changes := map[string]uint64{}
+	for _, source := range engine.Stats().Sources {
+		for change, count := range source.FloorProbeChanges {
+			if count > 0 {
+				changes[change] += count
+			}
+		}
 	}
 	record, _ := holds.controller.Reading(f.queryGroup)
-	if record.EarlierFloorMillis == nil || *record.EarlierFloorMillis != 0 || record.EarlierFloorRetests != 1 ||
-		record.EarlierFloorAtMillis < failedAt.Add(-time.Minute).UnixMilli() {
-		t.Fatalf("after the failed probe the floor is %v, retests %d, learned at %d; want none again, once retested, dated at the failure %d",
-			record.EarlierFloorMillis, record.EarlierFloorRetests, record.EarlierFloorAtMillis, failedAt.UnixMilli())
+	t.Logf("held %v: came down through %v, floor %v; probe events %v, rounds %v, changes %v", hold, came, record.EarlierFloorMillis, events, rounds, changes)
+	final := came[len(came)-1]
+	if len(came) < 2 || final < 19500*time.Millisecond || record.EarlierFloorMillis == nil ||
+		final-time.Duration(*record.EarlierFloorMillis)*time.Millisecond > readhold.MidpointResolution {
+		t.Fatalf("came down through %v to a floor of %v; want down from 48 s, to no less than 19.5 s, within %v of the floor",
+			came, record.EarlierFloorMillis, readhold.MidpointResolution)
 	}
-	if _, probing := holds.controller.FloorProbe(f.queryGroup); probing {
-		t.Fatal("the floor is probed again at once after a failed probe")
+	if holds.controller.Stats().FloorProbes[readhold.FloorProbeFloorRaised] == 0 || events[lookback.FloorProbeFailed] == 0 ||
+		changes[lookback.ChangePointsAdded] == 0 {
+		t.Fatalf("controller %v, probe events %v, changes %v; want a half that failed on the late series' point, raising the floor",
+			holds.controller.Stats().FloorProbes, events, changes)
+	}
+	if skipped != 0 || !holds.controller.LoweringVerified(f.queryGroup) {
+		t.Fatalf("%d Slots skipped, verified %v", skipped, holds.controller.LoweringVerified(f.queryGroup))
 	}
 }

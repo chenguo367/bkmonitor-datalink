@@ -74,7 +74,11 @@ type counters struct {
 	// started and ended (FloorProbeEvents).
 	floorProbeRounds map[string]uint64
 	floorProbes      map[string]uint64
-	holdIgnored      map[string]uint64
+	// floorProbeChanges is source|change: the buckets the formal reads of
+	// different probe rounds differed in from the read at the probe's hold,
+	// by change class (Changes).
+	floorProbeChanges map[string]uint64
+	holdIgnored       map[string]uint64
 	// source|outcome and source|age: completed samples whose first read was
 	// empty, and when those whose data arrived later were complete.
 	emptyFirstReads map[string]uint64
@@ -105,7 +109,7 @@ func newCounters(sources, refusals []string) counters {
 		earlierReads: map[string]uint64{}, earlierBytes: map[string]uint64{}, holdIgnored: map[string]uint64{},
 		earlierOvertaken: map[string]uint64{}, earlierPreparedLateMax: map[string]time.Duration{}, earlierAhead: map[string]uint64{},
 		earlierSkipped: map[string]uint64{}, probations: map[string]uint64{},
-		floorProbeRounds: map[string]uint64{}, floorProbes: map[string]uint64{},
+		floorProbeRounds: map[string]uint64{}, floorProbes: map[string]uint64{}, floorProbeChanges: map[string]uint64{},
 		emptyCompletion: map[string]uint64{}, refusals: map[string]uint64{RefusedOther: 0}, faults: map[string]uint64{}, plans: map[string]uint64{},
 		maxCompletion: map[string]time.Duration{}, recheckBytes: map[string]uint64{}, unknownLookback: map[string]uint64{},
 		yieldReleases: map[string]uint64{}, yieldReleaseSeconds: map[string]float64{}, yieldReleaseMax: map[string]time.Duration{}}
@@ -170,6 +174,9 @@ func newCounters(sources, refusals []string) counters {
 		}
 		for _, event := range FloorProbeEvents {
 			c.floorProbes[key2(source, event)] = 0
+		}
+		for _, change := range Changes {
+			c.floorProbeChanges[key2(source, change)] = 0
 		}
 		for _, slots := range EarlierAheadSlots {
 			c.earlierAhead[key2(source, slots)] = 0
@@ -409,6 +416,10 @@ type SourceStats struct {
 	FloorProbeRounds map[string]uint64 `json:"floor_probe_rounds"`
 	FloorProbes      map[string]uint64 `json:"floor_probes"`
 	FloorProbeGroups uint64            `json:"floor_probe_groups"`
+	// FloorProbeChanges is the buckets the formal reads of different probe
+	// rounds differed in from the read at the probe's hold, by change class
+	// (Changes): what a failed probe found not yet there.
+	FloorProbeChanges map[string]uint64 `json:"floor_probe_changes"`
 	// EmptyFirstReads: outcome -> completed samples whose first read was
 	// complete and held no point - arrived when data came at a later rung,
 	// stayed_empty when none did - and EmptyFirstReadCompletion when those
@@ -755,6 +766,10 @@ func (engine *Engine) Stats() Stats {
 		}
 		for _, event := range FloorProbeEvents {
 			entry.FloorProbes[event] = engine.counts.floorProbes[key2(source, event)]
+		}
+		entry.FloorProbeChanges = map[string]uint64{}
+		for _, change := range Changes {
+			entry.FloorProbeChanges[change] = engine.counts.floorProbeChanges[key2(source, change)]
 		}
 		for _, outcome := range EarlyOutcomes {
 			entry.EarlyReads[outcome] = engine.counts.early[key2(source, outcome)]

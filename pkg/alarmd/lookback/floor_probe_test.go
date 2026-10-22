@@ -199,6 +199,8 @@ func (r *probeRun) step() {
 			r.f.answers <- func(execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
 				return execution.ProviderCompletion{}, errors.New("backend unavailable")
 			}
+		case r.value[slot] == "none":
+			r.f.answers <- full()
 		default:
 			value := r.value[slot]
 			if value == "" {
@@ -481,6 +483,40 @@ func TestARoundTheProbeCannotTrustIsNotCounted(t *testing.T) {
 			}
 			if got := r.rounds(); !equalCounts(got, c.want) {
 				t.Fatalf("rounds %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// A probe that fails says how its last round's formal read differed from the read at the probe's hold, in buckets by
+// change class, on its end and in its source's counts: a value the formal read found otherwise is values_changed,
+// a point the probe's read did not have yet points_added.
+func TestAFailedProbeSaysHowItsRoundDiffered(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		value  string
+		change string
+	}{
+		{"a value", "0", ChangeValuesChanged},
+		{"a point not there yet", "none", ChangePointsAdded},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newProbeRun(t, 30*time.Second, 0, 5)
+			first := r.f.clock.now().Unix() / 60 * 60
+			r.value[first+60] = c.value
+			r.run(first, 2)
+			ends := r.endsSeen()
+			if len(ends) != 1 || ends[0].Event != FloorProbeFailed || ends[0].Changes[c.change] != 1 || len(ends[0].Changes) != 1 {
+				t.Fatalf("ends %+v, want one failed whose round differed in one bucket, %s", ends, c.change)
+			}
+			got := map[string]uint64{}
+			for change, count := range r.f.engine.Stats().Sources[sourceTimeSeries].FloorProbeChanges {
+				if count > 0 {
+					got[change] = count
+				}
+			}
+			if !equalCounts(got, map[string]uint64{c.change: 1}) {
+				t.Fatalf("source changes %v, want %s once", got, c.change)
 			}
 		})
 	}
