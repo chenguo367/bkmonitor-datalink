@@ -73,7 +73,6 @@ func runtimeExpiredZeroBridge(t *testing.T) (*productionReadHolds, *cutoverStall
 			t.Fatal(err)
 		}
 	}
-	time.Sleep(5 * time.Millisecond)
 	f.clock.Store(f.now().Add(readhold.RecordTTL + time.Hour).UnixMilli())
 	slot := execution.EvaluationTime(f.now().Unix() - f.now().Unix()%60)
 	last := *p.LastCompletion

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
 )
@@ -140,9 +141,10 @@ func heldTrialRun(t *testing.T, f *cutoverStallFixture, arrival, span time.Durat
 		}
 		engine.StepEarly(ctx)
 		// The trial reads on its own goroutine: let it answer before the clock moves.
-		for settle := time.Now().Add(20 * time.Millisecond); time.Now().Before(settle); {
-			time.Sleep(time.Millisecond)
-		}
+		testwait.Until(t, "the earlier-read trial answering", func() bool {
+			busy, _ := engine.Busy(f.queryGroup)
+			return busy.ReadsInFlight == 0
+		})
 		if hold := holds.controller.ReadHold(f.queryGroup); hold < lowest {
 			lowest = hold
 		}

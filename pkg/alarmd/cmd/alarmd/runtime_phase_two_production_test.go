@@ -22,6 +22,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
@@ -2749,7 +2750,7 @@ func TestProductionMaintainLeaseRetriesTransientRenewFailureInsideTTL(t *testing
 		if !errors.Is(err, transient) {
 			t.Fatalf("MaintainLease(TTL exhausted) error = %v, want the store error", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("MaintainLease() kept running after the lease TTL was exhausted")
 	}
 	if _, err := queryGroup.session.ValidateCurrent(context.Background(), fixture.clock.Now()); !errors.Is(err, ownership.ErrStaleFence) {
@@ -2771,7 +2772,7 @@ func TestProductionMaintainLeaseReturnsAuthoritativeDecisionImmediately(t *testi
 		if !errors.Is(err, ownership.ErrStaleFence) {
 			t.Fatalf("MaintainLease(stale) error = %v, want ErrStaleFence", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("MaintainLease() retried an authoritative stale fence decision")
 	}
 	if fixture.store.renewCount() != 1 {
@@ -2836,7 +2837,7 @@ func TestProductionMaintainControlLeaderRetriesTransientRenewFailureInsideTTL(t 
 		if !errors.Is(err, transient) {
 			t.Fatalf("MaintainControlLeader(TTL exhausted) error = %v, want the store error", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("MaintainControlLeader() kept running after the authority TTL was exhausted")
 	}
 	leader, err = fixture.production.TryAcquireControlLeader(context.Background(), fixture.clock.Now(), time.Minute)
@@ -2862,7 +2863,7 @@ func TestProductionMaintainControlLeaderClearsAuthorityOnStaleDecision(t *testin
 		if !errors.Is(err, ownership.ErrStaleFence) {
 			t.Fatalf("MaintainControlLeader(stale) error = %v, want ErrStaleFence", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("MaintainControlLeader() retried an authoritative stale fence decision")
 	}
 	if fixture.store.renewLeaderCount() != 1 {

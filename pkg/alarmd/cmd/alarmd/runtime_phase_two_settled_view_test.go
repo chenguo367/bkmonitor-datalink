@@ -11,7 +11,6 @@ package main
 
 import (
 	"context"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"net"
 	"net/http"
 	"strings"
@@ -23,6 +22,7 @@ import (
 	"golang.org/x/net/http2/h2c"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
@@ -137,7 +137,7 @@ func settleExecutableView(ctx context.Context, bundle *phaseTwoWorkerBundle, wai
 		if time.Now().After(deadline) {
 			return false
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond) // fixed-wait: the poll interval of a best-effort settle; requireSettledView waits on the condition
 	}
 }
 

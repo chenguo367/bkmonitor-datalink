@@ -22,6 +22,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 )
 
@@ -87,12 +88,12 @@ func (f *rebindFixture) target() openalerts.TargetBinding {
 
 func waitUntil(t *testing.T, within time.Duration, what string, condition func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(within)
+	deadline := testwait.Deadline(t)
 	for !condition() {
 		if time.Now().After(deadline) {
 			t.Fatalf("not within %s: %s", within, what)
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 }
 
@@ -117,7 +118,7 @@ func TestAProcessThatCouldNotAskAtStartupMovesItsReadsWhenTheConsoleAnswers(t *t
 		t.Fatal("a location the Console did not name was bound")
 	}
 	go func() { _ = cache.Run(ctx) }()
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond) // fixed-wait: nothing must load before the Console answers; 300 ms is many refreshes of the running cache
 	if stats := cache.Stats(); stats.Loaded != 0 || stats.UnavailableReason != openalerts.UnavailableLocationUnconfirmed {
 		t.Fatalf("loaded %d reason %q before the Console answered, want nothing read and the location unconfirmed", stats.Loaded, stats.UnavailableReason)
 	}
@@ -190,11 +191,11 @@ func TestTheRetryStopsWithTheProcess(t *testing.T) {
 		}, time.Millisecond, time.Millisecond)
 		close(done)
 	}()
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(20 * time.Millisecond) // fixed-wait: lets the retry loop spin before the cancel the case is about
 	cancel()
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("the retry did not stop with its context")
 	}
 }
@@ -277,7 +278,7 @@ func TestARetryAfterAReconciliationFoundTheLinkLeavesTheReadsAlone(t *testing.T)
 	})
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("the retry kept running after a reconciliation found the link")
 	}
 	if got := asked.Load(); got != 0 {

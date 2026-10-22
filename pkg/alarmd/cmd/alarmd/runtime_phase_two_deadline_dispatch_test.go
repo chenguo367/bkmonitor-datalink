@@ -16,6 +16,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
@@ -89,7 +90,7 @@ func collectDispatches(t *testing.T, started <-chan execution.QueryGroupIdentity
 		select {
 		case queryGroup := <-started:
 			order = append(order, queryGroup)
-		case <-time.After(2 * time.Second):
+		case <-testwait.Expired(t):
 			t.Fatalf("dispatched %v, want %d dispatches", order, count)
 		}
 	}
@@ -104,7 +105,7 @@ func stopDeadlineDispatcher(t *testing.T, cancel context.CancelFunc, done <-chan
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("runScheduler(cancel) error = %v, want context canceled", err)
 		}
-	case <-time.After(signalWaitBound):
+	case <-testwait.Expired(t):
 		t.Fatal("dispatcher did not stop after cancellation")
 	}
 }
@@ -231,7 +232,7 @@ func TestAOneShotRunEvictsAsProductionDoesAndRunsTheEvictedAtTheNextTick(t *test
 		if err != nil {
 			t.Fatalf("runScheduledOnce() error = %v", err)
 		}
-	case <-time.After(signalWaitBound):
+	case <-testwait.Expired(t):
 		t.Fatal("the one-shot run did not end")
 	}
 	order := collectDispatches(t, started, len(runners))

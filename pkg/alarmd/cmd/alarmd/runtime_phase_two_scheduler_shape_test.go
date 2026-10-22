@@ -18,6 +18,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
 
@@ -173,9 +174,7 @@ func TestAThrottledBudgetStillSeesTheDemandItHolds(t *testing.T) {
 			}
 		}(i)
 	}
-	for flights.PeakNormalRequestsPerSecond() < 50 {
-		time.Sleep(time.Millisecond)
-	}
+	testwait.Until(t, "fifty Normal requests a second at the peak", func() bool { return flights.PeakNormalRequestsPerSecond() >= 50 })
 	// Two run, held 100 ms each, and are released.
 	for i := 0; i < 2; i++ {
 		permit := <-granted

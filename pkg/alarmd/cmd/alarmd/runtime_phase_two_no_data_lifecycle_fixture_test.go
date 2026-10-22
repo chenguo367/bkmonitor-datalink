@@ -25,6 +25,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -367,7 +368,7 @@ func (fixture *lifecycleFixture) open(workerID string, client *http.Client) {
 	// and the Worker holds its lease, which the bundle's own loops do on the
 	// wall clock.
 	want := max(fixture.queryGroups, 1)
-	deadline := time.Now().Add(lifecycleWatchdog)
+	deadline := testwait.Deadline(fixture.t)
 	for {
 		bundle.mu.RLock()
 		groups := append([]execution.QueryGroupIdentity(nil), bundle.queryGroups...)
@@ -389,7 +390,7 @@ func (fixture *lifecycleFixture) open(workerID string, client *http.Client) {
 		if err := bundle.refreshAndReconcile(ctx, true); err != nil {
 			t.Fatalf("reconcile the bundle of %s: %v", workerID, err)
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 }
 
@@ -627,7 +628,7 @@ func (fixture *lifecycleFixture) change(strategy lifecycleStrategy, after int64)
 			t.Fatalf("refresh after the change: %v", err)
 		}
 	}
-	for deadline := time.Now().Add(lifecycleWatchdog); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+	for deadline := testwait.Deadline(fixture.t); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) { // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 		for round := after + 1; round <= after+30; round++ {
 			schedule, err := catalog.ReadFrozenSchedule(ctx, fixture.queryGroup, execution.EvaluationTime(fixture.evaluationAt(round)))
 			if err == nil && schedule.Segment.ObjectDigest != first.Segment.ObjectDigest {
@@ -694,14 +695,14 @@ func (fixture *lifecycleFixture) waitOpenAlertSetRead(round int64) {
 		fixture.t.Fatalf("the open alert port is %T", fixture.bundle.workerPorts.OpenAlerts)
 	}
 	attemptedAt := (fixture.evaluationAt(round) + fixture.interval/2) * 1000
-	for deadline, step := time.Now().Add(lifecycleWatchdog), int64(1); ; step++ {
+	for deadline, step := testwait.Deadline(fixture.t), int64(1); ; step++ {
 		if stats := port.cache.Stats(); stats.Loaded >= 1 && stats.Members >= 1 {
 			return
 		}
 		if step < fixture.interval/2 {
 			fixture.clock.Store(attemptedAt + step*1000)
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 		if time.Now().After(deadline) {
 			fixture.t.Fatalf("the open alert copy has not read the strategy's set after %s: %+v", lifecycleWatchdog, port.cache.Stats())
 		}

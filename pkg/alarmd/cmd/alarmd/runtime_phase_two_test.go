@@ -26,6 +26,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
@@ -167,7 +168,7 @@ func TestRunPhaseTwoApplicationBoundsHTTPShutdownWhenBundleOpenFails(t *testing.
 		if !errors.Is(err, want) || !errors.Is(err, ErrApplicationShutdownTimeout) {
 			t.Fatalf("runPhaseTwoApplicationWithDependencies() error = %v, want open and shutdown timeout", err)
 		}
-	case <-time.After(eventWatchdog):
+	case <-testwait.Expired(t):
 		close(httpRelease)
 		<-done
 		t.Fatal("bundle open failure waited indefinitely for HTTP shutdown")
@@ -221,7 +222,7 @@ func TestRunPhaseTwoApplicationCancelsWorkerAndMarksFatalWhenHTTPStopsEarly(t *t
 		if !errors.Is(err, want) {
 			t.Fatalf("runPhaseTwoApplicationWithDependencies() error = %v, want HTTP failure", err)
 		}
-	case <-time.After(eventWatchdog):
+	case <-testwait.Expired(t):
 		cancel()
 		<-done
 		t.Fatal("HTTP runtime stopped but the Worker Bundle kept running")
@@ -462,14 +463,14 @@ func TestPhaseTwoWorkerBundleBoundsRunnerFanoutIndependentlyOfQueryPermits(t *te
 	for index := 0; index < wantFanout; index++ {
 		select {
 		case <-started:
-		case <-time.After(3 * time.Second):
+		case <-testwait.Expired(t):
 			t.Fatalf("pre-permit runner %d did not start", index+1)
 		}
 	}
 	select {
 	case queryGroup := <-started:
 		t.Fatalf("pre-permit runner fanout exceeded %d at %s", wantFanout, queryGroup)
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(50 * time.Millisecond): // fixed-wait: the fanout must not pass its bound; 50 ms is many dispatch rounds of the in-memory runners
 	}
 	release()
 	if err := <-done; err != nil {
@@ -528,7 +529,7 @@ func TestPhaseTwoWorkerBundleRunsRetiredBacklogWhenCapacityIsReleased(t *testing
 		select {
 		case queryGroup := <-started:
 			firstTwo[queryGroup] = struct{}{}
-		case <-time.After(signalWaitBound):
+		case <-testwait.Expired(t):
 			t.Fatal("timed out waiting for the initial runner fanout")
 		}
 	}
@@ -544,7 +545,7 @@ func TestPhaseTwoWorkerBundleRunsRetiredBacklogWhenCapacityIsReleased(t *testing
 		if queryGroup != "query-group-3-retired-backlog" {
 			t.Fatalf("runner after query-group-2 released = %s, want retired backlog", queryGroup)
 		}
-	case <-time.After(signalWaitBound):
+	case <-testwait.Expired(t):
 		t.Fatal("timed out waiting for the retired backlog Query Group")
 	}
 	releaseFirst()
@@ -665,7 +666,7 @@ func TestPhaseTwoWorkerBundleRetriesReadyQueryGroupBeforeFullSweepCompletes(t *t
 	select {
 	case <-retried:
 		retriedBeforeSweepCompleted = true
-	case <-time.After(eventWatchdog):
+	case <-testwait.Expired(t):
 	}
 	close(blockingRelease)
 	if err := <-done; err != nil {
@@ -745,7 +746,7 @@ func TestPhaseTwoWorkerBundleNextTickReentersNormalQueryGroupBeforeSlowSweepComp
 			if !errors.Is(err, context.Canceled) {
 				t.Errorf("runScheduler(cancel) error = %v, want context canceled", err)
 			}
-		case <-time.After(signalWaitBound):
+		case <-testwait.Expired(t):
 			t.Error("persistent dispatcher did not drain after cancellation")
 		}
 	}()
@@ -861,7 +862,7 @@ func TestPhaseTwoWorkerBundleNormalQueueRotatesPastFastPrefixAcrossTicks(t *test
 			}
 			wake <- struct{}{}
 			release <- struct{}{}
-		case <-time.After(signalWaitBound):
+		case <-testwait.Expired(t):
 			cancel()
 			t.Fatal("normal dispatcher stopped making progress")
 		}
@@ -878,7 +879,7 @@ func TestPhaseTwoWorkerBundleNormalQueueRotatesPastFastPrefixAcrossTicks(t *test
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("runScheduler(cancel) error = %v, want context canceled", err)
 		}
-	case <-time.After(signalWaitBound):
+	case <-testwait.Expired(t):
 		t.Fatal("normal dispatcher did not drain after cancellation")
 	}
 }
@@ -931,7 +932,7 @@ func TestPhaseTwoWorkerBundleDelayedQueueKeepsEarliestReadyQueryGroups(t *testin
 		if queryGroup != target {
 			t.Fatalf("first delayed Query Group = %s, want %s", queryGroup, target)
 		}
-	case <-time.After(eventWatchdog):
+	case <-testwait.Expired(t):
 		t.Fatal("ready Query Group was hidden behind a full future delayed queue")
 	}
 	cancel()
@@ -940,7 +941,7 @@ func TestPhaseTwoWorkerBundleDelayedQueueKeepsEarliestReadyQueryGroups(t *testin
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("runScheduler(cancel) error = %v, want context canceled", err)
 		}
-	case <-time.After(signalWaitBound):
+	case <-testwait.Expired(t):
 		t.Fatal("delayed dispatcher did not stop after cancellation")
 	}
 }
@@ -1060,7 +1061,7 @@ func TestPhaseTwoWorkerBundleDispatcherDoesNotHoldQueryRecoveryAllowanceAcrossRu
 	for index := 0; index < 2; index++ {
 		select {
 		case <-recoveryRan:
-		case <-time.After(signalWaitBound):
+		case <-testwait.Expired(t):
 			cancel()
 			t.Fatal("recovery Runner was blocked by another Runner holding query recovery allowance")
 		}
@@ -1077,7 +1078,7 @@ func TestPhaseTwoWorkerBundleDispatcherDoesNotHoldQueryRecoveryAllowanceAcrossRu
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("dispatcher(cancel) error = %v, want context canceled", err)
 		}
-	case <-time.After(signalWaitBound):
+	case <-testwait.Expired(t):
 		t.Fatal("dispatcher did not drain recovery after cancellation")
 	}
 	dispatcher.stop()
@@ -1121,7 +1122,7 @@ func TestPhaseTwoWorkerBundleSchedulerCancellationStopsAdmissionAndDrainsInfligh
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("runScheduledOnce(cancel) error = %v, want context canceled", err)
 		}
-	case <-time.After(signalWaitBound):
+	case <-testwait.Expired(t):
 		t.Fatal("dispatcher did not drain canceled inflight Query Groups")
 	}
 	if got := queuedCalls.Load(); got != 0 {
@@ -1259,7 +1260,7 @@ func TestPhaseTwoWorkerBundleRunKeepsControlTicksActiveWhileSchedulerIsBusy(t *t
 				if err != nil {
 					t.Fatalf("Run(cancel) error = %v", err)
 				}
-			case <-time.After(signalWaitBound):
+			case <-testwait.Expired(t):
 				t.Fatal("Run did not stop after scheduler and control cancellation")
 			}
 		})
@@ -1302,7 +1303,7 @@ func TestPhaseTwoWorkerBundleNeverRegistersReadyAfterDraining(t *testing.T) {
 	go func() { shutdownDone <- bundle.Shutdown(context.Background()) }()
 	select {
 	case <-drainingObserved:
-	case <-time.After(20 * time.Millisecond):
+	case <-testwait.Expired(t):
 	}
 	close(releaseRenewal)
 	if err := <-shutdownDone; err != nil {
@@ -2701,12 +2702,12 @@ func (runner *fakePhaseTwoQueryGroup) runCount() int {
 
 func waitForRunnerCalls(t *testing.T, runner *fakePhaseTwoQueryGroup, count int) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := testwait.Deadline(t)
 	for time.Now().Before(deadline) {
 		if runner.runCount() >= count {
 			return
 		}
-		time.Sleep(time.Millisecond)
+		time.Sleep(time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	t.Fatalf("timed out waiting for %d runner calls; got %d", count, runner.runCount())
 }
@@ -2727,7 +2728,7 @@ func waitSignal(t *testing.T, signal <-chan struct{}, name string) {
 	t.Helper()
 	select {
 	case <-signal:
-	case <-time.After(signalWaitBound):
+	case <-testwait.Expired(t):
 		t.Fatalf("timed out waiting for %s", name)
 	}
 }
@@ -2746,25 +2747,25 @@ func equalReadiness(left, right []ownership.AssignmentReadiness) bool {
 
 func waitForRegistration(t *testing.T, owner *fakePhaseTwoOwnership, readiness ownership.AssignmentReadiness) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := testwait.Deadline(t)
 	for time.Now().Before(deadline) {
 		states := owner.registrationStates()
 		if len(states) > 0 && states[len(states)-1] == readiness {
 			return
 		}
-		time.Sleep(time.Millisecond)
+		time.Sleep(time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	t.Fatalf("timed out waiting for worker registration %s", readiness)
 }
 
 func waitForHealthState(t *testing.T, health *phaseTwoApplicationHealth, state observability.HealthState) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := testwait.Deadline(t)
 	for time.Now().Before(deadline) {
 		if health.HealthSnapshot().State == state {
 			return
 		}
-		time.Sleep(time.Millisecond)
+		time.Sleep(time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	t.Fatalf("timed out waiting for health state %s", state)
 }
@@ -2910,7 +2911,7 @@ func TestPhaseTwoWorkerBundleRegistrationRenewalCutsHungStoreCall(t *testing.T) 
 	hungAt := time.Now()
 	select {
 	case <-hungReleased:
-	case <-time.After(5 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("the hung registration call was not cut by the per-attempt timeout")
 	}
 	if cut := time.Since(hungAt); cut > 3*time.Second {
@@ -2931,9 +2932,9 @@ func TestPhaseTwoWorkerBundleRegistrationRenewalCutsHungStoreCall(t *testing.T) 
 	failureObserved := func() bool {
 		return hasRegistrationRenewalObservation(observations(), observability.ResultFailed, phaseTwoControlDependencyReason)
 	}
-	deadline := time.Now().Add(eventWatchdog)
+	deadline := testwait.Deadline(t)
 	for !failureObserved() && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
+		time.Sleep(time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	if !failureObserved() {
 		t.Fatalf("observations = %+v, want a retryable registration renewal failure", observations())
@@ -2974,7 +2975,7 @@ func TestPhaseTwoWorkerBundleRegistrationRenewalStopsOnInvariantError(t *testing
 	// then reading the list races the emitter. Wait for the thing this test
 	// actually asserts.
 	unsafeObserved := false
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := testwait.Deadline(t)
 	for !unsafeObserved && time.Now().Before(deadline) {
 		for _, observation := range observations() {
 			if observation.Component == observability.ComponentOwnership && observation.Stage == observability.StageAssignmentLost &&
@@ -2987,14 +2988,14 @@ func TestPhaseTwoWorkerBundleRegistrationRenewalStopsOnInvariantError(t *testing
 			}
 		}
 		if !unsafeObserved {
-			time.Sleep(time.Millisecond)
+			time.Sleep(time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 		}
 	}
 	if !unsafeObserved {
 		t.Fatalf("observations = %+v, want ownership marked unsafe with the invariant error", observations())
 	}
 	readyCount := readyRegistrationCount(owner)
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(20 * time.Millisecond) // fixed-wait: registrations must not keep flowing; 20 ms is many renewals of the in-memory owner
 	if again := readyRegistrationCount(owner); again != readyCount {
 		t.Fatalf("READY registrations kept flowing after the invariant error: %d -> %d", readyCount, again)
 	}
@@ -3059,12 +3060,12 @@ func hasRegistrationRenewalObservation(
 
 func waitPhaseTwoCondition(t *testing.T, timeout time.Duration, name string, condition func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := testwait.Deadline(t)
 	for time.Now().Before(deadline) {
 		if condition() {
 			return
 		}
-		time.Sleep(time.Millisecond)
+		time.Sleep(time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	t.Fatalf("timed out waiting for %s", name)
 }

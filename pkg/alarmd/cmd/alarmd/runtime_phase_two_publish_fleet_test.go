@@ -34,7 +34,7 @@ func TestTheBundleRunsOneFleetPublishAtATime(t *testing.T) {
 				break
 			}
 		}
-		time.Sleep(time.Millisecond)
+		time.Sleep(time.Millisecond) // fixed-wait: the simulated publish time that makes concurrent publishes overlap, the behaviour measured
 		inside.Add(-1)
 	}
 	control := &fakePhaseTwoControl{queryGroups: []execution.QueryGroupIdentity{"query-group-1"}, initialResult: healthyResult()}

@@ -193,7 +193,7 @@ func TestEveryForwardIsRecordedWithWhatBecameOfIt(t *testing.T) {
 	slow := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		select {
 		case <-request.Context().Done():
-		case <-time.After(2 * time.Second):
+		case <-time.After(2 * time.Second): // fixed-wait: a slow leader is what the case simulates; the read is bounded by its own deadline
 		}
 	}))
 	defer slow.Close()
@@ -225,7 +225,7 @@ func TestEveryForwardIsRecordedWithWhatBecameOfIt(t *testing.T) {
 	hops = nil
 	forward := leaderForwarderWithin(at(slow), "pod-follower", nil, time.Second, "diagnosis", observe)
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }() // fixed-wait: the reader leaving after 50 ms is the behaviour simulated
 	_, _ = forward(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/diagnose", nil).WithContext(ctx))
 	if len(hops) != 1 || hops[0].result != "canceled" {
 		t.Errorf("a reader that left: recorded %+v, want canceled", hops)
@@ -252,7 +252,7 @@ func TestAHopTakesTheReadersTimeAndTellsTheLeader(t *testing.T) {
 		}
 		select {
 		case <-request.Context().Done():
-		case <-time.After(3 * time.Second):
+		case <-time.After(3 * time.Second): // fixed-wait: a slow leader is what the case simulates; the read is bounded by its forwarded deadline
 		}
 		response.WriteHeader(http.StatusOK)
 	})))
@@ -261,7 +261,7 @@ func TestAHopTakesTheReadersTimeAndTellsTheLeader(t *testing.T) {
 	observe := func(_, result string, _ time.Duration) { results = append(results, result) }
 	forward := leaderForwarderWithin(scriptedLeaderDiscovery{endpoint: viewstream.LeaderEndpoint{WorkerID: "pod-leader",
 		Endpoint: strings.TrimPrefix(leader.URL, "http://")}}, "pod-follower", nil, directoryForwardTimeout, "directory", observe)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second) // fixed-wait: the reader's own time, which the forwarded deadline is derived from
 	defer cancel()
 	response := httptest.NewRecorder()
 	forwarded, refusal := forward(response, httptest.NewRequest(http.MethodGet, "/api/objects?scope=strategies", nil).WithContext(ctx))
@@ -272,7 +272,7 @@ func TestAHopTakesTheReadersTimeAndTellsTheLeader(t *testing.T) {
 		t.Fatalf("the Leader had %s, want the reader's five seconds less %s", budget, forwardReturnMargin)
 	}
 	// A Leader held to the time it was told answers inside the reader's.
-	short, cancelShort := context.WithTimeout(context.Background(), forwardReturnMargin+500*time.Millisecond)
+	short, cancelShort := context.WithTimeout(context.Background(), forwardReturnMargin+500*time.Millisecond) // fixed-wait: a short reader is the behaviour under test
 	defer cancelShort()
 	results = nil
 	if forwarded, _ := forward(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/objects?scope=strategies", nil).WithContext(short)); !forwarded ||
@@ -282,13 +282,13 @@ func TestAHopTakesTheReadersTimeAndTellsTheLeader(t *testing.T) {
 	// A Leader that keeps no time runs out the reader's: a timeout, not a
 	// reader that left.
 	deaf := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
-		time.Sleep(3 * time.Second)
+		time.Sleep(3 * time.Second) // fixed-wait: a Leader that keeps no time is the behaviour simulated; the reader bounds the read
 		response.WriteHeader(http.StatusOK)
 	}))
 	defer deaf.Close()
 	deafForward := leaderForwarderWithin(scriptedLeaderDiscovery{endpoint: viewstream.LeaderEndpoint{WorkerID: "pod-leader",
 		Endpoint: strings.TrimPrefix(deaf.URL, "http://")}}, "pod-follower", nil, directoryForwardTimeout, "directory", observe)
-	cut, cancelCut := context.WithTimeout(context.Background(), forwardReturnMargin+500*time.Millisecond)
+	cut, cancelCut := context.WithTimeout(context.Background(), forwardReturnMargin+500*time.Millisecond) // fixed-wait: a short reader is the behaviour under test
 	defer cancelCut()
 	results = nil
 	if forwarded, _ := deafForward(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/objects?scope=strategies", nil).WithContext(cut)); forwarded ||
@@ -296,7 +296,7 @@ func TestAHopTakesTheReadersTimeAndTellsTheLeader(t *testing.T) {
 		t.Fatalf("a Leader past the reader's time: forwarded %v, recorded %v, want a timeout", forwarded, results)
 	}
 	// A reader with less than the way back left is not handed on.
-	spent, cancelSpent := context.WithTimeout(context.Background(), forwardReturnMargin/2)
+	spent, cancelSpent := context.WithTimeout(context.Background(), forwardReturnMargin/2) // fixed-wait: a reader with less than the way back left is the behaviour under test
 	defer cancelSpent()
 	results = nil
 	if forwarded, _ := forward(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/objects?scope=strategies", nil).WithContext(spent)); forwarded ||

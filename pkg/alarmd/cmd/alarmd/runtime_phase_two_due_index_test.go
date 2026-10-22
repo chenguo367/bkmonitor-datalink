@@ -10,6 +10,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
@@ -803,7 +804,7 @@ func TestDispatcherReadsTheActivationHeaderWithoutBlockingTheLoop(t *testing.T) 
 	dispatcher.start(ctx)
 	defer dispatcher.stop()
 
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := testwait.Deadline(t)
 	for {
 		if sample := dispatcher.controlVersion.Load(); sample != nil {
 			if !sample.known || sample.tag != "publication-1" {
@@ -815,7 +816,7 @@ func TestDispatcherReadsTheActivationHeaderWithoutBlockingTheLoop(t *testing.T) 
 			t.Fatal("the dispatcher never read the activation header, so no publication could ever " +
 				"drop a bound and nothing in the metrics would say so")
 		}
-		time.Sleep(time.Millisecond)
+		time.Sleep(time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	dispatcher.beginGeneration()
 	if got := counterValue(t, bundle.dependencies.Recorder,

@@ -23,6 +23,7 @@ import (
 	"github.com/go-redis/redis/v8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -78,9 +79,9 @@ func TestAWorkerWhoseViewArrivesLateReadsEachLongPeriodGroupOnceUntilItsSlot(t *
 	ran := make(chan error, 1)
 	go func() { ran <- bundle.Run(ctx) }()
 	// No view yet: every round is refused and backs off.
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := testwait.Deadline(t)
 	for refusals(t, recorder) < groups && time.Now().Before(deadline) {
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	if refused := refusals(t, recorder); refused < groups {
 		t.Fatalf("%v rounds refused for want of a view before it was served, want each of the %d Query Groups", refused, groups)
@@ -88,7 +89,7 @@ func TestAWorkerWhoseViewArrivesLateReadsEachLongPeriodGroupOnceUntilItsSlot(t *
 	serveControlStreamForTest(bundle)
 	// Past the longest backoff the refusals can have grown to, with the view
 	// in place for all of it.
-	time.Sleep(12 * time.Second)
+	time.Sleep(12 * time.Second) // fixed-wait: refusals must not grow past the longest backoff; 12 s covers it, the window the case asserts over
 	cancel()
 	<-ran
 

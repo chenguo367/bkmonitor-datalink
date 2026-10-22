@@ -60,23 +60,23 @@ func TestAReassignedQueryGroupIsReleasedOnlyAfterItsRunningSlotReturns(t *testin
 		if err != nil {
 			t.Fatalf("refreshAndReconcile() error = %v", err)
 		}
-	case <-time.After(signalWaitBound):
+	case <-testwait.Expired(t):
 		t.Fatal("the reconcile that moved the Query Group away waited for its Slot; the control loop must not")
 	}
 	// The move is applied: no further Slot will start for it.
 	if heldRunner(bundle, "query-group-1") != nil {
 		t.Fatal("the moved Query Group is still a current runner")
 	}
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond) // fixed-wait: the lease must not be released while the Slot runs; 100 ms is many release checks
 	if released := first.releaseCount(); released != 0 {
 		t.Fatalf("lease released %d time(s) while the Slot was still running; want the release after "+
 			"the Slot's commit boundary (02 §6.2 steps 2-3)", released)
 	}
 	letSlotFinish()
 	<-done
-	deadline := time.Now().Add(signalWaitBound)
+	deadline := testwait.Deadline(t)
 	for first.releaseCount() == 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
+		time.Sleep(time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	if released := first.releaseCount(); released != 1 {
 		t.Fatalf("release calls after the Slot returned = %d, want exactly 1", released)
@@ -118,9 +118,9 @@ func TestAReassignedQueryGroupWithNoSlotInFlightIsReleasedAtOnce(t *testing.T) {
 	if err := bundle.refreshAndReconcile(context.Background(), true); err != nil {
 		t.Fatalf("refreshAndReconcile() error = %v", err)
 	}
-	deadline := time.Now().Add(signalWaitBound)
+	deadline := testwait.Deadline(t)
 	for first.releaseCount() == 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
+		time.Sleep(time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	if released := first.releaseCount(); released != 1 {
 		t.Fatalf("release calls = %d, want 1", released)
@@ -271,7 +271,7 @@ func TestAStopDoesNotWaitForeverOnASlotThatIgnoresCancellation(t *testing.T) {
 	bound := 2*cfg.ShutdownTimeout.Duration() + 2*time.Second
 	select {
 	case <-done:
-	case <-time.After(bound + time.Second):
+	case <-testwait.Expired(t):
 		t.Fatalf("the stop was still waiting on a Slot that ignores cancellation after %s, want it done within %s",
 			time.Since(stopped), bound)
 	}

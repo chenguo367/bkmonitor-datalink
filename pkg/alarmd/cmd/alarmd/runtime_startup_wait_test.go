@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
@@ -167,14 +168,14 @@ func TestTheStartupWaitEndsWithTheProcess(t *testing.T) {
 	go func() {
 		done <- waiter.await(ctx, "cmdb_index", func(context.Context) error { return io.EOF })
 	}()
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(20 * time.Millisecond) // fixed-wait: lets the wait loop run before the cancel the case is about
 	cancel()
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.Canceled) || !errors.Is(err, io.EOF) {
 			t.Fatalf("err = %v, want the cancellation and the last failure", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("the wait did not end with its context")
 	}
 }

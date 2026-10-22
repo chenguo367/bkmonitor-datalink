@@ -145,7 +145,7 @@ func TestAJobsFailedCallIsCountedWithItsReason(t *testing.T) {
 	base.AddHook(recorder.RedisHook("runtime"))
 	t.Cleanup(func() { _ = base.Close() })
 	stateStore := redisForCaller(base, redisfailure.CallerRuntimeState)
-	spent, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	spent, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second)) // fixed-wait: a deadline already past is the input under test
 	defer cancel()
 	if err := stateStore.Get(spent, "a").Err(); err == nil {
 		t.Fatal("a call on a spent deadline succeeded")

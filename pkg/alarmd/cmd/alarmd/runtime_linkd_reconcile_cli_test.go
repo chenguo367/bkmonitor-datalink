@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 )
@@ -131,9 +132,9 @@ func TestLinkdReconcileReadsAreNotGated(t *testing.T) {
 			outs <- op.Run(context.Background(), obchannel.Params{"strategy_id": id, "tenant": "system"})
 		}(id)
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := testwait.Deadline(t)
 	for fake.inFlight() < 2 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
+		time.Sleep(time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	if fake.inFlight() != 2 {
 		t.Fatalf("%d reads reached Linkd, want both at once", fake.inFlight())

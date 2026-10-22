@@ -336,7 +336,7 @@ func (fixture *electionFixture) transitions(toClass, reason string) float64 {
 func (fixture *electionFixture) pass(r int64, settled bool, want int) int {
 	fixture.t.Helper()
 	fixture.clockMillis.Store((fixture.base + r*electionPeriod + 1) * 1000)
-	time.Sleep(1200 * time.Millisecond)
+	time.Sleep(1200 * time.Millisecond) // fixed-wait: one beat of the processes' 1 s real-clock loops (lease renewal, scheduler tick, view stream) the fixture cannot drive or yet observe; the open exception of this class
 	fixture.tick()
 	evaluation := fixture.base + (r-1)*electionPeriod
 	completed := func() int {
@@ -370,7 +370,7 @@ func (fixture *electionFixture) balance(queryGroups int) {
 	for attempt := 0; attempt < 120; attempt++ {
 		fixture.advance(time.Second)
 		fixture.tick()
-		time.Sleep(250 * time.Millisecond)
+		time.Sleep(250 * time.Millisecond) // fixed-wait: one beat of the processes' 1 s real-clock loops (lease renewal, scheduler tick, view stream) the fixture cannot drive or yet observe; the open exception of this class
 		var shares []int
 		total := 0
 		for _, process := range fixture.alive() {
@@ -480,7 +480,7 @@ func TestAWorkerLeadsWhileTheControlProcessIsGoneAndHandsBackOnceItIsSteady(t *t
 	fixture.renewRecords()
 	crashedAt := fixture.now()
 	fixture.crash(control)
-	time.Sleep(3500 * time.Millisecond)
+	time.Sleep(3500 * time.Millisecond) // fixed-wait: the dead process's control lease runs out on the Redis server's clock in its 3 s TTL, which the fixture cannot move
 	for _, offset := range []time.Duration{5 * time.Second, 30 * time.Second, 55 * time.Second} {
 		fixture.clockMillis.Store(crashedAt.Add(offset).UnixMilli())
 		fixture.tick()
@@ -546,7 +546,7 @@ func TestAWorkerLeadsWhileTheControlProcessIsGoneAndHandsBackOnceItIsSteady(t *t
 	// would read as a break in the window and start it again.
 	for offset := 5 * time.Second; offset < window; offset += 5 * time.Second {
 		fixture.clockMillis.Store(firstSeen.Add(offset).UnixMilli())
-		time.Sleep(1200 * time.Millisecond)
+		time.Sleep(1200 * time.Millisecond) // fixed-wait: one beat of the processes' 1 s real-clock loops (lease renewal, scheduler tick, view stream) the fixture cannot drive or yet observe; the open exception of this class
 		fixture.tick()
 		if leader, epoch := fixture.leader(); leader != fallbackLeader || epoch != fallbackEpoch {
 			t.Fatalf("leader %s into the window = %v epoch %d, want the fallback still", offset, leader, epoch)
@@ -607,7 +607,7 @@ func TestAWorkerLeadsWhileTheControlProcessIsGoneAndHandsBackOnceItIsSteady(t *t
 	// Steady from here: no further moves of the lease.
 	for step := 0; step < 6; step++ {
 		fixture.advance(20 * time.Second)
-		time.Sleep(1100 * time.Millisecond)
+		time.Sleep(1100 * time.Millisecond) // fixed-wait: one beat of the processes' 1 s real-clock loops (lease renewal, scheduler tick, view stream) the fixture cannot drive or yet observe; the open exception of this class
 		fixture.tick()
 	}
 	if leader, epoch := fixture.leader(); leader != returned || epoch != preferredEpoch {
@@ -735,7 +735,7 @@ func TestWorkersRacingForAFreeLeaseEndWithOneLeader(t *testing.T) {
 			fixture.transitions("fallback", "fallback_takeover"))
 	}
 	fixture.crash(winner)
-	time.Sleep(3500 * time.Millisecond)
+	time.Sleep(3500 * time.Millisecond) // fixed-wait: the dead process's control lease runs out on the Redis server's clock in its 3 s TTL, which the fixture cannot move
 	fixture.advance(controlCandidacyWindow(winner.bundle.dependencies.Config))
 	for round := 0; round < 5; round++ {
 		fixture.advance(time.Second)
@@ -956,7 +956,7 @@ func TestAControlProcessInACrashLoopLeavesTheLeaseToAFallbackUntilItIsSteady(t *
 	// for the lease renewals to restate their deadlines on it.
 	round := func() {
 		fixture.advance(5 * time.Second)
-		time.Sleep(1200 * time.Millisecond)
+		time.Sleep(1200 * time.Millisecond) // fixed-wait: one beat of the processes' 1 s real-clock loops (lease renewal, scheduler tick, view stream) the fixture cannot drive or yet observe; the open exception of this class
 		fixture.tick()
 	}
 	restart := func() {
@@ -970,7 +970,7 @@ func TestAControlProcessInACrashLoopLeavesTheLeaseToAFallbackUntilItIsSteady(t *
 	// there, so it leaves the lease to the fallback.
 	fixture.renewRecords()
 	fixture.crash(control)
-	time.Sleep(3500 * time.Millisecond)
+	time.Sleep(3500 * time.Millisecond) // fixed-wait: the dead process's control lease runs out on the Redis server's clock in its 3 s TTL, which the fixture cannot move
 	control = fixture.open(controlName, roles.Set{roles.Control}, true)
 	if leader, _ := fixture.leader(); leader != nil {
 		t.Fatalf("%s took the free lease on starting; a control process not yet stable waits for a ready fallback", leader.name)

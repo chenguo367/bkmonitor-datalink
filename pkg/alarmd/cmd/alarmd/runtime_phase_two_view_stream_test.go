@@ -21,6 +21,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
@@ -79,8 +80,8 @@ func TestTheProductionLeaderServesItsDesiredSetOverTheViewStream(t *testing.T) {
 	// long -- which under a full parallel run it did.
 	bundle.cancelViewClient()
 	stats := bundle.dependencies.ViewStreamStats()
-	for deadline := time.Now().Add(5 * time.Second); stats.Sessions != 0 && time.Now().Before(deadline); stats = bundle.dependencies.ViewStreamStats() {
-		time.Sleep(10 * time.Millisecond)
+	for deadline := testwait.Deadline(t); stats.Sessions != 0 && time.Now().Before(deadline); stats = bundle.dependencies.ViewStreamStats() {
+		time.Sleep(10 * time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	if !stats.Leading || stats.ControlEpoch != leader.OwnerEpoch || stats.Revision == 0 || stats.Counts.Expected != 1 || stats.Sessions != 0 {
 		t.Fatalf("stream stats after the first round = %+v, want leading in term %d with a revision, one expected receiver and "+
@@ -177,7 +178,7 @@ func TestTheProductionLeaderServesItsDesiredSetOverTheViewStream(t *testing.T) {
 	}}}); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := testwait.Deadline(t)
 	for {
 		stats = bundle.dependencies.ViewStreamStats()
 		if stats.Counts.Installed == 1 && stats.Sessions == 1 {
@@ -186,7 +187,7 @@ func TestTheProductionLeaderServesItsDesiredSetOverTheViewStream(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatalf("stats = %+v, want one session and the receipt installed", stats)
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	if stats.Counts != (viewstream.Counts{Expected: 1, Sent: 1, Acked: 1, Installed: 1}) || stats.Counts.Switched != 0 {
 		t.Fatalf("counts = %+v, want expected/sent/acked/installed 1 and switched 0 in the shadow", stats.Counts)

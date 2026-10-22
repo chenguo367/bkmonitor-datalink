@@ -58,7 +58,7 @@ func TestAFormerLeaderHoldsWhatAWorkerThatNeverLedHolds(t *testing.T) {
 	window := controlCandidacyWindow(control.bundle.dependencies.Config)
 	for offset := 5 * time.Second; offset <= window+10*time.Second && fixture.transitions("preferred", "handback") == 0; offset += 5 * time.Second {
 		fixture.clockMillis.Store(firstSeen.Add(offset).UnixMilli())
-		time.Sleep(1200 * time.Millisecond)
+		time.Sleep(1200 * time.Millisecond) // fixed-wait: one beat of the processes' 1 s real-clock loops (lease renewal, scheduler tick, view stream) the fixture cannot drive or yet observe; the open exception of this class
 		fixture.tick()
 	}
 	if fixture.transitions("preferred", "handback") != 1 {

@@ -26,6 +26,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -94,10 +95,10 @@ func TestAnUnconfirmedSetLocationIsNotRead(t *testing.T) {
 	}
 	// Give the copy every chance to read: rounds until its subscription has
 	// had time to come up and a read of a reachable location would land.
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := testwait.Deadline(t)
 	for time.Now().Before(deadline) {
 		copy.Refresh(ctx)
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	if copy.Contains(key.TenantID, key.StrategyID, "theirs") {
 		t.Fatal("the gate answered from the fallback location's set, which the Console never named")
@@ -201,7 +202,7 @@ func TestAReconciliationThatFindsTheLinkElsewhereMovesTheReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	go func() { _ = cache.Run(ctx) }()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := testwait.Deadline(t)
 	for {
 		stats := cache.Stats()
 		if stats.LocationConfirmed && stats.Available && stats.Members == 1 {
@@ -211,7 +212,7 @@ func TestAReconciliationThatFindsTheLinkElsewhereMovesTheReads(t *testing.T) {
 			t.Fatalf("not moved and confirmed: confirmed %v available %v members %d loaded %d reason %q discovery %+v console %+v",
 				stats.LocationConfirmed, stats.Available, stats.Members, stats.Loaded, stats.UnavailableReason, index.Location.Discovery(), index.Console.Record())
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	if !cache.Contains(key.TenantID, key.StrategyID, "fp-open") {
 		t.Fatal("after the move the gate did not answer from the link's set")
@@ -268,7 +269,7 @@ func TestACopyWithoutAConsoleReadsNothingAndCountsNothing(t *testing.T) {
 	defer func() { cancel(); <-done }()
 	for round := 0; round < 5; round++ {
 		cache.Refresh(ctx)
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond) // fixed-wait: spaces the refreshes of a case asserting nothing is read; the rounds are the bound
 	}
 	stats := cache.Stats()
 	if stats.Configured || stats.Loaded != 0 || stats.UnavailableReason != "" {
@@ -300,7 +301,7 @@ func TestAnUnboundLocationWaitsInsteadOfSubscribing(t *testing.T) {
 	select {
 	case err := <-done:
 		t.Fatalf("Watch returned %v on an unbound location", err)
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond): // fixed-wait: Watch must not return on an unbound location; 100 ms is many times its first decision
 	}
 	if _, err := location.ReadSet(ctx, openalerts.StrategyKey{TenantID: "t", StrategyID: "1"}); err != openalerts.ErrLocationUnconfirmed {
 		t.Fatalf("ReadSet = %v, want the location named unconfirmed", err)
@@ -341,7 +342,7 @@ func TestALinkMovedOutOfReachUnbindsTheReads(t *testing.T) {
 	for round := 0; round < 5; round++ {
 		f.index.Cache.RequestCalibration()
 		f.index.Cache.Refresh(ctx)
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond) // fixed-wait: spaces the refreshes of a case asserting no command runs; the rounds are the bound
 	}
 	if commands := oldCommands(); len(commands) != 0 {
 		t.Fatalf("the unbound place ran %d commands, want none: %v", len(commands), commands)
@@ -402,7 +403,7 @@ func redisCommandsOn(t *testing.T, address, prefix string) (stop func() []string
 		}
 		select {
 		case <-collected:
-		case <-time.After(5 * time.Second):
+		case <-testwait.Expired(t):
 			t.Fatal("MONITOR never streamed the end marker")
 		}
 		return named
@@ -430,7 +431,7 @@ func TestARefusedNoticeReachesTheCopyThroughTheLocationSwitch(t *testing.T) {
 	}()
 	select {
 	case <-ready:
-	case <-time.After(3 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("the bound subscriber was not acknowledged")
 	}
 	if err := client.Publish(ctx, "test.linkd:changes", `{"bk_tenant_id":"t","strategy_id":"1","key":"foreign"}`).Err(); err != nil {
@@ -441,7 +442,7 @@ func TestARefusedNoticeReachesTheCopyThroughTheLocationSwitch(t *testing.T) {
 		if reason != openalerts.NoticeUndecodable {
 			t.Fatalf("refused %q, want undecodable", reason)
 		}
-	case <-time.After(3 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("the refusal did not reach the copy through the switch")
 	}
 	cancel()

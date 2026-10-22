@@ -28,6 +28,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdoutput"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
@@ -128,7 +129,7 @@ func (sink *followsSink) WriteBatch(_ context.Context, events []contract.Trigger
 		}
 		select {
 		case <-gate:
-		case <-time.After(lifecycleWatchdog):
+		case <-time.After(lifecycleWatchdog): // fixed-wait: a release for a fake held open by a case that never opens its gate, not an assertion
 		}
 	}
 	sink.mu.Lock()
@@ -591,7 +592,7 @@ func TestAClosingNormalWhoseOutputFailedIsSentByTheRetry(t *testing.T) {
 		}
 	}
 	closing := int64(0)
-	for deadline := time.Now().Add(10 * time.Second); closing == 0 && time.Now().Before(deadline); {
+	for deadline := testwait.Deadline(t); closing == 0 && time.Now().Before(deadline); {
 		for round := int64(2); round <= 30 && closing == 0; round++ {
 			schedule, err := fixture.catalog.ReadFrozenSchedule(ctx, fixture.queryGroup, execution.EvaluationTime(fixture.evaluationAt(round)))
 			if err == nil && schedule.Segment.ObjectDigest != first.Segment.ObjectDigest {
@@ -599,7 +600,7 @@ func TestAClosingNormalWhoseOutputFailedIsSentByTheRetry(t *testing.T) {
 			}
 		}
 		if closing == 0 {
-			time.Sleep(20 * time.Millisecond)
+			time.Sleep(20 * time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 		}
 	}
 	if closing == 0 {

@@ -148,7 +148,7 @@ func TestSoakTheSchedulerShapeStaggerAndHoldTogether(t *testing.T) {
 	started := time.Now()
 	stepped, unstepped := false, false
 	for time.Since(started) < runFor {
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond) // fixed-wait: the soak sampling cadence
 		switch {
 		case !stepped && time.Since(started) >= stepUpAt:
 			stepped = true
@@ -312,7 +312,7 @@ func (backend *soakBackend) roundTrip(request *http.Request) (*http.Response, er
 	}
 	backend.mu.Unlock()
 	select {
-	case <-time.After(latency):
+	case <-time.After(latency): // fixed-wait: the simulated backend latency under test
 	case <-request.Context().Done():
 		return nil, request.Context().Err()
 	}

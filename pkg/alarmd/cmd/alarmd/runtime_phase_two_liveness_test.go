@@ -19,6 +19,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
@@ -545,7 +546,7 @@ func TestStoppingAQueryGroupWhoseLeaseNeverEndsIsBounded(t *testing.T) {
 	go func() { bundle.handOverQueryGroup("query-group-1", lifecycle); close(stopped) }()
 	select {
 	case <-stopped:
-	case <-time.After(5 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("the control loop waited on a lease goroutine that never ended")
 	}
 	runner.mu.Lock()
