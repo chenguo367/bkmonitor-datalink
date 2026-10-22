@@ -39,6 +39,9 @@ func publishRoleControlFacts(ctx context.Context, bundle *phaseTwoWorkerBundle, 
 		AssignmentSweep: bundle.assignmentSweepFleetFacts(), LeaderRound: bundle.leaderRoundFleetFacts(),
 		ViewStream:     viewStreamFleetFacts(bundle.dependencies.ViewStreamStats, bundle.dependencies.Now)(),
 		CandidacyClass: bundle.candidacy}
+	if bundle.candidacy == ownership.ControlCandidacyFallback {
+		facts.Handback = bundle.handback.facts(controlCandidacyWindow(bundle.dependencies.Config))
+	}
 	err := store.PublishControl(ctx, facts)
 	bundle.dependencies.Recorder.ObserveControlFactsWrite(fleet.ControlPublishResult(err))
 	if err != nil {

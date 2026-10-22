@@ -109,3 +109,59 @@ func TestAHandbackWatchThatStartsOverIsCountedAndSaid(t *testing.T) {
 		})
 	}
 }
+
+// The watch reads in one call from the fleet record: no candidate ready, or
+// which one is, since when and when it is due; when the candidates were last
+// read; and how often the watch started over.
+func TestTheHandbackWatchSaysWhyTheLeaseHasNotBeenGivenBack(t *testing.T) {
+	const window = time.Minute
+	start := time.Unix(1_800_000_000, 0)
+	var watch controlHandbackWatch
+	empty := watch.facts(window)
+	if empty.WindowSeconds != 60 || empty.LastReadingAt != nil || len(empty.Ready) != 0 ||
+		empty.Resets[metric.ControlHandbackWatchResetListFailed] != 0 || empty.Resets[metric.ControlHandbackWatchResetGap] != 0 {
+		t.Fatalf("an unread watch = %+v, want no reading, nobody ready and both resets at zero", empty)
+	}
+	ready := []ownership.InstanceRegistration{preferredRecordForTest("control", "7", true, start.Add(time.Hour))}
+	watch.observe(ready, "fallback-self", start, window, 10*time.Second)
+	watch.observe(ready, "fallback-self", start.Add(5*time.Second), window, 10*time.Second)
+	watch.noteReset(metric.ControlHandbackWatchResetGap)
+	facts := watch.facts(window)
+	if facts.LastReadingAt == nil || !facts.LastReadingAt.Equal(start.Add(5*time.Second)) || len(facts.Ready) != 1 ||
+		facts.Ready[0].Instance != "control" || facts.Ready[0].Incarnation != "7" || !facts.Ready[0].ReadySince.Equal(start) ||
+		!facts.Ready[0].DueAt.Equal(start.Add(window)) || facts.Resets[metric.ControlHandbackWatchResetGap] != 1 {
+		t.Fatalf("watch = %+v, want control#7 ready since the start, due a window later, read at +5s, one gap", facts)
+	}
+	watch.observe(nil, "fallback-self", start.Add(10*time.Second), window, 10*time.Second)
+	if facts := watch.facts(window); len(facts.Ready) != 0 {
+		t.Fatalf("watch after the candidate went = %+v, want nobody ready", facts)
+	}
+}
+
+// A candidate store that stays down writes the first failure and then holds
+// the rest for the limiter's window, so a long outage is one line a minute
+// with the count of the ones it held, not one a round.
+func TestALongCandidateOutageWritesOneLineNotOneARound(t *testing.T) {
+	recorder := metric.NewRecorder(metric.BuildInfo{})
+	var lines bytes.Buffer
+	observer, err := newPhaseTwoRuntimeObserver(recorder, observability.New(observability.ComponentRuntime, &lines))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_800_000_000, 0)
+	bundle := &phaseTwoWorkerBundle{dependencies: phaseTwoWorkerBundleDependencies{
+		Config: validGoAccessRuntimeConfig(), Ownership: &handbackCandidatesForTest{err: errors.New("store unavailable")},
+		Recorder: recorder, Now: func() time.Time { return now }, Observer: observer,
+	}}
+	for round := 0; round < 50; round++ {
+		now = now.Add(5 * time.Second)
+		bundle.considerHandback(context.Background())
+	}
+	if got := counterValue(t, recorder, "alarmd_control_handback_watch_resets_total",
+		map[string]string{"reason": metric.ControlHandbackWatchResetListFailed}); got != 50 {
+		t.Fatalf("list_failed = %v, want every round counted", got)
+	}
+	if written := strings.Count(lines.String(), observability.StageControlHandbackWatch); written != 1 {
+		t.Fatalf("%d lines in a burst of 50 failing rounds, want 1: %s", written, lines.String())
+	}
+}

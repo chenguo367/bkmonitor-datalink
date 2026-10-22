@@ -398,7 +398,14 @@ func (fixture *electionFixture) balance(queryGroups int) {
 // through the Leader's instance record), returning the class it states. A
 // Worker-only process serves the restricted public surface, which leaves the
 // control facts out, so the view's own source is read rather than the route.
-func (fixture *electionFixture) leaderClassSeen(leader *electionProcess) string {
+func (fixture *electionFixture) leaderClassSeen(process *electionProcess) string {
+	fixture.t.Helper()
+	return fixture.controlFactsSeen(process).CandidacyClass
+}
+
+// controlFactsSeen is the Leader's control record of this term as the view
+// reads it, written by the Leader's own publish.
+func (fixture *electionFixture) controlFactsSeen(leader *electionProcess) fleet.ControlFacts {
 	fixture.t.Helper()
 	leader.bundle.dependencies.PublishFleet(fixture.ctx)
 	registry, err := ownership.NewRedisStoreWithClient(fixture.redis, productionPhaseTwoPrefix(fixture.prefix, "ownership"))
@@ -417,7 +424,7 @@ func (fixture *electionFixture) leaderClassSeen(leader *electionProcess) string 
 	if err != nil || !found || reading.Term != fleet.ControlTermCurrent || reading.Facts.Replica != leader.name {
 		fixture.t.Fatalf("control facts as the view reads them = (%+v, %v, %v), want %s's record of this term", reading, found, err, leader.name)
 	}
-	return reading.Facts.CandidacyClass
+	return reading.Facts
 }
 
 // TestAWorkerLeadsWhileTheControlProcessIsGoneAndHandsBackOnceItIsSteady is
@@ -543,6 +550,17 @@ func TestAWorkerLeadsWhileTheControlProcessIsGoneAndHandsBackOnceItIsSteady(t *t
 		fixture.tick()
 		if leader, epoch := fixture.leader(); leader != fallbackLeader || epoch != fallbackEpoch {
 			t.Fatalf("leader %s into the window = %v epoch %d, want the fallback still", offset, leader, epoch)
+		}
+		if offset == 5*time.Second {
+			// One read says why the lease is still the fallback's: the
+			// returned process is ready and when it is due.
+			handback := fixture.controlFactsSeen(fallbackLeader).Handback
+			if handback == nil || len(handback.Ready) != 1 || handback.Ready[0].Instance != returned.name ||
+				!handback.Ready[0].DueAt.Equal(firstSeen.Add(window)) || handback.LastReadingAt == nil ||
+				!handback.LastReadingAt.Equal(firstSeen.Add(offset)) {
+				t.Fatalf("handback in the fallback's record = %+v, want %s due at %s, read at %s",
+					handback, returned.name, firstSeen.Add(window), firstSeen.Add(offset))
+			}
 		}
 	}
 	fixture.clockMillis.Store(firstSeen.Add(window).UnixMilli())
