@@ -27,8 +27,11 @@ import (
 var QueryDurationBuckets = []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30}
 
 // DecisionLagBuckets reach five minutes: a held round lags tens of seconds
-// and a long-period Slot minutes.
-var DecisionLagBuckets = []float64{0.1, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300}
+// and a long-period Slot minutes. They are dense between 10 and 60 seconds
+// because that is where decisions land: one deployment's 5220 decisions all
+// fell in (10, 30], mean 15.8 s, and with only 10 and 30 there the P95 came
+// out as 10 + 20 x 0.95 = 29 s by construction, whatever the lag was.
+var DecisionLagBuckets = []float64{0.1, 0.5, 1, 2.5, 5, 10, 15, 20, 25, 30, 40, 50, 60, 120, 300}
 
 // queryFailureReasons is access.QueryFailures, held here because this
 // package does not import access; a test in the wiring holds the two

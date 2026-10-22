@@ -57,13 +57,16 @@ type FlowHistogram struct {
 	Count   uint64   `json:"n"`
 }
 
-// FlowFactsMaxBytes bounds the block a summary carries.
-const FlowFactsMaxBytes = 1024
+// FlowFactsMaxBytes bounds the block a summary carries. With 37 bucket
+// bounds and every counter at the test's ceiling of 10^12 the block encodes
+// to 1076 bytes; 1152 leaves room for one more such field. It is a small part
+// of a summary, which the snapshot budget bounds in MiB.
+const FlowFactsMaxBytes = 1152
 
 // The bounds of the three histograms, in seconds: the metrics' own, held
 // equal to them by a test in the wiring.
 var (
 	FlowQueryBounds    = []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30}
-	FlowDecisionBounds = []float64{0.1, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300}
+	FlowDecisionBounds = []float64{0.1, 0.5, 1, 2.5, 5, 10, 15, 20, 25, 30, 40, 50, 60, 120, 300}
 	FlowRedisBounds    = []float64{0.0005, 0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5}
 )

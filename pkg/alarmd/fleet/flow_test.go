@@ -40,7 +40,7 @@ func TestTheFlowBlockStaysWithinItsBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if buckets := len(FlowQueryBounds) + len(FlowDecisionBounds) + len(FlowRedisBounds); buckets != 32 || len(encoded) > FlowFactsMaxBytes {
-		t.Fatalf("flow block is %d bytes with %d buckets, want at most %d with 32", len(encoded), buckets, FlowFactsMaxBytes)
+	if buckets := len(FlowQueryBounds) + len(FlowDecisionBounds) + len(FlowRedisBounds); buckets != 37 || len(encoded) > FlowFactsMaxBytes {
+		t.Fatalf("flow block is %d bytes with %d buckets, want at most %d with 37", len(encoded), buckets, FlowFactsMaxBytes)
 	}
 }

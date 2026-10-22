@@ -901,10 +901,11 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("short_period_slot_completions_total"): 56,
 		// 11 codes UQ declares plus OTHER, times allowed/unavailable/other.
 		fqName("access_response_status_total"): 36,
-		// the flow: two label-free histograms (10 bounds, +Inf, sum, count),
-		// six failure reasons, one label-free counter
+		// the flow: two label-free histograms (bounds, +Inf, sum, count; the
+		// query duration has 10 bounds, the decision lag 15), six failure
+		// reasons, one label-free counter
 		fqName("access_query_duration_seconds"):    13,
-		fqName("slot_decision_lag_seconds"):        13,
+		fqName("slot_decision_lag_seconds"):        18,
 		fqName("access_query_failure_total"):       6,
 		fqName("output_events_rejected_all_total"): 1,
 		fqName("access_response_codec_total"):      3 * 3 * 4,
