@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -355,10 +356,13 @@ func TestAnIncompleteTrialFromThePreviousSlotLeavesTheHold(t *testing.T) {
 }
 
 // A group lowered under its search floor - a raise right after a lowering makes the lowered hold the floor, and
-// halfway between it and the hold leaves a gap no wider than a step - has nothing left to try, and says so: the
-// controller counts each trial it refuses search_done, the group's lookback reading counts the same Slots
-// no_candidate, and its record says when the floor was learned. In one deployment four groups lowered so sat at
-// 46-58 s for 57 hours, and the only reason counted was at_limit, another group's.
+// halfway between it and the hold leaves a gap no wider than a step - is probed at halves between the floor and its
+// hold, none of those Slots refused, each passed half its hold, until the hold is within readhold.MidpointResolution
+// of the floor: 48 s comes down to 24, 12, 6 and 3 s over a floor of none. There, its floor not yet stood a day, it
+// has nothing left to try, and says so: the controller counts each trial it refuses search_done, the group's
+// lookback reading counts the same Slots no_candidate, and its record says when the floor was learned. In one
+// deployment four groups lowered so sat at 46-58 s for 57 hours, and the only reason counted was at_limit, another
+// group's.
 func TestAGroupStuckUnderItsSearchFloorSaysWhy(t *testing.T) {
 	t.Parallel()
 	f := startCutoverFixture(t, leasesOutliveTheRun)
@@ -382,11 +386,26 @@ func TestAGroupStuckUnderItsSearchFloorSaysWhy(t *testing.T) {
 			if steppedAt < 0 && lowest < raised {
 				steppedAt = elapsed
 			}
-			return steppedAt >= 0 && elapsed >= steppedAt+3*time.Hour
+			return steppedAt >= 0 && elapsed >= steppedAt+10*time.Minute
 		})
 	if steppedAt < 0 || lowest != raised/2 {
 		t.Fatalf("fixture: from %v the hold came to %v, want halfway to the floor of none: trials %v, overtaken by %v",
 			raised, lowest, outcomes, overtaken)
+	}
+	if got := refused(); got[readhold.EarlierSkipSearchDone] != 0 {
+		t.Fatalf("Slots refused search_done while their group's half was probed: %v", got)
+	}
+	came, _, _ := descent(t, f, 16*time.Hour)
+	want := []time.Duration{48 * time.Second, 24 * time.Second, 12 * time.Second, 6 * time.Second, 3 * time.Second}
+	if fmt.Sprint(came) != fmt.Sprint(want) {
+		t.Fatalf("from %v the hold came down through %v, want %v", lowest, came, want)
+	}
+	if skipped := heldRounds(t, f, 3*time.Hour+time.Minute, func(elapsed time.Duration) bool { return elapsed >= 3*time.Hour }); skipped != 0 {
+		t.Fatalf("%d Slots skipped unevaluated under the floor", skipped)
+	}
+	if hold := holds.controller.ReadHold(f.queryGroup); hold != want[len(want)-1] || f.now().Sub(learnedAt) >= readhold.FloorStanding {
+		t.Fatalf("three hours on: hold %v, the floor learned %v before; want %v, the floor not yet stood %v",
+			hold, f.now().Sub(learnedAt), want[len(want)-1], readhold.FloorStanding)
 	}
 	record, _ := holds.controller.Reading(f.queryGroup)
 	if record.EarlierFloorMillis == nil || *record.EarlierFloorMillis != 0 || record.EarlierFloorAtMillis != learnedAt.UnixMilli() {

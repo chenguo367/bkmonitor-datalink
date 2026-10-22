@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -268,9 +269,12 @@ func TestAStuckGroupsFloorIsProbedAndItsHoldComesDownWithNoRoundReadEarly(t *tes
 func TestAProbeComesDownToWhereItsDataIsWholeAndNoFurther(t *testing.T) {
 	t.Parallel()
 	f := startCutoverFixture(t, leasesOutliveTheRun)
-	var jitter atomic.Bool
+	// Late only in windows that end after it starts being: a probe already begun - a half needs no standing - reads
+	// no round across that change, its read at the floor before it and the formal read after.
+	var lateFrom atomic.Int64
+	lateFrom.Store(math.MaxInt64)
 	f.uqHosts = func(end int64) []string {
-		if jitter.Load() && end%300 == 0 && !f.now().Before(time.Unix(end, 0).Add(20*time.Second)) {
+		if end > lateFrom.Load() && end%300 == 0 && !f.now().Before(time.Unix(end, 0).Add(20*time.Second)) {
 			return []string{"127.0.0.1", "127.0.0.2"}
 		}
 		return []string{"127.0.0.1"}
@@ -278,7 +282,7 @@ func TestAProbeComesDownToWhereItsDataIsWholeAndNoFurther(t *testing.T) {
 	engine, holds := f.bundle.dependencies.Lookback, f.bundle.dependencies.ReadHolds
 	hold := stuckUnderFloor(t, f, 96500*time.Millisecond)
 	ageFloor(t, f, readhold.FloorStanding)
-	jitter.Store(true)
+	lateFrom.Store(f.now().Unix())
 	came, skipped, _ := descent(t, f, 16*time.Hour)
 	events, rounds := probeCounts(engine)
 	changes := map[string]uint64{}
