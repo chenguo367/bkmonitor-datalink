@@ -35,39 +35,48 @@ const perWait = 2 * time.Minute
 // test binary's deadline less a margin, whichever is first.
 func Deadline(t testing.TB) time.Time {
 	t.Helper()
-	at := time.Now().Add(perWait)
+	at, _ := bound(t)
+	return at
+}
+
+// bound is Deadline and which of its two limits set it, for a wait that ran
+// out to say.
+func bound(t testing.TB) (time.Time, string) {
+	at, by := time.Now().Add(perWait), "the cap on one wait"
 	if deadline, ok := t.(interface{ Deadline() (time.Time, bool) }); ok {
 		if binary, set := deadline.Deadline(); set && binary.Add(-margin).Before(at) {
-			at = binary.Add(-margin)
+			at, by = binary.Add(-margin), "the test binary's deadline"
 		}
 	}
-	return at
+	return at, by
 }
 
 // Expired is a channel that fires at Deadline, for a select that waits on a
 // channel of its own.
 func Expired(t testing.TB) <-chan time.Time {
 	t.Helper()
-	return time.After(time.Until(Deadline(t)))
+	return time.After(time.Until(Deadline(t))) // fixed-wait: fires at the test's deadline, the bound itself
 }
 
 // Context is a context ending at Deadline, cancelled when t ends: a bound on
 // an operation the case expects to finish.
 func Context(t testing.TB) context.Context {
 	t.Helper()
-	ctx, cancel := context.WithDeadline(context.Background(), Deadline(t))
+	ctx, cancel := context.WithDeadline(context.Background(), Deadline(t)) // fixed-wait: ends at the test's deadline, the bound itself
 	t.Cleanup(cancel)
 	return ctx
 }
 
 // Until polls cond until it holds, failing t with what if Deadline passes
-// first. The poll starts at a millisecond and backs off to 50 ms.
+// first, and saying how long it waited and which bound ended it. The poll
+// starts at a millisecond and backs off to 50 ms.
 func Until(t testing.TB, what string, cond func() bool) {
 	t.Helper()
-	deadline := Deadline(t)
-	for step := time.Millisecond; !cond(); step = min(2*step, 50*time.Millisecond) {
+	started := time.Now()
+	deadline, by := bound(t)
+	for step := time.Millisecond; !cond(); step = min(2*step, 50*time.Millisecond) { // fixed-wait: a condition wait bounded by Deadline
 		if time.Now().After(deadline) {
-			t.Fatalf("%s did not happen before the test's deadline", what)
+			t.Fatalf("%s did not happen in %s, when %s ran out", what, time.Since(started).Round(time.Millisecond), by)
 		}
 		time.Sleep(step) // fixed-wait: the poll interval of a condition wait, not a bound
 	}

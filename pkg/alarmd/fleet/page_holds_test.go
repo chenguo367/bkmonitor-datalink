@@ -159,14 +159,11 @@ func TestASharedReadHoldsUntilItsLastUserLetsGo(t *testing.T) {
 	go func() { answers <- reads.do(first, "k", read, gone) }()
 	<-started
 	go func() { answers <- reads.do(second, "k", read, gone) }()
-	for deadline := testwait.Deadline(t); time.Now().Before(deadline); time.Sleep(time.Millisecond) { // fixed-wait: the poll interval of a condition wait bounded by the test deadline
+	testwait.Until(t, "both requests on the one read in flight", func() bool {
 		reads.mu.Lock()
-		joined := reads.flights["k"] != nil && reads.flights["k"].waiters == 2
-		reads.mu.Unlock()
-		if joined {
-			break
-		}
-	}
+		defer reads.mu.Unlock()
+		return reads.flights["k"] != nil && reads.flights["k"].waiters == 2
+	})
 	close(finish)
 	<-answers
 	<-answers

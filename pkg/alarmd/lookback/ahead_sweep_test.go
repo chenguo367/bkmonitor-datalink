@@ -86,9 +86,7 @@ func serialRun(t *testing.T, period, hold time.Duration, slots int) (outcomes, o
 			f.clock.set(now)
 			f.engine.StepEarly(ctx)
 			f.engine.Step(ctx)
-			for deadline := testwait.Deadline(t); running() && time.Now().Before(deadline); {
-				time.Sleep(time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
-			}
+			testwait.Until(t, "the trial started on the way answering", func() bool { return !running() })
 		}
 		f.clock.set(until)
 	}

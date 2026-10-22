@@ -52,9 +52,10 @@ func TestALargeSetIsReadOnItsOwnOneAtATime(t *testing.T) {
 		t.Fatal(err)
 	}
 	cache.Refresh(context.Background())
-	// The round took the one large-read slot before it returned, so the set
-	// it handed off is the only one that can start; wait for it to.
 	testwait.Until(t, "a large set read on its own", func() bool { mu.Lock(); defer mu.Unlock(); return len(own) > 0 })
+	// A second large read, had the round started one beside the first, is on
+	// its way by now; one that must not start sends nothing to wait on.
+	time.Sleep(50 * time.Millisecond) // fixed-wait: an absence window for a second large read beside the first
 	mu.Lock()
 	started := len(own)
 	mu.Unlock()

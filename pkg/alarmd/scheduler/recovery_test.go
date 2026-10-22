@@ -267,7 +267,9 @@ func TestQueryPermitDeadlineRemovesQueuedWaiterBeforeGrant(t *testing.T) {
 			time.Now().Add(100*time.Millisecond))
 		done <- acquireErr
 	}()
-	waitForPermitQueue(t, flights, 1, 0)
+	// It waits queued for at most its 100 ms, which a poll of the queue can
+	// miss; the count of callers that ever queued stays.
+	testwait.Until(t, "the expiring caller queued", func() bool { return flights.QueryPermitOccupancy().Queued >= 1 })
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.DeadlineExceeded) {
@@ -476,7 +478,7 @@ func TestAChannelNotGrantedNamesWhy(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	deadline := testwait.Deadline(t)
+	deadline := time.Now().Add(time.Minute)
 	holder, err := flights.AcquireRecoveryChannels(ctx, execution.SlotIdentity{QueryGroup: "holder", EvaluationTime: 60}, execution.OperationReplay, deadline, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -535,7 +537,7 @@ func TestAPhysicalPermitNotGrantedNamesWhy(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	deadline := testwait.Deadline(t)
+	deadline := time.Now().Add(time.Minute)
 	holder, err := flights.AcquireQueryPermit(ctx, execution.SlotIdentity{QueryGroup: "holder", EvaluationTime: 60}, execution.OperationNormal, deadline)
 	if err != nil {
 		t.Fatal(err)
@@ -694,7 +696,7 @@ func TestAPermitWaitLineSaysHowTheWaitEnded(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	deadline := testwait.Deadline(t)
+	deadline := time.Now().Add(time.Minute)
 	holder, err := flights.AcquireQueryPermit(ctx, execution.SlotIdentity{QueryGroup: "holder", EvaluationTime: 60}, execution.OperationNormal, deadline)
 	if err != nil {
 		t.Fatal(err)

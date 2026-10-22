@@ -93,12 +93,13 @@ func TestAnUnconfirmedSetLocationIsNotRead(t *testing.T) {
 	if err := copy.TrackOwned(key); err != nil {
 		t.Fatal(err)
 	}
-	// Give the copy every chance to read: rounds until its subscription has
-	// had time to come up and a read of a reachable location would land.
-	deadline := testwait.Deadline(t)
-	for time.Now().Before(deadline) {
+	// Give the copy every chance to read: rounds for two seconds, time for its
+	// subscription to come up and a read of a reachable location to land. A
+	// read that must not happen sends nothing to wait on.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) { // fixed-wait: the two-second absence window above
 		copy.Refresh(ctx)
-		time.Sleep(20 * time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
+		time.Sleep(20 * time.Millisecond) // fixed-wait: spaces the refreshes inside the absence window
 	}
 	if copy.Contains(key.TenantID, key.StrategyID, "theirs") {
 		t.Fatal("the gate answered from the fallback location's set, which the Console never named")

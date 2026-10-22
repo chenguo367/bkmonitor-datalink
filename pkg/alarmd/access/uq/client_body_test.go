@@ -114,7 +114,8 @@ func TestAQueryWhoseBodyStopsPartwayNamesItself(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A second for the answer to begin, well inside the server's 2 s stall:
+	// A second for the answer to begin, well inside the server's stall, which
+	// lasts until the request ends:
 	// this case is a body that stops after its headers, and a deadline the
 	// headers could miss under a loaded run reads as a request that never got
 	// an answer instead (a transport timeout, no body failure at all).
@@ -238,7 +239,7 @@ func TestOnlyABodysTransportFailureIsNamed(t *testing.T) {
 // own class.
 func TestABodyDeadlineIsNamedForWhoHeldTheTime(t *testing.T) {
 	client := &Client{now: time.Now}
-	deadline := testwait.Deadline(t)
+	deadline := time.Now().Add(-time.Second)
 	expired, cancel := context.WithDeadline(context.Background(), deadline) // fixed-wait: a deadline the case sets in the past
 	defer cancel()
 	attempt := queryIdentity{Budget: queryBudget{StartUnixMilli: deadline.Add(-time.Minute).UnixMilli(), ReadyAtUnixMilli: deadline.Add(-time.Minute).UnixMilli(),

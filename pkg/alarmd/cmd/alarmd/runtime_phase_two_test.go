@@ -1274,7 +1274,6 @@ func TestPhaseTwoWorkerBundleNeverRegistersReadyAfterDraining(t *testing.T) {
 	control := &fakePhaseTwoControl{queryGroups: []execution.QueryGroupIdentity{"query-group-1"}}
 	renewalStarted := make(chan struct{})
 	releaseRenewal := make(chan struct{})
-	drainingObserved := make(chan struct{})
 	var callsMu sync.Mutex
 	readyCalls := 0
 	owner := &fakePhaseTwoOwnership{assigned: []execution.QueryGroupIdentity{"query-group-1"}, runner: newFakePhaseTwoQueryGroup()}
@@ -1289,9 +1288,6 @@ func TestPhaseTwoWorkerBundleNeverRegistersReadyAfterDraining(t *testing.T) {
 				return
 			}
 		}
-		if registration.AssignmentReadiness == ownership.WorkerDraining {
-			close(drainingObserved)
-		}
 		callsMu.Unlock()
 	}
 	bundle := mustPhaseTwoWorkerBundle(t, cfg, newPhaseTwoApplicationHealth(), control, owner)
@@ -1301,10 +1297,13 @@ func TestPhaseTwoWorkerBundleNeverRegistersReadyAfterDraining(t *testing.T) {
 	waitSignal(t, renewalStarted, "READY registration renewal")
 	shutdownDone := make(chan error, 1)
 	go func() { shutdownDone <- bundle.Shutdown(context.Background()) }()
-	select {
-	case <-drainingObserved:
-	case <-testwait.Expired(t):
-	}
+	// The renewal is held until Shutdown has begun draining: from then on a
+	// READY that lands would undo the DRAINING it registers.
+	testwait.Until(t, "Shutdown beginning to drain", func() bool {
+		bundle.mu.Lock()
+		defer bundle.mu.Unlock()
+		return bundle.draining
+	})
 	close(releaseRenewal)
 	if err := <-shutdownDone; err != nil {
 		t.Fatal(err)

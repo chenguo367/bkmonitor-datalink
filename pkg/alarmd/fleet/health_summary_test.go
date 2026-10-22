@@ -343,8 +343,7 @@ func TestAHealthReadItsCallerLeftRecordsNoVerdict(t *testing.T) {
 		defer close(served)
 		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/health", nil).WithContext(ctx))
 	}()
-	for deadline := testwait.Deadline(t); reader.count() == 0 && time.Now().Before(deadline); time.Sleep(time.Millisecond) { // fixed-wait: the poll interval of a condition wait bounded by the test deadline
-	}
+	testwait.Until(t, "the scrape reading the replicas", func() bool { return reader.count() > 0 })
 	leave()
 	<-served
 	if history, _ := service.VerdictHistory(); len(history) != 0 {
