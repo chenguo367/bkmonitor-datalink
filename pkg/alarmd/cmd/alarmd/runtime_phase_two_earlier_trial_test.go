@@ -11,14 +11,12 @@ package main
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
 )
 
@@ -148,12 +146,12 @@ func heldTrialRun(t *testing.T, f *cutoverStallFixture, arrival, span time.Durat
 		}
 		if next := f.runner.NextReadyAt(); !next.After(f.now()) {
 			result, _, err := f.runner.RunOne(ctx)
-			if errors.Is(err, ownership.ErrStaleFence) {
-				t.Fatalf("RunOne at %s: the group's lease ran out on the fixture's clock, and no Slot after it runs: %v",
-					f.now().UTC().Format(time.TimeOnly), err)
-			}
+			// Every Slot of the run is run to its end. One that ends in an
+			// error - its lease run out on the fixture's clock
+			// (ErrStaleFence), or anything else - leaves the rounds after it
+			// to pass on what came before.
 			if err != nil {
-				t.Logf("RunOne at %s: %v", f.now().UTC().Format(time.TimeOnly), err)
+				t.Fatalf("RunOne at %s: %v", f.now().UTC().Format(time.TimeOnly), err)
 			}
 			// A Slot the scheduler gave up on and skipped unevaluated.
 			if result.ReasonCode == "GAP_SKIPPED" {
