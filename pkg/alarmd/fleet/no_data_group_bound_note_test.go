@@ -68,3 +68,27 @@ func TestANoDataGroupBoundNoteAsksNobodyToAct(t *testing.T) {
 	}
 	t.Fatal("no CONFIG_NOTED line")
 }
+
+// On the board the note decides nothing: a row's action comes from its
+// checks, and the note raises none, so a detecting strategy whose only extra
+// is the note has urgency none and no reason sentence. The note's own words
+// asking nobody to act is held by the case above.
+func TestANoDataGroupBoundNoteLeavesTheBoardRowWithNothingToDo(t *testing.T) {
+	facts := diagnosisFacts()
+	facts["4120"] = StrategyLookupFacts{Available: true, Found: true, Publication: StrategyPublication{SnapshotRevision: "s1", Epoch: 7},
+		Plans: plans(planA),
+		Dispositions: []StrategyDisposition{
+			{Scope: "PLAN", Disposition: "ACCEPTED"},
+			{Scope: "PLAN", Disposition: "CONFIG_NOTED", Reason: "NO_DATA_GROUP_BOUND_ABOVE_DEFAULT",
+				FieldPath: "items[0].no_data_config.max_groups", Detail: "max_groups=200000 default=100000"}}}
+	rig := newDiagnosisRig(t, facts, nil)
+	rig.universe = []string{"4120"}
+	page := rig.page(t, "", 0)
+	if len(page.Strategies) != 1 || page.Strategies[0].Verdict != StateDetecting {
+		t.Fatalf("diagnosis rows = %+v, want the one strategy detecting", page.Strategies)
+	}
+	row := page.Strategies[0]
+	if urgency, reason := urgencyOf(row), strategyReasonOf(row, time.Now()); urgency != UrgencyNone || reason != nil {
+		t.Fatalf("urgency %s reason %+v, want none and no reason: the owner chose this cost", urgency, reason)
+	}
+}
