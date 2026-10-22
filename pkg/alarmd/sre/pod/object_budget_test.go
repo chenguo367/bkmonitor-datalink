@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 func manyConfigMaps(n int) string {
@@ -32,10 +34,10 @@ func manyConfigMaps(n int) string {
 // where to resume, and it is not clean.
 func TestADryRunOutOfTimeKeepsWhatItCheckedAndSaysWhereToResume(t *testing.T) {
 	runner := &fakeDryRunner{applied: func(_ string, object map[string]any) (*unstructured.Unstructured, error) {
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond) // fixed-wait: the dry run's per-object time, which the case sets
 		return &unstructured.Unstructured{Object: object}, nil
 	}}
-	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Millisecond) // fixed-wait: the operation's deadline the case runs out
 	defer cancel()
 	receipt, err := dryRunProvider(t, runner).DryRun(ctx, DryRunRequest{Namespace: "ns1", Manifests: manyConfigMaps(10)})
 	if err != nil {
@@ -67,10 +69,10 @@ func TestAnApplyOutOfTimeSendsNothingPastWhereItStopped(t *testing.T) {
 	sent := 0
 	writer := &fakeWriter{applied: func(_ string, object map[string]any, _ bool) (*unstructured.Unstructured, error) {
 		sent++
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond) // fixed-wait: the apply's per-object time, which the case sets
 		return &unstructured.Unstructured{Object: object}, nil
 	}}
-	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Millisecond) // fixed-wait: the operation's deadline the case runs out
 	defer cancel()
 	receipt, err := writeProvider(t, runner, writer).Apply(ctx, ApplyRequest{Namespace: "ns1", Manifests: manyConfigMaps(10)})
 	if err != nil {
@@ -79,7 +81,7 @@ func TestAnApplyOutOfTimeSendsNothingPastWhereItStopped(t *testing.T) {
 	if receipt.ResumeFrom == nil || sent != *receipt.ResumeFrom || receipt.Counts[WriteNotAttempted] != 10-sent || len(receipt.Objects) != 10 {
 		t.Fatalf("sent %d, resume %v, counts %+v", sent, receipt.ResumeFrom, receipt.Counts)
 	}
-	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Minute)
+	ctx2, cancel2 := context.WithCancel(testwait.Context(t))
 	defer cancel2()
 	sent = 0
 	if whole, err := writeProvider(t, runner, writer).Apply(ctx2, ApplyRequest{Namespace: "ns1", Manifests: manyConfigMaps(3)}); err != nil || whole.ResumeFrom != nil || sent != 3 {

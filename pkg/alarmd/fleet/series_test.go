@@ -14,7 +14,16 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
+
+// trendsReading says whether a read of window is in progress in trends.
+func trendsReading(trends *Trends, window SeriesWindow) bool {
+	trends.mu.Lock()
+	defer trends.mu.Unlock()
+	return trends.inFlight[window.Key] != nil
+}
 
 type rangeCall struct {
 	space, promQL string
@@ -379,7 +388,7 @@ func TestConcurrentReadsOfAWindowShareOneRead(t *testing.T) {
 			trends.read(context.Background(), window, at)
 		}()
 	}
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond) // fixed-wait: a beat for the four callers to reach the read in progress; nothing observable marks that a caller waits on a trends flight (open)
 	close(release)
 	group.Wait()
 	lines := 0
@@ -404,7 +413,7 @@ func TestACallerLeavingDoesNotCancelTheSharedRead(t *testing.T) {
 	at := time.Unix(1789006380, 0)
 	first := make(chan TrendsAnswer, 1)
 	go func() { first <- trends.read(context.Background(), window, at) }()
-	time.Sleep(20 * time.Millisecond)
+	testwait.Until(t, "the first caller's read in progress", func() bool { return trendsReading(trends, window) })
 	leaving, cancel := context.WithCancel(context.Background())
 	cancel()
 	if left := trends.read(leaving, window, at); len(left.Trends) != 0 {
@@ -429,10 +438,10 @@ func TestTheStartingCallerLeavingDoesNotCancelTheSharedRead(t *testing.T) {
 	at := time.Unix(1789006380, 0)
 	starting, cancel := context.WithCancel(context.Background())
 	go trends.read(starting, window, at)
-	time.Sleep(20 * time.Millisecond)
+	testwait.Until(t, "the starting caller's read in progress", func() bool { return trendsReading(trends, window) })
 	waiting := make(chan TrendsAnswer, 1)
 	go func() { waiting <- trends.read(context.Background(), window, at) }()
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(20 * time.Millisecond) // fixed-wait: a beat for the waiting caller to join the read in progress; nothing observable marks that a caller waits on a trends flight (open)
 	cancel()
 	close(release)
 	answer := <-waiting
@@ -455,7 +464,7 @@ func TestTheTrendLinesAreReadSideBySide(t *testing.T) {
 		t.Fatalf("the catalog has %d lines; the test needs several", lines)
 	}
 	provider := &stubRange{answer: func(string, string) (SeriesRange, error) {
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond) // fixed-wait: the provider's 200 ms per line, which the case sets
 		return SeriesRange{}, nil
 	}}
 	trends := &Trends{Range: provider, Spaces: resolvedSpaces, Scope: trendTestScope, ComputeTimeout: 600 * time.Millisecond}
@@ -484,7 +493,7 @@ func TestTheTrendLinesAreReadSideBySide(t *testing.T) {
 // next caller reads again rather than taking it as whole for TrendsMaxAge.
 func TestACutTrendsAnswerIsNotKept(t *testing.T) {
 	provider := &stubRange{answer: func(string, string) (SeriesRange, error) {
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(300 * time.Millisecond) // fixed-wait: the provider's answer time past the read's 100 ms, which the case sets
 		return SeriesRange{}, nil
 	}}
 	trends := &Trends{Range: provider, Spaces: resolvedSpaces, Scope: trendTestScope, ComputeTimeout: 100 * time.Millisecond}

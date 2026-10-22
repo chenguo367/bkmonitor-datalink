@@ -66,7 +66,7 @@ func TestATransportDeadlineSaysWhichDeadlineWasOnTheRequest(t *testing.T) {
 	}
 
 	// A caller whose own deadline is the earlier one set the request's.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second) // fixed-wait: a caller deadline earlier than the attempt's, which the case needs
 	defer cancel()
 	completion, err = client.Execute(ctx, attempt, &collectingSink{})
 	if err != nil {

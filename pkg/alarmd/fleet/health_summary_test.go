@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
@@ -342,7 +343,7 @@ func TestAHealthReadItsCallerLeftRecordsNoVerdict(t *testing.T) {
 		defer close(served)
 		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/health", nil).WithContext(ctx))
 	}()
-	for deadline := time.Now().Add(2 * time.Second); reader.count() == 0 && time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+	for deadline := testwait.Deadline(t); reader.count() == 0 && time.Now().Before(deadline); time.Sleep(time.Millisecond) { // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	leave()
 	<-served
@@ -425,10 +426,10 @@ func TestReadersThatComeDuringASummarizedReadShareIt(t *testing.T) {
 		answers <- view
 	}
 	go read()
-	for deadline := time.Now().Add(2 * time.Second); reader.count() == 0 && time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+	for deadline := testwait.Deadline(t); reader.count() == 0 && time.Now().Before(deadline); time.Sleep(time.Millisecond) { // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	go read()
-	time.Sleep(100 * time.Millisecond)
+	testwait.Until(t, "the second reader waiting on the summarized read", func() bool { return sharedWaiters(&service.summaries) == 2 })
 	close(reader.release)
 	first, second := <-answers, <-answers
 	if reader.count() != 1 || first.AnomaliesTotal != 2 || second.AnomaliesTotal != 2 {

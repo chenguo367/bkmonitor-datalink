@@ -40,7 +40,7 @@ type namespaceAPI struct {
 }
 
 func (a *namespaceAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	time.Sleep(a.delay)
+	time.Sleep(a.delay) // fixed-wait: the API's answer delay, which the case sets
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if r.Method != http.MethodGet {

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 func heldQuery(f *fixture) Query {
@@ -290,7 +291,7 @@ func TestWholeWindowArrivalPublishesTheFirstConfirmedAgeBeforeTheDeepProbe(t *te
 		if item.Contract != q.Contract || item.ArrivalAge != 210*time.Second || item.Rung != RungNames[0] || !reflect.DeepEqual(item.Buckets, []int64{slot - 60}) {
 			t.Fatalf("whole-window evidence %+v", item)
 		}
-	case <-time.After(time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("confirmed arrival waited for the deep probe")
 	}
 	if f.group("qg").probe == nil {
@@ -330,7 +331,7 @@ func TestPartialRevisionAndVanishingValuesDoNotRaiseTheReadHold(t *testing.T) {
 				if got != reason || f.engine.Stats().Sources[sourceLog].ReadHoldIgnored[reason] != 1 {
 					t.Fatalf("ignored=%s want %s", got, reason)
 				}
-			case <-time.After(time.Second):
+			case <-testwait.Expired(t):
 				t.Fatal("ignored evidence was not counted separately")
 			}
 		})

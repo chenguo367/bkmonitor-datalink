@@ -19,6 +19,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 func overviewHealth() HealthResponse {
@@ -155,7 +157,7 @@ func TestTheOverviewIsComputedOncePerWindow(t *testing.T) {
 	var computed atomic.Int32
 	cache := newOverviewCache(now, func() Overview {
 		computed.Add(1)
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond) // fixed-wait: the computation's own time, which the case sets so the concurrent callers arrive while it runs
 		return Overview{GeneratedAt: now()}
 	})
 	var wait sync.WaitGroup
@@ -302,7 +304,7 @@ func TestAPanickingOverviewComputationDoesNotStrandTheNextCaller(t *testing.T) {
 		if got.Verdict.State != OverviewOK || calls.Load() != 2 {
 			t.Fatalf("after the panic: %+v in %d calls, want a fresh computation", got, calls.Load())
 		}
-	case <-time.After(5 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("the caller after a panicking computation is stranded")
 	}
 }
@@ -327,14 +329,14 @@ func TestACallerWaitingOnAPanickingComputationIsReleased(t *testing.T) {
 	<-started
 	waiter := make(chan Overview, 1)
 	go func() { waiter <- cache.get() }()
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond) // fixed-wait: a beat for the waiter to reach the computation in progress; nothing observable marks that it waits on it (open)
 	close(release)
 	select {
 	case got := <-waiter:
 		if got.Verdict.State != OverviewOK || calls.Load() != 2 {
 			t.Fatalf("the waiter got %+v after %d computations, want its own", got, calls.Load())
 		}
-	case <-time.After(5 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("a caller waiting on the panicking computation is stranded")
 	}
 }

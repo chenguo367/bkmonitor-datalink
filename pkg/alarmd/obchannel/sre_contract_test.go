@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/cliauth"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 type scopedTestAuth struct {
@@ -111,7 +112,7 @@ func TestReadsSREReadsAndExecutionsAllRunAtOnce(t *testing.T) {
 		select {
 		case <-all:
 			return Outcome{Complete: true, Value: map[string]any{"remote_state": "remote_completed"}}
-		case <-time.After(5 * time.Second):
+		case <-testwait.Expired(t):
 			return Outcome{Error: &Failure{Code: "not_together", Message: "the operations did not run at once"}}
 		}
 	}

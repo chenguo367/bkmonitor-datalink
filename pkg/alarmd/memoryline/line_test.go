@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 // fakeHeap is the runtime's reading, set by the test.
@@ -222,7 +224,7 @@ func TestTheReserveIsTakenAsTheCollectionEnds(t *testing.T) {
 	line.Reserve("detection", func() (uint64, uint64) { return 1 << 30, held.Load() })
 	before := line.read().cycles
 	runtime.GC()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := testwait.Deadline(t)
 	for {
 		line.mu.Lock()
 		cycle := line.cycle
@@ -233,7 +235,7 @@ func TestTheReserveIsTakenAsTheCollectionEnds(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatalf("no snapshot after the collection: the line is at cycle %d, the collection made it past %d", cycle, before)
 		}
-		time.Sleep(time.Millisecond)
+		time.Sleep(time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	// Detection fills 900 MiB of its budget before observation asks.
 	held.Store(900 << 20)
@@ -250,13 +252,13 @@ func TestAClosedLineIsToldOfNoMoreCollections(t *testing.T) {
 	line.Close()
 	// The collection whose finalizer sees the line closed.
 	runtime.GC()
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(20 * time.Millisecond) // fixed-wait: a beat for the finalizer of the collection after Close to run; nothing observable marks that it has run, since it returns at once on a closed line (open)
 	line.mu.Lock()
 	cycle := line.cycle
 	line.mu.Unlock()
 	for range 3 {
 		runtime.GC()
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond) // fixed-wait: a window for each collection's finalizer in which the closed line's cycle must not move; an absence sends no signal to wait on
 	}
 	line.mu.Lock()
 	defer line.mu.Unlock()

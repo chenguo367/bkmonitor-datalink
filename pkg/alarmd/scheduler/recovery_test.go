@@ -15,6 +15,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
@@ -272,7 +273,7 @@ func TestQueryPermitDeadlineRemovesQueuedWaiterBeforeGrant(t *testing.T) {
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("AcquireQueryPermit(expiring) error = %v", err)
 		}
-	case <-time.After(time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("queued permit did not expire at its business deadline")
 	}
 	if snapshot := flights.queryPermitSnapshot(); snapshot.NormalWaiting != 0 || snapshot.Inflight != 1 {
@@ -475,7 +476,7 @@ func TestAChannelNotGrantedNamesWhy(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	deadline := time.Now().Add(time.Minute)
+	deadline := testwait.Deadline(t)
 	holder, err := flights.AcquireRecoveryChannels(ctx, execution.SlotIdentity{QueryGroup: "holder", EvaluationTime: 60}, execution.OperationReplay, deadline, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -534,7 +535,7 @@ func TestAPhysicalPermitNotGrantedNamesWhy(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	deadline := time.Now().Add(time.Minute)
+	deadline := testwait.Deadline(t)
 	holder, err := flights.AcquireQueryPermit(ctx, execution.SlotIdentity{QueryGroup: "holder", EvaluationTime: 60}, execution.OperationNormal, deadline)
 	if err != nil {
 		t.Fatal(err)
@@ -646,13 +647,13 @@ func equalOperations(left, right []execution.Operation) bool {
 
 func waitForPermitQueue(t *testing.T, flights *FlightCoordinator, normal, recovery int) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := testwait.Deadline(t)
 	for time.Now().Before(deadline) {
 		snapshot := flights.queryPermitSnapshot()
 		if snapshot.NormalWaiting == normal && snapshot.RecoveryWaiting == recovery {
 			return
 		}
-		time.Sleep(time.Millisecond)
+		time.Sleep(time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	t.Fatalf("permit queue did not settle: %+v", flights.queryPermitSnapshot())
 }
@@ -662,7 +663,7 @@ func receivePermit(t *testing.T, permits <-chan *QueryPermit) *QueryPermit {
 	select {
 	case permit := <-permits:
 		return permit
-	case <-time.After(time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("timed out waiting for query permit")
 		return nil
 	}
@@ -693,7 +694,7 @@ func TestAPermitWaitLineSaysHowTheWaitEnded(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	deadline := time.Now().Add(time.Minute)
+	deadline := testwait.Deadline(t)
 	holder, err := flights.AcquireQueryPermit(ctx, execution.SlotIdentity{QueryGroup: "holder", EvaluationTime: 60}, execution.OperationNormal, deadline)
 	if err != nil {
 		t.Fatal(err)

@@ -19,6 +19,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 // scalePods is a namespace of n single-replica Deployments, as a test
@@ -98,7 +100,7 @@ func TestDiscoverOverAHundredOwnersFinishesInsideTheDeadline(t *testing.T) {
 	provider := mustProvider(t, Options{Client: client})
 	// The operation's default deadline is 30 s; the read must take a small
 	// part of it.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithCancel(testwait.Context(t))
 	defer cancel()
 	started := time.Now()
 	result, err := provider.Discover(ctx, DiscoverRequest{Namespace: "ns1"})

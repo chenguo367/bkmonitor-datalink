@@ -99,7 +99,7 @@ func loadingServer(t *testing.T) (string, <-chan error) {
 				write(loading)
 			case name == "SET", name == "GET" && args[0] == "late":
 				// Loading ends meanwhile: this runs on its own.
-				time.Sleep(100 * time.Millisecond)
+				time.Sleep(100 * time.Millisecond) // fixed-wait: the fake server's late answer, the delay the note above describes
 				if name == "SET" {
 					write("+OK\r\n")
 				} else {
@@ -122,7 +122,7 @@ func loadingServer(t *testing.T) (string, <-chan error) {
 // call's replies, if it left any, have reached the socket.
 func nextGet(t *testing.T, client *redis.Client) (string, error) {
 	t.Helper()
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond) // fixed-wait: a beat for the late replies the fake server sends 100 ms after each command to reach the socket, if the call left any; nothing observable marks that they have (open)
 	return client.Get(context.Background(), "k").Result()
 }
 

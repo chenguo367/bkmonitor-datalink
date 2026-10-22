@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 func lookbackFlights(t *testing.T, clock *mutableClock) *FlightCoordinator {
@@ -104,12 +105,12 @@ func TestTheLookbackNeverOvertakesAWaitingQuery(t *testing.T) {
 		}
 		granted <- permit
 	}()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := testwait.Deadline(t)
 	for flights.QueryPermitOccupancy().Waiting["normal"] == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("the formal query never queued")
 		}
-		time.Sleep(time.Millisecond)
+		time.Sleep(time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	if permit, reason := flights.TryAcquireLookbackPermit(); permit != nil || reason != LookbackRefusedWaiting {
 		t.Fatalf("with a formal query waiting the lookback = %v %q, want refused", permit, reason)
@@ -118,7 +119,7 @@ func TestTheLookbackNeverOvertakesAWaitingQuery(t *testing.T) {
 	select {
 	case permit := <-granted:
 		permit.Release()
-	case <-time.After(5 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("releasing the lookback permit did not hand it to the waiting query")
 	}
 	for _, held := range normal {
@@ -200,28 +201,28 @@ func TestAWaitingFormalQueryMakesTheLookbackYield(t *testing.T) {
 	first := wait("qg-first")
 	select {
 	case <-lookback.Yield():
-	case <-time.After(5 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("a formal query waits and the lookback was not asked to yield")
 	}
 	second := wait("qg-second")
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := testwait.Deadline(t)
 	for flights.QueryPermitOccupancy().Waiting["normal"] != 2 {
 		if time.Now().After(deadline) {
 			t.Fatal("the second formal query never queued")
 		}
-		time.Sleep(time.Millisecond)
+		time.Sleep(time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	lookback.Release()
 	select {
 	case permit := <-first:
 		permit.Release()
-	case <-time.After(5 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("the permit the lookback gave back did not reach the waiting query")
 	}
 	select {
 	case permit := <-second:
 		permit.Release()
-	case <-time.After(5 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("the second waiter was not granted")
 	}
 	for _, held := range normal {
@@ -266,7 +267,7 @@ func TestEveryLookbackYieldsToOneWaitingQueryAtTheMemoryShare(t *testing.T) {
 	for index, lookback := range lookbacks {
 		select {
 		case <-lookback.Yield():
-		case <-time.After(5 * time.Second):
+		case <-testwait.Expired(t):
 			t.Fatalf("a formal query waits and lookback permit %d of 32 was not asked to yield", index+1)
 		}
 	}
@@ -274,7 +275,7 @@ func TestEveryLookbackYieldsToOneWaitingQueryAtTheMemoryShare(t *testing.T) {
 	select {
 	case permit := <-granted:
 		permit.Release()
-	case <-time.After(5 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("the permit a lookback gave back did not reach the waiting query")
 	}
 	for _, lookback := range lookbacks {

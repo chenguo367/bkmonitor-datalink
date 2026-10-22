@@ -17,6 +17,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 type warmingPeakFixture struct {
@@ -157,7 +159,7 @@ func TestWarmingPeakEmitsOutsideItsLock(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("the hour's line deadlocked")
 	}
 	if len(fixture.lines) != 1 {

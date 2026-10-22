@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 // A read asked to yield is timed from the yield to the moment it gave its
@@ -85,7 +86,7 @@ func TestAReadStillHoldingItsPermitPastItsDeadlineAfterAYieldIsAFault(t *testing
 		defer engine.mu.Unlock()
 		return engine.groups["qg"].sample != nil && !engine.groups["qg"].sample.yieldAt.IsZero()
 	}
-	for deadline := time.Now().Add(5 * time.Second); !yielded(); time.Sleep(time.Millisecond) {
+	for deadline := testwait.Deadline(t); !yielded(); time.Sleep(time.Millisecond) { // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 		if time.Now().After(deadline) {
 			t.Fatal("the yield was never noted")
 		}
@@ -106,7 +107,7 @@ func TestAReadStillHoldingItsPermitPastItsDeadlineAfterAYieldIsAFault(t *testing
 	}
 	close(stop)
 	stats := func() Stats {
-		for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		for deadline := testwait.Deadline(t); ; time.Sleep(time.Millisecond) { // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 			if stats := engine.Stats(); stats.Sources[sourceLog].YieldReleases == 1 {
 				return stats
 			}
@@ -152,17 +153,17 @@ func TestAYieldAfterTheReadsContextEndedIsStillWatched(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	engine.Step(ctx)
 	<-started
-	cancel() // the read's context ends; the read does not
-	time.Sleep(50 * time.Millisecond)
+	cancel()                          // the read's context ends; the read does not
+	time.Sleep(50 * time.Millisecond) // fixed-wait: a beat for the cancelled read; nothing observable marks that it has seen the cancel (open)
 	close(yield)
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond) // fixed-wait: a beat for the yield watcher; nothing observable marks that it has taken the yield (open)
 	c.set(c.now().Add(RecheckTimeout + time.Second))
 	engine.Step(context.Background())
 	if n := engine.Stats().Faults[FaultYieldOverdue]; n != 1 {
 		t.Fatalf("yield_overdue %d, want the yield after the read's context ended watched and counted", n)
 	}
 	close(stop)
-	for deadline := time.Now().Add(5 * time.Second); engine.Stats().Sources[sourceLog].YieldReleases != 1; time.Sleep(time.Millisecond) {
+	for deadline := testwait.Deadline(t); engine.Stats().Sources[sourceLog].YieldReleases != 1; time.Sleep(time.Millisecond) { // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 		if time.Now().After(deadline) {
 			t.Fatal("the release after the late yield was not timed")
 		}
@@ -190,7 +191,7 @@ func TestAReadNeverAskedToYieldSettlesItsRung(t *testing.T) {
 	read.Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
 	c.set(c.now().Add(rungDelay(0, minute)))
 	engine.Step(context.Background())
-	for deadline := time.Now().Add(5 * time.Second); engine.Stats().Sources[sourceLog].Samples[OutcomeCompleted] != 1; time.Sleep(time.Millisecond) {
+	for deadline := testwait.Deadline(t); engine.Stats().Sources[sourceLog].Samples[OutcomeCompleted] != 1; time.Sleep(time.Millisecond) { // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 		if time.Now().After(deadline) {
 			t.Fatalf("a read no formal query asked to yield never settled: %v", engine.Stats().Sources[sourceLog].Rechecks[RungNames[0]])
 		}
@@ -216,7 +217,7 @@ func TestAYieldAfterTheReadCameBackIsNotTimed(t *testing.T) {
 			// and the release lingers long enough for the watcher to take
 			// the yield before a read that marked itself back only now
 			// would have.
-			return func() { close(yield); time.Sleep(50 * time.Millisecond) }, yield, ""
+			return func() { close(yield); time.Sleep(50 * time.Millisecond) }, yield, "" // fixed-wait: the release lingers, as the case describes above
 		},
 		Owns: func(execution.QueryGroupIdentity) bool { return true }, Owned: func() int { return 1 },
 	})
@@ -229,7 +230,7 @@ func TestAYieldAfterTheReadCameBackIsNotTimed(t *testing.T) {
 	c.set(c.now().Add(rungDelay(0, minute)))
 	engine.Step(context.Background())
 	var source SourceStats
-	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+	for deadline := testwait.Deadline(t); ; time.Sleep(time.Millisecond) { // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 		source = engine.Stats().Sources[sourceLog]
 		if source.Rechecks[RungNames[0]][RecheckCompared] == 1 {
 			break

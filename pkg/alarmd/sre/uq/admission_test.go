@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 // Native queries run side by side: a server that answers none until it has
@@ -29,7 +31,7 @@ func TestNativeQueriesRunSideBySide(t *testing.T) {
 		arrived.Done()
 		select {
 		case <-all:
-		case <-time.After(5 * time.Second):
+		case <-testwait.Expired(t):
 			http.Error(w, "the queries did not arrive together", http.StatusGatewayTimeout)
 			return
 		}
@@ -56,7 +58,7 @@ func TestNativeQueriesRunSideBySide(t *testing.T) {
 func TestTwoFailureReadsAtOnceBothComplete(t *testing.T) {
 	base := failureNow.Add(-time.Hour).UnixMilli()
 	server := &failureServer{rows: func(from int) ([]map[string]any, int) {
-		time.Sleep(40 * time.Millisecond)
+		time.Sleep(40 * time.Millisecond) // fixed-wait: the server's per-page answer time, which keeps the two reads in flight together
 		page := make([]map[string]any, 0, MaxTraceRows)
 		for i := 0; i < MaxTraceRows; i++ {
 			page = append(page, span(fmt.Sprintf("t%d", from+i), "web", "/busy", 500, nil, base+int64(from+i), 1, nil))

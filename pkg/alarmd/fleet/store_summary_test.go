@@ -219,7 +219,7 @@ func cutInsideScriptCall(client net.Conn, target string) bool {
 		lower := bytes.ToLower(pending)
 		if bytes.Contains(lower, []byte("$7\r\nevalsha\r\n")) || bytes.Contains(lower, []byte("$4\r\neval\r\n")) {
 			_, _ = server.Write(pending[:len(pending)-1])
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond) // fixed-wait: the cutter's pause between sending the partial script call and cutting the connection, a fixture timing the case sets
 			return true
 		}
 		if err != nil {
@@ -474,7 +474,7 @@ func TestADepartedReplicasLookbackLateListGoesWithItsSnapshot(t *testing.T) {
 	if lists, err := store.LoadLookbackLate(context.Background(), []string{"pod-gone"}); err != nil || len(lists) != 1 {
 		t.Fatalf("lists just after the publish = %v error %v, want pod-gone's", lists, err)
 	}
-	time.Sleep(400 * time.Millisecond)
+	time.Sleep(400 * time.Millisecond) // fixed-wait: past the store's 300 ms life on the Redis server's clock, which the fixture cannot move; waiting until the keys go would pass a longer life too
 	if exists := client.Exists(context.Background(), store.lookbackKey("pod-gone"), store.snapshotKey("pod-gone")).Val(); exists != 0 {
 		t.Fatalf("%d of the departed replica's list and snapshot remain past the store's life, want none", exists)
 	}

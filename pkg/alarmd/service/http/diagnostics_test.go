@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 )
 
@@ -204,7 +205,7 @@ func reserveAddress(t *testing.T) string {
 
 func waitForStatus(t *testing.T, url string, want int) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := testwait.Deadline(t)
 	for time.Now().Before(deadline) {
 		response, err := http.Get(url) //nolint:noctx // short-lived readiness probe in a test
 		if err == nil {
@@ -214,7 +215,7 @@ func waitForStatus(t *testing.T, url string, want int) {
 				return
 			}
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	t.Fatal(fmt.Sprintf("%s did not reach status %d before the deadline", url, want))
 }
@@ -271,11 +272,11 @@ func TestQueryListenerDrainsWhileTheDiagnosticsDrainIsStillWaiting(t *testing.T)
 	}()
 	select {
 	case <-entered:
-	case <-time.After(2 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("diagnostics request did not enter its handler")
 	}
 	cancel()
-	deadline := time.NewTimer(2 * time.Second)
+	deadline := time.NewTimer(2 * time.Second) // fixed-wait: must end inside the 10 s shutdown budget the case runs with, past which a drain one after the other would close the query listener too
 	defer deadline.Stop()
 	ticker := time.NewTicker(time.Millisecond)
 	defer ticker.Stop()
@@ -308,7 +309,7 @@ func TestQueryListenerDrainsWhileTheDiagnosticsDrainIsStillWaiting(t *testing.T)
 		if err != nil {
 			t.Fatalf("diagnostics request: %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("diagnostics request did not finish after release")
 	}
 	select {
@@ -316,7 +317,7 @@ func TestQueryListenerDrainsWhileTheDiagnosticsDrainIsStillWaiting(t *testing.T)
 		if err != nil {
 			t.Fatalf("run: %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("Run did not finish after diagnostics drained")
 	}
 }

@@ -19,6 +19,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 )
 
@@ -132,7 +133,7 @@ func TestTheSlotsSampleIsItsPrimaryWindowWhenADependencyIsReadFirst(t *testing.T
 	now = now.Add(time.Duration(lookback.RungSteps[0] * float64(step)))
 	clock.Unlock()
 	engine.Step(context.Background())
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := testwait.Deadline(t)
 	for {
 		recheck.mu.Lock()
 		read := len(recheck.specs)
@@ -143,7 +144,7 @@ func TestTheSlotsSampleIsItsPrimaryWindowWhenADependencyIsReadFirst(t *testing.T
 		if time.Now().After(deadline) {
 			t.Fatalf("no recheck of the sample: %+v", engine.Stats())
 		}
-		time.Sleep(time.Millisecond)
+		time.Sleep(time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	recheck.mu.Lock()
 	defer recheck.mu.Unlock()
@@ -240,7 +241,7 @@ func heldSlotTrialRead(t *testing.T, dependencyFirst, failing bool) {
 	set(heldReady.Add(-hold + execution.LoweredReadHold(hold, step) - lookback.RecheckTimeout))
 	engine.StepEarly(context.Background())
 	if failing {
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond) // fixed-wait: a window in which a failing backend must start no recheck; an absence sends no signal to wait on
 		recheck.mu.Lock()
 		defer recheck.mu.Unlock()
 		if len(recheck.specs) != 0 {
@@ -264,7 +265,7 @@ func heldSlotTrialRead(t *testing.T, dependencyFirst, failing bool) {
 	// Wait for the trial read to have finished, not only to have asked: the
 	// engine counts its bytes in the same step that files its answer, and a
 	// formal first read that finds it still running takes it as overtaken.
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := testwait.Deadline(t)
 	for {
 		var earlier uint64
 		for _, source := range engine.Stats().Sources {
@@ -280,7 +281,7 @@ func heldSlotTrialRead(t *testing.T, dependencyFirst, failing bool) {
 			}
 			t.Fatalf("no trial read was made; earlier-read outcomes %v", reads)
 		}
-		time.Sleep(time.Millisecond)
+		time.Sleep(time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 
 	set(heldReady.Add(time.Second))
@@ -292,7 +293,7 @@ func heldSlotTrialRead(t *testing.T, dependencyFirst, failing bool) {
 		if got.Outcome != lookback.EarlierEqual || !got.Observed {
 			t.Fatalf("trial read outcome %q observed %v, want it compared with the primary's first read and equal", got.Outcome, got.Observed)
 		}
-	case <-time.After(5 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("no trial read evidence after the formal first read")
 	}
 	recheck.mu.Lock()

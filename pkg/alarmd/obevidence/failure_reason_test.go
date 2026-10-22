@@ -32,7 +32,7 @@ func TestAReadOnAConnectionCutWhileIdleSaysWhy(t *testing.T) {
 	if got, _ := readOne(ctx, "fixture", read, "absent"); got.Status != "missing" || got.Reason != "" {
 		t.Fatalf("first read %+v", got)
 	}
-	time.Sleep(2500 * time.Millisecond)
+	time.Sleep(2500 * time.Millisecond) // fixed-wait: past the server's 1 s idle timeout, which its own cron applies; the cut must also have reached this end of the connection before the read, and nothing here observes that
 	got, _ := readOne(ctx, "fixture", read, "absent")
 	if got.Status != "dependency_unavailable" || got.Reason != redisfailure.ConnectionClosed || got.ReasonText == "" {
 		t.Fatalf("read after the idle cut: status %s reason %q text %q", got.Status, got.Reason, got.ReasonText)

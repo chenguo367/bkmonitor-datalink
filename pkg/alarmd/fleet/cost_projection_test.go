@@ -17,6 +17,7 @@ import (
 
 	"github.com/go-redis/redis/v8"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
@@ -189,7 +190,7 @@ func TestCostProjectionTotalBytesAreSharedAndBusyRefreshDoesNotWait(t *testing.T
 		if view.Complete || view.ReadCommands != 0 || view.Deferred != 1 || view.Gaps[0].Reason != "PROJECTION_UNAVAILABLE" {
 			t.Fatalf("busy refresh hidden: %+v", view)
 		}
-	case <-time.After(time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("busy refresh waited for in-flight Redis read")
 	}
 }

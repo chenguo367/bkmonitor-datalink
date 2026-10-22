@@ -373,7 +373,7 @@ func TestShrunkPagesStopAtTheRequestCap(t *testing.T) {
 func TestATopFailuresReadOutOfTimeAnswersWhatItScanned(t *testing.T) {
 	base := failureNow.Add(-time.Hour).UnixMilli()
 	server := &failureServer{rows: func(from int) ([]map[string]any, int) {
-		time.Sleep(150 * time.Millisecond)
+		time.Sleep(150 * time.Millisecond) // fixed-wait: the server's per-page answer time, which the case sets
 		page := make([]map[string]any, 0, MaxTraceRows)
 		for i := 0; i < MaxTraceRows; i++ {
 			page = append(page, span(fmt.Sprintf("t%d", from+i), "web", "/busy", 500, nil, base+int64(from+i), 1, nil))
@@ -381,7 +381,7 @@ func TestATopFailuresReadOutOfTimeAnswersWhatItScanned(t *testing.T) {
 		return page, 10000
 	}}
 	p := failureProvider(t, server, false)
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond) // fixed-wait: the read's deadline the case runs out
 	defer cancel()
 	answer, err := p.TopFailures(ctx, TopFailuresRequest{Egress: "primary", Target: "fixture", Now: failureNow})
 	if err != nil {
@@ -406,7 +406,7 @@ func TestATopFailuresPageCutByTheDeadlineKeepsThePagesBefore(t *testing.T) {
 	base := failureNow.Add(-time.Hour).UnixMilli()
 	server := &failureServer{rows: func(from int) ([]map[string]any, int) {
 		if from > 0 {
-			time.Sleep(2 * time.Second)
+			time.Sleep(2 * time.Second) // fixed-wait: the slow page's answer time past the read's 500 ms, which the case sets
 		}
 		page := make([]map[string]any, 0, MaxTraceRows)
 		for i := 0; i < MaxTraceRows; i++ {
@@ -415,7 +415,7 @@ func TestATopFailuresPageCutByTheDeadlineKeepsThePagesBefore(t *testing.T) {
 		return page, 10000
 	}}
 	p := failureProvider(t, server, false)
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond) // fixed-wait: the read's deadline the case runs out
 	defer cancel()
 	answer, err := p.TopFailures(ctx, TopFailuresRequest{Egress: "primary", Target: "fixture", Now: failureNow})
 	if err != nil || answer.Scanned != MaxTraceRows || len(answer.Groups) == 0 || !answer.Sampled {

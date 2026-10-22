@@ -429,9 +429,9 @@ func TestEveryFailureHasItsName(t *testing.T) {
 	if _, err := gone.Pods(context.Background()); codeOfErr(t, err) != CodeUnreachable {
 		t.Errorf("unreachable: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond) // fixed-wait: a deadline the case lets pass before the read
 	defer cancel()
-	time.Sleep(time.Millisecond)
+	<-ctx.Done()
 	if _, err := newReader(t, &fakeAPI{t: t}).Pods(ctx); codeOfErr(t, err) != CodeUnreachable || !strings.Contains(err.Error(), "deadline") {
 		t.Errorf("past the deadline: %v", err)
 	}
@@ -552,11 +552,11 @@ func TestAScanCutByTheDeadlineAnswersWhatItScanned(t *testing.T) {
 			}
 			_, _ = fmt.Fprintf(w, "2026-09-24T05:00:%02dZ {\"stage\":%q,\"n\":%d}\n", n%60, stage, n)
 			flusher.Flush()
-			time.Sleep(time.Millisecond)
+			time.Sleep(time.Millisecond) // fixed-wait: the stream's pace of a line a millisecond, which the case sets
 		}
 	}
 	reader := newReader(t, api)
-	ctx, cancel := context.WithTimeout(context.Background(), scanMargin+700*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), scanMargin+700*time.Millisecond) // fixed-wait: the read's deadline the case runs out
 	defer cancel()
 	got, err := reader.Logs(ctx, LogRequest{Pod: selfPod, Contains: []string{"schedule_cutover"}, SinceSeconds: 60})
 	if err != nil {

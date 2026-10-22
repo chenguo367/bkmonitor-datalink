@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/racedetector"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 var costA = CostPlanIdentity{"tenant", "business", "healthy-large"}
@@ -248,7 +249,7 @@ func TestCostSummaryObserveNeverWaitsForPublisher(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-testwait.Expired(t):
 		account.mu.Unlock()
 		t.Fatal("execution waited for summary publication")
 	}

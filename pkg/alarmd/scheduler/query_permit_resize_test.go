@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 func acquireNormal(t *testing.T, flights *FlightCoordinator, group string, deadline time.Time) *QueryPermit {
@@ -45,9 +46,7 @@ func TestTheQueryBudgetIsResizedInPlace(t *testing.T) {
 	}
 	granted := make(chan *QueryPermit, 1)
 	go func() { granted <- acquireNormal(t, flights, "late", deadline) }()
-	for flights.queryPermitSnapshot().NormalWaiting == 0 {
-		time.Sleep(time.Millisecond)
-	}
+	testwait.Until(t, "a caller queued for a permit", func() bool { return flights.queryPermitSnapshot().NormalWaiting != 0 })
 	raised := limits
 	raised.ProcessQueryPermits++
 	if err := flights.ResizeQueryLimits(raised); err != nil {
@@ -67,9 +66,7 @@ func TestTheQueryBudgetIsResizedInPlace(t *testing.T) {
 		t.Fatalf("lowering the budget took back permits: %d held", snapshot.Inflight)
 	}
 	go func() { granted <- acquireNormal(t, flights, "later", deadline) }()
-	for flights.queryPermitSnapshot().NormalWaiting == 0 {
-		time.Sleep(time.Millisecond)
-	}
+	testwait.Until(t, "a caller queued for a permit", func() bool { return flights.queryPermitSnapshot().NormalWaiting != 0 })
 	late.Release()
 	for _, permit := range held[:len(held)-lowered.ProcessQueryPermits] {
 		permit.Release()
@@ -77,7 +74,7 @@ func TestTheQueryBudgetIsResizedInPlace(t *testing.T) {
 	select {
 	case <-granted:
 		t.Fatalf("a permit was granted with %d held against a budget of %d", lowered.ProcessQueryPermits, lowered.ProcessQueryPermits)
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(50 * time.Millisecond): // fixed-wait: a window in which no permit may be granted; an absence sends no signal to wait on
 	}
 	held[len(held)-1].Release()
 	(<-granted).Release()

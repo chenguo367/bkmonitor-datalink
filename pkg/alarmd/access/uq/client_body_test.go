@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 const bodyTestSeries = `{"name":"_result0","columns":["_time","_result"],"types":["int64","float64"],"group_keys":["bk_target_ip"],"group_values":["127.0.0.1"],"values":[[1700123456789,12.5]]}`
@@ -22,7 +23,7 @@ const bodyTestSeries = `{"name":"_result0","columns":["_time","_result"],"types"
 func partialBodyServer(t *testing.T, cut bool, delay time.Duration) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		time.Sleep(delay)
+		time.Sleep(delay) // fixed-wait: the server's answer delay, which the case sets
 		head := `{"series":[` + bodyTestSeries + `,`
 		if cut {
 			hijacker, ok := writer.(http.Hijacker)
@@ -44,11 +45,9 @@ func partialBodyServer(t *testing.T, cut bool, delay time.Duration) *httptest.Se
 		writer.WriteHeader(http.StatusOK)
 		_, _ = writer.Write([]byte(head))
 		writer.(http.Flusher).Flush()
-		timer := time.NewTimer(2 * time.Second)
-		defer timer.Stop()
 		select {
 		case <-request.Context().Done():
-		case <-timer.C:
+		case <-testwait.Expired(t):
 		}
 	}))
 	t.Cleanup(server.Close)
@@ -64,7 +63,7 @@ type slowSink struct {
 }
 
 func (sink *slowSink) ConsumeProviderSeries(ctx context.Context, batch execution.ProviderSeriesBatch) error {
-	time.Sleep(sink.delay)
+	time.Sleep(sink.delay) // fixed-wait: the sink's per-series delay, which the case sets
 	if sink.err != nil {
 		return sink.err
 	}
@@ -223,7 +222,7 @@ func TestOnlyABodysTransportFailureIsNamed(t *testing.T) {
 	}
 	attempt := validAttempt(t)
 	attempt.DeadlineUnixMilli = time.Now().Add(time.Minute).UnixMilli()
-	caller, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	caller, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond) // fixed-wait: the caller's deadline the case runs out
 	defer cancel()
 	if _, err := client.Execute(caller, attempt, &collectingSink{}); err == nil || errors.As(err, &failure) {
 		t.Fatalf("a caller that gave up = %v, want its own error unnamed", err)
@@ -239,8 +238,8 @@ func TestOnlyABodysTransportFailureIsNamed(t *testing.T) {
 // own class.
 func TestABodyDeadlineIsNamedForWhoHeldTheTime(t *testing.T) {
 	client := &Client{now: time.Now}
-	deadline := time.Now().Add(-time.Second)
-	expired, cancel := context.WithDeadline(context.Background(), deadline)
+	deadline := testwait.Deadline(t)
+	expired, cancel := context.WithDeadline(context.Background(), deadline) // fixed-wait: a deadline the case sets in the past
 	defer cancel()
 	attempt := queryIdentity{Budget: queryBudget{StartUnixMilli: deadline.Add(-time.Minute).UnixMilli(), ReadyAtUnixMilli: deadline.Add(-time.Minute).UnixMilli(),
 		DeadlineUnixMilli: deadline.UnixMilli()}}
@@ -275,7 +274,7 @@ func TestABodyDeadlineIsNamedForWhoHeldTheTime(t *testing.T) {
 type failingReader struct{ wait time.Duration }
 
 func (reader failingReader) Read([]byte) (int, error) {
-	time.Sleep(reader.wait)
+	time.Sleep(reader.wait) // fixed-wait: the body reader's stall, which the case sets
 	return 0, syscall.ECONNRESET
 }
 

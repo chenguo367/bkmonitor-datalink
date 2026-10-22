@@ -26,6 +26,8 @@ import (
 	"time"
 
 	"github.com/go-redis/redis/v8"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 // Only Set and MGet are exercised; any other call would panic and thereby prove
@@ -518,10 +520,10 @@ func TestPagesThatAskTogetherShareOneReadOfTheSnapshots(t *testing.T) {
 		views <- view
 	}
 	go read(time.Minute)
-	for deadline := time.Now().Add(2 * time.Second); reader.count() == 0 && time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+	for deadline := testwait.Deadline(t); reader.count() == 0 && time.Now().Before(deadline); time.Sleep(time.Millisecond) { // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	go read(0)
-	time.Sleep(100 * time.Millisecond)
+	testwait.Until(t, "the second page waiting on the read in progress", func() bool { return sharedWaiters(&service.loads) == 2 })
 	close(reader.release)
 	first, second := <-views, <-views
 	if reader.count() != 1 {
@@ -661,7 +663,7 @@ func TestASharedReadIsSharedOnlyForTheSameReplicas(t *testing.T) {
 		snapshots, _ := service.loadShared(context.Background(), []string{"pod-a"})
 		answers <- answer{snapshots}
 	}()
-	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+	for deadline := testwait.Deadline(t); time.Now().Before(deadline); time.Sleep(time.Millisecond) { // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 		reader.mu.Lock()
 		started := reader.loads
 		reader.mu.Unlock()
@@ -673,7 +675,7 @@ func TestASharedReadIsSharedOnlyForTheSameReplicas(t *testing.T) {
 		snapshots, _ := service.loadShared(context.Background(), []string{"pod-a", "pod-b"})
 		answers <- answer{snapshots}
 	}()
-	time.Sleep(100 * time.Millisecond)
+	testwait.Until(t, "the second caller waiting on a read", func() bool { return sharedWaiters(&service.loads) == 2 })
 	close(reader.release)
 	first, second := <-answers, <-answers
 	if len(first.snapshots)+len(second.snapshots) != 3 || reader.loads != 2 {
@@ -691,7 +693,7 @@ func TestASharedReadIsSharedWhateverTheReplicasOrder(t *testing.T) {
 		snapshots, _ := service.loadShared(context.Background(), []string{"pod-a", "pod-b"})
 		answers <- len(snapshots)
 	}()
-	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+	for deadline := testwait.Deadline(t); time.Now().Before(deadline); time.Sleep(time.Millisecond) { // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 		reader.mu.Lock()
 		started := reader.loads
 		reader.mu.Unlock()
@@ -703,7 +705,7 @@ func TestASharedReadIsSharedWhateverTheReplicasOrder(t *testing.T) {
 		snapshots, _ := service.loadShared(context.Background(), []string{"pod-b", "pod-a"})
 		answers <- len(snapshots)
 	}()
-	time.Sleep(100 * time.Millisecond)
+	testwait.Until(t, "the second caller waiting on a read", func() bool { return sharedWaiters(&service.loads) == 2 })
 	close(reader.release)
 	if first, second := <-answers, <-answers; first != 2 || second != 2 || reader.loads != 1 {
 		t.Fatalf("answers of %d and %d snapshots from %d reads, want one read of both replicas shared", first, second, reader.loads)
@@ -743,6 +745,18 @@ func (reader *waitingSnapshots) Load(ctx context.Context, replicas []string) ([]
 	return snapshots, nil
 }
 
+// sharedWaiters is how many callers wait on reads in progress in reads,
+// whichever read each waits on.
+func sharedWaiters[T any](reads *sharedReads[T]) int {
+	reads.mu.Lock()
+	defer reads.mu.Unlock()
+	waiters := 0
+	for _, flight := range reads.flights {
+		waiters += flight.waiters
+	}
+	return waiters
+}
+
 func (reader *waitingSnapshots) counts() (int, int) {
 	reader.mu.Lock()
 	defer reader.mu.Unlock()
@@ -751,7 +765,7 @@ func (reader *waitingSnapshots) counts() (int, int) {
 
 func (reader *waitingSnapshots) waitLoads(t *testing.T, want int) {
 	t.Helper()
-	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+	for deadline := testwait.Deadline(t); time.Now().Before(deadline); time.Sleep(time.Millisecond) { // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 		if loads, _ := reader.counts(); loads >= want {
 			return
 		}
@@ -785,7 +799,7 @@ func TestASharedReadOutlivesTheCallerThatStartedIt(t *testing.T) {
 		snapshots, err := service.loadShared(impatient, replicas())
 		third <- answer{snapshots, err}
 	}()
-	time.Sleep(50 * time.Millisecond)
+	testwait.Until(t, "the two later callers waiting on the read in progress", func() bool { return sharedWaiters(&service.loads) == 3 })
 	leave()
 	if got := <-first; !errors.Is(got.err, context.Canceled) {
 		t.Fatalf("the caller that left got %v, want its own cancellation", got.err)
@@ -818,7 +832,7 @@ func TestASharedReadNobodyWaitsForIsStopped(t *testing.T) {
 	reader.waitLoads(t, 1)
 	leave()
 	<-left
-	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+	for deadline := testwait.Deadline(t); time.Now().Before(deadline); time.Sleep(time.Millisecond) { // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 		if _, stopped := reader.counts(); stopped == 1 {
 			break
 		}
@@ -827,7 +841,7 @@ func TestASharedReadNobodyWaitsForIsStopped(t *testing.T) {
 		t.Fatal("the read nobody waited for was not stopped")
 	}
 	close(reader.release)
-	bounded, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	bounded, cancel := context.WithCancel(testwait.Context(t))
 	defer cancel()
 	snapshots, err := service.loadShared(bounded, replicas())
 	if loads, _ := reader.counts(); err != nil || len(snapshots) != 2 || loads != 2 {
@@ -850,7 +864,7 @@ func TestASummarizedReadOutlivesTheCallerThatStartedIt(t *testing.T) {
 		view, _ := service.Summarized(context.Background(), time.Minute)
 		second <- view
 	}()
-	time.Sleep(50 * time.Millisecond)
+	testwait.Until(t, "the second caller waiting on the summarized read", func() bool { return sharedWaiters(&service.summaries) == 2 })
 	leave()
 	if view := <-first; !hasGap(view, GapSnapshotsUnreadable) || view.Health != HealthUnknown {
 		t.Fatalf("the caller that left read %s with gaps %+v, want unknown and unread", view.Health, view.Gaps)

@@ -26,6 +26,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 type fixtureClient struct {
@@ -475,7 +477,7 @@ func TestConcurrentRequestsAndBudgets(t *testing.T) {
 	}
 	select {
 	case <-both:
-	case <-time.After(5 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("a second call was held back by the provider")
 	}
 	close(unblock)
@@ -558,7 +560,7 @@ func TestCancellationReturnsUnknownAndRemoteTimerContinues(t *testing.T) {
 	// own 5 s deadline, is still running, and the remote then ends by itself.
 	select {
 	case <-started:
-	case <-time.After(time.Minute):
+	case <-testwait.Expired(t):
 		t.Fatal("remote supervisor did not start")
 	}
 	cancel()
@@ -567,7 +569,7 @@ func TestCancellationReturnsUnknownAndRemoteTimerContinues(t *testing.T) {
 		if result.RemoteState != RemoteUnknown || result.ExitCode != nil || result.EvidenceScope != "post_observation_unavailable" {
 			t.Fatalf("canceled receipt: %+v", result)
 		}
-	case <-time.After(time.Minute):
+	case <-testwait.Expired(t):
 		t.Fatal("cancellation did not return")
 	}
 	select {
@@ -580,7 +582,7 @@ func TestCancellationReturnsUnknownAndRemoteTimerContinues(t *testing.T) {
 		if err != nil {
 			t.Fatalf("independent remote timer failed: %v", err)
 		}
-	case <-time.After(time.Minute):
+	case <-testwait.Expired(t):
 		t.Fatal("remote process outlived its independent deadline")
 	}
 }

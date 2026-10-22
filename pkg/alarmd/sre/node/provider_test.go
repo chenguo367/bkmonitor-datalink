@@ -23,6 +23,7 @@ import (
 	kt "k8s.io/client-go/testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/redistest"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/pod"
 )
 
@@ -97,12 +98,12 @@ func request() ExecRequest {
 }
 func await(t *testing.T, condition func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := testwait.Deadline(t)
 	for time.Now().Before(deadline) {
 		if condition() {
 			return
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	t.Fatal("condition did not become true")
 }

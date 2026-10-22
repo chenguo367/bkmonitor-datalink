@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"k8s.io/client-go/rest"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 // A test binary started as "setsid" is the setsid utility: it makes a new
@@ -258,7 +260,7 @@ func TestTheShellSupervisorsDeadlineSurvivesAClosedOutput(t *testing.T) {
 		t.Fatalf("first record %q %v", line, err)
 	}
 	errPipe.Close()
-	waitGone(t, pidPath, time.Minute)
+	waitGone(t, pidPath)
 }
 
 // A command whose output nobody reads blocks on a full pipe, and the timer
@@ -275,19 +277,19 @@ func TestTheShellSupervisorsDeadlineSurvivesOutputBackpressure(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { stdout.Close(); command.Process.Kill(); command.Wait() }()
-	waitGone(t, pidPath, time.Minute)
+	waitGone(t, pidPath)
 }
 
 // waitGone waits for the pid a command wrote to exist and then to end.
-func waitGone(t *testing.T, pidPath string, guard time.Duration) {
+func waitGone(t *testing.T, pidPath string) {
 	t.Helper()
-	end := time.Now().Add(guard)
+	end := testwait.Deadline(t)
 	pid := 0
 	for pid == 0 && time.Now().Before(end) {
 		if data, err := os.ReadFile(pidPath); err == nil {
 			pid, _ = strconv.Atoi(strings.TrimSpace(string(data)))
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	if pid == 0 {
 		t.Fatal("the command never recorded its pid")
@@ -296,7 +298,7 @@ func waitGone(t *testing.T, pidPath string, guard time.Duration) {
 		if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
 			return
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	syscall.Kill(pid, syscall.SIGKILL)
 	t.Fatal("the command outlived its deadline")
@@ -623,7 +625,7 @@ func TestAStoppedTimerLeavesNoSleep(t *testing.T) {
 	if out, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("%v %s", err, out)
 	}
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond) // fixed-wait: time for the TERM the stopped timer sent to end its sleep; waiting until the sleep goes would also pass a leaked one, which ends by itself at 47 s
 	listing, _ := exec.Command("ps", "-Ao", "args").Output()
 	for _, line := range strings.Split(string(listing), "\n") {
 		if strings.TrimSpace(line) == "sleep 47" {

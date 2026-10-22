@@ -92,7 +92,7 @@ func TestTheQueryListenerServesTheControlStreamOverH2C(t *testing.T) {
 	// The stream survives longer than every request timeout the listener
 	// sets: nothing but ReadHeaderTimeout is set, and it does not apply to
 	// an open stream.
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond) // fixed-wait: a window in which the open stream must not be closed; an absence sends no signal to wait on
 	if err := connected.Send(&pb.WorkerMessage{Body: &pb.WorkerMessage_Heartbeat{Heartbeat: &pb.Heartbeat{SentAtMs: 1}}}); err != nil {
 		t.Fatal(err)
 	}

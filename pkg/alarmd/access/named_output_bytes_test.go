@@ -14,9 +14,9 @@ import (
 	"errors"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 var _ execution.RetainedBytesReserver = (*seriesAdapter)(nil)
@@ -101,7 +101,7 @@ func TestNamedReservationsAndDeliveriesOfOneSlotSerialize(t *testing.T) {
 	go func() { group.Wait(); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("reservations and deliveries of one Slot did not finish: deadlocked")
 	}
 	if inner.retained != rounds {

@@ -310,7 +310,7 @@ func TestLegacyControlServiceAndUnreachableTarget(t *testing.T) {
 		t.Fatalf("legacy server not explicit: %+v", result)
 	}
 	old.Stop()
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond) // fixed-wait: the caller's deadline the case runs out
 	defer cancel()
 	result = nodes["entry"].router.Invoke(ctx, obchannel.Invocation{EnvironmentID: "fixture", Version: obchannel.Version, Revision: nodes["entry"].channel.CatalogRevision(), Operation: "runtime.get", RequestID: "unreachable-fixture", Params: obchannel.Params{}, Target: obchannel.Target{Replica: "worker"}})
 	if result.Error == nil || result.Error.Code != "target_timeout" || nodes["worker"].runs.Load() != 0 {
@@ -321,7 +321,7 @@ func TestLegacyControlServiceAndUnreachableTarget(t *testing.T) {
 func TestControlLeaderKeepsItsLeaseWhenTheLeaderCannotBeReached(t *testing.T) {
 	nodes, _ := fixture(t)
 	nodes["leader"].server.Stop()
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond) // fixed-wait: the caller's deadline the case runs out
 	defer cancel()
 	result := nodes["entry"].router.Invoke(ctx, obchannel.Invocation{EnvironmentID: "fixture", Version: obchannel.Version, Revision: nodes["entry"].channel.CatalogRevision(), Operation: "runtime.get", RequestID: "leader-down-fixture", Params: obchannel.Params{}, Target: obchannel.Target{ControlLeader: true}})
 	if result.Error == nil || result.Meta.ControlLeader == nil || result.Meta.ControlLeader.OwnerID != "leader" || result.Meta.ControlLeader.OwnerEpoch != 7 {
@@ -425,7 +425,7 @@ func TestARoutedPartialAnswerReachesTheEntry(t *testing.T) {
 // HopReturnMargin, so the target's answer arrives while the caller waits.
 func TestARoutedPartialAnswerArrivesInsideAShorterCallersTime(t *testing.T) {
 	nodes, _ := fixture(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond) // fixed-wait: the caller's time, shorter than the operation's, which the case is about
 	defer cancel()
 	result := nodes["entry"].router.Invoke(ctx, obchannel.Invocation{EnvironmentID: "fixture", Version: obchannel.Version, Revision: nodes["entry"].channel.CatalogRevision(), Operation: "partial.long", RequestID: "short-caller-fixture", Params: obchannel.Params{}, Target: obchannel.Target{Replica: "worker"}})
 	if result.Status != "partial" || result.Error != nil || result.Meta.AnsweredBy != "worker" {

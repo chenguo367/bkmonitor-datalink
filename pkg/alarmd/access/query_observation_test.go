@@ -104,7 +104,7 @@ type failingProvider struct {
 }
 
 func (provider failingProvider) Execute(context.Context, execution.QueryAttempt, execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
-	time.Sleep(provider.sleep)
+	time.Sleep(provider.sleep) // fixed-wait: the provider's answer time, which the case measures
 	return execution.ProviderCompletion{}, provider.err
 }
 

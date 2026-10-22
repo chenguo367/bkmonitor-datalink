@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 func testRunner(t *testing.T) *Runner {
@@ -25,7 +27,7 @@ func terminal(t *testing.T, r *Runner) Response {
 	t.Helper()
 	select {
 	case <-r.done:
-	case <-time.After(35 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("execution did not finish")
 	}
 	return r.Handle(Request{Action: "get", ExecutionID: r.id})
@@ -98,7 +100,7 @@ func TestRedactionAcrossWritesAndBoundedLines(t *testing.T) {
 	r.Handle(q)
 	select {
 	case <-r.done:
-	case <-time.After(35 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("redaction execution did not finish")
 	}
 	v := terminal(t, r)
@@ -258,7 +260,7 @@ func TestOutputIsReadToTheEndHoweverLongTheReaderTakes(t *testing.T) {
 	// still in the pipe when the command and its group are gone.
 	r.Handle(startRequest("printf 'first\\n'; sleep 0.2; printf 'second\\n'"))
 	r.mu.Lock()
-	time.Sleep(2500 * time.Millisecond)
+	time.Sleep(2500 * time.Millisecond) // fixed-wait: holds the runner's lock past the two seconds exec's WaitDelay used to give, the slow reader the case is about
 	r.mu.Unlock()
 	v := terminal(t, r)
 	if v.State != "succeeded" || v.Error != "" || contents(v) != "first\nsecond\n" {

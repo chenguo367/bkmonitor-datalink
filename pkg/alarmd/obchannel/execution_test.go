@@ -284,7 +284,7 @@ func TestInternalExecutionHonorsContextAndRunsBesideOthers(t *testing.T) {
 	<-entered
 	// The second read runs (its own short context ends it), rather than being
 	// refused while the first holds anything.
-	second, cancelSecond := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	second, cancelSecond := context.WithTimeout(context.Background(), 50*time.Millisecond) // fixed-wait: the second read's own short deadline, which the case expects it to run out
 	go func() { <-second.Done(); close(hold) }()
 	response := c.ExecuteEvidence(second, internalInvocation(c))
 	cancelSecond()
@@ -346,7 +346,7 @@ func TestARoutedReadKeepsItsOperationsTime(t *testing.T) {
 	op.ExecutionTimeout = 20 * time.Second
 	c := newTargetChannel(t, Options{Auth: &testAuth{}, EnvironmentID: "test", Replica: "worker-b", Incarnation: "process-b", Operations: []Operation{op}})
 	for _, tc := range []struct{ left, want time.Duration }{{30 * time.Second, 20 * time.Second}, {5 * time.Second, 5 * time.Second}} {
-		ctx, cancel := context.WithTimeout(context.Background(), tc.left)
+		ctx, cancel := context.WithTimeout(context.Background(), tc.left) // fixed-wait: the caller's time left, the value the case checks the read is given
 		if response := c.ExecuteEvidence(ctx, internalInvocation(c)); response.Error != nil {
 			t.Fatalf("with %v left: %+v", tc.left, response.Error)
 		}
@@ -359,7 +359,7 @@ func TestARoutedReadKeepsItsOperationsTime(t *testing.T) {
 
 // A caller's deadline is kept; only a caller without one gets the fallback.
 func TestCallerBoundedKeepsTheCallersDeadline(t *testing.T) {
-	long, cancelLong := context.WithTimeout(context.Background(), time.Minute)
+	long, cancelLong := context.WithTimeout(context.Background(), time.Minute) // fixed-wait: the caller's one-minute deadline, the value the case checks is kept
 	defer cancelLong()
 	kept, cancel := CallerBounded(long, RequestTimeout)
 	defer cancel()
@@ -383,7 +383,7 @@ func TestAPartialOnTimeoutReadKeepsWhatItRead(t *testing.T) {
 		})
 		op.PartialOnTimeout = partial
 		c := newTargetChannel(t, Options{Auth: &testAuth{}, EnvironmentID: "test", Replica: "worker-b", Incarnation: "process-b", Operations: []Operation{op}})
-		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond) // fixed-wait: the caller's deadline the case runs out
 		response := c.ExecuteEvidence(ctx, internalInvocation(c))
 		cancel()
 		switch {

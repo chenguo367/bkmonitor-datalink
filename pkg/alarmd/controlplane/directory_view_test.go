@@ -441,7 +441,7 @@ type slowObjectReads struct {
 func (h slowObjectReads) BeforeProcess(ctx context.Context, cmd redis.Cmder) (context.Context, error) {
 	for _, arg := range cmd.Args()[1:] {
 		if key, ok := arg.(string); ok && strings.HasPrefix(key, h.prefix) {
-			time.Sleep(h.delay)
+			time.Sleep(h.delay) // fixed-wait: the slow read's delay, which the case sets
 		}
 	}
 	return ctx, nil

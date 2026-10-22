@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 func groupSample(f *fixture, name string, hold time.Duration, first func(int64) []*execution.Dataset, later func(int64) []*execution.Dataset) {
@@ -206,7 +207,7 @@ func TestGroupReadingOwnershipCanReenterStatsAndForget(t *testing.T) {
 		if found || !called {
 			t.Fatal("an owner-lost group supplied a reading")
 		}
-	case <-time.After(time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("GroupReading held the engine lock across its ownership callback")
 	}
 }

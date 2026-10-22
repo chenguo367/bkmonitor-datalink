@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 func diagnosticSeries(ip string, points int) string {
@@ -270,7 +271,7 @@ func TestDiagnosticCancellationConcurrencyAndNoRetry(t *testing.T) {
 		case <-started:
 		case err := <-done:
 			t.Fatalf("query %d answered %v without reaching UQ", i+1, err)
-		case <-time.After(time.Second):
+		case <-testwait.Expired(t):
 			t.Fatalf("query %d did not reach UQ", i+1)
 		}
 	}
@@ -279,7 +280,7 @@ func TestDiagnosticCancellationConcurrencyAndNoRetry(t *testing.T) {
 		select {
 		case err := <-done:
 			assertDiagnosticCode(t, err, "query_canceled")
-		case <-time.After(time.Second):
+		case <-testwait.Expired(t):
 			t.Fatal("query did not honor cancellation")
 		}
 	}
@@ -338,7 +339,7 @@ func TestDiagnosticDeadlineAndMetadataBudget(t *testing.T) {
 		return nil, r.Context().Err()
 	})})
 	spec := validAttempt(t).Spec
-	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond) // fixed-wait: the caller's deadline the case runs out
 	defer cancel()
 	_, err := client.Query(ctx, spec, DiagnosticSelection{}, 0)
 	assertDiagnosticCode(t, err, "query_timeout")
@@ -427,7 +428,7 @@ func TestARequeryPagesItsSeries(t *testing.T) {
 func TestARequeryIsGivenItsSlotsBudget(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
-		case <-time.After(DiagnosticTimeout + 500*time.Millisecond):
+		case <-time.After(DiagnosticTimeout + 500*time.Millisecond): // fixed-wait: the provider answers after the diagnostic timeout, which the case needs
 		case <-r.Context().Done():
 			return
 		}

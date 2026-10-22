@@ -45,7 +45,7 @@ func frontRead(t *testing.T, c *Channel, op string) (int, Response) {
 func TestFrontReadsAreNeverRefusedForABudget(t *testing.T) {
 	read := func(id string) Operation {
 		return Operation{ID: id, Summary: id, Fields: map[string]Field{}, Run: func(context.Context, Params) Outcome {
-			time.Sleep(5 * time.Millisecond)
+			time.Sleep(5 * time.Millisecond) // fixed-wait: the operation's run time, which the case sets so the 32 reads are in flight together
 			return Outcome{Complete: true, Value: map[string]string{"read": id}}
 		}}
 	}

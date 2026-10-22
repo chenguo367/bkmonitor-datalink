@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 // settlingWait is the readiness wait without a hold: a Slot is ready that long
@@ -85,8 +86,8 @@ func serialRun(t *testing.T, period, hold time.Duration, slots int) (outcomes, o
 			f.clock.set(now)
 			f.engine.StepEarly(ctx)
 			f.engine.Step(ctx)
-			for deadline := time.Now().Add(2 * time.Second); running() && time.Now().Before(deadline); {
-				time.Sleep(time.Millisecond)
+			for deadline := testwait.Deadline(t); running() && time.Now().Before(deadline); {
+				time.Sleep(time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 			}
 		}
 		f.clock.set(until)
