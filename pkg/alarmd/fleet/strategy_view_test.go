@@ -29,7 +29,7 @@ func TestAStrategyViewCountsItsObjectsByPunctuality(t *testing.T) {
 	decided := rows["2"]
 	decided.Check = CheckSlotsOverdue
 	rows["2"] = decided
-	index := buildBoard("c1", time.Unix(10_000, 0), "digest-1", universe, func(id string) DiagnosisRow { return rows[id] }, nil, due, census, nil)
+	index := buildBoard("c1", time.Unix(10_000, 0), "digest-1", universe, func(id string) DiagnosisRow { return rows[id] }, nil, due, census, nil, nil)
 	want := map[string]map[Punctuality]int{
 		"1": {PunctualityOverdue: 1, PunctualityOnTime: 1},
 		"2": {PunctualityLate: 1, PunctualityNotStarted: 1},

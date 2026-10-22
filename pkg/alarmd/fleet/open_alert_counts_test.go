@@ -47,7 +47,7 @@ func openBoard(t *testing.T, snapshots []Snapshot, plans map[string][]DiagnosisP
 	}
 	index := buildBoard("c1", time.Unix(1, 0), "d", universe, func(id string) DiagnosisRow {
 		return DiagnosisRow{StrategyID: id, Verdict: StateDetecting, Plans: plans[id]}
-	}, nil, nil, nil, view.OpenAlerts)
+	}, nil, nil, nil, view.OpenAlerts, nil)
 	return boardRows(index)
 }
 

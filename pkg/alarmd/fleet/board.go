@@ -151,9 +151,13 @@ type BoardRow struct {
 	CapabilityClass string      `json:"capability_class"`
 	Line            string      `json:"line"`
 	Punctuality     Punctuality `json:"punctuality"`
-	Since           *time.Time  `json:"since,omitempty"`
-	SinceBasis      SinceBasis  `json:"since_basis,omitempty"`
-	SinceWord       string      `json:"since_word,omitempty"`
+	// LateWait is what the strategy's worst late or overdue object waited
+	// on (strategyLateWait); present exactly when Punctuality is late or
+	// overdue.
+	LateWait   *LateWait  `json:"late_wait,omitempty"`
+	Since      *time.Time `json:"since,omitempty"`
+	SinceBasis SinceBasis `json:"since_basis,omitempty"`
+	SinceWord  string     `json:"since_word,omitempty"`
 	// OpenAlerts is the strategy's open alerts on alarmd's copy of the
 	// consumer's set; absent when not known, at_least when a replica could
 	// not count it. The alerts themselves are read in Linkd.
@@ -295,7 +299,7 @@ func boardLine(row BoardRow) string {
 // order the words give and then longest standing first, and counts every
 // facet over the whole universe.
 func buildBoard(id string, at time.Time, digest string, universe []string, decide func(string) DiagnosisRow,
-	lines []StrategyLine, due *DueView, census *ScheduleCensus, open *OpenView) *boardIndex {
+	lines []StrategyLine, due *DueView, census *ScheduleCensus, open *OpenView, waits *lateWaitIndex) *boardIndex {
 	words := ProductWords()
 	byStrategy := make(map[string]StrategyLine, len(lines))
 	for _, line := range lines {
@@ -322,6 +326,7 @@ func buildBoard(id string, at time.Time, digest string, universe []string, decid
 			StateWord: words.State[decided.Verdict], Action: decided.Action, ActionWord: words.Action[decided.Action],
 			CapabilityClass: capabilityOf(decided), Punctuality: strategyPunctuality(decided, due), OpenAlerts: strategyOpenAlerts(decided, open),
 			KBAnchor: "state-" + string(decided.Verdict)}
+		row.LateWait = strategyLateWait(decided, due, waits)
 		if line, ok := byStrategy[decided.StrategyID]; ok {
 			row.Since, row.SinceBasis = line.Since, line.SinceBasis
 			row.SinceWord = words.SinceBasis[line.SinceBasis]
@@ -332,7 +337,7 @@ func buildBoard(id string, at time.Time, digest string, universe []string, decid
 		row.Line = boardLine(row)
 		row.areas, row.reasons = capabilityFactsOf(decided)
 		index.rows = append(index.rows, row)
-		index.views[row.StrategyID] = viewFactsOf(decided, due)
+		index.views[row.StrategyID] = viewFactsOf(decided, due, waits)
 		index.facets.State[row.State]++
 		if row.Action != "" {
 			index.facets.Action[row.Action]++

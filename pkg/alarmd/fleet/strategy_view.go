@@ -47,18 +47,23 @@ type StrategyViewActual struct {
 	Row           BoardRow    `json:"row"`
 	Objects       ViewObjects `json:"objects"`
 	Check         Check       `json:"check,omitempty"`
+	// LateWaits is the late and overdue objects grouped by what they waited
+	// on (strategyLateWaits).
+	LateWaits []LateWaitGroup `json:"late_waits,omitempty"`
 }
 
 // boardViewFacts is what the drawer reads of a strategy beyond its row.
 type boardViewFacts struct {
-	objects ViewObjects
-	check   Check
+	objects   ViewObjects
+	check     Check
+	lateWaits []LateWaitGroup
 }
 
 // viewFactsOf counts the decided strategy's objects by punctuality, each read
 // from its own replica as the row's punctuality is.
-func viewFactsOf(decided DiagnosisRow, due *DueView) boardViewFacts {
-	facts := boardViewFacts{objects: ViewObjects{ByPunctuality: map[Punctuality]int{}}, check: decided.Check}
+func viewFactsOf(decided DiagnosisRow, due *DueView, waits *lateWaitIndex) boardViewFacts {
+	facts := boardViewFacts{objects: ViewObjects{ByPunctuality: map[Punctuality]int{}}, check: decided.Check,
+		lateWaits: strategyLateWaits(decided, due, waits)}
 	for _, punctuality := range Punctualities {
 		facts.objects.ByPunctuality[punctuality] = 0
 	}
@@ -81,7 +86,7 @@ func (index *boardIndex) view(strategyID string, maxAge time.Duration) (Strategy
 		}
 		facts := index.views[strategyID]
 		return StrategyViewActual{GeneratedAt: index.at, MaxAgeSeconds: int(maxAge / time.Second), Row: row,
-			Objects: facts.objects, Check: facts.check}, true
+			Objects: facts.objects, Check: facts.check, LateWaits: facts.lateWaits}, true
 	}
 	return StrategyViewActual{}, false
 }
@@ -324,6 +329,8 @@ type ActualDetection struct {
 	PunctualityWord string      `json:"punctuality_word"`
 	Objects         ViewObjects `json:"objects"`
 	OpenAlerts      *BoardCount `json:"open_alerts,omitempty"`
+	// LateWaits is what the late and overdue objects waited on, grouped.
+	LateWaits []LateWaitGroup `json:"late_waits,omitempty"`
 }
 
 // StrategyView is the drawer: conclusion, what it should detect, what it
@@ -344,6 +351,6 @@ func ComposeStrategyView(actual StrategyViewActual, standing *StrategyStanding) 
 	return StrategyView{GeneratedAt: actual.GeneratedAt, MaxAgeSeconds: actual.MaxAgeSeconds, Conclusion: actual.Row,
 		Expected: ExpectedOf(standing),
 		Actual: ActualDetection{Punctuality: actual.Row.Punctuality, PunctualityWord: PunctualityWords[actual.Row.Punctuality],
-			Objects: actual.Objects, OpenAlerts: actual.Row.OpenAlerts},
+			Objects: actual.Objects, OpenAlerts: actual.Row.OpenAlerts, LateWaits: actual.LateWaits},
 		Check: actual.Check, KBAnchor: actual.Row.KBAnchor}
 }
