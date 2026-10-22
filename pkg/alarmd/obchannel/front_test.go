@@ -12,6 +12,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/cliauth"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obevidence"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/pod"
 )
 
@@ -184,5 +186,40 @@ func TestTheFrontReadsAStrategyConfigByItsSourceViewOnly(t *testing.T) {
 	}
 	if ran != 1 {
 		t.Fatalf("a refused view still ran the operation (%d runs)", ran)
+	}
+}
+
+// A front read of a strategy's config does not carry where alarmd read it
+// from: the store's address, database, prefix and key, and a failed read's
+// own error text, are the cluster's. The value and its omissions are kept.
+func TestTheFrontAnswerOfAStrategyConfigLeavesOutTheStoreLocation(t *testing.T) {
+	result := obevidence.Result{Status: "ok", Source: "source_cache", Complete: true,
+		Location:   obevidence.Location{Role: "source", Address: "store.example:6379", DB: 3, Prefix: "cache", Key: "cache.strategy.80"},
+		Value:      map[string]any{"id": 80},
+		Omitted:    []obevidence.Omission{{Path: "$.runtime_config", Reason: "value_shape_only"}},
+		ReasonText: "dial tcp store.example:6379: refused"}
+	c, err := New(Options{Auth: postObservationAuth{}, EnvironmentID: "test", Replica: "replica-1",
+		Operations: []Operation{{ID: "strategy.config", Summary: "config",
+			Fields: map[string]Field{"view": {Type: "string"}, "strategy_id": {Type: "string"}},
+			Run:    func(context.Context, Params) Outcome { return Outcome{Complete: true, Value: result} }}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(map[string]any{"channel_version": Version, "mode": "invoke", "operation": "strategy.config", "params": map[string]any{"view": "source", "strategy_id": "80"}})
+	w := httptest.NewRecorder()
+	c.FrontReadHandler(func(*http.Request) error { return nil }).ServeHTTP(w, httptest.NewRequest(http.MethodPost, cliauth.FrontReadPath, bytes.NewReader(raw)))
+	body := w.Body.String()
+	if w.Code != http.StatusOK {
+		t.Fatalf("front read answered %d %s", w.Code, body)
+	}
+	for _, private := range []string{"store.example", "cache.strategy.80", `"db":3`, `"prefix":"cache"`, "refused"} {
+		if strings.Contains(body, private) {
+			t.Errorf("the front answer carries %q: %s", private, body)
+		}
+	}
+	for _, kept := range []string{`"id":80`, "$.runtime_config", "value_shape_only", `"role":"source"`} {
+		if !strings.Contains(body, kept) {
+			t.Errorf("the front answer lost %q: %s", kept, body)
+		}
 	}
 }

@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obevidence"
 )
 
 // FrontReads is what the front surface may read, the admin server's page:
@@ -49,6 +51,23 @@ var FrontReads = map[string]bool{
 // one the front does not make.
 var FrontParams = map[string]map[string]string{
 	"strategy.config": {"view": "source"},
+}
+
+// frontAnswers trims what a front read returns to what the page may hold.
+// strategy.config names where it read from - the store's address, database,
+// prefix and key - and, on a failed read, the error's own text; those are the
+// cluster's, not alarmd's, so the front answer drops them. The CLI, which
+// reads addresses already, keeps them.
+var frontAnswers = map[string]func(any) any{
+	"strategy.config": func(value any) any {
+		result, ok := value.(obevidence.Result)
+		if !ok {
+			return value
+		}
+		result.Location = obevidence.Location{Role: result.Location.Role}
+		result.ReasonText = ""
+		return result
+	},
 }
 
 // FrontReadHandler serves the front surface's read: an invoke of one of
@@ -161,6 +180,9 @@ func (c *Channel) serveFront(w http.ResponseWriter, r *http.Request, authorize f
 		out.Meta.Revision = c.revision
 	} else {
 		out = c.runHere(execCtx, op, req, params, meta)
+	}
+	if trim := frontAnswers[req.Operation]; trim != nil {
+		out.Result = trim(out.Result)
 	}
 	code := 200
 	if out.Status == "error" {
