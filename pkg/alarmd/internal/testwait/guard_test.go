@@ -13,6 +13,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -266,43 +267,62 @@ func (w *waitWalk) parentKind(expr ast.Expr) string {
 // compares the clock with holds the test's deadline: it is then a wait on its
 // condition, bounded by the test.
 func (w *waitWalk) loop(at token.Pos, enclosing []ast.Node, header []ast.Node, body *ast.BlockStmt) {
-	// The variables the loop sets straight from the clock, in its header or
-	// anywhere in its body: a condition that reads one reads the clock
-	// (expired := time.Since(start) > d; if expired), wherever it was set.
-	clockVars := map[*ast.Object]ast.Expr{}
-	collect := func(n ast.Node) {
+	// The variables the loop sets from the clock, in its header or anywhere
+	// in its body, straight or through another such variable (now :=
+	// time.Now(); elapsed := now.Sub(start)), with every value each is set
+	// to: a condition that reads one reads the clock (expired :=
+	// time.Since(start) > d; if expired), wherever it was set. Collected
+	// until a pass learns nothing new, since a variable can be set from one
+	// set further down.
+	clockVars := clockVariables{}
+	var collect func(ast.Node)
+	learned := false
+	note := func(set *ast.Ident, value ast.Expr) {
+		if set.Obj == nil || !w.readsClockStraight(value, clockVars) {
+			return
+		}
+		for _, known := range clockVars[set.Obj] {
+			if known == value {
+				return
+			}
+		}
+		clockVars[set.Obj] = append(clockVars[set.Obj], value)
+		learned = true
+	}
+	collect = func(n ast.Node) {
 		switch n := n.(type) {
 		case *ast.AssignStmt:
 			if len(n.Lhs) != len(n.Rhs) {
 				return
 			}
 			for i, value := range n.Rhs {
-				if set, ok := n.Lhs[i].(*ast.Ident); ok && set.Obj != nil && w.readsClockStraight(value) {
-					clockVars[set.Obj] = value
+				if set, ok := n.Lhs[i].(*ast.Ident); ok {
+					note(set, value)
 				}
 			}
 		case *ast.ValueSpec:
 			for i, value := range n.Values {
-				if i < len(n.Names) && n.Names[i].Obj != nil && w.readsClockStraight(value) {
-					clockVars[n.Names[i].Obj] = value
+				if i < len(n.Names) {
+					note(n.Names[i], value)
 				}
 			}
 		}
 	}
-	var conditions []ast.Node
-	for i, part := range header {
-		if part == nil {
-			continue
-		}
+	for learned = true; learned; {
+		learned = false
 		// Init and post set, the condition tests (for init; cond; post).
-		if i == 1 {
-			conditions = append(conditions, part)
-		} else {
-			inLoop(part, func(n ast.Node) { collect(n) })
+		for i, part := range header {
+			if part != nil && i != 1 {
+				inLoop(part, collect)
+			}
 		}
+		inLoop(body, collect)
+	}
+	var conditions []ast.Node
+	if len(header) > 1 && header[1] != nil {
+		conditions = append(conditions, header[1])
 	}
 	inLoop(body, func(n ast.Node) {
-		collect(n)
 		switch n := n.(type) {
 		case *ast.IfStmt:
 			conditions = append(conditions, n.Cond)
@@ -341,6 +361,27 @@ func (w *waitWalk) loop(at token.Pos, enclosing []ast.Node, header []ast.Node, b
 	w.report(at, "clock loop")
 }
 
+// clockVariables are the variables a loop sets from the clock, each with
+// every value it is set to there.
+type clockVariables map[*ast.Object][]ast.Expr
+
+// value is the one value id is set to in the loop: the first, when every
+// value is the same plain clock read or there is only one; nil when it is set
+// to different things.
+func (vars clockVariables) value(id *ast.Ident) ast.Expr {
+	values := vars[id.Obj]
+	if len(values) == 0 {
+		return nil
+	}
+	same := types.ExprString(ast.Unparen(values[0]))
+	for _, other := range values[1:] {
+		if types.ExprString(ast.Unparen(other)) != same {
+			return nil
+		}
+	}
+	return values[0]
+}
+
 // inLoop visits n and what is under it, leaving out function literals, which
 // run apart from the loop, and the loops inside it, which are judged at their
 // own for.
@@ -366,7 +407,7 @@ func inLoop(n ast.Node, visit func(ast.Node)) {
 // comparison it takes part in: the nearest enclosing relational expression
 // or time comparison method call, or else the read itself (for a variable,
 // the value it was set to, as for a bool set from a comparison).
-func (w *waitWalk) clockComparisons(n ast.Node, clockVars map[*ast.Object]ast.Expr) []ast.Node {
+func (w *waitWalk) clockComparisons(n ast.Node, clockVars clockVariables) []ast.Node {
 	var found []ast.Node
 	var path []ast.Node
 	ast.Inspect(n, func(n ast.Node) bool {
@@ -381,8 +422,13 @@ func (w *waitWalk) clockComparisons(n ast.Node, clockVars map[*ast.Object]ast.Ex
 		if call, ok := n.(*ast.CallExpr); ok && clockReads[w.qualified(call.Fun)] {
 			read = call
 		}
-		if id, ok := n.(*ast.Ident); ok && id.Obj != nil && clockVars[id.Obj] != nil {
-			read = clockVars[id.Obj]
+		if id, ok := n.(*ast.Ident); ok && id.Obj != nil && len(clockVars[id.Obj]) > 0 {
+			// Its one value, or the variable itself when it is set to
+			// different things: a read of the clock either way.
+			read = id
+			if value := clockVars.value(id); value != nil {
+				read = value
+			}
 		}
 		if read != nil {
 			comparison := read
@@ -400,24 +446,27 @@ func (w *waitWalk) clockComparisons(n ast.Node, clockVars map[*ast.Object]ast.Ex
 	return found
 }
 
-// readsClockStraight reports whether expr's value comes from a clock read
-// through arithmetic and method calls on it (time.Since(start) - d,
-// time.Now().Sub(start)) rather than through a call it is an argument of.
-func (w *waitWalk) readsClockStraight(expr ast.Expr) bool {
+// readsClockStraight reports whether expr's value comes from a clock read -
+// a clock call or a variable the loop set from one - through arithmetic and
+// method calls on it (time.Since(start) - d, now.Sub(start)) rather than
+// through a call it is an argument of.
+func (w *waitWalk) readsClockStraight(expr ast.Expr, clockVars clockVariables) bool {
 	switch e := ast.Unparen(expr).(type) {
+	case *ast.Ident:
+		return e.Obj != nil && len(clockVars[e.Obj]) > 0
 	case *ast.CallExpr:
 		if clockReads[w.qualified(e.Fun)] {
 			return true
 		}
 		if sel, ok := e.Fun.(*ast.SelectorExpr); ok && w.qualified(sel) == "" {
-			return w.readsClockStraight(sel.X)
+			return w.readsClockStraight(sel.X, clockVars)
 		}
 	case *ast.SelectorExpr:
-		return w.readsClockStraight(e.X)
+		return w.readsClockStraight(e.X, clockVars)
 	case *ast.BinaryExpr:
-		return w.readsClockStraight(e.X) || w.readsClockStraight(e.Y)
+		return w.readsClockStraight(e.X, clockVars) || w.readsClockStraight(e.Y, clockVars)
 	case *ast.UnaryExpr:
-		return w.readsClockStraight(e.X)
+		return w.readsClockStraight(e.X, clockVars)
 	}
 	return false
 }
@@ -438,7 +487,7 @@ func (w *waitWalk) isComparison(n ast.Node) bool {
 
 // allOnTestDeadline reports whether every comparison is on the test's
 // deadline (onTestDeadline).
-func (w *waitWalk) allOnTestDeadline(comparisons []ast.Node, fn ast.Node, clockVars map[*ast.Object]ast.Expr) bool {
+func (w *waitWalk) allOnTestDeadline(comparisons []ast.Node, fn ast.Node, clockVars clockVariables) bool {
 	for _, comparison := range comparisons {
 		if !w.onTestDeadline(comparison, fn, clockVars) {
 			return false
@@ -451,14 +500,18 @@ func (w *waitWalk) allOnTestDeadline(comparisons []ast.Node, fn ast.Node, clockV
 // the test's deadline as set: time.Now() against a variable of fn holding
 // testwait.Deadline (Before, After, Equal or Compare, either way round), or
 // time.Until of such a variable against 0. A clock variable stands for the
-// value it was set to. Arithmetic on either side - the deadline moved by a
+// value it was set to when every value it is set to in the loop is that one;
+// set to more than one (now = time.Now(), then now = now.Add(d)), it stands
+// for none, so what a comparison means cannot turn on the order of the code. Arithmetic on either side - the deadline moved by a
 // constant, the clock pushed forward, a duration other than 0 - makes it a
 // fixed time again, and does not count.
-func (w *waitWalk) onTestDeadline(comparison ast.Node, fn ast.Node, clockVars map[*ast.Object]ast.Expr) bool {
+func (w *waitWalk) onTestDeadline(comparison ast.Node, fn ast.Node, clockVars clockVariables) bool {
 	as := func(expr ast.Expr) ast.Expr {
 		expr = ast.Unparen(expr)
-		if id, ok := expr.(*ast.Ident); ok && id.Obj != nil && clockVars[id.Obj] != nil {
-			return ast.Unparen(clockVars[id.Obj])
+		if id, ok := expr.(*ast.Ident); ok && id.Obj != nil && len(clockVars[id.Obj]) > 0 {
+			if value := clockVars.value(id); value != nil {
+				return ast.Unparen(value)
+			}
 		}
 		return expr
 	}

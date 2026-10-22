@@ -240,6 +240,57 @@ func clockSetInTheBody(t *testing.T, start time.Time, d time.Duration, done func
 	}
 }
 
+// A clock variable set from another, moved by a constant, or stepped in the
+// loop's header is the clock still, and moved it is a fixed time again.
+func clockThroughVariables(t *testing.T, start time.Time, done func() bool) {
+	for !done() { /* want clock loop */
+		now := time.Now()
+		elapsed := now.Sub(start)
+		if elapsed > time.Second {
+			return
+		}
+	}
+	deadline := testwait.Deadline(t)
+	for !done() { /* want clock loop */
+		now := time.Now()
+		later := now.Add(119 * time.Second)
+		if later.After(deadline) {
+			return
+		}
+	}
+	for !done() { /* want clock loop */
+		now := time.Now()
+		now = now.Add(119 * time.Second)
+		if now.After(deadline) {
+			return
+		}
+	}
+	for now := time.Now(); !done(); now = now.Add(time.Millisecond) { /* want clock loop */
+		if now.After(deadline) {
+			return
+		}
+	}
+	for now := time.Now(); !done(); now = time.Now() {
+		if now.After(deadline) {
+			t.Fatal("not done")
+		}
+	}
+}
+
+// A variable set from a clock variable assigned further down the loop is
+// the clock too: the next pass reads it so.
+func clockSetBelow(start time.Time, done func() bool) {
+	var now time.Time
+	var elapsed time.Duration
+	for !done() { /* want clock loop */
+		elapsed = now.Sub(start)
+		if elapsed > time.Second {
+			return
+		}
+		now = time.Now()
+	}
+}
+
 // The test's deadline moved by a constant is a fixed time again, whichever
 // side of the comparison carries the arithmetic.
 func shortenedDeadline(t *testing.T, done func() bool) {
