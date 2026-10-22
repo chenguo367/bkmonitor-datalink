@@ -22,6 +22,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/cliauth"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/redistest"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obevidence"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/pod"
 )
@@ -43,10 +44,32 @@ func frontRead(t *testing.T, c *Channel, op string) (int, Response) {
 // list reads included, all answer. Before, past 2.5% of the CPU limit a
 // minute the list reads were refused as front_rate_limited.
 func TestFrontReadsAreNeverRefusedForABudget(t *testing.T) {
+	const together = 32
+	// A barrier: each read runs until all 32 are running, so they are in
+	// flight together. A read answered without running (refused) lets the
+	// others go, and the case fails on its code.
+	var arrivals sync.WaitGroup
+	arrivals.Add(together)
+	allIn, answeredEarly := make(chan struct{}), make(chan struct{})
+	var answered sync.Once
+	go func() { arrivals.Wait(); close(allIn) }()
+	bound := testwait.Context(t)
 	read := func(id string) Operation {
 		return Operation{ID: id, Summary: id, Fields: map[string]Field{}, Run: func(context.Context, Params) Outcome {
-			time.Sleep(5 * time.Millisecond) // fixed-wait: the operation's run time, which the case sets so the 32 reads are in flight together
-			return Outcome{Complete: true, Value: map[string]string{"read": id}}
+			arrivals.Done()
+			select {
+			case <-allIn:
+			case <-answeredEarly:
+			case <-bound.Done():
+			}
+			// Read again: once all are in, the first to answer also closes
+			// answeredEarly, and a read woken late may find both ready.
+			select {
+			case <-allIn:
+				return Outcome{Complete: true, Value: map[string]string{"read": id}}
+			default:
+				return Outcome{Error: &Failure{Code: "not_in_flight_together", Message: "the 32 reads were not all running at once"}}
+			}
 		}}
 	}
 	c, err := New(Options{Auth: postObservationAuth{}, EnvironmentID: "test", Replica: "replica-1",
@@ -54,13 +77,13 @@ func TestFrontReadsAreNeverRefusedForABudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const together = 32
 	var done sync.WaitGroup
 	codes := make([]int, together)
 	for i := range codes {
 		done.Add(1)
 		go func() {
 			defer done.Done()
+			defer answered.Do(func() { close(answeredEarly) })
 			codes[i], _ = frontRead(t, c, []string{"fleet.get", "object.list", "overview.get", "runtime.get"}[i%4])
 		}()
 	}

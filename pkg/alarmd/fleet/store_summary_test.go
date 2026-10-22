@@ -16,6 +16,7 @@ import (
 	"io"
 	"net"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -24,6 +25,7 @@ import (
 	"github.com/go-redis/redis/v8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/redistest"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 // realRedis starts a redis-server for the test and returns its address and
@@ -164,10 +166,12 @@ func TestThePublishSummarizedScriptRunsAsTheStoreCallsIt(t *testing.T) {
 
 // scriptCutter is a proxy to Redis that passes a connection's bytes on
 // until it sees a script call, then passes on all of that call but its last
-// byte and drops the connection: Redis has nearly the whole command and
-// never the end of it.
+// byte and drops the connection once Redis holds what it was sent: Redis has
+// nearly the whole command and never the end of it.
 func scriptCutter(t *testing.T, target string) (string, func() bool) {
 	t.Helper()
+	observer := redis.NewClient(&redis.Options{Addr: target})
+	t.Cleanup(func() { _ = observer.Close() })
 	var cuts sync.WaitGroup
 	var mu sync.Mutex
 	sawScript := false
@@ -185,7 +189,7 @@ func scriptCutter(t *testing.T, target string) (string, func() bool) {
 			cuts.Add(1)
 			go func() {
 				defer cuts.Done()
-				if cutInsideScriptCall(client, target) {
+				if cutInsideScriptCall(t, client, target, observer) {
 					mu.Lock()
 					sawScript = true
 					mu.Unlock()
@@ -202,8 +206,8 @@ func scriptCutter(t *testing.T, target string) (string, func() bool) {
 }
 
 // cutInsideScriptCall proxies one connection and says whether it cut one
-// short inside a script call.
-func cutInsideScriptCall(client net.Conn, target string) bool {
+// short inside a script call that Redis held part of.
+func cutInsideScriptCall(t *testing.T, client net.Conn, target string, observer *redis.Client) bool {
 	defer client.Close()
 	server, err := net.Dial("tcp", target)
 	if err != nil {
@@ -219,7 +223,15 @@ func cutInsideScriptCall(client net.Conn, target string) bool {
 		lower := bytes.ToLower(pending)
 		if bytes.Contains(lower, []byte("$7\r\nevalsha\r\n")) || bytes.Contains(lower, []byte("$4\r\neval\r\n")) {
 			_, _ = server.Write(pending[:len(pending)-1])
-			time.Sleep(100 * time.Millisecond) // fixed-wait: the cutter's pause between sending the partial script call and cutting the connection, a fixture timing the case sets
+			// The cut comes once Redis has read what was sent, not before:
+			// cut sooner, Redis would have none of the call to throw away.
+			local := server.LocalAddr().String()
+			for deadline := testwait.Deadline(t); !holdsPartialCommand(observer, local); {
+				if time.Now().After(deadline) {
+					return false
+				}
+				time.Sleep(time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
+			}
 			return true
 		}
 		if err != nil {
@@ -228,6 +240,31 @@ func cutInsideScriptCall(client net.Conn, target string) bool {
 		_, _ = server.Write(pending)
 		pending = pending[:0]
 	}
+}
+
+// holdsPartialCommand reports whether Redis holds the start of a command on
+// the connection from local, as its client list says: bytes in the query
+// buffer (qbuf), or arguments it has already parsed (argv-mem).
+func holdsPartialCommand(observer *redis.Client, local string) bool {
+	list, err := observer.ClientList(context.Background()).Result()
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(list, "\n") {
+		fields := strings.Fields(line)
+		if !slices.Contains(fields, "addr="+local) {
+			continue
+		}
+		for _, field := range fields {
+			if value, ok := strings.CutPrefix(field, "qbuf="); ok && value != "0" {
+				return true
+			}
+			if value, ok := strings.CutPrefix(field, "argv-mem="); ok && value != "0" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // The three writes of a summarized publish are one script call, so a
@@ -255,7 +292,7 @@ func TestASummarizedPublishCutInsideItsScriptCallLeavesAllThreeAsTheyWere(t *tes
 	}
 	_ = cut.Close()
 	if !cutScript() {
-		t.Fatal("the proxy never saw the script call: the test proves nothing")
+		t.Fatal("the proxy never cut a script call Redis held part of: the test proves nothing")
 	}
 	after := client.MGet(context.Background(), keys...).Val()
 	for index := range keys {

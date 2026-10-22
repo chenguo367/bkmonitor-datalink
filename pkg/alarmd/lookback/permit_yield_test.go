@@ -12,6 +12,7 @@ package lookback
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -219,18 +220,31 @@ func TestAReadNeverAskedToYieldSettlesItsRung(t *testing.T) {
 // yield, and the rung is compared, not preempted.
 func TestAYieldAfterTheReadCameBackIsNotTimed(t *testing.T) {
 	c := &clock{at: time.Unix(1_700_000_100, 0)}
+	// The read's context: the watcher cancels it when it takes the yield.
+	var reading atomic.Value
+	bound := testwait.Context(t)
 	engine, err := New(Options{Now: c.now, UnspreadFirstSamples: true,
 		Recheck: func(ctx context.Context, _ execution.PhysicalQuerySpec, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
+			reading.Store(ctx)
 			_ = sink.ConsumeProviderSeries(ctx, execution.ProviderSeriesBatch{Dataset: dataset("h1", steady)})
 			return execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil
 		},
 		Permit: func() (func(), <-chan struct{}, string) {
 			yield := make(chan struct{})
 			// The waiting formal query arrives as the permit is given back,
-			// and the release lingers long enough for the watcher to take
-			// the yield before a read that marked itself back only now
-			// would have.
-			return func() { close(yield); time.Sleep(50 * time.Millisecond) }, yield, "" // fixed-wait: the release lingers, as the case describes above
+			// and the release lasts until the watcher has taken the yield,
+			// which it marks by cancelling the read's context: a read that
+			// marked itself back only after the release would be found not
+			// back then, and timed.
+			return func() {
+				close(yield)
+				if read, ok := reading.Load().(context.Context); ok {
+					select {
+					case <-read.Done():
+					case <-bound.Done():
+					}
+				}
+			}, yield, ""
 		},
 		Owns: func(execution.QueryGroupIdentity) bool { return true }, Owned: func() int { return 1 },
 	})

@@ -11,12 +11,14 @@ package httpservice
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -276,23 +278,27 @@ func TestQueryListenerDrainsWhileTheDiagnosticsDrainIsStillWaiting(t *testing.T)
 		t.Fatal("diagnostics request did not enter its handler")
 	}
 	cancel()
-	deadline := time.NewTimer(2 * time.Second) // fixed-wait: must end inside the 10 s shutdown budget the case runs with, past which a drain one after the other would close the query listener too
-	defer deadline.Stop()
-	ticker := time.NewTicker(time.Millisecond)
-	defer ticker.Stop()
-	client := &http.Client{Timeout: time.Second}
-	for {
-		response, err := client.Get("http://" + queryAddress + "/healthz") //nolint:noctx // probe
+	// Stopped means refused: a probe that times out or meets a closing
+	// connection says nothing about the listener. Each probe dials anew, so
+	// none rides a connection kept from the one before. No bound short of the
+	// test's deadline is needed for the order: drained one after the other,
+	// the query listener stops only once the diagnostics drain gives up at
+	// the end of the shared budget, by force-closing the request still in its
+	// handler, and that request then ends in an error below, not on release.
+	probe := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	probeCtx := testwait.Context(t)
+	testwait.Until(t, "the query listener refusing connections while the diagnostics handler is blocked", func() bool {
+		request, err := http.NewRequestWithContext(probeCtx, http.MethodGet, "http://"+queryAddress+"/healthz", nil)
 		if err != nil {
-			break
+			t.Fatal(err)
+		}
+		response, err := probe.Do(request)
+		if err != nil {
+			return errors.Is(err, syscall.ECONNREFUSED)
 		}
 		response.Body.Close()
-		select {
-		case <-ticker.C:
-		case <-deadline.C:
-			t.Fatal("query listener kept accepting while the diagnostics handler was blocked")
-		}
-	}
+		return false
+	})
 	select {
 	case err := <-requestDone:
 		t.Fatalf("diagnostics request ended before release: %v", err)

@@ -621,17 +621,26 @@ func TestAShortProgramIsMatchedOnlyAsTheRuntimeQuotesIt(t *testing.T) {
 // own TERM ends it, whether or not the shell has job control.
 func TestAStoppedTimerLeavesNoSleep(t *testing.T) {
 	runtimeProvider(t)
-	command := exec.Command("/bin/sh", "-c", remoteSupervisor, supervisorName, "N0NCE", "47", "/bin/sh", "-c", "exit 0")
+	// The timer's deadline lies past the wait below, so its sleep goes
+	// within the wait only by the TERM the stopped timer sends it: a leaked
+	// one would still be sleeping when the wait gives up.
+	seconds := strconv.Itoa(int(time.Until(testwait.Deadline(t)).Seconds()) + 47)
+	command := exec.Command("/bin/sh", "-c", remoteSupervisor, supervisorName, "N0NCE", seconds, "/bin/sh", "-c", "exit 0")
 	if out, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("%v %s", err, out)
 	}
-	time.Sleep(200 * time.Millisecond) // fixed-wait: time for the TERM the stopped timer sent to end its sleep; waiting until the sleep goes would also pass a leaked one, which ends by itself at 47 s
-	listing, _ := exec.Command("ps", "-Ao", "args").Output()
-	for _, line := range strings.Split(string(listing), "\n") {
-		if strings.TrimSpace(line) == "sleep 47" {
-			t.Fatal("the stopped timer's sleep is still running")
+	testwait.Until(t, "the stopped timer's sleep ending on its TERM", func() bool {
+		listing, err := exec.Command("ps", "-Ao", "args").Output()
+		if err != nil {
+			t.Fatalf("ps: %v", err)
 		}
-	}
+		for _, line := range strings.Split(string(listing), "\n") {
+			if strings.TrimSpace(line) == "sleep "+seconds {
+				return false
+			}
+		}
+		return true
+	})
 }
 
 // dashOrSkip is the local dash, the /bin/sh of Debian-based images.

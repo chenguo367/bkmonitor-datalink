@@ -84,7 +84,7 @@ func startLateTakeoverReplay(t *testing.T) *lateReplay {
 	select {
 	case <-entered:
 	case <-testwait.Expired(t):
-		t.Fatalf("worker 1 sent no query for the taken-over Slot within %s", lifecycleWatchdog)
+		t.Fatal("worker 1 sent no query for the taken-over Slot before the test's deadline")
 	}
 	return &lateReplay{fixture: fixture, evaluation: evaluation, frozenDeadline: frozenDeadline, arrival: arrival,
 		release: release, ran: ran}
@@ -188,7 +188,7 @@ func waitScheduled(t *testing.T, ran <-chan error) {
 			t.Fatalf("the dispatcher pass returned %v", err)
 		}
 	case <-testwait.Expired(t):
-		t.Fatalf("the dispatcher pass did not return within %s", lifecycleWatchdog)
+		t.Fatal("the dispatcher pass did not return before the test's deadline")
 	}
 }
 
@@ -347,7 +347,7 @@ func TestAnExecutionInsideItsCommitIsNotDeclinedAndItsStateLands(t *testing.T) {
 	select {
 	case <-entered:
 	case <-testwait.Expired(t):
-		t.Fatalf("round 1 wrote no output within %s", lifecycleWatchdog)
+		t.Fatal("round 1 wrote no output before the test's deadline")
 	}
 	evaluation, frozenDeadline, found := fixture.unfinishedSlot()
 	if !found || evaluation != fixture.evaluationAt(1) {
@@ -563,7 +563,7 @@ func (fixture *lifecycleFixture) addSecondStrategy() {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the bundle owns %v %s after the second strategy, want two Query Groups", groups, lifecycleWatchdog)
+			t.Fatalf("the bundle owns %v at the test's deadline after the second strategy, want two Query Groups", groups)
 		}
 	}
 }

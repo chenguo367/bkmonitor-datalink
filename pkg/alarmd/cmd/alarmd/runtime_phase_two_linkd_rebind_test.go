@@ -86,12 +86,14 @@ func (f *rebindFixture) target() openalerts.TargetBinding {
 		Address: f.cfg.PlatformCache.TargetGroup.Address, Database: 0, Sources: []string{"source"}}
 }
 
-func waitUntil(t *testing.T, within time.Duration, what string, condition func() bool) {
+// waitUntil waits for condition until the test's deadline. The duration its
+// callers pass is the bound it once had and is not read.
+func waitUntil(t *testing.T, _ time.Duration, what string, condition func() bool) {
 	t.Helper()
 	deadline := testwait.Deadline(t)
 	for !condition() {
 		if time.Now().After(deadline) {
-			t.Fatalf("not within %s: %s", within, what)
+			t.Fatalf("not before the test's deadline: %s", what)
 		}
 		time.Sleep(20 * time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
@@ -185,13 +187,26 @@ func TestTheRetryStopsWithTheProcess(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	location := &linkdLocationSwitch{discovery: fleet.LinkdDiscoveryFacts{Outcome: fleet.LinkdDiscoveryFailed}, replaced: make(chan struct{})}
 	done := make(chan struct{})
+	// The cancel goes in once the retry has asked again: it is the loop
+	// running, not one that has not started, that has to stop.
+	asked := make(chan struct{}, 1)
 	go func() {
 		location.retry(ctx, linkdLocationConfig(), func(context.Context, openalerts.HTTPReconcilerOptions) (openalerts.TargetBinding, error) {
+			select {
+			case asked <- struct{}{}:
+			default:
+			}
 			return openalerts.TargetBinding{}, errors.New("console unreachable")
 		}, time.Millisecond, time.Millisecond)
 		close(done)
 	}()
-	time.Sleep(20 * time.Millisecond) // fixed-wait: lets the retry loop spin before the cancel the case is about
+	select {
+	case <-asked:
+	case <-done:
+		t.Fatal("the retry ended before it asked")
+	case <-testwait.Expired(t):
+		t.Fatal("the retry never asked the Console")
+	}
 	cancel()
 	select {
 	case <-done:

@@ -104,7 +104,7 @@ func TestTheProductionLeaderServesItsDesiredSetOverTheViewStream(t *testing.T) {
 	}
 	defer conn.Close()
 	client := pb.NewControlServiceClient(conn)
-	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	callCtx, cancel := context.WithDeadline(ctx, testwait.Deadline(t))
 	defer cancel()
 
 	// The wrong token is refused before anything is served.

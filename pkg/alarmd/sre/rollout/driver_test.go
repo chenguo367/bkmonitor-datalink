@@ -608,10 +608,12 @@ func TestAHungReadDoesNotHoldTheDriverPastItsLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	cluster.hang.Store(true)
-	time.Sleep(700 * time.Millisecond) // fixed-wait: a window over two 300 ms leases in which the hung reads must not let the lease lapse; an absence sends no signal to wait on
+	// Each hung read is bounded, so the driver comes back to read again.
+	testwait.Until(t, "the driver reading again past its hung reads", func() bool { return cluster.reads.Load() >= 3 })
+	time.Sleep(700 * time.Millisecond) // fixed-wait: an absence window over two 300 ms leases; a driver that does not renew between its hung reads lets the lease lapse inside one
 	entry, _ := store.Get(context.Background(), receipt.ID)
-	if entry.DrivenBy != "pod-a/1" || entry.LeaseExpired() || cluster.reads.Load() < 3 {
-		t.Fatalf("after a hung read: driven by %q, lease expired %v, %d reads", entry.DrivenBy, entry.LeaseExpired(), cluster.reads.Load())
+	if entry.DrivenBy != "pod-a/1" || entry.LeaseExpired() {
+		t.Fatalf("after hung reads: driven by %q, lease expired %v, %d reads", entry.DrivenBy, entry.LeaseExpired(), cluster.reads.Load())
 	}
 	cluster.hang.Store(false)
 	cluster.set(finish)

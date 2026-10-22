@@ -51,9 +51,9 @@ const (
 	// lifecycleInterval is the item's aggregation interval, which is the
 	// period no-data is judged at.
 	lifecycleInterval = int64(60)
-	// lifecycleWatchdog bounds every wait on something the bundle does in
-	// its own goroutines. It is generous because the machine running these is
-	// shared; nothing here measures time against it.
+	// lifecycleWatchdog is how long the follows-output sink holds a write
+	// whose gate a case never opens, before letting it go. No wait on the
+	// bundle is bounded by it: those run to the test's deadline (testwait).
 	lifecycleWatchdog = 10 * time.Second
 )
 
@@ -385,7 +385,7 @@ func (fixture *lifecycleFixture) open(workerID string, client *http.Client) {
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the bundle of %s owns %v after %s, want %d Query Groups", workerID, groups, lifecycleWatchdog, want)
+			t.Fatalf("the bundle of %s owns %v at the test's deadline, want %d Query Groups", workerID, groups, want)
 		}
 		if err := bundle.refreshAndReconcile(ctx, true); err != nil {
 			t.Fatalf("reconcile the bundle of %s: %v", workerID, err)
@@ -636,7 +636,7 @@ func (fixture *lifecycleFixture) change(strategy lifecycleStrategy, after int64)
 			}
 		}
 	}
-	t.Fatalf("no Segment carried the changed strategy within %s", lifecycleWatchdog)
+	t.Fatal("no Segment carried the changed strategy before the test's deadline")
 	return 0
 }
 
@@ -704,7 +704,7 @@ func (fixture *lifecycleFixture) waitOpenAlertSetRead(round int64) {
 		}
 		time.Sleep(20 * time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 		if time.Now().After(deadline) {
-			fixture.t.Fatalf("the open alert copy has not read the strategy's set after %s: %+v", lifecycleWatchdog, port.cache.Stats())
+			fixture.t.Fatalf("the open alert copy has not read the strategy's set by the test's deadline: %+v", port.cache.Stats())
 		}
 	}
 }

@@ -604,7 +604,7 @@ func TestAClosingNormalWhoseOutputFailedIsSentByTheRetry(t *testing.T) {
 		}
 	}
 	if closing == 0 {
-		t.Fatal("no Segment carried the new target within ten seconds")
+		t.Fatal("no Segment carried the new target before the test's deadline")
 	}
 	for round := int64(2); round < closing; round++ {
 		if !fixture.attempt(round, 0) {

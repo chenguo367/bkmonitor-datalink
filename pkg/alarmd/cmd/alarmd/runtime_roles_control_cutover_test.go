@@ -37,7 +37,7 @@ func TestAWholeDeploymentRollingAtOnceElectsTheControlProcessInOneEpoch(t *testi
 	fixture := newElectionFixture(t, queryGroups, "alarmd:phase-two:election-cutover")
 	round := func() {
 		fixture.advance(5 * time.Second)
-		time.Sleep(1200 * time.Millisecond) // fixed-wait: one beat of the processes' 1 s real-clock loops (lease renewal, scheduler tick, view stream) the fixture cannot drive or yet observe; the open exception of this class
+		fixture.awaitRenewals()
 		fixture.tick()
 	}
 	old := fixture.open("cutover-old", roles.Set{roles.Control, roles.Worker}, true)

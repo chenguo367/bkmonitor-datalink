@@ -71,10 +71,13 @@ func TestTheQueryBudgetIsResizedInPlace(t *testing.T) {
 	for _, permit := range held[:len(held)-lowered.ProcessQueryPermits] {
 		permit.Release()
 	}
-	select {
-	case <-granted:
-		t.Fatalf("a permit was granted with %d held against a budget of %d", lowered.ProcessQueryPermits, lowered.ProcessQueryPermits)
-	case <-time.After(50 * time.Millisecond): // fixed-wait: a window in which no permit may be granted; an absence sends no signal to wait on
+	// Release dispatches under the coordinator's lock before it returns: a
+	// permit it granted is already counted in flight, its waiter already off
+	// the queue. No other path grants one meanwhile; the waiter's own
+	// deadline is a minute away.
+	if snapshot := flights.queryPermitSnapshot(); snapshot.Inflight != lowered.ProcessQueryPermits || snapshot.NormalWaiting != 1 {
+		t.Fatalf("a permit was granted with %d held against a budget of %d: %d in flight, %d waiting",
+			lowered.ProcessQueryPermits, lowered.ProcessQueryPermits, snapshot.Inflight, snapshot.NormalWaiting)
 	}
 	held[len(held)-1].Release()
 	(<-granted).Release()

@@ -353,7 +353,14 @@ func TestTheServerBringsEachWorkerToTheCurrentRevisionBySnapshotOrOneStep(t *tes
 	w3.receipt("i3", snap3.Version, true)
 	eventually(t, "installed by all is reported once", func() bool { return harness.observer.count("installed_by_all", "") == 1 })
 	w3.receipt("i3", snap3.Version, true)
-	time.Sleep(20 * time.Millisecond) // fixed-wait: a window in which the repeated receipt must not report installed_by_all again; an absence sends no signal to wait on
+	// The server reads one stream's messages in order and records a receipt,
+	// reporting installed_by_all from that same read, before it reads the
+	// next: a heartbeat answered after the repeated receipt means the receipt
+	// has been recorded and anything it would report has been reported.
+	w3.send(&pb.WorkerMessage{Body: &pb.WorkerMessage_Heartbeat{Heartbeat: &pb.Heartbeat{SentAtMs: 1}}})
+	if beat := w3.recv().GetHeartbeat(); beat == nil {
+		t.Fatal("w3's heartbeat after the repeated receipt was not answered")
+	}
 	if harness.observer.count("installed_by_all", "") != 1 {
 		t.Fatalf("installed_by_all reported %d times, want once", harness.observer.count("installed_by_all", ""))
 	}

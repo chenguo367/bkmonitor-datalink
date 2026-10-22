@@ -171,12 +171,13 @@ func TestAStopLetsTheSlotInItsCommitBoundaryFinish(t *testing.T) {
 		}
 		drainingBeforeFinish.Store(draining())
 		// After DRAINING the stop takes a few in-process steps - the dispatcher
-		// told to stop, its ticks returned - before the drain counts the Slots
-		// it waits for; returning inside them reads as a drain with nothing in
-		// flight. None of them is observable from here.
+		// told to stop, its ticks returned - before drainSlots counts the
+		// Slots it waits for; returning inside them reads as a drain with
+		// nothing in flight. Nothing marks that count: an observation or hook
+		// in drainSlots once Waited is read would let this wait on it.
 		select {
 		case <-ctx.Done():
-		case <-time.After(2 * time.Second): // fixed-wait: seconds of margin over the in-memory steps between DRAINING and the drain's count
+		case <-time.After(2 * time.Second): // fixed-wait: (open) a margin over the in-memory steps from DRAINING to drainSlots counting the running Slots, which nothing observable marks
 		}
 		outcome <- "finished"
 		return execution.SlotExecutionResult{Completed: true}, true, nil
@@ -268,12 +269,11 @@ func TestAStopDoesNotWaitForeverOnASlotThatIgnoresCancellation(t *testing.T) {
 	waitSignal(t, runner.runStarted, "the Slot that ignores cancellation")
 	stopped := time.Now()
 	cancel()
-	bound := 2*cfg.ShutdownTimeout.Duration() + 2*time.Second
 	select {
 	case <-done:
 	case <-testwait.Expired(t):
-		t.Fatalf("the stop was still waiting on a Slot that ignores cancellation after %s, want it done within %s",
-			time.Since(stopped), bound)
+		t.Fatalf("the stop was still waiting on a Slot that ignores cancellation %s after it began, at the test's deadline",
+			time.Since(stopped))
 	}
 	drain := bundle.shutdownDrain()
 	if drain == nil || drain.Outcome != observability.SlotDrainDeadlineUnreturned || drain.Waited != 1 ||

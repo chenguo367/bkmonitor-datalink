@@ -129,7 +129,7 @@ func settleExecutableView(ctx context.Context, bundle *phaseTwoWorkerBundle, wai
 	}
 	serveControlStreamForTest(bundle)
 	deadline := time.Now().Add(wait)
-	for {
+	for { // fixed-wait: (open) a best-effort bound, after which the pass runs unsettled and returns false unread; failing here at the test's deadline needs a testing.TB that runScheduledOnceSettled and settledRunner's callers do not pass
 		renewLapsedRegistrationForTest(ctx, bundle, ownership)
 		if viewSettled(ctx, bundle, ownership) {
 			return true
