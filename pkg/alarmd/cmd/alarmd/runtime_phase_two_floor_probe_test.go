@@ -18,8 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-redis/redis/v8"
-
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
@@ -80,7 +78,12 @@ func ageFloor(t *testing.T, f *cutoverStallFixture, age time.Duration) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.redisClient.Set(ctx, key, aged, redis.KeepTTL).Err(); err != nil {
+	// The record's own expiry kept, set again from what is left of it: SET's KEEPTTL is Redis 6's.
+	left, err := f.redisClient.PTTL(ctx, key).Result()
+	if err != nil || left <= 0 {
+		t.Fatalf("fixture: the record's expiry %v %v, want one set", left, err)
+	}
+	if err := f.redisClient.Set(ctx, key, aged, left).Err(); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.bundle.dependencies.ReadHolds.controller.RestoreBatch(ctx, []execution.QueryGroupIdentity{f.queryGroup}); err != nil {
