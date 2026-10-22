@@ -12,6 +12,7 @@ package controlplane
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -33,9 +34,14 @@ const recoveryStatusSetterValueLimit = 64
 // a value holding "-" into the ending and the case (recover.py:136-138),
 // ends the alert closed when the ending is "close" and recovered otherwise
 // (:396-403), and recovers on no data when the case is "nodata". A value it
-// cannot split - not a string, null, or more than one "-" - raises inside the
-// same try as the window, so that alert's level takes the default window and
-// "recovery" (:139-142): malformed.
+// cannot split - a number, a boolean, null, or more than one "-" - raises
+// inside the same try as the window, so that alert's level takes the default
+// window and "recovery" (:139-142): malformed. A list or an object is a
+// membership test there: one without a "-" member is neither "close" nor
+// split and recovers on its own window; one with it reaches .split and
+// raises an AttributeError the try does not catch, so that level's recovery
+// check fails each time - read here as malformed, the nearest thing this
+// build can run.
 type legacyRecoveryStatusSetter struct {
 	written   string
 	close     bool
@@ -54,6 +60,16 @@ func readLegacyRecoveryStatusSetter(raw json.RawMessage) legacyRecoveryStatusSet
 	}
 	var text string
 	if json.Unmarshal(value, &text) != nil || strings.TrimSpace(string(value)) == "null" {
+		var members []any
+		var keys map[string]json.RawMessage
+		switch {
+		case strings.TrimSpace(string(value)) == "null":
+		case json.Unmarshal(value, &members) == nil:
+			return legacyRecoveryStatusSetter{written: string(value), malformed: slices.Contains(members, any("-"))}
+		case json.Unmarshal(value, &keys) == nil:
+			_, dash := keys["-"]
+			return legacyRecoveryStatusSetter{written: string(value), malformed: dash}
+		}
 		return legacyRecoveryStatusSetter{written: string(value), malformed: true}
 	}
 	setter := legacyRecoveryStatusSetter{written: text}

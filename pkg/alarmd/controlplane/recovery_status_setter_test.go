@@ -49,6 +49,10 @@ func TestAStatusSetterIsReadAsTheCheckerReadsItAndWhatDoesNotRunIsSaid(t *testin
 		{setter: `"close-no-data"`, notes: []string{window}, detail: `recovery_windows=5; status_setter "close-no-data" is not read`, windows: 5},
 		{setter: `null`, notes: []string{window}, windows: 5},
 		{setter: `5`, notes: []string{window}, windows: 5},
+		{setter: `["close-nodata"]`, notes: []string{defaulted}, detail: `status_setter="[\"close-nodata\"]" read_as=recovery`, windows: 3},
+		{setter: `["-"]`, notes: []string{window}, windows: 5},
+		{setter: `{"close":1}`, notes: []string{defaulted}, windows: 3},
+		{setter: `{"-":1}`, notes: []string{window}, windows: 5},
 	} {
 		t.Run(test.setter, func(t *testing.T) {
 			catalog := legacyRecoveryCatalog(t, `{"level":1,"trigger_config":{"count":1,"check_window":1},"recovery_config":{"check_window":3,"status_setter":`+test.setter+`}}`, 1)
