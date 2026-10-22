@@ -12,12 +12,14 @@ package metric
 import (
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/tracing"
 )
 
 type traceExportMetrics struct {
 	slots   *prometheus.CounterVec
 	dropped *prometheus.CounterVec
+	state   *prometheus.GaugeVec
 }
 
 func newTraceExportMetrics() traceExportMetrics {
@@ -38,6 +40,14 @@ func newTraceExportMetrics() traceExportMetrics {
 				"Slot span's context instead). A Slot never waits on the export, so this is where a slow or " +
 				"absent collector shows.",
 		}, []string{"reason"}),
+		state: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Subsystem: metricSubsystem, Name: "trace_export",
+			Help: "Whether this process exports its own spans, one-hot by state: on (a collector was given " +
+				"and the exporter built) or off_not_configured (no phase_two.tracing.otlp_endpoint). Set at " +
+				"startup. The span counters stay at zero both while the export is off and while it has nothing " +
+				"to sample; this says which. Both series exist from the start; the fleet overview names the " +
+				"collector's host and the sampling.",
+		}, []string{"state"}),
 	}
 	for _, decision := range tracing.Decisions {
 		metrics.slots.WithLabelValues(decision)
@@ -45,11 +55,29 @@ func newTraceExportMetrics() traceExportMetrics {
 	for _, reason := range tracing.DropReasons {
 		metrics.dropped.WithLabelValues(reason)
 	}
+	for _, state := range fleet.TracingStates {
+		metrics.state.WithLabelValues(state)
+	}
 	return metrics
 }
 
 func (m traceExportMetrics) collectors() []prometheus.Collector {
-	return []prometheus.Collector{m.slots, m.dropped}
+	return []prometheus.Collector{m.slots, m.dropped, m.state}
+}
+
+// SetTraceExportState sets the export's state, one-hot: the named state 1,
+// every other 0. An unnamed state changes nothing.
+func (r *Recorder) SetTraceExportState(state string) {
+	if r == nil || !knownLabel(fleet.TracingStates, state) {
+		return
+	}
+	for _, each := range fleet.TracingStates {
+		value := 0.0
+		if each == state {
+			value = 1
+		}
+		r.phaseTwo.traceExport.state.WithLabelValues(each).Set(value)
+	}
 }
 
 // TraceSlotDecided counts one Slot's sampling decision.

@@ -271,6 +271,11 @@ func openProductionPhaseTwoBundleAssembly(
 	if err != nil {
 		return nil, err
 	}
+	// Whether this process exports, said in one read: a gauge and the fleet
+	// facts, so an export that is off is not read as one with nothing to
+	// sample.
+	tracingFacts := fleetTracingFacts(cfg, traces != nil)
+	recorder.SetTraceExportState(tracingFacts.State)
 	defer func() {
 		if resultErr != nil {
 			_ = shutdownTraces(context.Background(), traces)
@@ -1394,6 +1399,8 @@ func openProductionPhaseTwoBundleAssembly(
 		// The same facts the runtime profile reports, from the same
 		// functions the Slot source and admission are assembled with.
 		retention: fleetRetentionFacts(cfg),
+		// The export built above, on or off.
+		tracing: tracingFacts,
 	}
 	// The heartbeat reports the same acknowledgement and occupancy the fleet
 	// snapshot publishes, from the same sources.

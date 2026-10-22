@@ -2150,6 +2150,10 @@ type Snapshot struct {
 	// read it from its configuration. Absent on a build before this fact
 	// existed, which the aggregate keeps apart from any choice.
 	OutputProtocol *OutputProtocolFacts `json:"output_protocol,omitempty"`
+	// Tracing is the span export this process runs with, as it built it: on
+	// with the collector's host and sampling, or off and why. Absent on a
+	// build before this fact existed.
+	Tracing *TracingFacts `json:"tracing,omitempty"`
 	// Retention is the retention lengths this process runs with and their
 	// inputs, the same facts as the runtime profile's retention section. On
 	// the snapshot because a deployment read only through its pages had no
@@ -3034,6 +3038,9 @@ type ReplicaView struct {
 	// it. Absent when it published none (an older build), which the page says
 	// rather than filling in.
 	OutputProtocol *OutputProtocolFacts `json:"output_protocol,omitempty"`
+	// Tracing is the span export this replica runs, as it published it.
+	// Absent when it published none (an older build).
+	Tracing *TracingFacts `json:"tracing,omitempty"`
 	// RoundMemory is this replica's, as it published it: the rounds and
 	// bytes its tracker keeps and the object keeping the most. Absent when it
 	// published none (an older build).
@@ -3314,6 +3321,9 @@ type View struct {
 	// group with an empty word. What a given strategy publishes as is not
 	// here -- it is frozen per Plan and read from the directory.
 	OutputProtocols []OutputProtocolGroup `json:"output_protocols"`
+	// Tracings is the distinct span exports the counted replicas run, grouped
+	// like Builds; a replica that published none is its own group.
+	Tracings []TracingGroup `json:"tracings"`
 	// Retentions is the distinct retention facts the counted replicas run
 	// with, grouped like Builds: one entry is a deployment that agrees with
 	// itself, more is a rollout or a values file that changed under some of
@@ -3665,10 +3675,12 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 			facts := *snapshot.OutputProtocol
 			perReplica.OutputProtocol = &facts
 		}
+		perReplica.Tracing = CopyTracingFacts(snapshot.Tracing)
 		// And what its tracker keeps, copied so a later read cannot alias
 		// the snapshot's.
 		perReplica.RoundMemory = copyRoundMemory(snapshot.RoundMemory)
 		view.OutputProtocols = addToOutputProtocolGroup(view.OutputProtocols, snapshot.OutputProtocol, replica)
+		view.Tracings = addToTracingGroup(view.Tracings, snapshot.Tracing, replica)
 		view.Retentions = addToRetentionGroup(view.Retentions, snapshot.Retention, replica)
 		view.Builds = addToBuildGroup(view.Builds, snapshot.Build, replica)
 		view.Workers.Ready++
@@ -3869,6 +3881,7 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	Settle(&view)
 	sortBuildGroups(view.Builds)
 	sortOutputProtocolGroups(view.OutputProtocols)
+	sortTracingGroups(view.Tracings)
 	sortRetentionGroups(view.Retentions)
 	return view
 }

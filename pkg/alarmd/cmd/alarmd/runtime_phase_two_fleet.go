@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/url"
 	"sort"
 	"time"
 
@@ -321,6 +322,10 @@ type fleetPublisher struct {
 	// inputs, read once at assembly for the same reason. Nil on a publisher
 	// built by hand, and the snapshot then carries none.
 	retention *observability.RuntimeRetentionFacts
+	// tracing is the span export this process built at assembly, on or off
+	// and why. Nil on a publisher built by hand, and the snapshot then
+	// carries none.
+	tracing *fleet.TracingFacts
 }
 
 // fleetOverdueWakeCeiling bounds how many parked objects one publish carries.
@@ -607,6 +612,22 @@ func fleetRetentionFacts(cfg config.Config) *observability.RuntimeRetentionFacts
 	return &facts
 }
 
+// fleetTracingFacts is the span export this process built, as the fleet
+// publishes it: on with the collector's host and the sampling it runs, when
+// the exporter was built, or off because no collector was given. Neither the
+// endpoint's path nor the token is in it.
+func fleetTracingFacts(cfg config.Config, built bool) *fleet.TracingFacts {
+	if !built {
+		return &fleet.TracingFacts{State: fleet.TracingOffNotConfigured, Reason: fleet.TracingReasonNotConfigured}
+	}
+	host := ""
+	if parsed, err := url.Parse(cfg.PhaseTwo.Tracing.OTLPEndpoint); err == nil {
+		host = parsed.Host
+	}
+	ratio, rate := cfg.TraceSampleRatio(), cfg.TraceMaxTracesPerSecond()
+	return &fleet.TracingFacts{State: fleet.TracingOn, EndpointHost: host, SampleRatio: &ratio, MaxTracesPerSecond: &rate}
+}
+
 // fleetOutputProtocolFacts is the choice this process runs with: the word the
 // reconciler was configured with -- the same call, so the fleet cannot
 // publish one word while the Plans are built under another -- and whether the
@@ -772,6 +793,7 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 		facts := *publisher.retention
 		snapshot.Retention = &facts
 	}
+	snapshot.Tracing = fleet.CopyTracingFacts(publisher.tracing)
 	// What the tracker keeps to read holes by, and the object keeping the
 	// most: the metrics carry the counts, only the snapshot can name it.
 	roundMemory := publisher.tracker.RoundMemory().Summary()

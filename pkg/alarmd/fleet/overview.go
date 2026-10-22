@@ -78,6 +78,10 @@ type Overview struct {
 	FlowCoverage OverviewCoverage  `json:"flow_coverage"`
 	Resources    OverviewResources `json:"resources"`
 	Runtime      OverviewRuntime   `json:"runtime"`
+	// Tracing is the span export the replicas run as one line: on with the
+	// collector's host and sampling, not configured, mixed or unknown. Never
+	// the endpoint's path or the token.
+	Tracing OverviewTracing `json:"tracing"`
 	// Late is the evaluate stage's late and overdue objects as the page's
 	// one line, with the strategy page's selection for them.
 	Late OverviewLate `json:"late"`
@@ -414,6 +418,8 @@ type OverviewReplica struct {
 	Ready         bool     `json:"ready"`
 	MergedQueries int      `json:"merged_queries"`
 	State         string   `json:"state"`
+	// Tracing is the span export this replica runs, as it published it.
+	Tracing *TracingFacts `json:"tracing,omitempty"`
 }
 
 type OverviewNotice struct {
@@ -511,6 +517,7 @@ func overviewOf(health HealthResponse, running map[StateWord]int, runningKnown b
 	if health.Expected != nil {
 		overview.Resources.Scale.MergedQueries = overviewMeasured(float64(*health.Expected), "merged_queries")
 	}
+	overview.Tracing = overviewTracingOf(health.Tracings)
 	overview.Runtime = OverviewRuntime{Replicas: []OverviewReplica{}, Attention: []OverviewNotice{}}
 	for _, replica := range health.PerReplica {
 		resource := OverviewReplicaResource{Name: replica.Replica, MemoryRatio: overviewUnmeasured("ratio"),
@@ -526,7 +533,8 @@ func overviewOf(health HealthResponse, running map[StateWord]int, runningKnown b
 			}
 		}
 		overview.Resources.Replicas = append(overview.Resources.Replicas, resource)
-		row := OverviewReplica{Name: replica.Replica, UptimeSeconds: replica.UptimeSeconds, MergedQueries: replica.Owned, State: OverviewOK}
+		row := OverviewReplica{Name: replica.Replica, UptimeSeconds: replica.UptimeSeconds, MergedQueries: replica.Owned, State: OverviewOK,
+			Tracing: CopyTracingFacts(replica.Tracing)}
 		if replica.Build != nil {
 			row.Version = replica.Build.Version
 		}

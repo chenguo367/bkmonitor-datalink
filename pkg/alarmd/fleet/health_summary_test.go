@@ -48,7 +48,7 @@ func healthFromSnapshots(view View, at time.Time, stallAfter time.Duration) Heal
 		ReadEarly: firstScreenList(readEarly), ReadEarlyTotal: len(readEarly),
 		Coverage: view.Coverage, Handover: handoverOf(view.Coverage), PerReplica: view.PerReplica,
 		PublishedVersion: view.PublishedVersion, Workers: view.Workers, Builds: view.Builds,
-		OutputProtocols: outputProtocolList(view.OutputProtocols), Retentions: retentionList(view.Retentions),
+		OutputProtocols: outputProtocolList(view.OutputProtocols), Tracings: tracingList(view.Tracings), Retentions: retentionList(view.Retentions),
 		OutputPath: OutputPathOf(&view), Degradations: degradationList(view.Degradations),
 		Activation: view.Activation, ActivationReplica: view.ActivationReplica, NoDataHorizon: view.NoDataHorizon,
 		Rebalance: view.Rebalance, RebalanceReplica: view.RebalanceReplica,

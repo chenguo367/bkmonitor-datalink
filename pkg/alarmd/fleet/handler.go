@@ -258,6 +258,9 @@ type HealthResponse struct {
 	// values file on a machine the reader could not reach. Per strategy, the
 	// frozen format is on the directory route's effective_output.
 	OutputProtocols []OutputProtocolGroup `json:"output_protocols"`
+	// Tracings is which span export each counted replica runs, grouped the
+	// same way: on with the collector's host, or off and why.
+	Tracings []TracingGroup `json:"tracings"`
 	// Retentions is which retention lengths each counted replica runs with,
 	// and their inputs, grouped the same way: what runtime.get answers on
 	// the CLI channel, for a deployment read only through its pages.
@@ -1061,6 +1064,7 @@ func healthOf(view *View, part ReplicaPart, at time.Time) HealthResponse {
 		Coverage: view.Coverage, Handover: handoverOf(view.Coverage), PerReplica: view.PerReplica,
 		PublishedVersion: view.PublishedVersion, Workers: view.Workers, Builds: view.Builds,
 		OutputProtocols: outputProtocolList(view.OutputProtocols),
+		Tracings:        tracingList(view.Tracings),
 		Retentions:      retentionList(view.Retentions),
 		OutputPath:      OutputPathOf(view),
 		Degradations:    degradationList(view.Degradations),

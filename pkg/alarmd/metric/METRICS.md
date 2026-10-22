@@ -1989,6 +1989,12 @@ Schedule timelines the Control Leader looked at because a Worker reported them u
 
 Owned Query Groups this replica began naming on its registration because a round met a Schedule timeline that does not decode or whose key is gone (SCHEDULE_UNREADABLE, SCHEDULE_MISSING): one per Query Group each time it goes from unnamed to named. The name is dropped by the first later round of that Query Group that runs a Slot, or when it leaves this replica. A leader reads each named timeline again and rewrites or reopens it (timeline_repairs_total). A count that keeps rising for the same Query Groups is a rewrite that does not take. Reader: the release acceptance, from /metrics after each deploy.
 
+## alarmd_trace_export
+
+Labels: `state`
+
+Whether this process exports its own spans, one-hot by state: on (a collector was given and the exporter built) or off_not_configured (no phase_two.tracing.otlp_endpoint). Set at startup. The span counters stay at zero both while the export is off and while it has nothing to sample; this says which. Both series exist from the start; the fleet overview names the collector's host and the sampling.
+
 ## alarmd_trace_slots_total
 
 Labels: `decision`
