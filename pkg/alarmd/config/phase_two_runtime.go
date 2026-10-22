@@ -233,6 +233,7 @@ type PhaseTwoRuntimeConfig struct {
 	Coordinator      PhaseTwoCoordinatorConfig      `yaml:"-"`
 	PlatformSettings PhaseTwoPlatformSettingsConfig `yaml:"platform_settings"`
 	NoData           PhaseTwoNoDataConfig           `yaml:"no_data"`
+	Tracing          PhaseTwoTracingConfig          `yaml:"tracing"`
 }
 
 // PhaseTwoNoDataConfig is the deployment's say over how long one absent group
@@ -408,6 +409,9 @@ func (c PhaseTwoRuntimeConfig) validateRoles(selected roles.Set) error {
 		return fmt.Errorf("phase_two platform_settings.redis_key_prefix: %w", err)
 	}
 	if err := c.NoData.validate(); err != nil {
+		return err
+	}
+	if err := c.Tracing.validate(); err != nil {
 		return err
 	}
 	for name, list := range map[string]*[]string{

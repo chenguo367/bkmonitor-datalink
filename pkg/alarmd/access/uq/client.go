@@ -15,6 +15,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/tracing"
 )
 
 const (
@@ -275,7 +276,7 @@ func (client *Client) execute(callerCtx, ctx context.Context, attempt queryIdent
 	return client.executeCarryingAPMApp(callerCtx, ctx, attempt, sink)
 }
 
-func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt queryIdentity, sink execution.ProviderSeriesSink, scanned *DiagnosticScan) (execution.ProviderCompletion, error) {
+func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt queryIdentity, sink execution.ProviderSeriesSink, scanned *DiagnosticScan) (spanResult execution.ProviderCompletion, spanErr error) {
 	path, encoded, err := buildWireRequestCarrying(attempt.Spec, carriesAPMApp(attempt.Spec) && !attempt.NoAppCarry)
 	if err != nil {
 		return execution.ProviderCompletion{}, err
@@ -292,7 +293,10 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 	for name, value := range scopeHeaders(attempt.Spec.PlanFacts) {
 		request.Header.Set(name, value)
 	}
-	traceParent, traceID := newTraceParent()
+	// The attempt's span, under its Slot's when the Slot is sampled; the
+	// traceparent is that span's context, or a fresh unsampled trace.
+	querySpan, traceParent, traceID := tracing.StartQuery(ctx, "uq", len(attempt.Strategies), attempt.AttemptNo)
+	defer func() { querySpan.End(queryOutcome(spanResult, spanErr)) }()
 	request.Header.Set(headerTraceParent, traceParent)
 	if strategies := strategyHeader(attempt.Strategies); strategies != "" {
 		request.Header.Set(headerStrategy, strategies)

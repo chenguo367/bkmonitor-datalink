@@ -36,6 +36,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scopeclose"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategycache"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/targetplan"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/tracing"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
 )
 
@@ -420,6 +421,8 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"alarmd_control_health_invalid_total":                 "variableLabels: {field}",
 		"alarmd_control_leader_transitions_total":             "variableLabels: {to_class,reason}",
 		"alarmd_control_handback_watch_resets_total":          "variableLabels: {reason}",
+		"alarmd_trace_slots_total":                            "variableLabels: {decision}",
+		"alarmd_trace_spans_dropped_total":                    "variableLabels: {reason}",
 		"alarmd_startup_dependency_wait_total":                "variableLabels: {dependency}",
 		"alarmd_activation_blocked_query_groups":              "variableLabels: {reason}",
 		"alarmd_activation_blocked_set_total":                 "variableLabels: {accounting}",
@@ -1040,6 +1043,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("control_health_invalid_total"):            len(controlHealthInvalidFields),
 		fqName("control_leader_transitions_total"):        len(controlLeaderTransitions),
 		fqName("control_handback_watch_resets_total"):     len(ControlHandbackWatchResetReasons),
+		fqName("trace_slots_total"):                       len(tracing.Decisions),
+		fqName("trace_spans_dropped_total"):               len(tracing.DropReasons),
 		fqName("startup_dependency_wait_total"):           len(StartupDependencies),
 		fqName("activation_blocked_query_groups"):         len(ActivationBlockedReasons),
 		fqName("activation_blocked_set_total"):            len(controlplane.BlockedSetAccountings),

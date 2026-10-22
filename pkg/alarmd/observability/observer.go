@@ -70,6 +70,9 @@ const (
 	// starting over (control_handback_watch_resets_total): the round could
 	// not read the candidates, or went too long without a reading.
 	StageControlHandbackWatch = "control_handback_watch"
+	// StageTraceExport names a batch of alarmd's own spans the collector
+	// did not take (trace_spans_dropped_total{reason="export_failed"}).
+	StageTraceExport = "trace_export"
 	// StageStateCarryDecided is the Control Leader deciding what an
 	// activation whose state generation moved may carry; StageStateCarried
 	// is a Worker carrying it for each series. See StateCarryFacts.
@@ -3643,6 +3646,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentControlPlane, StageSourceWithheld},
 	{ComponentControlPlane, StageNoDataSuspended},
 	{ComponentControlPlane, StageControlHandbackWatch},
+	{ComponentRuntime, StageTraceExport},
 	{ComponentState, StageSideEffectAdmission}, {ComponentState, StageGapGuardCommitted},
 	{ComponentState, StageMutationCompared}, {ComponentState, StageStateAdmission}, {ComponentState, StageWarmingPeak},
 	{ComponentState, StageStateApplied}, {ComponentState, StageOutputUnapplied},
@@ -3681,6 +3685,10 @@ var allOperations = append(append([]Operation(nil), metricOperations...), phaseT
 // did not say. They are listed once and shared, so adding one cannot silently
 // change what counts as a resource reason.
 var unclassifiedReasons = []ReasonCode{ReasonNone, ReasonInternalUnknown, ReasonNotReported}
+
+// ReasonTraceExportFailed is the trace_export line's reason: a batch of
+// alarmd's own spans the collector did not take, the error beside it.
+const ReasonTraceExportFailed ReasonCode = "trace_export_failed"
 
 // The effective-time maintenance's outcomes: the closed list of what one
 // maintenance step does to a Query Group, an alert or a close batch. They
@@ -3898,7 +3906,7 @@ var allResourceReasons = joinReasons(
 // allLogReasons is every reason NormalizeReason can return: the limiter keeps
 // a bucket for each, and refuses a reason it has none for, so a catalogue
 // NormalizeReason accepts and this list leaves out has its lines dropped.
-var allLogReasons = joinReasons(unclassifiedReasons, resourceOnlyReasons, activationFailureReasons, ViewStreamReasons, SchedulerDecisionReasons, SlotPathReasons, effectiveMaintenanceReasons, AbsentCloseReasons, CompletionAttributionReasons, AdmissionFailureReasons, NoDataStallReasons, contractClassReasons, []ReasonCode{ReasonHeldBySupplement, ReasonHeldByMaintenance, ReasonSlotCancelled}, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
+var allLogReasons = joinReasons(unclassifiedReasons, []ReasonCode{ReasonTraceExportFailed}, resourceOnlyReasons, activationFailureReasons, ViewStreamReasons, SchedulerDecisionReasons, SlotPathReasons, effectiveMaintenanceReasons, AbsentCloseReasons, CompletionAttributionReasons, AdmissionFailureReasons, NoDataStallReasons, contractClassReasons, []ReasonCode{ReasonHeldBySupplement, ReasonHeldByMaintenance, ReasonSlotCancelled}, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
 
 var componentStageSet = makeComponentStageSet(allComponentStages)
 var metricComponentStageSet = makeComponentStageSet(metricComponentStages)

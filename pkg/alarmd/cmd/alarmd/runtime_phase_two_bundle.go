@@ -43,6 +43,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/state"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategycache"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/tracing"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream/pb"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/worker"
@@ -260,6 +261,21 @@ func openProductionPhaseTwoBundleAssembly(
 	if err != nil {
 		return nil, err
 	}
+	traces, err := tracing.New(tracing.Config{Endpoint: cfg.PhaseTwo.Tracing.OTLPEndpoint, Token: cfg.PhaseTwo.Tracing.Token,
+		SampleRatio: cfg.TraceSampleRatio(), MaxTracesPerSecond: cfg.TraceMaxTracesPerSecond(),
+		ServiceVersion: recorder.Build().Version, InstanceID: cfg.PhaseTwo.Worker.ID,
+		ExportFailed: func(err error) {
+			observeRuntime(context.Background(), baseObserver, observability.Observation{Component: observability.ComponentRuntime,
+				Stage: observability.StageTraceExport, Result: observability.ResultFailed, ReasonCode: observability.ReasonTraceExportFailed, Err: err})
+		}}, recorder)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if resultErr != nil {
+			_ = shutdownTraces(context.Background(), traces)
+		}
+	}()
 	// The tracker reads the stream the replica already emits, so building the
 	// anomaly list costs no reads of its own. It forwards every observation
 	// untouched: diagnostics must not change what the pipeline reports.
@@ -859,6 +875,7 @@ func openProductionPhaseTwoBundleAssembly(
 		SteppedDownAsLeader: controlLeaderSteppedDown(reconciler, recorder),
 		QueryCooldowns:      newProductionQueryCooldownStore(cfg, redisForCaller(runtimeClient, redisfailure.CallerQueryCooldown), recorder, observer),
 		ReadHolds:           readHolds,
+		Traces:              traces,
 		DecisionLag:         recorder.RecordDecisionLag,
 		Store:               ownershipStore, WorkerID: cfg.PhaseTwo.Worker.ID, Catalog: catalog, Progress: progressStore,
 		Executor: executor, Now: external.Now, ControlLeaderTTL: cfg.PhaseTwo.Ownership.ControlLeaderTTL.Duration(),
@@ -1200,7 +1217,7 @@ func openProductionPhaseTwoBundleAssembly(
 			stopCMDBIndex()
 			viewServer.Close()
 			eventsClosed = true
-			closers := []error{events.Shutdown(shutdownCtx), closeCLI()}
+			closers := []error{events.Shutdown(shutdownCtx), closeCLI(), shutdownTraces(shutdownCtx, traces)}
 			if moved := linkd.Location.OwnedClient(); moved != nil {
 				closers = append(closers, moved.Close())
 			}
@@ -1882,4 +1899,15 @@ func controlLeaderSteppedDown(reconciler interface{ StepDown() }, recorder *metr
 		reconciler.StepDown()
 		recorder.ControlLeaderStepDown()
 	}
+}
+
+// traceShutdownBound is how long shutdown waits for the span export to send
+// what it has queued: a part of the shutdown, so a collector that does not
+// answer costs the spans and not the process's exit.
+const traceShutdownBound = 3 * time.Second
+
+func shutdownTraces(ctx context.Context, traces *tracing.Exporter) error {
+	ctx, cancel := context.WithTimeout(ctx, traceShutdownBound)
+	defer cancel()
+	return traces.Shutdown(ctx)
 }

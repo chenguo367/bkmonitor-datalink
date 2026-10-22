@@ -216,6 +216,10 @@ func (c *Config) credentialGroups() []credentialGroup {
 		{field: "phase_two.linkd.username", value: &c.PhaseTwo.Linkd.Username, file: &c.PhaseTwo.Linkd.UsernameFile, environment: LinkdConsoleUsernameEnvironment},
 		{field: "phase_two.linkd.password", value: &c.PhaseTwo.Linkd.Password, file: &c.PhaseTwo.Linkd.PasswordFile, environment: LinkdConsolePasswordEnvironment},
 	}
+	// The span export's token: the Worker sends the spans of the Slots it runs.
+	tracing := []credentialReference{
+		{field: "phase_two.tracing.token", value: &c.PhaseTwo.Tracing.Token, file: &c.PhaseTwo.Tracing.TokenFile},
+	}
 	cli := []credentialReference{
 		{field: "cli.admin_key", value: &c.CLI.AdminKey, file: &c.CLI.AdminKeyFile, environment: CLIAdminKeyEnvironment},
 	}
@@ -224,6 +228,7 @@ func (c *Config) credentialGroups() []credentialGroup {
 		{references: output, used: business},
 		{references: linkd, used: business},
 		{references: cli, used: selected.Has(roles.Channel)},
+		{references: tracing, used: selected.Has(roles.Worker)},
 	}
 }
 

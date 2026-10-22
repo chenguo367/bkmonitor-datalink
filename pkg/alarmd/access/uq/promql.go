@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/tracing"
 	"io"
 	"net/http"
 	"strconv"
@@ -142,7 +143,8 @@ func (client *Client) Range(ctx context.Context, request RangeRequest) (RangeRes
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set(headerQuerySource, client.querySource)
 	httpRequest.Header.Set(headerSpace, request.SpaceUID)
-	traceParent, traceID := newTraceParent()
+	// A page's read is no Slot's: a fresh trace, not sampled.
+	_, traceParent, traceID := tracing.StartQuery(ctx, "uq", 0, 1)
 	httpRequest.Header.Set(headerTraceParent, traceParent)
 	// A connection the server dropped while idle is re-dialed by the
 	// transport, as for an evaluation query (markReplayable).

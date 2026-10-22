@@ -11,8 +11,6 @@ package uq
 
 import (
 	"bytes"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"regexp"
@@ -39,14 +37,6 @@ const (
 	// Plans share names the first ones and how many more there were.
 	maxStrategyHeaderBytes = 256
 )
-
-// newTraceParent is a fresh W3C traceparent, sampled, and its trace id.
-func newTraceParent() (header, traceID string) {
-	var ids [24]byte
-	_, _ = rand.Read(ids[:])
-	traceID = hex.EncodeToString(ids[:16])
-	return "00-" + traceID + "-" + hex.EncodeToString(ids[16:]) + "-01", traceID
-}
 
 // strategyHeader is the strategy ids joined by commas, cut before the id
 // that would pass maxStrategyHeaderBytes and followed by "+N" for the N left

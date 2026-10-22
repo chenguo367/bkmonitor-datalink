@@ -23,7 +23,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
-var traceParentFormat = regexp.MustCompile(`^00-([0-9a-f]{32})-[0-9a-f]{16}-01$`)
+var traceParentFormat = regexp.MustCompile(`^00-([0-9a-f]{32})-[0-9a-f]{16}-00$`)
 
 // headerServer answers every request with status and body, and keeps the
 // headers each request carried.
@@ -68,7 +68,7 @@ func TestARequestCarriesItsTraceAndStrategiesAndAnUnchangedSource(t *testing.T) 
 		}
 		match := traceParentFormat.FindStringSubmatch(header.Get(headerTraceParent))
 		if match == nil {
-			t.Fatalf("traceparent %q is not a sampled W3C trace context", header.Get(headerTraceParent))
+			t.Fatalf("traceparent %q is not an unsampled W3C trace context", header.Get(headerTraceParent))
 		}
 		traces[match[1]] = true
 		if got := header.Get(headerStrategy); got != "101,202" {

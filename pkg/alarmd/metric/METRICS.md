@@ -1989,6 +1989,18 @@ Schedule timelines the Control Leader looked at because a Worker reported them u
 
 Owned Query Groups this replica began naming on its registration because a round met a Schedule timeline that does not decode or whose key is gone (SCHEDULE_UNREADABLE, SCHEDULE_MISSING): one per Query Group each time it goes from unnamed to named. The name is dropped by the first later round of that Query Group that runs a Slot, or when it leaves this replica. A leader reads each named timeline again and rewrites or reopens it (timeline_repairs_total). A count that keeps rising for the same Query Groups is a rewrite that does not take. Reader: the release acceptance, from /metrics after each deploy.
 
+## alarmd_trace_slots_total
+
+Labels: `decision`
+
+Slots by what the span export decided for them: sampled (its spans are exported), not_sampled_ratio (outside phase_two.tracing.sample_ratio) or rate_limited (inside the ratio but past max_traces_per_second). Nothing is counted while the export is off. sampled is bounded by the rate whatever the Slot count; rate_limited rising is the rate, not the ratio, deciding what is exported.
+
+## alarmd_trace_spans_dropped_total
+
+Labels: `reason`
+
+Spans of sampled Slots that were not exported, by why: queue_full (the export queue of 2048 spans was full when the span ended), export_failed (the collector did not take a batch; every span in it is counted) or per_slot_cap (a Slot's query spans past 32; the query is sent the Slot span's context instead). A Slot never waits on the export, so this is where a slow or absent collector shows.
+
 ## alarmd_trigger_open_alert_gate_total
 
 Labels: `outcome`

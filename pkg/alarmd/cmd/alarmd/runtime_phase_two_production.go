@@ -26,6 +26,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/progress"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/tracing"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/worker"
 )
@@ -1269,6 +1270,8 @@ type productionPhaseTwoOwnershipDependencies struct {
 	// alone, which is what every runtime did before.
 	QueryCooldowns scheduler.QueryCooldownStore
 	ReadHolds      *productionReadHolds
+	// Traces exports the spans of the Slots it samples; nil exports none.
+	Traces *tracing.Exporter
 	// DecisionLag hears each decided Slot's lag (the flow's evaluate
 	// stage); nil hears nothing.
 	DecisionLag      func(time.Duration)
@@ -2605,7 +2608,7 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 		release = func() { previousRelease(); runtime.viewGate.forget(queryGroup, session) }
 	}
 	executor = &observedProductionSlotExecutor{next: executor, observer: runtime.dependencies.Observer, readHolds: runtime.dependencies.ReadHolds,
-		decisionLag: runtime.dependencies.DecisionLag}
+		decisionLag: runtime.dependencies.DecisionLag, traces: runtime.dependencies.Traces}
 	var readHolds scheduler.ReadHolds
 	if runtime.dependencies.ReadHolds != nil {
 		readHolds = runtime.dependencies.ReadHolds
@@ -2834,6 +2837,9 @@ type observedProductionSlotExecutor struct {
 	// decisionLag hears each decided Slot's lag from readable data to its
 	// completion; nil hears nothing.
 	decisionLag func(time.Duration)
+	// traces decides whether the Slot is exported and holds its span; nil
+	// exports nothing.
+	traces *tracing.Exporter
 }
 
 func (executor observedProductionSlotExecutor) Execute(
@@ -2849,6 +2855,9 @@ func (executor observedProductionSlotExecutor) Execute(
 		Result:    observability.ResultStarted, Trace: trace,
 	})
 	started := time.Now()
+	// The Slot's span, when the export samples it; its queries and their
+	// retries read the decision from ctx.
+	ctx, slotSpan := executor.traces.StartSlot(ctx, string(request.Contract.Slot.QueryGroup), int64(request.Contract.Slot.EvaluationTime))
 	// The attempt's query budget, recorded by access for whichever plan binds
 	// the round, rendered on the completion only when the round ends degraded.
 	ctx, budget := observability.ContextWithBudgetCapture(ctx)
@@ -2959,6 +2968,7 @@ func (executor observedProductionSlotExecutor) Execute(
 	} else if observedResult == "" {
 		observedResult = observability.ResultSuccess
 	}
+	slotSpan.End(string(observedResult), string(reason), observedResult == observability.ResultFailed)
 	observeRuntime(ctx, executor.observer, observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageSlotCompleted,
 		Operation: observability.Operation(request.Operation), ShortPeriodCompletion: shortCompletion,
