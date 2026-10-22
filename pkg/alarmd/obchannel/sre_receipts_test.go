@@ -66,7 +66,7 @@ func TestSREReceiptsAreSelectedAndPaged(t *testing.T) {
 	if ids, page = list(SREReceiptFilter{Limit: 3, Offset: 3}); fmt.Sprint(ids) != "[r1]" || page.NextOffset != 0 {
 		t.Fatalf("second page %v %+v", ids, page)
 	}
-	if ttl := client.TTL(context.Background(), "test.sre:{env}:receipts").Val(); ttl <= SREReceiptRetention-time.Minute || ttl > SREReceiptRetention {
+	if ttl := client.TTL(context.Background(), "test.sre:{env}:receipts:exec").Val(); ttl <= SREReceiptRetention-time.Minute || ttl > SREReceiptRetention {
 		t.Fatalf("ttl %v, want the retention", ttl)
 	}
 }
@@ -156,21 +156,22 @@ func TestSREReceiptsReadAnExecutionBack(t *testing.T) {
 }
 
 // Every action the channel records is filed on purpose: a write goes to the
-// change list, where whoever asks what was changed reads it, and a read to
-// the access list. An action added without being decided here fails, so a
-// write cannot drift into the access list unnoticed.
-func TestEveryRecordedActionIsFiledAsAChangeOrAnAccess(t *testing.T) {
+// change list, where whoever asks what was changed reads it, a command to
+// the exec list, and a read to the access list. An action added without
+// being decided here fails, so a write cannot drift into the access list
+// unnoticed.
+func TestEveryRecordedActionIsFiledAsAChangeACommandOrAnAccess(t *testing.T) {
 	want := map[string]string{
-		OpNodeExec: SREEffectChange, OpNodeCancel: SREEffectChange, OpNodeEnded: SREEffectChange, OpNodeGet: SREEffectAccess,
-		"pod.exec": SREEffectAccess, pod.OpDeletePod: SREEffectChange, pod.OpRestartWorkload: SREEffectChange, pod.OpScaleWorkload: SREEffectChange,
+		OpNodeExec: SREEffectExec, OpNodeCancel: SREEffectExec, OpNodeEnded: SREEffectExec, OpNodeGet: SREEffectAccess,
+		"pod.exec": SREEffectExec, pod.OpDeletePod: SREEffectChange, pod.OpRestartWorkload: SREEffectChange, pod.OpScaleWorkload: SREEffectChange,
 		pod.OpReadSecret: SREEffectAccess, pod.OpReadConfigMap: SREEffectAccess, OpSetImage: SREEffectChange, OpRevert: SREEffectChange,
-		pod.OpListResources: SREEffectAccess, pod.OpDryRun: SREEffectChange, pod.OpApply: SREEffectChange, pod.OpDelete: SREEffectChange,
+		pod.OpListResources: SREEffectAccess, pod.OpDryRun: SREEffectAccess, pod.OpApply: SREEffectChange, pod.OpDelete: SREEffectChange,
 		pod.OpPatch: SREEffectChange, pod.OpEditConfigMapText: SREEffectChange,
 	}
 	for _, op := range SREActionOps {
 		effect, decided := want[op]
 		if !decided {
-			t.Errorf("action %s is recorded but not decided here as a change or an access", op)
+			t.Errorf("action %s is recorded but not decided here as a change, a command or an access", op)
 			continue
 		}
 		if got := sreEffect(op); got != effect {

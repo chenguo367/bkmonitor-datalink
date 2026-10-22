@@ -69,8 +69,8 @@ func TestNodeSchemaAndRecoveryContract(t *testing.T) {
 func TestNodeReceiptsLinkOneExecutionAcrossRequests(t *testing.T) {
 	f := SREReceiptFilter{ExecutionID: "execution-a"}
 	for _, op := range []string{OpNodeExec, OpNodeCancel, OpNodeEnded} {
-		if sreEffect(op) != SREEffectChange {
-			t.Fatalf("%s audit lost from changes", op)
+		if sreEffect(op) != SREEffectExec {
+			t.Fatalf("%s audit lost from the exec list", op)
 		}
 		if !f.matches(SREAction{Op: op, ExecutionID: "execution-a", RequestID: op}) || f.matches(SREAction{Op: op, ExecutionID: "execution-b"}) {
 			t.Fatalf("%s execution filter mismatched", op)

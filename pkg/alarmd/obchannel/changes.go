@@ -26,8 +26,8 @@ import (
 // changes made through this deployment's SRE channel - an image set or
 // reverted, an object applied, patched or deleted, a Pod deleted, a workload
 // restarted or scaled, a ConfigMap edited - and alarmd's own starts and
-// stops. It reads records that already exist, the channel's change receipts
-// and the lifecycle record, and keeps none of its own.
+// stops. It reads records that already exist, the channel's change and exec
+// receipts and the lifecycle record, and keeps none of its own.
 //
 // It is not every change in the cluster: what kubectl, helm or a pipeline
 // did outside the channel never appears. Commands run through the channel
@@ -157,17 +157,17 @@ type ChangesSourceReach struct {
 }
 
 // ChangesCoverage is each source's reach. Changes is the change list, which
-// gives the rows and the node.exec counts; PodExecutions the access list,
-// which gives the pod.exec counts; Lifecycle the starts and stops.
+// gives the rows; Executions the exec list, which gives the node.exec and
+// pod.exec counts; Lifecycle the starts and stops.
 //
 // A list below its cap still holds everything written within its retention,
 // whose clock every write renews; only a full list can have let older
 // entries go. EarliestReadableAt is therefore the latest oldest entry among
 // the full sources, and absent when none is full.
 type ChangesCoverage struct {
-	Changes       ChangesSourceReach `json:"changes"`
-	PodExecutions ChangesSourceReach `json:"pod_executions"`
-	Lifecycle     ChangesSourceReach `json:"lifecycle"`
+	Changes    ChangesSourceReach `json:"changes"`
+	Executions ChangesSourceReach `json:"executions"`
+	Lifecycle  ChangesSourceReach `json:"lifecycle"`
 	// Trimmed names the full sources whose oldest entry is after since: the
 	// range asked reaches past what they still hold, so rows or counts in it
 	// may have been pushed out.
@@ -209,7 +209,7 @@ func ChangesOperation(options ChangesOptions) Operation {
 				return Outcome{Error: failure}
 			}
 			coverage := answer.Coverage
-			complete := coverage.Changes.Read && coverage.PodExecutions.Read && coverage.Lifecycle.Read && len(coverage.Trimmed) == 0
+			complete := coverage.Changes.Read && coverage.Executions.Read && coverage.Lifecycle.Read && len(coverage.Trimmed) == 0
 			out := Outcome{Value: answer, Complete: complete && answer.NextCursor == "",
 				Summary: fmt.Sprintf("%d 条变更（本页 %d 条）", answer.Matched, len(answer.Rows))}
 			if answer.NextCursor != "" {
@@ -219,7 +219,7 @@ func ChangesOperation(options ChangesOptions) Operation {
 				}
 				out.Next = []Call{{Operation: OpChangesList, Params: next, Reason: "同一时间范围的下一页。"}}
 			}
-			for name, reach := range map[string]ChangesSourceReach{"changes": coverage.Changes, "pod_executions": coverage.PodExecutions, "lifecycle": coverage.Lifecycle} {
+			for name, reach := range map[string]ChangesSourceReach{"changes": coverage.Changes, "executions": coverage.Executions, "lifecycle": coverage.Lifecycle} {
 				if !reach.Read {
 					out.Limitations = append(out.Limitations, name+" was not read ("+reach.Reason+"): its rows or counts are missing, not zero.")
 				}
@@ -264,7 +264,7 @@ func listChanges(ctx context.Context, options ChangesOptions, p Params) (Changes
 
 	answer := ChangesAnswer{Since: since, Until: until, Rows: []ChangeRow{}, Executions: []ExecutionBucket{}, ExecutionsReadBy: OpSREReceipts}
 	answer.Coverage.Changes = ChangesSourceReach{Cap: MaxSREChangeReceipts, RetentionSeconds: int64(SREReceiptRetention / time.Second)}
-	answer.Coverage.PodExecutions = ChangesSourceReach{Cap: MaxSREAccessReceipts, RetentionSeconds: int64(SREReceiptRetention / time.Second)}
+	answer.Coverage.Executions = ChangesSourceReach{Cap: MaxSREExecReceipts, RetentionSeconds: int64(SREReceiptRetention / time.Second)}
 	answer.Coverage.Lifecycle = ChangesSourceReach{}
 	inRange := func(at time.Time) bool { return !at.Before(since) && at.Before(until) }
 	var rows []ChangeRow
@@ -277,8 +277,6 @@ func listChanges(ctx context.Context, options ChangesOptions, p Params) (Changes
 		return buckets[start]
 	}
 
-	// The change list: change rows, and node.exec's count (its cancel and
-	// end receipts are the same command and are not counted again).
 	read := func(effect string, light bool, reach *ChangesSourceReach, visit func(SREAction)) {
 		if options.Receipts == nil {
 			reach.Reason = "receipts_unavailable"
@@ -305,13 +303,8 @@ func listChanges(ctx context.Context, options ChangesOptions, p Params) (Changes
 			}
 		}
 	}
+	// The change list gives the rows.
 	read(SREEffectChange, false, &answer.Coverage.Changes, func(receipt SREAction) {
-		if receipt.Op == OpNodeExec {
-			if started(receipt) {
-				bucket(receipt.At).NodeExec++
-			}
-			return
-		}
 		kind, ok := changeKinds[receipt.Op]
 		if !ok || receipt.DryRun {
 			return
@@ -321,8 +314,17 @@ func listChanges(ctx context.Context, options ChangesOptions, p Params) (Changes
 		row.Operator, row.OperatorKind = operatorOf(receipt)
 		rows = append(rows, row)
 	})
-	read(SREEffectAccess, true, &answer.Coverage.PodExecutions, func(receipt SREAction) {
-		if receipt.Op == opPodExec && started(receipt) {
+	// The exec list gives the counts: one per node.exec or pod.exec that
+	// ran. A node.exec's cancel and end receipts are the same command and
+	// are not counted again.
+	read(SREEffectExec, true, &answer.Coverage.Executions, func(receipt SREAction) {
+		if !started(receipt) {
+			return
+		}
+		switch receipt.Op {
+		case OpNodeExec:
+			bucket(receipt.At).NodeExec++
+		case opPodExec:
 			bucket(receipt.At).PodExec++
 		}
 	})
@@ -356,7 +358,7 @@ func listChanges(ctx context.Context, options ChangesOptions, p Params) (Changes
 	for _, source := range []struct {
 		name  string
 		reach ChangesSourceReach
-	}{{"changes", answer.Coverage.Changes}, {"pod_executions", answer.Coverage.PodExecutions}, {"lifecycle", answer.Coverage.Lifecycle}} {
+	}{{"changes", answer.Coverage.Changes}, {"executions", answer.Coverage.Executions}, {"lifecycle", answer.Coverage.Lifecycle}} {
 		reach := source.reach
 		if !reach.Read || !reach.Full || reach.OldestAt == nil {
 			continue

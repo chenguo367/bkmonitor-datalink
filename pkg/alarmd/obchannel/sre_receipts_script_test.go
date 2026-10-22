@@ -20,7 +20,7 @@ import (
 // landed and leaves nothing.
 func TestASREReceiptIsOneScript(t *testing.T) {
 	const key = "test.sre:{env}:receipts"
-	action := SREAction{Op: "pod.exec", RequestID: "newest", At: time.Unix(1_700_000_000, 0).UTC()}
+	action := SREAction{Op: "secret.get", RequestID: "newest", At: time.Unix(1_700_000_000, 0).UTC()}
 	redistest.CheckScriptSite(t, redistest.ScriptSite{
 		// A full list, so the trim has one to cut.
 		Prepare: func(t *testing.T, client *redis.Client) {

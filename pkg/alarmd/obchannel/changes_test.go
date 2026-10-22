@@ -123,7 +123,7 @@ func TestChangesSayHowFarBackTheyReach(t *testing.T) {
 		!changes.OldestAt.Equal(changesBase.Add(3*time.Second)) || changes.RetentionSeconds != int64(SREReceiptRetention/time.Second) {
 		t.Fatalf("change reach %+v", changes)
 	}
-	if executions := answer.Coverage.PodExecutions; !executions.Read || executions.Full || executions.Kept != 1 || executions.Cap != MaxSREAccessReceipts {
+	if executions := answer.Coverage.Executions; !executions.Read || executions.Full || executions.Kept != 1 || executions.Cap != MaxSREExecReceipts {
 		t.Fatalf("execution reach %+v", executions)
 	}
 	if lifecycle := answer.Coverage.Lifecycle; !lifecycle.Read || lifecycle.Cap != 64 || lifecycle.Full || !lifecycle.OldestAt.Equal(changesBase.Add(-2*time.Hour)) ||
@@ -157,7 +157,7 @@ func TestAChangesSourceThatDoesNotAnswerIsNamed(t *testing.T) {
 		t.Fatalf("outcome %+v", out)
 	}
 	coverage := answer.Coverage
-	if coverage.Changes.Read || coverage.Changes.Reason != "store_unavailable" || coverage.PodExecutions.Read || coverage.Lifecycle.Read ||
+	if coverage.Changes.Read || coverage.Changes.Reason != "store_unavailable" || coverage.Executions.Read || coverage.Lifecycle.Read ||
 		coverage.Lifecycle.Reason != "store_unavailable" || coverage.EarliestReadableAt != nil || len(out.Limitations) != 3 {
 		t.Fatalf("coverage %+v limitations %v", coverage, out.Limitations)
 	}

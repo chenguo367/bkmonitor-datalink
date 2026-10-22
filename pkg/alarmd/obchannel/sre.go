@@ -46,8 +46,8 @@ type SREAction struct {
 	Entry string `json:"entry,omitempty"`
 	// At is when the action ended.
 	At time.Time `json:"at"`
-	// Effect is the list the receipt was kept in, change or access; set on
-	// read, not stored.
+	// Effect is the list the receipt was kept in, change, exec or access;
+	// set on read, not stored.
 	Effect string `json:"effect,omitempty"`
 	// DryRun marks an action that made every check and wrote nothing
 	// (configmap.edit_text with dry_run): it is not a change.
@@ -738,13 +738,13 @@ func SREOperations(options SREOptions) []Operation {
 	}
 	timestamp := Field{Type: "string", MinLength: 1, MaxLength: 64, Description: "RFC 3339 time"}
 	maxReceiptsPage, maxReceiptsOffset := int64(maxSREReceiptsPage), int64(MaxSREReceipts)
-	ops = append(ops, Operation{ID: OpSREReceipts, Summary: "读取 SRE 动作（执行、管理、改镜像与回退）的回执，最新的在前；可按时间、命名空间、对象名、request_id、execution_id 与 effect 过滤，带分页。回执分两类分开保存，读多了也挤不掉改动：change（节点执行/取消/终态、改镜像、apply、delete、删 Pod、重启、扩缩、dry run）与 access（执行、读 Secret 与 ConfigMap）。",
+	ops = append(ops, Operation{ID: OpSREReceipts, Summary: "读取 SRE 动作（执行、管理、改镜像与回退）的回执，最新的在前；可按时间、命名空间、对象名、request_id、execution_id 与 effect 过滤，带分页。回执分三类分开保存，一类再多也挤不掉另一类：change（可能改了状态的动作：改镜像、回退、apply、patch、delete、删 Pod、重启、扩缩、改 ConfigMap；dry run 与生效前被拒的不算）、exec（经通道的命令：节点执行及其取消、终态，pod.exec）与 access（读取：执行输出、Secret、ConfigMap、资源列表，以及 dry run 与生效前被拒的尝试）。",
 		EvidenceScope: "sre_receipts", ExecutionPool: "sre", ExecutionTimeout: 10 * time.Second, Availability: receiptsAvailable,
-		Limits: map[string]any{"kept": MaxSREReceipts, "kept_change": MaxSREChangeReceipts, "kept_access": MaxSREAccessReceipts,
-			"receipt_bytes_change": SREChangeReceiptBytes, "receipt_bytes_access": SREAccessReceiptBytes, "retention_seconds": int64(SREReceiptRetention / time.Second), "max_page": maxSREReceiptsPage,
+		Limits: map[string]any{"kept": MaxSREReceipts, "kept_change": MaxSREChangeReceipts, "kept_exec": MaxSREExecReceipts, "kept_access": MaxSREAccessReceipts,
+			"receipt_bytes_change": SREChangeReceiptBytes, "receipt_bytes_exec": SREExecReceiptBytes, "receipt_bytes_access": SREAccessReceiptBytes, "retention_seconds": int64(SREReceiptRetention / time.Second), "max_page": maxSREReceiptsPage,
 			"content": "who, what, where and how each action ended; a pod.exec receipt carries its run's facts and its script digest, never its argv, stdin or output"},
 		Fields: map[string]Field{"since": timestamp, "until": timestamp, "namespace": text, "name": text, "request_id": text, "execution_id": text,
-			"effect": {Type: "string", Enum: []string{SREEffectChange, SREEffectAccess}},
+			"effect": {Type: "string", Enum: []string{SREEffectChange, SREEffectExec, SREEffectAccess}},
 			"limit":  {Type: "integer", Minimum: &positive, Maximum: &maxReceiptsPage}, "offset": {Type: "integer", Minimum: &nonnegative, Maximum: &maxReceiptsOffset}},
 		OutputSchema: SchemaOf(SREReceiptPage{}),
 		Run: func(ctx context.Context, p Params) Outcome {

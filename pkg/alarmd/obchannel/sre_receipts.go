@@ -25,23 +25,50 @@ const (
 	// SREReceiptRetention is how long each receipt list lives past its own
 	// latest write.
 	SREReceiptRetention = 7 * 24 * time.Hour
-	// Receipts are kept in two lists by effect, so reads cannot push a
-	// change out: a change (an image, an apply or delete, a Pod deleted, a
-	// workload restarted or scaled, a dry run) and an access (an execution,
-	// a Secret or ConfigMap read). The lists live in the deployment's shared
-	// Redis, so what bounds them is their footprint there: each receipt is
-	// cut to its effect's size when it is written, and the lists keep 1024
-	// changes (far more than the 7 days of retention see) and 4096 accesses
-	// (about a day at the busiest rate seen, a session executing every 20
-	// seconds), 4 MiB each at most, about 3.5 MB at the sizes seen.
+	// Receipts are kept in three lists by effect, so one kind cannot push
+	// another out:
+	//
+	//   - change: an action that may have changed state - an image set or
+	//     reverted, an object applied, patched or deleted, a Pod deleted, a
+	//     workload restarted or scaled, a ConfigMap edited - that was not a
+	//     dry run and was not refused before any effect;
+	//   - exec: a command run through the channel (node.exec, its cancel and
+	//     its end, pod.exec), which may have changed anything and whose
+	//     receipt cannot say;
+	//   - access: everything else - a read (an execution's output, a Secret
+	//     or ConfigMap, a resource list), a dry run, and an attempt refused
+	//     before any effect.
+	//
+	// The lists live in the deployment's shared Redis, so what bounds them is
+	// their footprint there: each receipt is cut to its list's size when it
+	// is written. The caps are sized from one deployment's receipts of
+	// 2026-10-16 to 10-22, each list to hold the 7 days of retention at the busiest day
+	// seen:
+	//
+	//   - change: 127 changes on the busiest day (dry runs included, which
+	//     now go to access), 7 x 127 = 889, so 1024; 4 KiB each, 4 MiB at
+	//     most, about 0.6 MB at the sizes seen (median 400-600 bytes);
+	//   - exec: 172 node.exec runs on the busiest day, each with an exec and
+	//     an end receipt (323 in all), and 531 pod.exec runs the same day:
+	//     854 a day, 7 x 854 = 5978, so 8192; 1 KiB each (node receipts reach
+	//     531 bytes, pod.exec 830), 8 MiB at most, about 5 MB at the sizes
+	//     seen;
+	//   - access: about 1350 a day, mostly node.execution.get polls, so 4096
+	//     holds about 3 days; 1 KiB each, 4 MiB at most. Reads change
+	//     nothing, and 3 days covers looking back over a recent incident;
+	//     the reach shrinks as reads grow, and changes.list does not read
+	//     this list.
 	SREChangeReceiptBytes = 4 << 10
+	SREExecReceiptBytes   = 1 << 10
 	SREAccessReceiptBytes = 1 << 10
 	MaxSREChangeReceipts  = 1024
+	MaxSREExecReceipts    = 8192
 	MaxSREAccessReceipts  = 4096
 	// MaxSREReceipts is how many receipts are kept in all.
-	MaxSREReceipts = MaxSREChangeReceipts + MaxSREAccessReceipts
-	// SREEffectChange and SREEffectAccess name the two lists.
+	MaxSREReceipts = MaxSREChangeReceipts + MaxSREExecReceipts + MaxSREAccessReceipts
+	// SREEffectChange, SREEffectExec and SREEffectAccess name the lists.
 	SREEffectChange = "change"
+	SREEffectExec   = "exec"
 	SREEffectAccess = "access"
 	// sreReceiptWriteTimeout bounds one write: a store that does not answer
 	// does not hold the action's answer up for longer.
@@ -69,9 +96,9 @@ type SREExec struct {
 	StartFailure           string `json:"start_failure,omitempty"`
 }
 
-// SREReceipts keeps the SRE channel's receipts in the shared store, two
-// lists for the deployment (changes under key+":change", accesses under
-// key): every replica writes its actions and any replica answers
+// SREReceipts keeps the SRE channel's receipts in the shared store, three
+// lists for the deployment (changes under key+":change", commands under
+// key+":exec", accesses under key): every replica writes its actions and any replica answers
 // sre.receipts. A write that fails is counted and does not hold the
 // action up; the sre_action line is then the only record.
 type SREReceipts struct {
@@ -101,18 +128,56 @@ redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
 return 1
 `)
 
-// sreEffect is the list an action's receipt goes to.
+// sreEffect is the list an operation's receipts go to when it takes effect.
 func sreEffect(op string) string {
 	switch op {
-	case OpNodeExec, OpNodeCancel, OpNodeEnded, OpSetImage, OpRevert, pod.OpApply, pod.OpDelete, pod.OpPatch, pod.OpDeletePod, pod.OpRestartWorkload, pod.OpScaleWorkload, pod.OpDryRun, pod.OpEditConfigMapText:
+	case OpSetImage, OpRevert, pod.OpApply, pod.OpDelete, pod.OpPatch, pod.OpDeletePod, pod.OpRestartWorkload, pod.OpScaleWorkload, pod.OpEditConfigMapText:
 		return SREEffectChange
+	case OpNodeExec, OpNodeCancel, OpNodeEnded, opPodExec:
+		return SREEffectExec
 	}
 	return SREEffectAccess
 }
 
+// receiptEffect is the list one receipt goes to: its operation's, unless it
+// cannot have changed anything - a dry run, or an attempt refused before any
+// effect (by validation or a busy provider, by the apiserver's
+// authorization, or because its target was replaced since it was read) -
+// which is an access. A failure stays where it is: the apiserver or the
+// transport failing does not say nothing was written.
+func receiptEffect(action SREAction) string {
+	switch {
+	case action.DryRun, action.Result == SREResultRefused, action.Result == SREResultForbidden, action.Result == SREResultTargetChanged:
+		return SREEffectAccess
+	}
+	return sreEffect(action.Op)
+}
+
+// sreLists is each list with its receipt size and cap, in the order a read
+// merges them.
+var sreLists = []struct {
+	effect     string
+	size, kept int
+}{
+	{SREEffectChange, SREChangeReceiptBytes, MaxSREChangeReceipts},
+	{SREEffectExec, SREExecReceiptBytes, MaxSREExecReceipts},
+	{SREEffectAccess, SREAccessReceiptBytes, MaxSREAccessReceipts},
+}
+
+// sreListOf is one list's size and cap; an unknown effect is the access list.
+func sreListOf(effect string) (size, kept int) {
+	for _, list := range sreLists {
+		if list.effect == effect {
+			return list.size, list.kept
+		}
+	}
+	return SREAccessReceiptBytes, MaxSREAccessReceipts
+}
+
 func (s *SREReceipts) keyOf(effect string) string {
-	if effect == SREEffectChange {
-		return s.key + ":change"
+	switch effect {
+	case SREEffectChange, SREEffectExec:
+		return s.key + ":" + effect
 	}
 	return s.key
 }
@@ -133,11 +198,8 @@ func (s *SREReceipts) record(action SREAction) error {
 	if action.At.IsZero() {
 		action.At = s.now().UTC()
 	}
-	effect := sreEffect(action.Op)
-	size, kept := SREAccessReceiptBytes, MaxSREAccessReceipts
-	if effect == SREEffectChange {
-		size, kept = SREChangeReceiptBytes, MaxSREChangeReceipts
-	}
+	effect := receiptEffect(action)
+	size, kept := sreListOf(effect)
 	body, err := fitReceipt(action, size)
 	if err != nil {
 		return err
@@ -214,7 +276,7 @@ type SREReceiptFilter struct {
 	Namespace, Name string
 	RequestID       string
 	ExecutionID     string
-	// Effect selects one list, change or access; empty reads both.
+	// Effect selects one list, change, exec or access; empty reads all.
 	Effect        string
 	Offset, Limit int
 }
@@ -239,10 +301,7 @@ func (s *SREReceipts) List(ctx context.Context, filter SREReceiptFilter) (SRERec
 		limit = maxSREReceiptsPage
 	}
 	var matches []SREAction
-	for _, list := range []struct {
-		effect string
-		kept   int
-	}{{SREEffectChange, MaxSREChangeReceipts}, {SREEffectAccess, MaxSREAccessReceipts}} {
+	for _, list := range sreLists {
 		raw, err := s.client.LRange(ctx, s.keyOf(list.effect), 0, int64(list.kept-1)).Result()
 		if err != nil && !errors.Is(err, redis.Nil) {
 			return page, err
@@ -280,10 +339,7 @@ func (s *SREReceipts) List(ctx context.Context, filter SREReceiptFilter) (SRERec
 // reads each list once this way rather than paging List, which reads both
 // lists whole on every page.
 func (s *SREReceipts) Read(ctx context.Context, effect string) ([]SREAction, int, error) {
-	kept := MaxSREAccessReceipts
-	if effect == SREEffectChange {
-		kept = MaxSREChangeReceipts
-	}
+	_, kept := sreListOf(effect)
 	raw, err := s.client.LRange(ctx, s.keyOf(effect), 0, int64(kept-1)).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		return nil, 0, err
@@ -303,13 +359,10 @@ func (s *SREReceipts) Read(ctx context.Context, effect string) ([]SREAction, int
 }
 
 // ReadStamps is Read with each receipt decoded into its operation, time and
-// result only: changes.list counts the access list's commands and needs no
-// more, and the access list is the larger one (MaxSREAccessReceipts).
+// result only: changes.list counts the exec list's commands and needs no
+// more, and the exec list is the largest one (MaxSREExecReceipts).
 func (s *SREReceipts) ReadStamps(ctx context.Context, effect string) ([]SREAction, int, error) {
-	kept := MaxSREAccessReceipts
-	if effect == SREEffectChange {
-		kept = MaxSREChangeReceipts
-	}
+	_, kept := sreListOf(effect)
 	raw, err := s.client.LRange(ctx, s.keyOf(effect), 0, int64(kept-1)).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		return nil, 0, err
