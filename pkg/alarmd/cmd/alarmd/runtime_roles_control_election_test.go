@@ -546,8 +546,16 @@ func TestAWorkerLeadsWhileTheControlProcessIsGoneAndHandsBackOnceItIsSteady(t *t
 		}
 	}
 	fixture.clockMillis.Store(firstSeen.Add(window).UnixMilli())
-	time.Sleep(1200 * time.Millisecond)
-	fixture.tick()
+	// Only a round that published considers the handback, and a round that
+	// could not read the active set returns before it publishes, with
+	// nothing the fixture sees. Production's next round would hand back, so
+	// the fixture ticks again at the same instant until one has rather than
+	// read a single round as the answer; a handback that never comes still
+	// fails here, and the rounds above still hold that none came early.
+	waitPhaseTwoCondition(t, 30*time.Second, "the fallback Leader hands back once the window has passed", func() bool {
+		fixture.tick()
+		return fixture.transitions("preferred", "handback") >= 1
+	})
 	if fixture.transitions("preferred", "handback") != 1 {
 		t.Fatalf("handbacks once the window passed = %v, want 1", fixture.transitions("preferred", "handback"))
 	}
