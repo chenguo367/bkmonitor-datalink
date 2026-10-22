@@ -699,3 +699,15 @@ func TestARoundCutWhileClosingResumesAtTheFirstCloseNotExecuted(t *testing.T) {
 		t.Fatalf("rounds cut after one close each closed %v, want each strategy once", closed)
 	}
 }
+
+// The absent-close round follows the source's re-read bound rather than
+// repeating it as a second number: a round no slower than the re-read, and
+// grace plus one round within the close bound.
+func TestTheAbsentCloseRoundFollowsTheSourceReadBound(t *testing.T) {
+	if absentCloseInterval > controlplane.SourceFullReadInterval {
+		t.Fatalf("absent-close round %s is slower than the source re-read %s", absentCloseInterval, controlplane.SourceFullReadInterval)
+	}
+	if absentCloseGrace+absentCloseInterval > absentCloseBound {
+		t.Fatalf("grace %s plus a round %s exceeds the close bound %s", absentCloseGrace, absentCloseInterval, absentCloseBound)
+	}
+}

@@ -26,9 +26,14 @@ import (
 // absentCloseInterval is how often the leader takes the difference. The
 // bound is the grace: a candidate has to be seen missing by two rounds under
 // two observations before it is closed, and the source is read again at
-// least every six minutes, so a round every five minutes is what makes a
-// confirmed absence reach a close inside a quarter of an hour.
+// least every controlplane.SourceFullReadInterval, so a round no slower than
+// that re-read, with absentCloseGrace, is what makes a confirmed absence
+// reach a close inside absentCloseBound. Both relations are pinned by a test
+// against the source's own bound, so neither number drifts from it.
 const absentCloseInterval = 5 * time.Minute
+
+// absentCloseBound is how long a confirmed absence may take to reach a close.
+const absentCloseBound = 15 * time.Minute
 
 // absentCloseGrace is how long this loop must have seen a strategy missing
 // from the snapshot before it closes the strategy's alerts. It is this

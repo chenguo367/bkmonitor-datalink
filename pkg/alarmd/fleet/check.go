@@ -1587,8 +1587,10 @@ type Todo struct {
 	Retained         int        `json:"retained"`
 	RetainedLastHour int        `json:"retained_last_hour"`
 	RetainedNewest   *time.Time `json:"retained_newest,omitempty"`
-	// RecentWindowSeconds is the window the counts above are decided on,
-	// so the page prints the bound it was measured with.
+	// RecentWindowSeconds is the floor of the window the counts above are
+	// decided on: each record is recent for three of its object's periods,
+	// and for at least this long (RecentWindow), so a short-period object's
+	// window is this and a long-period one's is longer.
 	RecentWindowSeconds int `json:"recent_window_seconds"`
 	// Governance is the lines already confirmed as somebody else's, and the
 	// distinct objects under them.
