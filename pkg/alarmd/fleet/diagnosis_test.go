@@ -508,22 +508,52 @@ func TestADiagnosisPageSaysHowMuchProgressItLeftUnread(t *testing.T) {
 	}
 }
 
-// A row names the tenant its Plans run under, the one Linkd is read under;
-// a strategy ID running under two tenants names none rather than one of them.
-func TestADiagnosisRowNamesItsPlansSoleTenant(t *testing.T) {
+// A row names the tenant its Plans run under, the one Linkd is read under,
+// on the diagnosis page, the board row and the strategy view alike; a
+// strategy ID under two tenants, or with a Plan of no tenant, names none
+// rather than one of them, and the board and view still carry the key.
+func TestAStrategyNamesItsPlansSoleTenantWhereverItIsRead(t *testing.T) {
 	facts := diagnosisFacts()
 	split := facts["4101"]
 	other := planB
 	other.Tenant = "tenant-b"
 	split.Plans = plans(planA, other)
 	facts["4110"] = split
+	untenanted := facts["4101"]
+	bare := planB
+	bare.Tenant = ""
+	untenanted.Plans = plans(planA, bare)
+	facts["4111"] = untenanted
+	want := map[string]string{"4101": "default", "4110": "", "4111": ""}
 	rig := newDiagnosisRig(t, facts, nil)
-	rig.universe = []string{"4101", "4110"}
-	tenants := map[string]string{}
+	rig.universe = []string{"4101", "4110", "4111"}
 	for _, row := range rig.page(t, "", 0).Strategies {
-		tenants[row.StrategyID] = row.Tenant
+		if row.Tenant != want[row.StrategyID] {
+			t.Errorf("diagnosis %s tenant %q, want %q", row.StrategyID, row.Tenant, want[row.StrategyID])
+		}
 	}
-	if tenants["4101"] != "default" || tenants["4110"] != "" {
-		t.Fatalf("tenants = %v, want 4101 under default and 4110 under none", tenants)
+	code, _, raw := rig.board(t, "board=1")
+	rows, _ := raw["rows"].([]any)
+	if code != http.StatusOK || len(rows) != 3 {
+		t.Fatalf("board status %d rows %v", code, raw["rows"])
+	}
+	for _, item := range rows {
+		row := item.(map[string]any)
+		tenant, present := row["tenant"]
+		if id := row["strategy_id"].(string); !present || tenant != want[id] {
+			t.Errorf("board %s tenant %v (present %v), want %q always present", id, tenant, present, want[id])
+		}
+	}
+	for id, tenant := range want {
+		w := httptest.NewRecorder()
+		rig.handler.ServeHTTP(w, httptest.NewRequest("GET", "/api/diagnose?view=1&strategy_id="+id, nil))
+		var view map[string]any
+		if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &view) != nil {
+			t.Fatalf("view %s status %d body %s", id, w.Code, w.Body.String())
+		}
+		row, _ := view["row"].(map[string]any)
+		if got, present := row["tenant"]; !present || got != tenant {
+			t.Errorf("view %s tenant %v (present %v), want %q always present", id, got, present, tenant)
+		}
 	}
 }
