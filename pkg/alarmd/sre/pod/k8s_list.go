@@ -458,7 +458,7 @@ func (p *Provider) cleanObject(object map[string]any, fingerprints *fingerprints
 		if annotations, ok := metadata["annotations"].(map[string]any); ok {
 			delete(annotations, lastAppliedAnnotation)
 			for key, value := range annotations {
-				if text, isText := value.(string); isText && text != "" && (credentialKey.MatchString(key) || configKey.MatchString(key) || keyMaterial(text)) {
+				if text, isText := value.(string); isText && text != "" && (credentialKey.MatchString(key) || credentialName(key) || keyMaterial(text)) {
 					annotations[key] = "<redacted>"
 				}
 			}

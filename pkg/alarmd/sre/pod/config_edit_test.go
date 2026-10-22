@@ -166,7 +166,7 @@ func TestTextInsideAMaskedValueIsRefusedLikeTextThatIsNowhere(t *testing.T) {
 // Text spanning a masked value and plain text is not editable either.
 func TestTextSpanningAMaskedValueIsRefused(t *testing.T) {
 	provider, _, writer := editProvider(t, editConfig)
-	_, err := provider.EditConfigMapText(context.Background(), editRequest(provider, editConfig, "dsn_password: Sh0rt", "dsn_password: x"))
+	_, err := provider.EditConfigMapText(context.Background(), editRequest(provider, editConfig, "dsn_password: Sh0rt", "dsn_host: x"))
 	if editCode(err) != EditOldTextNotShown || len(writer.patches) != 0 {
 		t.Fatalf("err %v", err)
 	}

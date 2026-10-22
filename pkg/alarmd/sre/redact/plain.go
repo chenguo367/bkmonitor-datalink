@@ -64,8 +64,28 @@ func KeyMaterial(text string) bool {
 // The credential shapes CredentialSpans finds inside a line of text, beside
 // the key-material runs KeyMaterial reads.
 var (
-	// urlUserinfo is the user:password part of a URL (scheme://user:pass@host).
-	urlUserinfo = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.\-]*://([^/\s:@]+:[^/\s@]+)@`)
+	// urlUserinfo is the user:password part of a URL (scheme://user:pass@host),
+	// the user possibly empty (redis://:pass@host).
+	urlUserinfo = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.\-]*://([^/\s:@]*:[^/\s@]+)@`)
+	// dsnUserinfo is the user:password of a Go driver DSN, which has no
+	// scheme: user:pass@tcp(host:3306)/db.
+	dsnUserinfo = regexp.MustCompile(`(?:^|[\s"'=])([^\s:@/"'=]+:[^\s@/"']+)@(?:tcp|udp|unix)\(`)
+	// assignedCredential is a credential assigned inside a value, under a
+	// name that ends in a credential word: a query parameter (?password=,
+	// &access_token=), a JDBC property (;password=), a JAAS option
+	// (password="..."), an inline key: value. The name has to end in the
+	// word, so password_min_length=8 and token_ttl=60 are not one.
+	assignedCredential = regexp.MustCompile(`(?i)(?:^|[\s;,&?{(\["'])["']?[A-Za-z0-9_.\-]*?` + credentialWordPattern + `["']?\s*[=:]\s*("[^"\r\n]*"|'[^'\r\n]*'|[^\s;,&"'}\]]+)`)
+	// credentialDirective is a directive that takes a credential as its
+	// argument, as redis.conf writes it: requirepass secret, masterauth
+	// secret, and the same in prose (password secret).
+	credentialDirective = regexp.MustCompile(`(?i)(?:^|\s)(?:requirepass|masterauth|password|passwd|passphrase)\s+([^\s"']+)`)
+	// passwordHash is a stored password hash: htpasswd, crypt(3), bcrypt,
+	// argon2 ($apr1$, $2y$, $6$, $argon2id$, {SHA}, {SSHA}).
+	passwordHash = regexp.MustCompile(`(?:\$(?:apr1|2[abxy]|[156]|argon2(?:id|i|d)?)\$[^\s"']+|\{S?SHA\}[A-Za-z0-9+/=]+)`)
+	// pgpassLine is a .pgpass line, host:port:database:user:password; the
+	// password is its last field.
+	pgpassLine = regexp.MustCompile(`(?m)^[^:\s]+:[0-9*]+:[^:\s]+:[^:\s]+:(\S+)$`)
 	// authHeader is an Authorization value: a Bearer or Basic credential, or
 	// whatever follows an Authorization: or Authorization= header name.
 	authHeader = regexp.MustCompile(`(?i)\b(?:bearer|basic)\s+([A-Za-z0-9._~+/=\-]{8,})|\bauthorization\s*[:=]\s*(\S+(?:\s+\S+)?)`)
@@ -82,8 +102,10 @@ func CredentialShaped(text string) bool {
 
 // CredentialSpans are the byte ranges of text that are shaped like a
 // credential, in order and not overlapping: a JWT, a run of hex or base64
-// that reads like key material, the userinfo of a URL, an Authorization or
-// Bearer value, a token under a known provider prefix. Everything outside
+// that reads like key material, the userinfo of a URL or a Go DSN, an
+// Authorization or Bearer value, a token under a known provider prefix, a
+// value assigned to a credential name inside the text, a password hash, a
+// .pgpass line's password. Everything outside
 // them is ordinary text. A PEM block spans lines and is not found here
 // (CredentialShaped reports it).
 func CredentialSpans(text string) [][2]int {
@@ -116,6 +138,14 @@ func CredentialSpans(text string) [][2]int {
 		add(at[4], at[5])
 	}
 	for _, at := range keyPrefix.FindAllStringIndex(text, -1) {
+		add(at[0], at[1])
+	}
+	for _, rule := range []*regexp.Regexp{dsnUserinfo, assignedCredential, credentialDirective, pgpassLine} {
+		for _, at := range rule.FindAllStringSubmatchIndex(text, -1) {
+			add(at[2], at[3])
+		}
+	}
+	for _, at := range passwordHash.FindAllStringIndex(text, -1) {
 		add(at[0], at[1])
 	}
 	return mergeSpans(spans)
@@ -196,4 +226,69 @@ func PlainValue(text string) bool {
 		}
 	}
 	return true
+}
+
+// credentialWords are the words that name a credential when a name ends in
+// one: the last segment of password, db_password, redisPass, requirepass,
+// aws_secret_access_key. credentialWordPattern is the same set as a
+// pattern, for a name inside text.
+var credentialWords = map[string]bool{"pass": true, "passwd": true, "password": true, "pwd": true, "passphrase": true,
+	"secret": true, "token": true, "credential": true, "credentials": true, "apikey": true, "cookie": true, "salt": true,
+	"requirepass": true, "masterauth": true, "authpass": true, "authorization": true}
+
+// credentialKeyQualifiers make a trailing "key" a credential: api_key,
+// access_key, secret_key, private_key, a bare key. Any other key - a cache
+// key, a routing key, a partition key - is configuration.
+var credentialKeyQualifiers = map[string]bool{"": true, "api": true, "access": true, "secret": true, "private": true,
+	"signing": true, "sign": true, "encryption": true, "encrypt": true, "master": true, "admin": true, "client": true,
+	"auth": true, "app": true, "license": true, "hmac": true, "aes": true}
+
+// passDirectives make a trailing "pass" a hand-off, not a password: a web
+// server's proxy_pass, fastcgi_pass and the like name an upstream.
+var passDirectives = map[string]bool{"proxy": true, "fastcgi": true, "uwsgi": true, "scgi": true, "grpc": true, "memcached": true}
+
+const credentialWordPattern = `(?:pass|passwd|password|pwd|passphrase|secret|token|credentials?|api[_-]?key|access[_-]?key|secret[_-]?key|private[_-]?key|client[_-]?secret|requirepass|masterauth|authorization)`
+
+var nameSegment = regexp.MustCompile(`[A-Z]+[a-z0-9]*|[a-z0-9]+`)
+
+// CredentialName says a name holds a credential by what it names: its last
+// segment - split at _ . - and camelCase - is a credential word, or a key
+// qualified as one (credentialKeyQualifiers). A name that only starts with
+// such a word names something about it - password_min_length, token_ttl,
+// secretRef, password_file - and is configuration.
+func CredentialName(name string) bool {
+	segments := nameSegment.FindAllString(name, -1)
+	if len(segments) == 0 {
+		return false
+	}
+	last := strings.ToLower(segments[len(segments)-1])
+	qualifier := ""
+	if len(segments) > 1 {
+		qualifier = strings.ToLower(segments[len(segments)-2])
+	}
+	if last == "pass" && passDirectives[qualifier] {
+		return false
+	}
+	if credentialWords[last] || strings.HasSuffix(last, "password") || strings.HasSuffix(last, "passwd") ||
+		strings.HasSuffix(last, "secret") || strings.HasSuffix(last, "token") {
+		return true
+	}
+	if last != "key" && last != "keys" {
+		return false
+	}
+	return credentialKeyQualifiers[qualifier]
+}
+
+// CredentialNamed says some segment of a name is a credential word: the
+// password_file, tls_key_path family, whose value is where a credential is
+// kept rather than the credential, but which holds the credential itself
+// when it is written there by mistake.
+func CredentialNamed(name string) bool {
+	segments := nameSegment.FindAllString(name, -1)
+	for index := range segments {
+		if CredentialName(strings.Join(segments[:index+1], "_")) {
+			return true
+		}
+	}
+	return false
 }

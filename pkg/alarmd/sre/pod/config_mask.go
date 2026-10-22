@@ -26,8 +26,9 @@ const ConfigValueContract = "config_values_blacklist_v1"
 // a hosts file came back nearly every line masked - so the rule is a
 // blacklist: a value is shown as it is, except
 //
-//   - a value under a credential-like name (configKey) - password, secret,
-//     token, an API or access key, a private key - is masked whole;
+//   - a value under a credential name (credentialName) - password, secret,
+//     token, requirepass, an API or access key, a private key - is masked
+//     whole;
 //   - a part of any value, under any name, that is shaped like a credential
 //     is masked where it stands (redact.CredentialSpans): a PEM block, a JWT,
 //     a long run of base64 or hex that reads like key material, the userinfo
@@ -39,8 +40,11 @@ const ConfigValueContract = "config_values_blacklist_v1"
 // and fingerprint, so a host, a port or a path next to it stays readable.
 // Secrets are not ConfigMaps: their values are never shown (secret.get).
 
-// configKey is a name whose value is secret by what it names.
-var configKey = regexp.MustCompile(`(?i)(passw|passwd|pwd|secret|token|credential|auth|cookie|session|private|crypt|cipher|sign|cert|salt|seed|nonce|apikey|api[_-]?key|access[_-]?key|(^|[_.\-])(key|iv|pin)([_.\-]|$)|(key|iv)$)`)
+// credentialName says a name holds a credential by what it names
+// (redact.CredentialName): its last segment is password, secret, token,
+// requirepass, an API or access key... A name about a credential -
+// password_min_length, token_ttl, secretRef - is configuration.
+func credentialName(name string) bool { return redact.CredentialName(name) }
 
 var (
 	pemBlock   = regexp.MustCompile(`-----BEGIN [A-Z0-9 ]+-----`)
@@ -76,24 +80,31 @@ func (m *configMasker) mask(text string) string {
 	return fmt.Sprintf("<redacted bytes=%d fingerprint=%s>", len(text), m.fingerprints.sum([]byte(text)))
 }
 
-// leaf is text under name: masked whole under a credential-like name,
-// otherwise shown with its credential-shaped parts masked where they stand.
+// leaf is text under name: masked whole under a credential name, otherwise
+// read as a line of text (lines) - its own keys and directives decided by
+// their names, its credential-shaped parts masked where they stand.
 // Text of several lines - a file held in one value - is read as a value of
 // its own (value).
 func (m *configMasker) leaf(name, text string) string {
 	if text == "" {
 		return text
 	}
-	if referencePath(name, text) {
-		return text
-	}
-	if configKey.MatchString(name) {
+	if credentialName(name) || credentialReference(name) && !redact.ShownCredentialPath(text) {
 		return m.mask(text)
 	}
 	if strings.Contains(text, "\n") {
 		return m.value(name, text)
 	}
-	return m.spans(text)
+	// A value carrying a PEM header is key material whole, as a value of
+	// several lines starting with one is (value): a block held with escaped
+	// newlines in one line of JSON.
+	if pemBlock.MatchString(text) {
+		return m.mask(text)
+	}
+	// One line under a plain name is read as a line of text is: a key and
+	// value or a directive inside it (pass: two words, requirepass x) is
+	// decided by its own name, not only by the shapes in it.
+	return m.lines(text)
 }
 
 // spans is text with every credential-shaped part masked where it stands.
@@ -113,15 +124,16 @@ func (m *configMasker) spans(text string) string {
 	return out.String()
 }
 
-// referencePath says a value is a credential reference: a name ending in
-// _file (password_file, admin_key_file) whose value alarmd would accept as
-// a path and that reads as plain (redact.ShownCredentialPath). The path says where
-// a credential is mounted, not what it is, and showing it is how a wrongly
-// mounted key is diagnosed; so it is shown although the name reads like a
-// credential. Any other value under such a name - the credential itself
-// written where its path belongs, most often - is masked as any other.
-func referencePath(name, text string) bool {
-	return strings.HasSuffix(strings.ToLower(name), "_file") && redact.ShownCredentialPath(text)
+// credentialReference says a name is where a credential is kept: a name
+// ending in file or path whose earlier segments name a credential
+// (password_file, admin_key_file, tls_private_key_path). Its value is shown
+// when it reads as a plain absolute path (redact.ShownCredentialPath) - the
+// path says where a credential is mounted, not what it is, and showing it is
+// how a wrongly mounted key is diagnosed - and masked otherwise: the
+// credential itself written where its path belongs, most often.
+func credentialReference(name string) bool {
+	lower := strings.ToLower(name)
+	return (strings.HasSuffix(lower, "file") || strings.HasSuffix(lower, "path")) && redact.CredentialNamed(name)
 }
 
 // value is one ConfigMap value under its key, as it may be shown.
@@ -257,7 +269,7 @@ func (m *configMasker) scalar(node *yaml.Node, name string) {
 	}
 	m.scalarPEM = m.scalarPEM || begins
 	if node.Tag == "!!bool" || node.Tag == "!!int" || node.Tag == "!!float" || node.Tag == "!!null" {
-		if !configKey.MatchString(name) {
+		if !credentialName(name) {
 			return
 		}
 	}
@@ -303,7 +315,12 @@ func (m *configMasker) lines(text string) string {
 			value := strings.Trim(match[3], `"'`)
 			if shown := m.leaf(match[1], value); shown != value {
 				lines[index] = prefix + match[1] + match[2] + shown
+				continue
 			}
+			// A shape the split hides is read on the whole line: a URL
+			// (mongodb://user:pass@host split at its colon loses its
+			// scheme), a Go DSN (user:pass@tcp(...)) or a .pgpass line.
+			lines[index] = prefix + m.spans(rest)
 			continue
 		}
 		if at := credentialWordEnd(rest); at > 0 {
@@ -316,7 +333,7 @@ func (m *configMasker) lines(text string) string {
 }
 
 // credentialWordEnd is where, in a line of words, the first word that names a
-// credential (configKey) ends, when words follow it - "password hunter2",
+// credential (credentialName) ends, when words follow it - "password hunter2",
 // "api token abc" - so that what follows is masked; 0 when no such word has
 // anything after it.
 func credentialWordEnd(rest string) int {
@@ -325,7 +342,7 @@ func credentialWordEnd(rest string) int {
 	for index, field := range fields {
 		at := strings.Index(rest[offset:], field) + offset
 		offset = at + len(field)
-		if index < len(fields)-1 && configKey.MatchString(strings.TrimRight(field, ":=")) {
+		if index < len(fields)-1 && credentialName(strings.TrimRight(field, ":=")) {
 			return offset
 		}
 	}
