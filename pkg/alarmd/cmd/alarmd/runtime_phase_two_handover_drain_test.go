@@ -14,6 +14,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 )
@@ -152,16 +153,32 @@ func TestAStopLetsTheSlotInItsCommitBoundaryFinish(t *testing.T) {
 		if !first {
 			return execution.SlotExecutionResult{}, false, nil
 		}
+		// The Slot runs until the Worker has registered DRAINING - the order
+		// the case is about - or a cancel ends it; past the test's deadline it
+		// finishes without, and the case reads that as DRAINING not first.
+		draining := func() bool {
+			states := owner.registrationStates()
+			return len(states) > 0 && states[len(states)-1] == ownership.WorkerDraining
+		}
+		for deadline := testwait.Deadline(t); !draining() && time.Now().Before(deadline); {
+			select {
+			case <-ctx.Done():
+				outcome <- "cancelled"
+				return execution.SlotExecutionResult{}, true, ctx.Err()
+			case <-time.After(time.Millisecond): // fixed-wait: the poll interval of a condition wait bounded by the test deadline
+			}
+		}
+		drainingBeforeFinish.Store(draining())
+		// After DRAINING the stop takes a few in-process steps - the dispatcher
+		// told to stop, its ticks returned - before the drain counts the Slots
+		// it waits for; returning inside them reads as a drain with nothing in
+		// flight. None of them is observable from here.
 		select {
 		case <-ctx.Done():
-			outcome <- "cancelled"
-			return execution.SlotExecutionResult{}, true, ctx.Err()
-		case <-time.After(300 * time.Millisecond):
-			states := owner.registrationStates()
-			drainingBeforeFinish.Store(len(states) > 0 && states[len(states)-1] == ownership.WorkerDraining)
-			outcome <- "finished"
-			return execution.SlotExecutionResult{Completed: true}, true, nil
+		case <-time.After(2 * time.Second): // fixed-wait: seconds of margin over the in-memory steps between DRAINING and the drain's count
 		}
+		outcome <- "finished"
+		return execution.SlotExecutionResult{Completed: true}, true, nil
 	}}
 	bundle := mustPhaseTwoWorkerBundle(t, cfg, newPhaseTwoApplicationHealth(), control, owner)
 	ctx, cancel := context.WithCancel(context.Background())
