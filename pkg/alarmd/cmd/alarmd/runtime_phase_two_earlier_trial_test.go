@@ -125,6 +125,12 @@ func heldTrialRun(t *testing.T, f *cutoverStallFixture, arrival, span time.Durat
 		return counts
 	}
 	started := f.now()
+	// The lookback's loop reads the due rechecks once every lookbackTick of
+	// the process's clock (Engine.Run). That loop runs on the wall clock and
+	// this one on the fixture's, which leaps, so the run takes those steps
+	// itself, at the same cadence on its own clock; left to the wall clock,
+	// they came only as often as the run paused.
+	lastStep := started
 	for deadline := started.Add(span); f.now().Before(deadline); {
 		if done(f.now().Sub(started), lowest, raised, outcomesNow()) {
 			break
@@ -138,6 +144,10 @@ func heldTrialRun(t *testing.T, f *cutoverStallFixture, arrival, span time.Durat
 			if result.ReasonCode == "GAP_SKIPPED" {
 				skipped++
 			}
+		}
+		if f.now().Sub(lastStep) >= lookbackTick {
+			engine.Step(ctx)
+			lastStep = f.now()
 		}
 		engine.StepEarly(ctx)
 		// The trial reads on its own goroutine: let it answer before the clock moves.
