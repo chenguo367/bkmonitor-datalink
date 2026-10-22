@@ -135,9 +135,10 @@ func TestAReassignedQueryGroupWithNoSlotInFlightIsReleasedAtOnce(t *testing.T) {
 
 // Design 02 §6.6: on a stop signal the Worker goes DRAINING first, stops
 // creating Slots, and finishes within the drain deadline the execution that
-// has entered its Event/State/Progress boundary. The Slot below needs 300 ms
-// to finish, far inside the shutdown timeout: stopping the Worker lets it
-// finish, and the Worker was already registered DRAINING when it did.
+// has entered its Event/State/Progress boundary. The Slot below runs until
+// the Worker has registered DRAINING and then a short margin, far inside the
+// shutdown timeout: stopping the Worker lets it finish, and the Worker was
+// already registered DRAINING when it did.
 func TestAStopLetsTheSlotInItsCommitBoundaryFinish(t *testing.T) {
 	cfg := validGoAccessRuntimeConfig()
 	queryGroup := execution.QueryGroupIdentity("query-group-drain")
