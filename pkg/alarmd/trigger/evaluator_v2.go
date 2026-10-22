@@ -33,7 +33,7 @@ func EvaluateV2(request EvaluationRequestV2) (EvaluationResultV2, error) {
 	levelResults := make([]contract.LevelResultV1, 0, levels.Len())
 	for index, level := range levels.All() {
 		eligibility, err := EvaluateStateEligibilityV2(
-			request.EvaluationTime, level, request.Record.LevelFacts[index], request.EffectiveTimeFacts[index].Fact,
+			request.DecisionTime, level, request.Record.LevelFacts[index], request.EffectiveTimeFacts[index].Fact,
 		)
 		if err != nil {
 			return EvaluationResultV2{}, err
@@ -273,7 +273,7 @@ func EvaluateStateEligibilityV2(
 
 func validateRequestV2(request EvaluationRequestV2) (strategy.LevelList, error) {
 	if request.Plan == nil || !request.Limits.valid() || request.TenantID == "" || request.BusinessID == "" ||
-		request.Record.RecordID == "" || request.Record.SourceTime < 0 || request.EvaluationTime < 0 || request.ExecutionID == "" ||
+		request.Record.RecordID == "" || request.Record.SourceTime < 0 || request.EvaluationTime < 0 || request.DecisionTime <= 0 || request.ExecutionID == "" ||
 		request.ReadHoldMillis < 0 || request.ReadHoldMillis > execution.MaxReadHoldMillis ||
 		request.ReadEnd < 0 || request.ReadEnd > request.EvaluationTime ||
 		request.RecordRef.RecordID != request.Record.RecordID || request.RecordRef.SourceTime != request.Record.SourceTime ||

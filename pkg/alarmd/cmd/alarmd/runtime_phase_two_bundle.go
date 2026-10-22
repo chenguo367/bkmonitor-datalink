@@ -758,6 +758,7 @@ func openProductionPhaseTwoBundleAssembly(
 		return nil, err
 	}
 	workerPorts := worker.Ports{
+		Now:           time.Now,
 		EffectiveTime: legacyTime.Provider(),
 		Finalization:  frozen, Activation: repository, Query: querySource, Sequencer: sequencer,
 		Evaluator: evaluator, Admission: admitter, GapGuard: executionStore, Events: events,

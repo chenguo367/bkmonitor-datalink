@@ -310,6 +310,7 @@ func noDataRequestFixtureOnGroup(
 			EffectiveTimeFacts:      []execution.BoundEffectiveTimeFact{{Consumer: consumer, SeriesIdentity: series, Fact: facts[0]}},
 			RequiredPhysicalQueries: []execution.PlannedPhysicalQueryRef{{Digest: "physical", QueryRevision: "query"}},
 			DeadlineUnixMilli:       200000,
+			DecisionTime:            sourceTime,
 		},
 		Inputs: []execution.SeriesEvaluationInputRequest{{
 			Contract: contractRef, Consumer: consumer, SeriesIdentity: series,

@@ -33,13 +33,17 @@ import (
 type Ports struct {
 	// EffectiveTime supplies bounded legacy facts; nil yields UNKNOWN for legacy schedules.
 	EffectiveTime strategy.EffectiveTimeProvider
-	Finalization  execution.QueryFreeFinalizationSource
-	Activation    execution.PlanActivationSource
-	Query         execution.QueryExecutionSource
-	Sequencer     execution.SideEffectSequencer
-	Evaluator     execution.Evaluator
-	Admission     execution.SideEffectAdmitter
-	GapGuard      execution.GapGuardStore
+	// Now is the wall clock the effective time is judged at: the moment the
+	// worker decides a Level's Trigger and Recovery, not the Slot's
+	// evaluation time. Optional: nil is time.Now.
+	Now          func() time.Time
+	Finalization execution.QueryFreeFinalizationSource
+	Activation   execution.PlanActivationSource
+	Query        execution.QueryExecutionSource
+	Sequencer    execution.SideEffectSequencer
+	Evaluator    execution.Evaluator
+	Admission    execution.SideEffectAdmitter
+	GapGuard     execution.GapGuardStore
 	// NoData is required, like every other port here. A worker without it would
 	// evaluate every Plan's thresholds and none of their absence, and the only
 	// sign would be no-data alerts that never fire - which is indistinguishable
@@ -165,6 +169,14 @@ type activationProtectionRequiredError struct {
 
 func (*activationProtectionRequiredError) Error() string {
 	return "alarmd worker: changed activation requires Guard protection"
+}
+
+// now is the wall clock of a decision (Ports.Now).
+func (coordinator *SlotExecutionCoordinator) now() time.Time {
+	if coordinator.ports.Now != nil {
+		return coordinator.ports.Now()
+	}
+	return time.Now()
 }
 
 func NewSlotExecutionCoordinator(ports Ports, budget ProvisionalBudget) (*SlotExecutionCoordinator, error) {

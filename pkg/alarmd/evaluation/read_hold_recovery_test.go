@@ -69,6 +69,7 @@ func TestTheSlotsOwnReadSetsTheSettledBoundary(t *testing.T) {
 func atSlot(t *testing.T, plan *strategy.CompiledPlan, request execution.EvaluationRequest, at int64) execution.EvaluationRequest {
 	t.Helper()
 	request.Header.Contract.Slot.EvaluationTime = execution.EvaluationTime(at)
+	request.Header.DecisionTime = at
 	request.Header.Contract.ScheduleSegmentStart = execution.EvaluationTime(at)
 	provider := strategy.NewStaticScheduleProvider(strategy.TimezoneResolverFunc(func(context.Context, string, string, string) (*time.Location, error) {
 		return time.UTC, nil

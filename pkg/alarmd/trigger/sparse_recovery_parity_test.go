@@ -59,6 +59,7 @@ func evaluateSlotV2(t *testing.T, plan *strategy.CompiledPlan, points []sparsePo
 	request := requestV2(t, plan, points[index].time, []DetectionFact{factV2(level, result)},
 		[]LevelHistory{{LevelID: level.Definition().LevelID, View: history}}, activeFactsV2(t, plan, evaluationTime))
 	request.EvaluationTime, request.ReadHoldMillis, request.SeriesSeenBefore = evaluationTime, hold, seen
+	request.DecisionTime = evaluationTime
 	request.ReadEnd = readEnd
 	evaluated, err := EvaluateV2(request)
 	if err != nil {
@@ -73,6 +74,7 @@ func evaluateSlotV2(t *testing.T, plan *strategy.CompiledPlan, points []sparsePo
 func readInTheNextSlot(t *testing.T, request *EvaluationRequestV2) {
 	t.Helper()
 	request.EvaluationTime = request.Record.SourceTime + 60
+	request.DecisionTime = request.EvaluationTime
 	request.ReadEnd = request.EvaluationTime
 	request.EffectiveTimeFacts = activeFactsV2(t, request.Plan, request.EvaluationTime)
 }

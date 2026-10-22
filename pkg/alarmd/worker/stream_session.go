@@ -346,7 +346,7 @@ func (stream *streamedExecution) Begin(ctx context.Context, header execution.Int
 	stream.streamed = make(map[streamedInputKey]execution.NamedInputBinding)
 	stream.planSeries = make(map[execution.PlanIdentity]map[execution.SeriesIdentityDigest]struct{})
 	stream.completionOnly = make(map[execution.PlanIdentity][]execution.NamedInputBinding)
-	effective, err := PrepareEffectiveTimeFacts(ctx, header, stream.coordinator.ports.EffectiveTime)
+	effective, err := PrepareEffectiveTimeFacts(ctx, header, stream.coordinator.ports.EffectiveTime, stream.coordinator.now().Unix())
 	if err != nil {
 		return fmt.Errorf("alarmd worker: prepare EffectiveTime facts: %w", err)
 	}
@@ -1802,10 +1802,22 @@ func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry
 	}
 	stateItems := []execution.StatePreflightItem{entry.item}
 	loaded := execution.StatePreflightResult{Items: []execution.RuntimeStateView{view}}
+	// The effective time is judged at the decision: the facts prepared when
+	// the Slot began are judged again only if a window boundary has passed
+	// since, which is when they stop holding.
+	decision := stream.coordinator.now().Unix()
+	if !effectiveFactsHoldAt(stream.effective, decision) {
+		effective, err := PrepareEffectiveTimeFacts(ctx, stream.header, stream.coordinator.ports.EffectiveTime, decision)
+		if err != nil {
+			return fmt.Errorf("alarmd worker: prepare EffectiveTime facts at the decision: %w", err)
+		}
+		stream.effective = effective
+	}
 	evaluationHeader, err := bindAlwaysEffectiveTimeFacts(stream.header, stateItems, stream.effective, entry.kind())
 	if err != nil {
 		return fmt.Errorf("alarmd worker: bind series EffectiveTime facts: %w", err)
 	}
+	evaluationHeader.DecisionTime = decision
 	request := execution.EvaluationRequest{Header: evaluationHeader, Inputs: inputs, State: loaded, Gaps: stream.gaps,
 		HostOverlay: stream.hostOverlays[due.Identity][series], NamedOutputs: stream.primaryNamedOutputs(inputs)}
 	// Told before the evaluation, so the strategy is in the copy's next read

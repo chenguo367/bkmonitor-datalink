@@ -189,6 +189,11 @@ type EvaluationRequestV2 struct {
 	Histories          []LevelHistory
 	EffectiveTimeFacts []LevelEffectiveTimeFact
 	EvaluationTime     int64
+	// DecisionTime is the wall clock, in Unix seconds, that the effective
+	// time is judged at (execution.InternalExecutionHeader.DecisionTime):
+	// EffectiveTimeFacts must hold at it. Everything else - history, the
+	// event's times - is the Slot's EvaluationTime.
+	DecisionTime int64
 	// ReadHoldMillis is the read hold of the Slot this record is evaluated
 	// in, as its frozen execution contract carries it
 	// (execution.FrozenExecutionContractRef.ReadHoldMillis): how much later

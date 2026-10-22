@@ -14,6 +14,14 @@ type PlannedPhysicalQueryRef struct {
 }
 
 type InternalExecutionHeader struct {
+	// DecisionTime is the wall clock, in Unix seconds, that the header's
+	// EffectiveTimeFacts were judged at: the moment the worker decides the
+	// Levels' Trigger and Recovery. The effective time gates emission at the
+	// decision, as the platform's own detector and close do, so a Slot
+	// evaluated just before a window ends but decided after it does not
+	// fire an alert the window's close would retire at once. History stays
+	// keyed by the Slot's evaluation time. Set when the facts are bound.
+	DecisionTime            int64
 	ExecutionID             string
 	Contract                FrozenExecutionContractRef
 	DuePlans                []DuePlan

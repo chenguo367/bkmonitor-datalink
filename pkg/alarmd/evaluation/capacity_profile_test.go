@@ -57,6 +57,7 @@ func TestCapacityProfileLegalSeries(t *testing.T) {
 			}
 			req := requestFixtureForPlan(t, plan, records, nil)
 			req.Header.Contract.Slot.EvaluationTime = 1000080
+			req.Header.DecisionTime = 1000080
 			req.Header.DeadlineUnixMilli = 1000120000
 			req.Header.DuePlans[0].CompletionDeadlineUnixMilli = 1000120000
 			req.Header.Requirements[0].LogicalQueryRef = "query"

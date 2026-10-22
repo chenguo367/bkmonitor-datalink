@@ -681,7 +681,7 @@ func requestV2ForBenchmark(b *testing.B, plan *strategy.CompiledPlan, level stra
 		RecordRef: contract.TriggerRecordRefV1{RecordID: recordID, SourceTime: 420, DimensionIdentityDigest: strings.Repeat("c", 64), Dimensions: map[string]json.RawMessage{"host": json.RawMessage(`"127.0.0.1"`)}},
 		Observed:  contract.TriggerObservedV1{Values: map[string]json.RawMessage{"value": json.RawMessage(`50.1`)}, Unit: "percent"},
 		Histories: []LevelHistory{{LevelID: 5, View: pointHistory{step: 60, points: points}}}, EffectiveTimeFacts: activeFactsBenchmark(b, plan, 420),
-		EvaluationTime: 420, ExecutionID: "execution-1",
+		EvaluationTime: 420, DecisionTime: 420, ExecutionID: "execution-1",
 		Limits: EvaluationLimitsV2{MaxLevels: 16, MaxTriggerWindowSize: 64, MaxRecoveryConsecutiveWindows: 64, MaxRequiredHistoryPoints: 256, MaxLevelResultsPerEvent: 16, MaxEvidenceBytesPerEvent: 64 << 10, MaxComputeCost: 4096},
 	}
 }
@@ -816,7 +816,7 @@ func requestV2(t *testing.T, plan *strategy.CompiledPlan, source int64, facts []
 		Record:    DetectionRecord{RecordID: recordID, SourceTime: source, ProjectedValues: []ProjectedValue{{CanonicalDecimal: "50.100000", Available: true}}, LevelFacts: facts},
 		RecordRef: contract.TriggerRecordRefV1{RecordID: recordID, SourceTime: source, DimensionIdentityDigest: strings.Repeat("c", 64), Dimensions: map[string]json.RawMessage{"host": json.RawMessage(`"127.0.0.1"`)}},
 		Observed:  contract.TriggerObservedV1{Values: map[string]json.RawMessage{"value": json.RawMessage(`50.1`)}, Unit: "percent"},
-		Histories: histories, EffectiveTimeFacts: effective, EvaluationTime: source, ExecutionID: "execution-1",
+		Histories: histories, EffectiveTimeFacts: effective, EvaluationTime: source, DecisionTime: source, ExecutionID: "execution-1",
 		LateAccepted: false,
 		Limits: EvaluationLimitsV2{
 			MaxLevels: 16, MaxTriggerWindowSize: 64, MaxRecoveryConsecutiveWindows: 64,
