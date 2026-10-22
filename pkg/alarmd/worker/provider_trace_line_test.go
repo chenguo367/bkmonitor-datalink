@@ -87,14 +87,18 @@ func TestEveryFailedQueryLineNamesTheTraceItWasSentWith(t *testing.T) {
 		delay    time.Duration
 		serve    func(http.ResponseWriter, *http.Request)
 	}{
-		{name: "no answer by the deadline", reason: contract.ReasonQueryTimeout, deadline: 200 * time.Millisecond,
+		// The deadlines below are the behaviour under test. Each leaves a loaded
+		// host seconds to get the request to the server, or the answer back,
+		// before it passes: at 200 ms the request itself could come after it,
+		// and then nothing was sent to read the trace id from.
+		{name: "no answer by the deadline", reason: contract.ReasonQueryTimeout, deadline: 2 * time.Second, // fixed-wait: the deadline under test
 			serve: func(w http.ResponseWriter, r *http.Request) {
 				select {
 				case <-r.Context().Done():
-				case <-time.After(2 * time.Second):
+				case <-time.After(3 * time.Second): // fixed-wait: releases the silent server for the close; the client gave up at its 2 s deadline before
 				}
 			}},
-		{name: "delivered too late", reason: contract.ReasonQueryDeliveryTimeout, deadline: 300 * time.Millisecond, delay: 600 * time.Millisecond,
+		{name: "delivered too late", reason: contract.ReasonQueryDeliveryTimeout, deadline: 2 * time.Second, delay: 4 * time.Second, // fixed-wait: the deadline under test and a delivery twice as slow
 			serve: answer},
 		{name: "unavailable", reason: contract.ReasonQueryUnavailable, deadline: time.Minute,
 			serve: func(w http.ResponseWriter, _ *http.Request) {
