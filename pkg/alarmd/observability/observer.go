@@ -3611,7 +3611,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentOwnership, StageControlReadsSpent},
 	{ComponentOwnership, StageAssignmentIndexWritten}, {ComponentOwnership, StageAssignmentIndexRead},
 	{ComponentOwnership, StageAssignmentSwept}, {ComponentOwnership, StageAssignmentApplied},
-	{ComponentOwnership, StageHandoverDrained},
+	{ComponentOwnership, StageHandoverDrained}, {ComponentRuntime, StageShutdownDrainBegan},
 	{ComponentOwnership, StageViewPublished}, {ComponentOwnership, StageViewSession}, {ComponentOwnership, StageViewInstalled},
 	{ComponentOwnership, StageTakeoverStarted}, {ComponentOwnership, StageTakeoverCompleted},
 	{ComponentOwnership, StageLeaseRenewed}, {ComponentOwnership, StageFenceChecked},

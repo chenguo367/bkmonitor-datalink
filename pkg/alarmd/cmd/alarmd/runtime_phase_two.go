@@ -2867,6 +2867,14 @@ func (bundle *phaseTwoWorkerBundle) drainSlots(
 ) error {
 	began := time.Now()
 	drain := observability.SlotDrainFacts{Site: observability.SlotDrainSiteShutdown, Waited: bundle.runningSlots()}
+	// Said before the wait: a stop killed before its drain ends still says
+	// how many Slots it was waiting on; the shutdown line says how it ended.
+	observeRuntime(context.Background(), bundle.dependencies.Observer, observability.Observation{
+		Component: observability.ComponentRuntime, Stage: observability.StageShutdownDrainBegan,
+		Result:    observability.ResultStarted,
+		SlotDrain: &observability.SlotDrainFacts{Site: drain.Site, Waited: drain.Waited},
+		Trace:     observability.TraceFields{OwnerID: bundle.dependencies.Config.PhaseTwo.Worker.ID},
+	})
 	var schedulerErr error
 	select {
 	case schedulerErr = <-schedulerDone:

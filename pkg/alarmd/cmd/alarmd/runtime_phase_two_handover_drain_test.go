@@ -146,6 +146,8 @@ func TestAStopLetsTheSlotInItsCommitBoundaryFinish(t *testing.T) {
 	owner := &fakePhaseTwoOwnership{assigned: []execution.QueryGroupIdentity{queryGroup}}
 	runStarted := make(chan struct{})
 	outcome := make(chan string, 1)
+	drainBegan := make(chan observability.SlotDrainFacts, 1)
+	var began atomic.Pointer[observability.SlotDrainFacts]
 	var drainingBeforeFinish atomic.Bool
 	var once sync.Once
 	owner.runner = &callbackPhaseTwoQueryGroup{run: func(ctx context.Context) (execution.SlotExecutionResult, bool, error) {
@@ -173,16 +175,25 @@ func TestAStopLetsTheSlotInItsCommitBoundaryFinish(t *testing.T) {
 		// After DRAINING the stop takes a few in-process steps - the dispatcher
 		// told to stop, its ticks returned - before drainSlots counts the
 		// Slots it waits for; returning inside them reads as a drain with
-		// nothing in flight. Nothing marks that count: an observation or hook
-		// in drainSlots once Waited is read would let this wait on it.
+		// nothing in flight. The stop says when it has counted them.
 		select {
 		case <-ctx.Done():
-		case <-time.After(2 * time.Second): // fixed-wait: (open) a margin over the in-memory steps from DRAINING to drainSlots counting the running Slots, which nothing observable marks
+		case facts := <-drainBegan:
+			began.Store(&facts)
+		case <-testwait.Expired(t):
 		}
 		outcome <- "finished"
 		return execution.SlotExecutionResult{Completed: true}, true, nil
 	}}
 	bundle := mustPhaseTwoWorkerBundle(t, cfg, newPhaseTwoApplicationHealth(), control, owner)
+	bundle.dependencies.Observer = observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+		if observation.Stage == observability.StageShutdownDrainBegan && observation.SlotDrain != nil {
+			select {
+			case drainBegan <- *observation.SlotDrain:
+			default:
+			}
+		}
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- bundle.Run(ctx) }()
@@ -199,6 +210,10 @@ func TestAStopLetsTheSlotInItsCommitBoundaryFinish(t *testing.T) {
 	}
 	if drain := bundle.shutdownDrain(); drain == nil || drain.Outcome != "finished" || drain.Waited != 1 || drain.Cancelled != 0 {
 		t.Fatalf("shutdown drain = %+v, want finished with 1 waited and none cancelled", drain)
+	}
+	// The stop said, before its wait, that it was waiting on the one Slot.
+	if facts := began.Load(); facts == nil || facts.Site != observability.SlotDrainSiteShutdown || facts.Waited != 1 || facts.Outcome != "" {
+		t.Fatalf("the stop's drain began as %+v, want the shutdown waiting on 1 Slot, seen by the Slot before it returned", facts)
 	}
 }
 

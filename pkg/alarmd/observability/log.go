@@ -925,13 +925,16 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		)
 	}
 	if facts := observation.SlotDrain; facts != nil {
-		attributes = append(attributes,
-			slog.String("drain_site", facts.Site),
-			slog.String("drain_outcome", facts.Outcome),
-			slog.Int("drain_waited", facts.Waited),
-			slog.Int("drain_cancelled", facts.Cancelled),
-			slog.Int64("drain_wait_ms", facts.WaitMS),
-		)
+		attributes = append(attributes, slog.String("drain_site", facts.Site), slog.Int("drain_waited", facts.Waited))
+		// A drain that has only begun has no outcome yet, and nothing
+		// cancelled or waited to say.
+		if facts.Outcome != "" {
+			attributes = append(attributes,
+				slog.String("drain_outcome", facts.Outcome),
+				slog.Int("drain_cancelled", facts.Cancelled),
+				slog.Int64("drain_wait_ms", facts.WaitMS),
+			)
+		}
 	}
 	if facts := observation.AssignmentApplied; facts != nil {
 		attributes = append(attributes,
@@ -1281,6 +1284,10 @@ func appendTraceFields(attributes []slog.Attr, trace TraceFields) []slog.Attr {
 func mandatoryLogStage(stage Stage) bool {
 	switch stage {
 	case StageStartup, StageConfigLoaded, StageShutdown, StageFatal:
+		return true
+	case StageShutdownDrainBegan:
+		// Once a stop, before its wait for the Slots in flight: the one
+		// account of what a stop killed during that wait was waiting for.
 		return true
 	case StageSnapshotRefreshed, StageSnapshotUnavailable:
 		return true

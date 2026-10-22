@@ -11,6 +11,13 @@ package observability
 // shutdown), which is written once per process.
 const StageHandoverDrained = "handover_drained"
 
+// StageShutdownDrainBegan names a stop beginning its wait for the Slots in
+// flight, once a stop: how many it waits on (SlotDrain, site shutdown,
+// Waited). The shutdown line says how the wait ended; this one is written
+// before it, so a process killed before its drain ends still says what it
+// was waiting for.
+const StageShutdownDrainBegan = "shutdown_drain_began"
+
 // StageOutputUnapplied names one Slot whose events the broker acknowledged
 // and whose State write the ownership store then refused (ReasonCode is the
 // refusal): the next owner redoes the Slot from Progress and sends the same
