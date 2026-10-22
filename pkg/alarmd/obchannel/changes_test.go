@@ -81,7 +81,7 @@ func TestChangesAreTheChannelsChangesAndTheReplicasStartsAndStops(t *testing.T) 
 		if row.Operator != "" {
 			who += ":" + row.Operator
 		}
-		got = append(got, fmt.Sprintf("%s %s %s %s", row.At.Format("15:04"), row.Kind, row.Op+row.Replica, who))
+		got = append(got, fmt.Sprintf("%s %s %s %s", row.At.Format("15:04"), row.Kind, row.Op+row.Pod, who))
 	}
 	want := []string{
 		"02:55 start alarmd-1 ", "02:50 stop alarmd-1 ",

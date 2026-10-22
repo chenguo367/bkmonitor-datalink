@@ -120,8 +120,9 @@ type ChangeRow struct {
 	Kind   string        `json:"kind"`
 	Op     string        `json:"op,omitempty"`
 	Object *ChangeObject `json:"object,omitempty"`
-	// Replica is the alarmd replica that started or stopped.
-	Replica string `json:"replica,omitempty"`
+	// Pod is the alarmd Pod that started or stopped (the lifecycle record's
+	// replica, which is its Pod name).
+	Pod string `json:"pod,omitempty"`
 	// Operator is the admin user's name when OperatorKind is user.
 	Operator     string `json:"operator,omitempty"`
 	OperatorKind string `json:"operator_kind,omitempty"`
@@ -193,7 +194,7 @@ func ChangesOperation(options ChangesOptions) Operation {
 	positive, maxRows := int64(1), int64(ChangesMaxRows)
 	return Operation{ID: OpChangesList,
 		Summary: "变更记录：经本部署 SRE 通道做的变更（改镜像=发布、回退=回滚、apply/patch/delete、删 Pod、重启、扩缩、改 ConfigMap=写操作）与 alarmd 副本的启动、停止，最新的在前。" +
-			"每行只有时刻、类别、操作、对象（kind/namespace/name）、操作者（管理员用户名、部署管理员或未知）、结果，启停另带构建版本与停止原因；不含会话、请求、脚本与命令行。" +
+			"每行只有时刻、类别、操作、对象（kind/namespace/name）、操作者（管理员用户名、部署管理员或未知）、结果，启停另带 Pod、构建版本与停止原因；不含会话、请求、脚本与命令行。" +
 			"不经通道的改动（kubectl、helm、流水线）不在其中；经通道的命令执行（node.exec、pod.exec）不列行，按小时计数，明细用 sre.receipts 读。" +
 			"coverage 给出各来源能读到多早（最早一条、上限、是否已满、保留期）：空列表是\"保留范围内没有\"，不是\"没有变更\"。",
 		EvidenceScope: "deployment",
@@ -344,7 +345,7 @@ func listChanges(ctx context.Context, options ChangesOptions, p Params) (Changes
 			if !inRange(event.At) || (event.Event != ChangeStart && event.Event != ChangeStop) {
 				continue
 			}
-			row := ChangeRow{At: at, Kind: event.Event, Replica: event.Replica, Build: event.Build}
+			row := ChangeRow{At: at, Kind: event.Event, Pod: event.Replica, Build: event.Build}
 			if event.Event == ChangeStop {
 				row.StopReason = event.Reason
 			}
@@ -419,7 +420,7 @@ func operatorOf(receipt SREAction) (string, string) {
 }
 
 func rowKey(row ChangeRow) string {
-	parts := []string{row.Kind, row.Op, row.Replica, row.Result, row.OperatorKind, row.Operator, row.Build, row.StopReason}
+	parts := []string{row.Kind, row.Op, row.Pod, row.Result, row.OperatorKind, row.Operator, row.Build, row.StopReason}
 	if row.Object != nil {
 		parts = append(parts, row.Object.Namespace, row.Object.Kind, row.Object.Name)
 	}

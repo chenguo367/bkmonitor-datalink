@@ -223,7 +223,7 @@ func TestChangesReadTheLifecycleRecordAndTheChannelsReceiptsAsWired(t *testing.T
 	}
 	var kinds []string
 	for _, row := range answer.Rows {
-		kinds = append(kinds, row.Kind+":"+row.Replica+row.Op)
+		kinds = append(kinds, row.Kind+":"+row.Pod+row.Op)
 	}
 	if strings.Join(kinds, ",") != "release:workload.set_image,stop:pod-a,start:pod-a" || answer.Rows[1].StopReason != lifecycleStopSignal || answer.Rows[2].Build == "" {
 		t.Fatalf("rows %v %+v", kinds, answer.Rows)
