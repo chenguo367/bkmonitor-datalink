@@ -92,6 +92,9 @@ var plainCorpus = []struct{ name, text string }{
 	{"cert in prose", "# set the cert path below"},
 	{"username", "username: alice"},
 	{"auth switch", "auth: true"},
+	{"secure_cookie switch", "secure_cookie: true"},
+	{"cookie_http_only switch", "cookie_http_only: false"},
+	{"use_token switch", "use_token: on"},
 	{"nginx proxy_pass", "location / {\n    proxy_pass http://backend.example.test:8080;\n    fastcgi_pass 192.0.2.30:9000;\n}"},
 }
 

@@ -46,6 +46,12 @@ const ConfigValueContract = "config_values_blacklist_v1"
 // password_min_length, token_ttl, secretRef - is configuration.
 func credentialName(name string) bool { return redact.CredentialName(name) }
 
+// maskedByName says a value is masked for its name: the name is a credential
+// name and the value is not a switch (redact.ShownUnderCredentialName).
+func maskedByName(name, text string) bool {
+	return credentialName(name) && !redact.ShownUnderCredentialName(text)
+}
+
 var (
 	pemBlock   = regexp.MustCompile(`-----BEGIN [A-Z0-9 ]+-----`)
 	lineKeyVal = regexp.MustCompile(`^([A-Za-z0-9_.\-]+)(\s*[:=]\s*)(.*)$`)
@@ -89,7 +95,7 @@ func (m *configMasker) leaf(name, text string) string {
 	if text == "" {
 		return text
 	}
-	if credentialName(name) || credentialReference(name) && !redact.ShownCredentialPath(text) {
+	if maskedByName(name, text) || credentialReference(name) && !redact.ShownCredentialPath(text) {
 		return m.mask(text)
 	}
 	if strings.Contains(text, "\n") {

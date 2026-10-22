@@ -142,6 +142,11 @@ func CredentialSpans(text string) [][2]int {
 	}
 	for _, rule := range []*regexp.Regexp{dsnUserinfo, assignedCredential, credentialDirective, pgpassLine} {
 		for _, at := range rule.FindAllStringSubmatchIndex(text, -1) {
+			// A credential name assigned a switch (use_token: on) assigns
+			// no secret.
+			if rule != dsnUserinfo && rule != pgpassLine && ShownUnderCredentialName(strings.Trim(text[at[2]:at[3]], `"'`)) {
+				continue
+			}
 			add(at[2], at[3])
 		}
 	}
@@ -278,6 +283,15 @@ func CredentialName(name string) bool {
 	}
 	return credentialKeyQualifiers[qualifier]
 }
+
+// booleanLiteral is a whole value that is a switch, not a secret.
+var booleanLiteral = regexp.MustCompile(`(?i)^(?:true|false|yes|no|on|off)$`)
+
+// ShownUnderCredentialName says a value under a credential name is not a
+// credential and may be shown: the whole value is a boolean literal
+// (secure_cookie: true). A number is not exempt: a numeric password or PIN
+// is a password.
+func ShownUnderCredentialName(text string) bool { return booleanLiteral.MatchString(text) }
 
 // CredentialNamed says some segment of a name is a credential word: the
 // password_file, tls_key_path family, whose value is where a credential is
