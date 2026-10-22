@@ -313,6 +313,9 @@ func TestTheServerBringsEachWorkerToTheCurrentRevisionBySnapshotOrOneStep(t *tes
 	if snap3.Version.Revision != 2 || len(snap3.Entries) != 1 {
 		t.Fatalf("w3 snapshot = %+v, want revision 2 whole", snap3)
 	}
+	// The server counts a snapshot once its last chunk is sent, which a
+	// worker can have received first.
+	eventually(t, "the server counting the snapshot it sent", func() bool { return harness.server.Stats().SnapshotChunksSent == 4 })
 	stats = harness.server.Stats()
 	if stats.Revision != 2 || stats.Counts != (viewstream.Counts{Expected: 3, Sent: 3}) || stats.DeltasSent != 1 || stats.EmptyDeltasSent != 1 || stats.SnapshotChunksSent != 4 {
 		t.Fatalf("stats after second publish = %+v", stats)
