@@ -17,12 +17,14 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/redistest"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/pod"
 )
 
@@ -80,6 +82,21 @@ func TestTheConfigMapEditIsAnAuditedWriteWithoutValues(t *testing.T) {
 	}
 	if !found || sreEffect(pod.OpEditConfigMapText) != SREEffectChange {
 		t.Fatal("configmap.edit_text is not a counted change")
+	}
+	// A dry run makes every check, writes nothing, and its receipt says so:
+	// changes.list lists the edit and not the dry run.
+	status, response = call(t, channel, envelope(channel, "invoke", pod.OpEditConfigMapText, Params{"namespace": "ns1", "name": "app", "key": "config.yaml",
+		"old_text": "http://old.example.test/", "new_text": "http://new.example.test/", "expected_fingerprint": fingerprint, "dry_run": true}))
+	if status != 200 || response.Error != nil || len(writer.sent) != 1 || len(actions) != 2 || actions[0].DryRun || !actions[1].DryRun {
+		t.Fatalf("dry run: HTTP %d %+v sent %d audit %+v", status, response.Error, len(writer.sent), actions)
+	}
+	receipts := NewSREReceipts(redistest.Start(t).Client(), "test.sre:{env}:receipts", nil, nil)
+	for _, action := range actions {
+		receipts.Record(action)
+	}
+	changes, _ := runChanges(t, ChangesOptions{Receipts: receipts, Now: func() time.Time { return time.Now().Add(time.Minute) }}, Params{})
+	if len(changes.Rows) != 1 || changes.Rows[0].Op != pod.OpEditConfigMapText {
+		t.Fatalf("change rows %+v, want the edit only", changes.Rows)
 	}
 }
 

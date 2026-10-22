@@ -302,6 +302,35 @@ func (s *SREReceipts) Read(ctx context.Context, effect string) ([]SREAction, int
 	return receipts, undecoded, nil
 }
 
+// ReadStamps is Read with each receipt decoded into its operation, time and
+// result only: changes.list counts the access list's commands and needs no
+// more, and the access list is the larger one (MaxSREAccessReceipts).
+func (s *SREReceipts) ReadStamps(ctx context.Context, effect string) ([]SREAction, int, error) {
+	kept := MaxSREAccessReceipts
+	if effect == SREEffectChange {
+		kept = MaxSREChangeReceipts
+	}
+	raw, err := s.client.LRange(ctx, s.keyOf(effect), 0, int64(kept-1)).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return nil, 0, err
+	}
+	stamps, undecoded := make([]SREAction, 0, len(raw)), 0
+	for _, entry := range raw {
+		var stamp struct {
+			Op     string    `json:"op"`
+			At     time.Time `json:"at"`
+			Result string    `json:"result"`
+		}
+		if json.Unmarshal([]byte(entry), &stamp) != nil {
+			undecoded++
+			continue
+		}
+		stamps = append(stamps, SREAction{Op: stamp.Op, At: stamp.At, Result: stamp.Result, Effect: effect})
+	}
+	sort.SliceStable(stamps, func(i, j int) bool { return stamps[i].At.After(stamps[j].At) })
+	return stamps, undecoded, nil
+}
+
 func (f SREReceiptFilter) matches(action SREAction) bool {
 	if !f.Since.IsZero() && action.At.Before(f.Since) {
 		return false

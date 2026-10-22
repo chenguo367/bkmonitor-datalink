@@ -49,6 +49,9 @@ type SREAction struct {
 	// Effect is the list the receipt was kept in, change or access; set on
 	// read, not stored.
 	Effect string `json:"effect,omitempty"`
+	// DryRun marks an action that made every check and wrote nothing
+	// (configmap.edit_text with dry_run): it is not a change.
+	DryRun bool `json:"dry_run,omitempty"`
 	// Exec is what a pod.exec run said about itself, without its output.
 	Exec *SREExec `json:"exec,omitempty"`
 	// Argv is an execution's command line, redacted and capped
@@ -535,7 +538,7 @@ func SREOperations(options SREOptions) []Operation {
 				started := now()
 				v, err := pods.EditConfigMapText(ctx, pod.ConfigMapEditRequest{Namespace: p.String("namespace"), Name: p.String("name"), Key: p.String("key"),
 					OldText: p.String("old_text"), NewText: p.String("new_text"), ExpectedFingerprint: p.String("expected_fingerprint"), DryRun: p.Bool("dry_run")})
-				audit(ctx, started, SREAction{Op: pod.OpEditConfigMapText, Namespace: v.Namespace, Kind: "ConfigMap", Name: v.Name, UID: v.UID, Detail: editDetail(v)}, err)
+				audit(ctx, started, SREAction{Op: pod.OpEditConfigMapText, Namespace: v.Namespace, Kind: "ConfigMap", Name: v.Name, UID: v.UID, Detail: editDetail(v), DryRun: p.Bool("dry_run")}, err)
 				return wrapPod(v, err, err == nil)
 			}},
 	}
