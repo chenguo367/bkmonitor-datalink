@@ -43,8 +43,8 @@ func newTraceExportMetrics() traceExportMetrics {
 		state: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Subsystem: metricSubsystem, Name: "trace_export",
 			Help: "Whether this process exports its own spans, one-hot by state: on (a collector was given " +
-				"and the exporter built) or off_not_configured (no phase_two.tracing.otlp_endpoint). Set at " +
-				"startup. The span counters stay at zero both while the export is off and while it has nothing " +
+				"and the exporter built), off_not_configured (no phase_two.tracing.otlp_endpoint) or off_role " +
+				"(the process does not run the worker role, the one that exports). Set at startup. The span counters stay at zero both while the export is off and while it has nothing " +
 				"to sample; this says which. Both series exist from the start; the fleet overview names the " +
 				"collector's host and the sampling.",
 		}, []string{"state"}),

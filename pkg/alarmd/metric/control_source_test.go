@@ -100,14 +100,16 @@ func TestControlSourceCollectorReportsStateAtScrapeTime(t *testing.T) {
 		}
 		modes[[2]string{labels["role"], labels["mode"]}] = m.GetGauge().GetValue()
 	}
-	want := len(observability.ControlSourceRoles) * len(observability.ControlSourceModes)
+	// The grid and the off_role pair, which is 0 on a process that refreshes.
+	want := len(observability.ControlSourceRoles)*len(observability.ControlSourceModes) + 1
 	ones := 0
 	for _, value := range modes {
 		if value == 1 {
 			ones++
 		}
 	}
-	if len(modes) != want || ones != 1 || modes[[2]string{"leader", "never_succeeded"}] != 1 {
+	offRole, present := modes[[2]string{RoleNotApplicable, RoleNotApplicable}]
+	if len(modes) != want || ones != 1 || modes[[2]string{"leader", "never_succeeded"}] != 1 || !present || offRole != 0 {
 		t.Fatalf("modes = %v, want %d series with 1 on leader/never_succeeded only", modes, want)
 	}
 	if age := gatherFamily(t, r, "alarmd_control_source_last_success_age_seconds"); len(age) != 0 {

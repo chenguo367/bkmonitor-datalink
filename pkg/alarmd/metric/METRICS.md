@@ -485,7 +485,7 @@ Seconds since the last refresh round that succeeded, under any status including 
 
 Labels: `role`, `mode`
 
-Which role this process has in refreshing the control plane's strategy source and which state that refresh is in, 1 on the current pair and 0 on the others; read each scrape from the process's state, not set on a transition. role: leader (this process runs the refresh), follower (another process holds the leader lease; this one reads what it publishes), unacquired (the lease could not be acquired and it is not known whether anyone holds it -- a store error, or no attempt yet). No replica reporting leader means nobody is refreshing. mode: healthy (the last round succeeded), degraded_last_good (the last round failed and the process serves the last good catalog, which some process once refreshed successfully), never_succeeded (the last round failed and no round is known to have ever succeeded under this store). On a follower the mode is that of its own control reads. A follower's zero on every refresh counter is normal: only the leader refreshes.
+Which role this process has in refreshing the control plane's strategy source and which state that refresh is in, 1 on the current pair and 0 on the others; read each scrape from the process's state, not set on a transition. role: leader (this process runs the refresh), follower (another process holds the leader lease; this one reads what it publishes), unacquired (the lease could not be acquired and it is not known whether anyone holds it -- a store error, or no attempt yet). No replica reporting leader means nobody is refreshing. The off_role pair is a cell on every process: 1 on one with neither the control nor the worker role (the rest 0), else 0. mode: healthy (the last round succeeded), degraded_last_good (the last round failed and the process serves the last good catalog, which some process once refreshed successfully), never_succeeded (the last round failed and no round is known to have ever succeeded under this store). On a follower the mode is that of its own control reads. A follower's zero on every refresh counter is normal: only the leader refreshes.
 
 ## alarmd_control_source_refresh_total
 
@@ -931,7 +931,7 @@ Failed calls to the alert link's Console, by operation and class: the transport'
 
 Labels: `state`
 
-The alert link's Console as this replica last saw it, one cell per state and 1 on the current one: not_configured (the deployment names no Console, so neither the open alert set's calibration nor the close of disabled or deleted strategies' alerts runs; by design on a deployment whose events all go the Python-compatible way), not_called, unreadable (the latest call of some operation failed), link_unhealthy (the Console answered and the link says its own set maintenance is failing, never succeeded or is behind; the close refuses every round) and reachable.
+The alert link's Console as this replica last saw it, one cell per state and 1 on the current one: not_configured (the deployment names no Console, so neither the open alert set's calibration nor the close of disabled or deleted strategies' alerts runs; by design on a deployment whose events all go the Python-compatible way), not_called, unreadable (the latest call of some operation failed), link_unhealthy (the Console answered and the link says its own set maintenance is failing, never succeeded or is behind; the close refuses every round), reachable, and off_role, a cell on every process: 1 on one with neither the control nor the worker role (the rest 0), else 0.
 
 ## alarmd_live_query_reserve_seconds
 
@@ -1391,7 +1391,7 @@ Reads on which the effective value of a field changed, by field: what one edit o
 
 Labels: `mode`
 
-Which state the process copy of the platform's settings (host_disable_monitor_states, is_access_bk_data, bkdata_cmdb_level_tables, file_system_type_ignore) is in, 1 on the current one and 0 on the others; read each scrape from the copy's state. not_configured: the deployment renders no distribution source, the copy answers from its own configuration and the platform's code defaults, which is what alarmd did before it could read the platform, and is not a fault. never_loaded: a source is configured and no read has found a publication since the process started. authoritative: the last read found a publication and every field decoded. stale: there was a publication once and the last read did not yield one; the copy answers from the last publication, and past the staleness bound fleet health degrades.
+Which state the process copy of the platform's settings (host_disable_monitor_states, is_access_bk_data, bkdata_cmdb_level_tables, file_system_type_ignore) is in, 1 on the current one and 0 on the others; read each scrape from the copy's state. off_role is a cell on every process: 1 on one with neither the control nor the worker role, which keeps no copy (the rest 0), else 0. not_configured: the deployment renders no distribution source, the copy answers from its own configuration and the platform's code defaults, which is what alarmd did before it could read the platform, and is not a fault. never_loaded: a source is configured and no read has found a publication since the process started. authoritative: the last read found a publication and every field decoded. stale: there was a publication once and the last read did not yield one; the copy answers from the last publication, and past the staleness bound fleet health degrades.
 
 ## alarmd_platform_settings_read_retry_total
 
@@ -1999,7 +1999,7 @@ Owned Query Groups this replica began naming on its registration because a round
 
 Labels: `state`
 
-Whether this process exports its own spans, one-hot by state: on (a collector was given and the exporter built) or off_not_configured (no phase_two.tracing.otlp_endpoint). Set at startup. The span counters stay at zero both while the export is off and while it has nothing to sample; this says which. Both series exist from the start; the fleet overview names the collector's host and the sampling.
+Whether this process exports its own spans, one-hot by state: on (a collector was given and the exporter built), off_not_configured (no phase_two.tracing.otlp_endpoint) or off_role (the process does not run the worker role, the one that exports). Set at startup. The span counters stay at zero both while the export is off and while it has nothing to sample; this says which. Both series exist from the start; the fleet overview names the collector's host and the sampling.
 
 ## alarmd_trace_slots_total
 

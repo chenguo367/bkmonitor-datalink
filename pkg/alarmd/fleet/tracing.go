@@ -23,10 +23,14 @@ import (
 const (
 	TracingOn               = "on"
 	TracingOffNotConfigured = "off_not_configured"
+	// TracingOffRole is a process without the worker role, which exports no
+	// spans whatever the configuration says: the gauge's state there. A
+	// replica's published facts never carry it - only a worker publishes.
+	TracingOffRole = "off_role"
 )
 
 // TracingStates is every state, in the order the gauge creates them.
-var TracingStates = []string{TracingOn, TracingOffNotConfigured}
+var TracingStates = []string{TracingOn, TracingOffNotConfigured, TracingOffRole}
 
 // TracingReasonNotConfigured is why an export is off: no collector was given.
 const TracingReasonNotConfigured = "not_configured"

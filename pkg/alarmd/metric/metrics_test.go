@@ -1109,7 +1109,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("leader_forward_duration_seconds")] = histogramSeries(len(LeaderForwardRoutes)*len(LeaderForwardResults), len(leaderForwardBuckets))
 	bounds[fqName("apm_app_carried_responses_total")] = len(APMCarriedTables) * len(APMCarriedOutcomes)
 	bounds[fqName("apm_app_carried_response_bytes")] = histogramSeries(len(APMCarriedTables), 10)
-	bounds[fqName("control_source_mode")] = len(observability.ControlSourceRoles) * len(observability.ControlSourceModes)
+	bounds[fqName("control_source_mode")] = len(observability.ControlSourceRoles)*len(observability.ControlSourceModes) + 1
 	bounds[fqName("control_source_last_success_age_seconds")] = 1
 	bounds[fqName("leader_rounds_total")] = 2
 	bounds[fqName("query_cooldown_saves_total")] = len(QueryCooldownSaveResults)
@@ -1125,7 +1125,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		bounds[fqName(name)] = n
 	}
 	// Five states; three operations by two results.
-	bounds[fqName("linkd_console_state")] = 5
+	bounds[fqName("linkd_console_state")] = len(fleet.LinkdConsoleStates) + 1
 	bounds[fqName("linkd_console_calls_total")] = 6
 	// Eight SRE execution, management, Secret- and ConfigMap-read and image-change operations by six results.
 	bounds[fqName("sre_actions_total")] = 48
@@ -1275,7 +1275,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("catalog_global_strategies_unsupported")] = len(controlplane.GlobalBusinessRefusalWords) *
 		(len(controlplane.SupportedSourceSemantics) + 3)
 	bounds[fqName("level_abnormal_total")] = 2
-	bounds[fqName("platform_settings_mode")] = len(platformsettings.Modes)
+	bounds[fqName("platform_settings_mode")] = len(platformsettings.Modes) + 1
 	bounds[fqName("platform_settings_authoritative_age_seconds")] = 1
 	bounds[fqName("platform_settings_refresh_total")] = 2
 	bounds[fqName("platform_settings_unavailable_total")] = len(platformsettings.UnavailableReasons)
