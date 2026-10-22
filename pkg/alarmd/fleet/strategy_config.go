@@ -19,6 +19,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	model "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 )
 
 // The key configuration a strategy runs with, read on request from the
@@ -251,6 +252,10 @@ type StrategyLevelConfig struct {
 	Algorithms []StrategyAlgorithmInfo `json:"algorithms"`
 	Trigger    StrategyTypedPlanConfig `json:"trigger"`
 	Recovery   StrategyTypedPlanConfig `json:"recovery"`
+	// effectiveTime is the level's effective time as detection normalizes
+	// it, nil when it could not be read. Only the strategy view's words read
+	// it; the configuration answer does not carry it.
+	effectiveTime *strategy.EffectiveTimeRequirement
 }
 
 // StrategyAlgorithmInfo is one algorithm by type and version, with the size
@@ -335,6 +340,9 @@ func strategyPlanConfigOf(object controlplane.QueryGroupObject, plan controlplan
 			Connector: level.Connector, Algorithms: []StrategyAlgorithmInfo{},
 			Trigger:  typedPlanConfigOf(level.TriggerPlan),
 			Recovery: typedPlanConfigOf(level.RecoveryPlan),
+		}
+		if requirement, err := strategy.TriggerEffectiveTime(level.TriggerPlan.Config); err == nil {
+			entry.effectiveTime = &requirement
 		}
 		for _, algorithm := range level.DetectPlan.Algorithms {
 			entry.Algorithms = append(entry.Algorithms, StrategyAlgorithmInfo{Type: algorithm.Type, Version: algorithm.Version, ConfigBytes: len(algorithm.Config)})

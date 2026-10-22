@@ -360,6 +360,19 @@ func CompileUptime(raw json.RawMessage) (EffectiveTimeRequirement, error) {
 	return compileEffectiveTimeRequirement(&value, businessLocalTimezoneRef)
 }
 
+// TriggerEffectiveTime is a level's effective time read from its trigger
+// plan's configuration, normalized the way the compiler normalizes it for
+// detection: a single 00:00-23:59 range with no calendars is ALWAYS.
+func TriggerEffectiveTime(raw json.RawMessage) (EffectiveTimeRequirement, error) {
+	var config triggerPlanConfigV1
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &config); err != nil {
+			return EffectiveTimeRequirement{}, err
+		}
+	}
+	return compileEffectiveTimeRequirement(config.Uptime, config.TimezoneRef)
+}
+
 func normalizeCalendarIDs(ids []int64) ([]int64, error) {
 	result := append([]int64(nil), ids...)
 	sort.Slice(result, func(left, right int) bool { return result[left] < result[right] })

@@ -120,6 +120,53 @@ func TestExpectedDetectionIsTheFrozenConfigInWords(t *testing.T) {
 	}
 }
 
+// The effective time is said from what detection runs, not from whether a
+// window was configured: a single 00:00-23:59 range is all day (detection
+// normalizes it away), a narrower window is named, and calendars are named
+// by ID. Read through the configuration projection, from trigger plans as
+// the catalog freezes them.
+func TestTheEffectiveTimeIsSaidAsDetectionRunsIt(t *testing.T) {
+	trigger := func(uptime string) json.RawMessage {
+		return json.RawMessage(`{"window_size":5,"required_anomalies":3,"step_seconds":60,"timezone_ref":"BUSINESS_LOCAL","uptime":` + uptime + `}`)
+	}
+	cases := map[string]struct {
+		uptimes []string
+		want    string
+	}{
+		"all day as one 00:00-23:59 range": {[]string{`{"time_ranges":[{"start":"00:00","end":"23:59"}]}`}, "全天生效"},
+		"a limited window":                 {[]string{`{"time_ranges":[{"start":"09:00","end":"18:00"}]}`}, "每天 09:00-18:00 检测"},
+		"all day except holidays": {[]string{`{"time_ranges":[{"start":"00:00","end":"23:59"}],"calendars":[7]}`},
+			"全天检测，日历 7 中的日子不检测"},
+		"only on calendar days, two windows": {[]string{`{"time_ranges":[{"start":"20:00","end":"22:00"},{"start":"08:00","end":"12:00"}],"active_calendars":[12]}`},
+			"日历 12 中的日子每天 08:00-12:00、20:00-22:00 检测"},
+		"levels that differ": {[]string{`{"time_ranges":[{"start":"09:00","end":"18:00"}]}`, `{"time_ranges":[{"start":"00:00","end":"23:59"}]}`},
+			"致命：每天 09:00-18:00 检测；预警：全天检测"},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			object := configObject()
+			plan := &object.Plans[0]
+			// A frozen calendar snapshot is present, as it is when uptime is set.
+			plan.EffectiveTimeSnapshot = json.RawMessage(`{"schema_version":1,"status":"OK","calendars":[]}`)
+			base := plan.StrategyIR.Levels[0]
+			plan.StrategyIR.Levels = nil
+			for i, uptime := range c.uptimes {
+				level := base
+				level.Definition.LevelID = uint32(1 + i)
+				level.TriggerPlan.Config = trigger(uptime)
+				plan.StrategyIR.Levels = append(plan.StrategyIR.Levels, level)
+			}
+			configs := StrategyPlanConfigsOf(object, "4101", "2")
+			if len(configs.Items) == 0 {
+				t.Fatalf("no item: %+v", configs)
+			}
+			if got := expectedItemOf(configs.Items[0]).EffectiveTime; got != c.want {
+				t.Fatalf("effective time = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
 // A configuration the page cannot have is said in words, never as an empty
 // list that reads "detects nothing": not accepted, refused with why, or not
 // read.

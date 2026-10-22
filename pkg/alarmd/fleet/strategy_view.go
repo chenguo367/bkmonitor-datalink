@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 )
 
 // The strategy drawer: one strategy as the admin page opens it. Its
@@ -223,10 +224,82 @@ func expectedItemOf(config StrategyPlanConfig) ExpectedItem {
 	if config.NoData != nil {
 		item.NoData = fmt.Sprintf("连续 %d 个周期无数据时告警（%s）", config.NoData.Continuous, levelWord(config.NoData.Level))
 	}
-	if config.EffectiveTimeConfigured {
-		item.EffectiveTime = "只在配置的生效时段内检测"
-	}
+	item.EffectiveTime = effectiveTimeWord(config)
 	return item
+}
+
+// effectiveTimeWord says when a plan detects, from each level's effective
+// time as detection normalizes it: all day when no level has a window or a
+// calendar (a single 00:00-23:59 range is all day), otherwise the windows
+// and calendars, by level when the levels differ. A level whose effective
+// time was not read leaves only the configuration's presence to go on.
+func effectiveTimeWord(config StrategyPlanConfig) string {
+	var words, levels []string
+	byWord := map[string][]string{}
+	for _, level := range config.Levels {
+		if level.effectiveTime == nil {
+			if config.EffectiveTimeConfigured {
+				return "只在配置的生效时段内检测"
+			}
+			return "全天生效"
+		}
+		word := requirementWord(*level.effectiveTime)
+		if _, seen := byWord[word]; !seen {
+			words = append(words, word)
+		}
+		byWord[word] = append(byWord[word], levelWord(level.LevelID))
+	}
+	switch {
+	case len(words) == 0 || len(words) == 1 && words[0] == "":
+		return "全天生效"
+	case len(words) == 1:
+		return words[0]
+	}
+	for _, word := range words {
+		said := word
+		if said == "" {
+			said = "全天检测"
+		}
+		levels = append(levels, strings.Join(byWord[word], "、")+"："+said)
+	}
+	return strings.Join(levels, "；")
+}
+
+// requirementWord is one normalized effective time in words, "" for all day:
+// "每天 09:00-18:00 检测", "日历 12 中的日子全天检测", "全天检测，日历 7 中的日子不检测".
+func requirementWord(requirement strategy.EffectiveTimeRequirement) string {
+	if requirement.Kind() == strategy.EffectiveTimeAlways {
+		return ""
+	}
+	when := "全天"
+	// With calendars, detection keeps a whole-day range rather than dropping it.
+	if ranges := requirement.TimeRanges(); len(ranges) > 0 && !(len(ranges) == 1 && ranges[0].StartMinute() == 0 && ranges[0].EndMinute() == 24*60-1) {
+		windows := make([]string, 0, len(ranges))
+		for _, r := range ranges {
+			windows = append(windows, clockWord(r.StartMinute())+"-"+clockWord(r.EndMinute()))
+		}
+		when = "每天 " + strings.Join(windows, "、") + " "
+	}
+	word := when + "检测"
+	if active := requirement.ActiveCalendarIDs(); len(active) > 0 {
+		word = "日历 " + calendarWord(active) + " 中的日子" + word
+	}
+	if inactive := requirement.InactiveCalendarIDs(); len(inactive) > 0 {
+		word += "，日历 " + calendarWord(inactive) + " 中的日子不检测"
+	}
+	return word
+}
+
+func clockWord(minute uint16) string {
+	return fmt.Sprintf("%02d:%02d", minute/60, minute%60)
+}
+
+func calendarWord(ids []int64) string {
+	words := make([]string, 0, len(ids))
+	for _, id := range ids {
+		words = append(words, fmt.Sprint(id))
+	}
+	return strings.Join(words, "、")
 }
 
 func intervalWord(seconds int64) string {
