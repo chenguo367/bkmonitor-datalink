@@ -281,8 +281,8 @@ func readHoldSentence(hold *ReadHoldFacts) (string, *ReasonFacts, bool) {
 			"两条路：数据负责人查数据为什么晚到这么久；或者接受延迟",
 			secondsWords(facts.ArrivalLatestSeconds), secondsWords(facts.HoldLimitSeconds))
 		if facts.SuggestedTimeDelaySeconds > 0 {
-			sentence += fmt.Sprintf("，把策略 time_delay 从 %d 秒改为 %s%s，代价是告警要在数据时间之后%s才发出",
-				facts.TimeDelaySeconds, secondsWords(facts.SuggestedTimeDelaySeconds), settling, aboutWords(facts.SuggestedTimeDelaySeconds))
+			sentence += fmt.Sprintf("，把策略 time_delay 从 %s改为 %s%s，代价是告警要在数据时间之后%s才发出",
+				currentDelayWords(facts.TimeDelaySeconds), secondsWords(facts.SuggestedTimeDelaySeconds), settling, aboutWords(facts.SuggestedTimeDelaySeconds))
 		} else {
 			sentence += "，调大策略的 time_delay，代价是告警跟着晚发"
 		}
@@ -291,10 +291,20 @@ func readHoldSentence(hold *ReadHoldFacts) (string, *ReasonFacts, bool) {
 	sentence := fmt.Sprintf("数据最晚约在窗口结束后 %s到齐，alarmd 自动推后约 %s再读，读到的数据完整、结果可信",
 		secondsWords(facts.ArrivalLatestSeconds), secondsWords(facts.HoldSeconds))
 	if facts.SuggestedTimeDelaySeconds > 0 {
-		sentence += fmt.Sprintf("；如把策略 time_delay 从 %d 秒改为 %s%s，alarmd 就不必再自动推后（可选）",
-			facts.TimeDelaySeconds, secondsWords(facts.SuggestedTimeDelaySeconds), settling)
+		sentence += fmt.Sprintf("；如把策略 time_delay 从 %s改为 %s%s，alarmd 就不必再自动推后（可选）",
+			currentDelayWords(facts.TimeDelaySeconds), secondsWords(facts.SuggestedTimeDelaySeconds), settling)
 	}
 	return sentence, &ReasonFacts{ReadHold: facts}, true
+}
+
+// currentDelayWords is the strategy's time_delay as the sentence says it. The
+// control plane reads an unset time_delay as 0, so 0 says it may be either
+// rather than claim the owner set it.
+func currentDelayWords(seconds int64) string {
+	if seconds == 0 {
+		return "0 秒（或未设置）"
+	}
+	return fmt.Sprintf("%d 秒", seconds)
 }
 
 // readEarlySentence is the lookback's sentence: the samples that changed
@@ -304,8 +314,8 @@ func readEarlySentence(early *ReadEarlyFacts) (string, *ReasonFacts, bool) {
 		SuggestedTimeDelaySeconds: early.SuggestedDelaySeconds}
 	sentence := fmt.Sprintf("最近 %d 次抽样里，数据在 alarmd 读取之后又有新增或改动，每轮读到的数据还不全，检测结果不能采信", facts.Samples)
 	if facts.SuggestedTimeDelaySeconds > 0 {
-		sentence += fmt.Sprintf("；策略负责人把 time_delay 从 %d 秒改为 %s即可读全，代价是告警要在数据时间之后%s才发出",
-			facts.TimeDelaySeconds, secondsWords(facts.SuggestedTimeDelaySeconds), aboutWords(facts.SuggestedTimeDelaySeconds))
+		sentence += fmt.Sprintf("；策略负责人把 time_delay 从 %s改为 %s即可读全，代价是告警要在数据时间之后%s才发出",
+			currentDelayWords(facts.TimeDelaySeconds), secondsWords(facts.SuggestedTimeDelaySeconds), aboutWords(facts.SuggestedTimeDelaySeconds))
 	} else {
 		sentence += "；策略负责人调大 time_delay"
 	}
