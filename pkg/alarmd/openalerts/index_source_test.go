@@ -18,6 +18,7 @@ import (
 	"github.com/go-redis/redis/v8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/redistest"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 func indexRedis(t *testing.T) *redis.Client {
@@ -44,13 +45,13 @@ func startRedisServer(t *testing.T, _ string, address string) {
 func waitRedisReady(t *testing.T, client *redis.Client) {
 	t.Helper()
 	// The server answered before StartAt returned; what is left is this
-	// client's own connection, under the same bound.
-	deadline := time.Now().Add(redistest.ReadyWithin)
+	// client's own connection, bounded by the test's deadline.
+	deadline := testwait.Deadline(t)
 	for time.Now().Before(deadline) {
 		if err := client.Ping(context.Background()).Err(); err == nil {
 			return
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 	}
 	t.Fatal("redis-server did not become ready")
 }
@@ -117,7 +118,7 @@ func TestRedisSubscriberAcknowledgesReconnectAndFiltersInvalidNotices(t *testing
 			if actual != wanted {
 				t.Fatalf("ready %v want %v", actual, wanted)
 			}
-		case <-time.After(3 * time.Second):
+		case <-testwait.Expired(t):
 			t.Fatal("no subscription acknowledgement")
 		}
 	}
@@ -141,7 +142,7 @@ func TestRedisSubscriberAcknowledgesReconnectAndFiltersInvalidNotices(t *testing
 		if key != keyA {
 			t.Fatalf("unexpected notice %+v", key)
 		}
-	case <-time.After(3 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("valid notice lost")
 	}
 	refusedMu.Lock()
@@ -166,7 +167,7 @@ func TestRedisSubscriberAcknowledgesReconnectAndFiltersInvalidNotices(t *testing
 	cancel()
 	select {
 	case <-done:
-	case <-time.After(3 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("subscriber did not close")
 	}
 }

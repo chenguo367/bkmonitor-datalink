@@ -40,7 +40,7 @@ func answer(w http.ResponseWriter, _ *http.Request) {
 type slowSink struct{ delay time.Duration }
 
 func (sink slowSink) ConsumeProviderSeries(context.Context, execution.ProviderSeriesBatch) error {
-	time.Sleep(sink.delay)
+	time.Sleep(sink.delay) // fixed-wait: the stub sink's delay per batch, which the case sets
 	return nil
 }
 

@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 // A set handed back as too slow for the round is read on its own, outside
@@ -50,7 +52,9 @@ func TestALargeSetIsReadOnItsOwnOneAtATime(t *testing.T) {
 		t.Fatal(err)
 	}
 	cache.Refresh(context.Background())
-	time.Sleep(50 * time.Millisecond)
+	// The round took the one large-read slot before it returned, so the set
+	// it handed off is the only one that can start; wait for it to.
+	testwait.Until(t, "a large set read on its own", func() bool { mu.Lock(); defer mu.Unlock(); return len(own) > 0 })
 	mu.Lock()
 	started := len(own)
 	mu.Unlock()
@@ -58,18 +62,18 @@ func TestALargeSetIsReadOnItsOwnOneAtATime(t *testing.T) {
 		t.Fatalf("%d sets read on their own at once, want one", started)
 	}
 	close(release)
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := testwait.Deadline(t)
 	for time.Now().Before(deadline) {
 		if cache.Snapshot(keyA).IndexReadAt.IsZero() && cache.Snapshot(keyB).IndexReadAt.IsZero() {
-			time.Sleep(5 * time.Millisecond)
+			time.Sleep(5 * time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 			continue
 		}
 		break
 	}
 	advance(2 * time.Minute)
-	for index := 0; index < 20 && (cache.Snapshot(keyA).IndexReadAt.IsZero() || cache.Snapshot(keyB).IndexReadAt.IsZero()); index++ {
+	for deadline := testwait.Deadline(t); time.Now().Before(deadline) && (cache.Snapshot(keyA).IndexReadAt.IsZero() || cache.Snapshot(keyB).IndexReadAt.IsZero()); {
 		cache.Refresh(context.Background())
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline; each round may start the other large read
 		advance(2 * time.Minute)
 	}
 	if cache.Snapshot(keyA).IndexReadAt.IsZero() || cache.Snapshot(keyB).IndexReadAt.IsZero() {

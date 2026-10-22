@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream/pb"
 )
@@ -144,7 +145,7 @@ func TestReadEvidenceHasNoCountOfItsOwn(t *testing.T) {
 		go func() { _, err := client.ReadEvidence(ctx, &pb.EvidenceRequest{}); done <- err }()
 		select {
 		case <-entered:
-		case <-untilTestDeadline(t):
+		case <-testwait.Expired(t):
 			t.Fatalf("handler %d did not start", i+1)
 		}
 		cancel()
@@ -153,7 +154,7 @@ func TestReadEvidenceHasNoCountOfItsOwn(t *testing.T) {
 			if status.Code(err) != codes.Canceled {
 				t.Fatalf("cancel code=%s", status.Code(err))
 			}
-		case <-untilTestDeadline(t):
+		case <-testwait.Expired(t):
 			t.Fatal("canceled RPC did not return")
 		}
 	}
@@ -164,7 +165,7 @@ func TestReadEvidenceHasNoCountOfItsOwn(t *testing.T) {
 	case <-entered:
 	case err := <-done:
 		t.Fatalf("the ninth request was answered %s without reaching its handler", status.Code(err))
-	case <-untilTestDeadline(t):
+	case <-testwait.Expired(t):
 		t.Fatal("the ninth request did not reach its handler")
 	}
 	cancel()
@@ -197,7 +198,7 @@ func TestReadEvidenceHonorsCallerAndServerDeadlines(t *testing.T) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond) // fixed-wait: the caller deadline the case expects to expire and finds inherited by the handler
 	defer cancel()
 	if _, err := client.ReadEvidence(ctx, &pb.EvidenceRequest{}); status.Code(err) != codes.DeadlineExceeded {
 		t.Fatal("caller deadline was not respected")
@@ -217,7 +218,7 @@ func TestReadEvidenceHonorsCallerAndServerDeadlines(t *testing.T) {
 	}
 	// A caller with longer than EvidenceTimeout left keeps it: the hop does
 	// not cut an operation that was given more.
-	long, cancelLong := context.WithTimeout(context.Background(), 10*time.Second)
+	long, cancelLong := context.WithTimeout(context.Background(), 10*time.Second) // fixed-wait: a caller deadline longer than EvidenceTimeout, which the case finds the handler keeps
 	defer cancelLong()
 	go func() { _, _ = client.ReadEvidence(long, &pb.EvidenceRequest{}) }()
 	if remaining := <-deadlines; remaining <= viewstream.EvidenceTimeout {

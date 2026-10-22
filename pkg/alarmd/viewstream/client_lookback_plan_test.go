@@ -32,7 +32,7 @@ func planClient(t *testing.T, leader *scriptedLeader, keep bool) (*viewstream.Cl
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(5 * time.Millisecond):
+			case <-time.After(5 * time.Millisecond): // fixed-wait: the stub Sleep's real pause in place of the client's backoff, which the case sets so the loop cannot spin
 				return nil
 			}
 		}}

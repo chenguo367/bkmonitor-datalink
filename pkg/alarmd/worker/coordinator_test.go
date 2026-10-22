@@ -1587,7 +1587,7 @@ func (ports *recordingPorts) Execute(ctx context.Context, request execution.Quer
 		return execution.QueryExecutionCompletion{}, err
 	}
 	if ports.queryTakes > 0 {
-		time.Sleep(ports.queryTakes)
+		time.Sleep(ports.queryTakes) // fixed-wait: the stub query's duration, which the case sets
 	}
 	if err := ports.fail("query"); err != nil {
 		return execution.QueryExecutionCompletion{}, err

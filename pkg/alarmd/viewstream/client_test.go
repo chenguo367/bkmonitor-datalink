@@ -23,6 +23,7 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream/pb"
@@ -191,7 +192,7 @@ func startClientWithClock(t *testing.T, discovery *scriptedDiscovery, probe view
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(5 * time.Millisecond):
+			case <-time.After(5 * time.Millisecond): // fixed-wait: the stub Sleep's real pause in place of the client's backoff, which the case sets so the loop cannot spin
 				return nil
 			}
 		}})
@@ -694,7 +695,7 @@ func TestTheWorkerReprobesTheInstalledViewOnTheHeartbeat(t *testing.T) {
 	leader.mu.Unlock()
 	select {
 	case <-entered:
-	case <-untilTestDeadline(t):
+	case <-testwait.Expired(t):
 		close(hold)
 		t.Fatal("no heartbeat re-probed revision 1 before the test's deadline")
 	}
@@ -837,7 +838,7 @@ func TestTheHeartbeatCarriesTheWorkersCostsToTheLeadersSink(t *testing.T) {
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
-				case <-time.After(5 * time.Millisecond):
+				case <-time.After(5 * time.Millisecond): // fixed-wait: the stub Sleep's real pause in place of the client's backoff, which the case sets so the loop cannot spin
 					return nil
 				}
 			}})
@@ -923,7 +924,7 @@ func TestTheReceiptCountsTheQueryGroupsExecutedFromTheViewAndClaimsSwitchedOnlyF
 		viewstream.ClientOptions{Dial: dialer.dial, Tick: 20 * time.Millisecond, Switched: switched,
 			Now: func() time.Time { return time.UnixMilli(clock.Load()) },
 			Sleep: func(ctx context.Context, wait time.Duration) error {
-				time.Sleep(5 * time.Millisecond)
+				time.Sleep(5 * time.Millisecond) // fixed-wait: the stub Sleep's real pause in place of the client's backoff, which the case sets so the loop cannot spin
 				return ctx.Err()
 			}})
 	if err != nil {
@@ -1007,7 +1008,7 @@ func TestALeaderThatRefusesTheConnectionIsNamedAndItsAddressKeptApart(t *testing
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(5 * time.Millisecond):
+			case <-time.After(5 * time.Millisecond): // fixed-wait: the stub Sleep's real pause in place of the client's backoff, which the case sets so the loop cannot spin
 				return nil
 			}
 		}})
@@ -1091,7 +1092,7 @@ func TestAHelloNotSentNamesItselfOnTheLine(t *testing.T) {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(5 * time.Millisecond):
+			case <-time.After(5 * time.Millisecond): // fixed-wait: the stub Sleep's real pause in place of the client's backoff, which the case sets so the loop cannot spin
 				return nil
 			}
 		}})

@@ -21,6 +21,7 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream/pb"
@@ -180,7 +181,7 @@ func (ws *workerStream) recv() *pb.LeaderMessage {
 			ws.t.Fatalf("recv: %v", result.err)
 		}
 		return result.message
-	case <-untilTestDeadline(ws.t):
+	case <-testwait.Expired(ws.t):
 		ws.t.Fatal("no message before the test's deadline")
 		return nil
 	}
@@ -241,7 +242,7 @@ func (ws *workerStream) probedReceipt(incarnation string, version *pb.Version, m
 
 func eventually(t *testing.T, what string, condition func() bool) {
 	t.Helper()
-	deadline := untilTestDeadline(t)
+	deadline := testwait.Expired(t)
 	for {
 		if condition() {
 			return
@@ -249,28 +250,9 @@ func eventually(t *testing.T, what string, condition func() bool) {
 		select {
 		case <-deadline:
 			t.Fatalf("%s did not happen before the test's deadline", what)
-		case <-time.After(5 * time.Millisecond):
+		case <-time.After(5 * time.Millisecond): // fixed-wait: the poll interval of a condition wait bounded by the test deadline
 		}
 	}
-}
-
-// testDeadlineMargin is what is left of the test binary's deadline
-// (go test -timeout) when a wait gives up: enough to report which wait it
-// was, by name, before the binary's own timeout panics with every stack.
-const testDeadlineMargin = time.Second
-
-// untilTestDeadline fires when a wait for something that should happen has
-// waited as long as the test may run. A wait of its own (two seconds, once)
-// failed correct runs whenever the machine was busy -- a race build next to
-// other packages' tests -- and bought nothing a hang does not already show.
-func untilTestDeadline(t testing.TB) <-chan time.Time {
-	type deadliner interface{ Deadline() (time.Time, bool) }
-	if d, ok := t.(deadliner); ok {
-		if deadline, set := d.Deadline(); set {
-			return time.After(time.Until(deadline) - testDeadlineMargin)
-		}
-	}
-	return nil
 }
 
 // A Worker that says Hello gets the current snapshot; a publication that
@@ -371,7 +353,7 @@ func TestTheServerBringsEachWorkerToTheCurrentRevisionBySnapshotOrOneStep(t *tes
 	w3.receipt("i3", snap3.Version, true)
 	eventually(t, "installed by all is reported once", func() bool { return harness.observer.count("installed_by_all", "") == 1 })
 	w3.receipt("i3", snap3.Version, true)
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(20 * time.Millisecond) // fixed-wait: a window in which the repeated receipt must not report installed_by_all again; an absence sends no signal to wait on
 	if harness.observer.count("installed_by_all", "") != 1 {
 		t.Fatalf("installed_by_all reported %d times, want once", harness.observer.count("installed_by_all", ""))
 	}

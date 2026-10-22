@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 // Every Console method refuses a context without a deadline before it sends
@@ -105,7 +106,7 @@ func TestEachConsoleRequestHasItsOwnDeadline(t *testing.T) {
 	for index := 0; index < consoleLatencyColdStart; index++ {
 		reader.Latency().Observe(10 * time.Millisecond)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithCancel(testwait.Context(t))
 	defer cancel()
 	if _, err := reader.Binding(ctx); err != nil {
 		t.Fatalf("target read: %v", err)
@@ -151,7 +152,7 @@ func TestAHungConsoleHoldsOnlyItsOwnRound(t *testing.T) {
 	go func() { defer close(refreshed); cache.refreshIndex(context.Background()) }()
 	select {
 	case <-refreshed:
-	case <-time.After(5 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("the refresh round waited on a hung calibration")
 	}
 	cache.calibrate(context.Background())
@@ -161,7 +162,7 @@ func TestAHungConsoleHoldsOnlyItsOwnRound(t *testing.T) {
 	}
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("a hung calibration outlived its deadline")
 	}
 	if !cache.index.calibrateMu.TryLock() {
@@ -223,12 +224,12 @@ func TestAHungFactsRefreshDelaysNoIndexRead(t *testing.T) {
 	go func() { defer close(refreshed); cache.refreshIndex(context.Background()) }()
 	select {
 	case <-refreshed:
-	case <-time.After(5 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("the index round waited on the Console's facts")
 	}
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("a hung facts refresh outlived its deadline")
 	}
 }
@@ -298,13 +299,13 @@ func TestTheConsoleRoundRunsAtStartAndOnAWake(t *testing.T) {
 	defer func() { cancel(); <-done }()
 	select {
 	case <-calls:
-	case <-time.After(5 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("no calibration at start with an hour between rounds")
 	}
 	cache.LocationMoved()
 	select {
 	case <-calls:
-	case <-time.After(5 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("no calibration after a move asked for one")
 	}
 }
@@ -328,7 +329,7 @@ func TestFastFailuresDoNotPullTheConsoleDeadlineDown(t *testing.T) {
 			w.WriteHeader(http.StatusBadGateway)
 			return
 		}
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(300 * time.Millisecond) // fixed-wait: the stub Console's slow answer, which the case sets under the 400 ms deadline it must not be cut by
 		_ = json.NewEncoder(w).Encode([]TargetBinding{testBinding()})
 	}))
 	t.Cleanup(server.Close)
@@ -336,7 +337,7 @@ func TestFastFailuresDoNotPullTheConsoleDeadlineDown(t *testing.T) {
 	for index := 0; index < consoleLatencyColdStart; index++ {
 		reader.Latency().Observe(100 * time.Millisecond)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithCancel(testwait.Context(t))
 	defer cancel()
 	ask := func() error {
 		var targets []TargetBinding
