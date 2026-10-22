@@ -25,6 +25,8 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	collector "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 var unsampledParent = regexp.MustCompile(`^00-([0-9a-f]{32})-[0-9a-f]{16}-00$`)
@@ -101,9 +103,7 @@ func testExporter(t *testing.T, ratio float64, rate int) (*Exporter, *exporterFo
 
 func flush(t *testing.T, exporter *Exporter) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := exporter.provider.ForceFlush(ctx); err != nil {
+	if err := exporter.provider.ForceFlush(testwait.Context(t)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -327,8 +327,8 @@ func TestTheExportSpeaksOTLPWithTheToken(t *testing.T) {
 	query, _, _ := StartQuery(ctx, "uq", 1, 1)
 	query.End("COMPLETE", "", false)
 	slot.End("success", "", false)
-	shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	// A flush the case expects to finish, bounded by the test's deadline.
+	shutdown := testwait.Context(t)
 	if err := exporter.Shutdown(shutdown); err != nil {
 		t.Fatal(err)
 	}

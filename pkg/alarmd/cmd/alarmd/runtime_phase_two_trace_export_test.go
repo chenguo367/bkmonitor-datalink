@@ -18,13 +18,13 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
-	"time"
 
 	collector "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/tracing"
@@ -92,8 +92,8 @@ func TestASlotRunsUnderItsOwnSpanAndItsQueriesUnderIt(t *testing.T) {
 	request := execution.SlotExecutionRequest{Contract: execution.FrozenExecutionContractRef{
 		Slot: execution.SlotIdentity{QueryGroup: "qg-trace", EvaluationTime: 1_800_000_000}}}
 	_, _ = executor.Execute(context.Background(), request)
-	shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	// A flush the case expects to finish, bounded by the test's deadline.
+	shutdown := testwait.Context(t)
 	if err := traces.Shutdown(shutdown); err != nil {
 		t.Fatal(err)
 	}
