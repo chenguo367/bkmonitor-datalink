@@ -77,3 +77,24 @@ func TestStrategyBoardSaysAnUnreadableUniverse(t *testing.T) {
 		t.Fatalf("an unreadable universe answered %s", encoded)
 	}
 }
+
+// The urgency facet passes through to the board, and stays on the next page's
+// call with the rest of the selection.
+func TestStrategyBoardPassesTheUrgencyFacet(t *testing.T) {
+	var asked *url.URL
+	native := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked = r.URL
+		_, _ = w.Write([]byte(`{"generated_at":"2026-10-17T00:00:00Z","max_age_seconds":30,"universe_digest":"d","universe":3,` +
+			`"facets":{"state":{},"action":{},"capability":{},"punctuality":{},"urgency":{}},"late_objects":{"value":0},"late_strategies":{"value":0},` +
+			`"matched":2,"rows":[],"next_cursor":"next"}`))
+	})
+	c := testChannel(t, &testAuth{}, NativeOperations(native)...)
+	_, out := call(t, c, envelope(c, "invoke", "strategy.board", Params{"urgency": "ACTION_NEEDED,UNKNOWN"}))
+	if asked == nil || asked.Query().Get("urgency") != "ACTION_NEEDED,UNKNOWN" {
+		t.Fatalf("asked %v", asked)
+	}
+	raw, _ := json.Marshal(out)
+	if !strings.Contains(string(raw), `"urgency":"ACTION_NEEDED,UNKNOWN"`) {
+		t.Fatalf("the next page dropped the urgency facet: %s", raw)
+	}
+}

@@ -29,13 +29,15 @@ const productWordsFile = "product_words.json"
 // productWordsExport is the part of ProductWords a page shows. The window,
 // hole and coverage words belong to the developer's view and stay out.
 type productWordsExport struct {
-	State       map[StateWord]string   `json:"state"`
-	StateOrder  []StateWord            `json:"state_order"`
-	Action      map[ActionWord]string  `json:"action"`
-	ActionOrder []ActionWord           `json:"action_order"`
-	Watch       map[WatchReason]string `json:"watch"`
-	SinceBasis  map[SinceBasis]string  `json:"since_basis"`
-	Health      map[Health]string      `json:"health"`
+	State        map[StateWord]string   `json:"state"`
+	StateOrder   []StateWord            `json:"state_order"`
+	Action       map[ActionWord]string  `json:"action"`
+	ActionOrder  []ActionWord           `json:"action_order"`
+	Watch        map[WatchReason]string `json:"watch"`
+	SinceBasis   map[SinceBasis]string  `json:"since_basis"`
+	Health       map[Health]string      `json:"health"`
+	Urgency      map[Urgency]string     `json:"urgency"`
+	UrgencyOrder []Urgency              `json:"urgency_order"`
 }
 
 func productWordsExportBytes(t *testing.T) []byte {
@@ -44,6 +46,7 @@ func productWordsExportBytes(t *testing.T) []byte {
 	encoded, err := json.MarshalIndent(productWordsExport{
 		State: words.State, StateOrder: words.StateOrder, Action: words.Action, ActionOrder: words.ActionOrder,
 		Watch: words.Watch, SinceBasis: words.SinceBasis, Health: words.Health,
+		Urgency: words.Urgency, UrgencyOrder: words.UrgencyOrder,
 	}, "", "  ")
 	if err != nil {
 		t.Fatal(err)

@@ -154,10 +154,17 @@ type BoardRow struct {
 	// LateWait is what the strategy's worst late or overdue object waited
 	// on (strategyLateWait); present exactly when Punctuality is late or
 	// overdue.
-	LateWait   *LateWait  `json:"late_wait,omitempty"`
-	Since      *time.Time `json:"since,omitempty"`
-	SinceBasis SinceBasis `json:"since_basis,omitempty"`
-	SinceWord  string     `json:"since_word,omitempty"`
+	LateWait *LateWait `json:"late_wait,omitempty"`
+	// Urgency is whether acting is needed, optional or not asked
+	// (urgencyOf), and Reason the cause in one sentence with the numbers it
+	// was written from (strategyReasonOf); Reason is absent exactly when the
+	// strategy detects under no check.
+	Urgency     Urgency         `json:"urgency"`
+	UrgencyWord string          `json:"urgency_word"`
+	Reason      *StrategyReason `json:"reason,omitempty"`
+	Since       *time.Time      `json:"since,omitempty"`
+	SinceBasis  SinceBasis      `json:"since_basis,omitempty"`
+	SinceWord   string          `json:"since_word,omitempty"`
 	// OpenAlerts is the strategy's open alerts on alarmd's copy of the
 	// consumer's set; absent when not known, at_least when a replica could
 	// not count it. The alerts themselves are read in Linkd.
@@ -177,6 +184,7 @@ type BoardFacets struct {
 	Action      map[ActionWord]int  `json:"action"`
 	Capability  map[string]int      `json:"capability"`
 	Punctuality map[Punctuality]int `json:"punctuality"`
+	Urgency     map[Urgency]int     `json:"urgency"`
 }
 
 // BoardCount is a count the page shows with how sure it is: AtLeast when a
@@ -193,6 +201,7 @@ type BoardFilter struct {
 	Action      map[ActionWord]bool
 	Capability  map[string]bool
 	Punctuality map[Punctuality]bool
+	Urgency     map[Urgency]bool
 	StrategyID  string
 	// Area reads Capability in one area: the row's outcome there, supported
 	// when it has no record in it, as the matrix counts a cell. Reason is a
@@ -311,7 +320,7 @@ func buildBoard(id string, at time.Time, digest string, universe []string, decid
 	}
 	index := &boardIndex{id: id, at: at, digest: digest, rows: make([]BoardRow, 0, len(universe)), views: make(map[string]boardViewFacts, len(universe)),
 		facets: BoardFacets{State: map[StateWord]int{}, Action: map[ActionWord]int{}, Capability: map[string]int{},
-			Punctuality: map[Punctuality]int{}}}
+			Punctuality: map[Punctuality]int{}, Urgency: map[Urgency]int{}}}
 	for _, word := range DiagnosisVerdicts() {
 		index.facets.State[word] = 0
 	}
@@ -324,6 +333,9 @@ func buildBoard(id string, at time.Time, digest string, universe []string, decid
 	for _, punctuality := range Punctualities {
 		index.facets.Punctuality[punctuality] = 0
 	}
+	for _, urgency := range Urgencies {
+		index.facets.Urgency[urgency] = 0
+	}
 	for _, id := range universe {
 		decided := decide(id)
 		row := BoardRow{StrategyID: decided.StrategyID, Tenant: decided.Tenant, BusinessID: decided.Business, State: decided.Verdict,
@@ -331,6 +343,8 @@ func buildBoard(id string, at time.Time, digest string, universe []string, decid
 			CapabilityClass: capabilityOf(decided), Punctuality: strategyPunctuality(decided, due), OpenAlerts: strategyOpenAlerts(decided, open),
 			KBAnchor: "state-" + string(decided.Verdict)}
 		row.LateWait = strategyLateWait(decided, due, waits)
+		row.Urgency = urgencyOf(decided)
+		row.UrgencyWord, row.Reason = words.Urgency[row.Urgency], strategyReasonOf(decided, at)
 		if line, ok := byStrategy[decided.StrategyID]; ok {
 			row.Since, row.SinceBasis = line.Since, line.SinceBasis
 			row.SinceWord = words.SinceBasis[line.SinceBasis]
@@ -348,13 +362,22 @@ func buildBoard(id string, at time.Time, digest string, universe []string, decid
 		}
 		index.facets.Capability[row.CapabilityClass]++
 		index.facets.Punctuality[row.Punctuality]++
+		index.facets.Urgency[row.Urgency]++
 	}
-	actionRank := map[ActionWord]int{}
+	actionRank, urgencyRank := map[ActionWord]int{}, map[Urgency]int{}
 	for rank, word := range ActionWords {
 		actionRank[word] = rank
 	}
+	for rank, urgency := range Urgencies {
+		urgencyRank[urgency] = rank
+	}
+	// What needs a hand first, then by owner and longest standing: an
+	// optional edit never sorts ahead of a strategy whose results are wrong.
 	sort.SliceStable(index.rows, func(i, j int) bool {
 		a, b := index.rows[i], index.rows[j]
+		if urgencyRank[a.Urgency] != urgencyRank[b.Urgency] {
+			return urgencyRank[a.Urgency] < urgencyRank[b.Urgency]
+		}
 		if actionRank[a.Action] != actionRank[b.Action] {
 			return actionRank[a.Action] < actionRank[b.Action]
 		}
@@ -407,6 +430,9 @@ func (filter BoardFilter) matches(row BoardRow) bool {
 	if len(filter.Punctuality) > 0 && !filter.Punctuality[row.Punctuality] {
 		return false
 	}
+	if len(filter.Urgency) > 0 && !filter.Urgency[row.Urgency] {
+		return false
+	}
 	return true
 }
 
@@ -421,7 +447,7 @@ func (filter BoardFilter) key() string {
 		sort.Strings(list)
 		return strings.Join(list, ",")
 	}
-	states, actions, punctualities := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	states, actions, punctualities, urgencies := map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for word := range filter.State {
 		states[string(word)] = true
 	}
@@ -431,7 +457,10 @@ func (filter BoardFilter) key() string {
 	for word := range filter.Punctuality {
 		punctualities[string(word)] = true
 	}
-	return strings.Join([]string{words(states), words(actions), words(filter.Capability), words(punctualities), filter.StrategyID, filter.Area, filter.Reason}, ";")
+	for word := range filter.Urgency {
+		urgencies[string(word)] = true
+	}
+	return strings.Join([]string{words(states), words(actions), words(filter.Capability), words(punctualities), filter.StrategyID, filter.Area, filter.Reason, words(urgencies)}, ";")
 }
 
 // boardCursor binds a position to one computation and one selection: the

@@ -214,12 +214,17 @@ func TestBoardPagesWithinOneComputationAndRereadsOtherwise(t *testing.T) {
 // else: a field added here without the page's agreement fails.
 var boardAllowed = map[string][]string{
 	"":       {"generated_at", "max_age_seconds", "universe_digest", "universe", "facets", "late_objects", "late_strategies", "at_least_reason", "matched", "rows", "next_cursor", "reread"},
-	"facets": {"state", "action", "capability", "punctuality"},
+	"facets": {"state", "action", "capability", "punctuality", "urgency"},
 	"count":  {"value", "at_least"},
 	"row": {"strategy_id", "tenant", "business_id", "state", "state_word", "action", "action_word", "watch", "watch_word",
-		"capability_class", "line", "punctuality", "late_wait", "since", "since_basis", "since_word", "open_alerts", "kb_anchor"},
+		"capability_class", "line", "punctuality", "late_wait", "since", "since_basis", "since_word", "open_alerts", "kb_anchor",
+		"urgency", "urgency_word", "reason"},
 	"late_wait": {"stage", "reason", "since", "unknown", "warming"},
 	"warming":   {"short", "short_fresh", "empty", "guarded"},
+	"reason":    {"code", "sentence", "facts"},
+	"facts":     {"read_hold", "read_early", "data_absent", "window", "refusal", "withheld"},
+	"read_hold": {"arrival_latest_seconds", "hold_seconds", "hold_limit_seconds", "at_limit", "time_delay_seconds",
+		"suggested_time_delay_seconds", "settling_wait_seconds"},
 }
 
 func keysOf(t *testing.T, raw json.RawMessage) []string {
@@ -259,6 +264,7 @@ func TestBoardCarriesOnlyPageFields(t *testing.T) {
 	since := time.Unix(50, 0)
 	index.rows[0].Since, index.rows[0].SinceBasis, index.rows[0].SinceWord = &since, SinceAtLeast, "只会更久"
 	index.rows[0].Watch, index.rows[0].WatchWord = WatchWindowFilling, "窗口在补"
+	index.rows[0].Reason, _, _ = readHoldReasonForTest()
 	page := index.page(BoardFilter{}, "", 2, DiagnosisSummaryFreshFor)
 	encoded, err := json.Marshal(page)
 	if err != nil {
@@ -282,7 +288,7 @@ func TestBoardCarriesOnlyPageFields(t *testing.T) {
 	if err := json.Unmarshal(top["rows"], &rows); err != nil {
 		t.Fatal(err)
 	}
-	waits := 0
+	waits, reasons := 0, 0
 	for _, row := range rows {
 		subset(t, "row", keysOf(t, row))
 		var fields map[string]json.RawMessage
@@ -291,6 +297,23 @@ func TestBoardCarriesOnlyPageFields(t *testing.T) {
 			waits++
 			subset(t, "late_wait", keysOf(t, wait))
 		}
+		if reason, present := fields["reason"]; present {
+			reasons++
+			subset(t, "reason", keysOf(t, reason))
+			var parts map[string]json.RawMessage
+			_ = json.Unmarshal(reason, &parts)
+			if raw, present := parts["facts"]; present {
+				subset(t, "facts", keysOf(t, raw))
+				var facts map[string]json.RawMessage
+				_ = json.Unmarshal(raw, &facts)
+				if hold, present := facts["read_hold"]; present {
+					subset(t, "read_hold", keysOf(t, hold))
+				}
+			}
+		}
+	}
+	if reasons == 0 {
+		t.Fatal("no row carried a reason, so its fields went unchecked")
 	}
 	if waits == 0 {
 		t.Fatal("no row carried a late wait, so its fields went unchecked")
@@ -398,4 +421,14 @@ func TestABoardPageTakesAsManyRowsAsADiagnosisPage(t *testing.T) {
 	if BoardMaxRows != DiagnosisPageRows {
 		t.Fatalf("board page bound %d, diagnosis page %d; want one bound", BoardMaxRows, DiagnosisPageRows)
 	}
+}
+
+// readHoldReasonForTest is a held-at-limit reason as strategyReasonOf writes
+// it, for the tests that walk its fields.
+func readHoldReasonForTest() (*StrategyReason, ReadHoldFacts, DiagnosisRow) {
+	hold := ReadHoldFacts{Millis: 600_000, LimitMillis: 600_000, ArrivalAgeMillis: 2_176_000, AtLimit: true, HeldSince: 1,
+		DelaySeconds: 60, SuggestedDelaySeconds: 2160}
+	decided := DiagnosisRow{StrategyID: "80", Verdict: StateResultUntrusted, Action: ActionStrategyEdit, Check: CheckReadBeforeComplete,
+		deciding: &Anomaly{Kind: KindReadHeld, ReadHold: &hold}}
+	return strategyReasonOf(decided, time.Unix(10_000, 0)), hold, decided
 }

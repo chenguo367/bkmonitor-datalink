@@ -136,6 +136,11 @@ type DiagnosisRow struct {
 	// thing asked after global strategies reach a deployment. Omitted for
 	// the rest.
 	Global bool `json:"global,omitempty"`
+
+	// deciding is the row the words were decided from, kept for the board's
+	// reason sentence (strategyReasonOf), which reads its facts; not a field
+	// of the answer.
+	deciding *Anomaly
 }
 
 // ProgressFacts is one object's persisted progress, as the runtime reads it.
@@ -316,6 +321,8 @@ func diagnoseStrategyRow(id string, facts StrategyLookupFacts, ctx diagnosisCont
 	if found {
 		row.Verdict, row.Action, row.Check = bestWords.State, bestWords.Action, bestWords.Check
 		row.Reason, row.DecidingObject = string(bestWords.Check), best.QueryGroup
+		deciding := best
+		row.deciding = &deciding
 		if best.CauseReason != "" {
 			settleCauseOrigin(&best)
 			row.Reason, row.ReasonOrigin = best.CauseReason, best.CauseOrigin

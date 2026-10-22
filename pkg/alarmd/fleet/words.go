@@ -125,6 +125,10 @@ type Words struct {
 	// decides none of its own.
 	StateOrder  []StateWord  `json:"state_order"`
 	ActionOrder []ActionWord `json:"action_order"`
+	// Urgency renders whether acting is needed, optional or not asked, and
+	// UrgencyOrder is the page's order of the facet.
+	Urgency      map[Urgency]string `json:"urgency"`
+	UrgencyOrder []Urgency          `json:"urgency_order"`
 }
 
 // ProductWords is the one rendering of the vocabulary.
@@ -167,6 +171,10 @@ func ProductWords() Words {
 			string(observability.CoverageRejectWindowGuardReasonFree):  "写了守卫原因却没被守卫",
 		},
 		StateOrder: append([]StateWord(nil), StateWords...), ActionOrder: append([]ActionWord(nil), ActionWords...),
+		Urgency: map[Urgency]string{
+			UrgencyActionNeeded: "需要处理", UrgencyOptional: "可选优化", UrgencyNone: "无需处理", UrgencyUnknown: "状态未知",
+		},
+		UrgencyOrder: append([]Urgency(nil), Urgencies...),
 		State: map[StateWord]string{
 			StateDetecting: "在检测", StateResultUntrusted: "检测结果不能采信", StateNotDetecting: "没在检测",
 			StateDataAbsent: "数据没到", StateIdentityMismatch: "数据身份对不上", StateStrategyInvalid: "策略定义有问题", StateDependencyUnanswered: "依赖没应答",

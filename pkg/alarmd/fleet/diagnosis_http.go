@@ -751,6 +751,23 @@ func parseBoardQuery(query url.Values) (BoardFilter, int, map[string]any) {
 		}
 		filter.Punctuality[Punctuality(word)] = true
 	}
+	urgencies, refusal := words("urgency", func(word string) bool {
+		for _, known := range Urgencies {
+			if string(known) == word {
+				return true
+			}
+		}
+		return false
+	})
+	if refusal != nil {
+		return filter, 0, refusal
+	}
+	for word := range urgencies {
+		if filter.Urgency == nil {
+			filter.Urgency = map[Urgency]bool{}
+		}
+		filter.Urgency[Urgency(word)] = true
+	}
 	limit := BoardDefaultRows
 	if raw := query.Get("limit"); raw != "" {
 		n, err := strconv.Atoi(raw)

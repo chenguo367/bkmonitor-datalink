@@ -55,5 +55,17 @@
     "DEGRADED": "降级",
     "HEALTHY": "正常",
     "UNKNOWN": "证据不全"
-  }
+  },
+  "urgency": {
+    "ACTION_NEEDED": "需要处理",
+    "NONE": "无需处理",
+    "OPTIONAL": "可选优化",
+    "UNKNOWN": "状态未知"
+  },
+  "urgency_order": [
+    "ACTION_NEEDED",
+    "UNKNOWN",
+    "OPTIONAL",
+    "NONE"
+  ]
 }

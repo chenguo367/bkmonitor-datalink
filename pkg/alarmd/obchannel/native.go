@@ -96,7 +96,7 @@ func NativeOperationsWith(handler http.Handler, options NativeOptions) []Operati
 					}
 					if cursor, _ := result["next_cursor"].(string); cursor != "" {
 						next := Params{"cursor": cursor, "limit": p.Int("limit", fleet.BoardDefaultRows)}
-						for _, facet := range []string{"state", "action", "capability", "punctuality", "strategy_id", "area", "reason"} {
+						for _, facet := range []string{"state", "action", "capability", "punctuality", "urgency", "strategy_id", "area", "reason"} {
 							if value := p.String(facet); value != "" {
 								next[facet] = value
 							}
@@ -151,6 +151,7 @@ func NativeOperationsWith(handler http.Handler, options NativeOptions) []Operati
 			return "/api/strategies", url.Values{"state": {p.String("state")}, "action": {p.String("action")}, "limit": {strconv.Itoa(p.Int("limit", 50))}}
 		}),
 		makeOp("strategy.board", "策略检测看板：全部策略（含能力上被拒的）每条一行——检测状态、谁来处理、能力类别、是否按时（取其检测对象里最坏的：超期>迟到>未知>还没开始>按时）、处于当前状态多久，"+
+			"每行带紧急度 urgency（需要处理 / 可选优化 / 无需处理 / 状态未知，默认按它排序）与原因 reason（检查码、一句带数字的话、写这句话用的数字），"+
 			"分面计数按全集算；late_objects / late_strategies 是“N 个检测对象、M 条策略”迟到或超期，任一实例名单被截断时带 at_least 与原因，不是确数。"+
 			"与首屏计数同一次计算，由 Leader 算、30 秒内共用（generated_at、max_age_seconds）；游标绑定那次计算与那组筛选，换了计算或筛选都答 reread、从第一页重读。"+
 			"各分面可填逗号分隔的多个词；不含查询组、副本、修订号，研发细节用 diagnose.environment。", map[string]Field{
@@ -158,6 +159,7 @@ func NativeOperationsWith(handler http.Handler, options NativeOptions) []Operati
 			"action":      {Type: "string", Description: "处理方词，逗号分隔多个。", MinLength: 1, MaxLength: 256},
 			"capability":  {Type: "string", Description: "能力类别：supported、partial、unsupported_by_design、not_yet_supported，逗号分隔。", MinLength: 1, MaxLength: 256},
 			"punctuality": {Type: "string", Description: "按时：on_time、late、overdue、not_started、not_detecting、unknown，逗号分隔。", MinLength: 1, MaxLength: 256},
+			"urgency":     {Type: "string", Description: "紧急度：ACTION_NEEDED（需要处理）、OPTIONAL（可选优化）、NONE（无需处理）、UNKNOWN（状态未知），逗号分隔。", MinLength: 1, MaxLength: 128},
 			"strategy_id": text("只看这一条策略。", "用户给定或此前的看板行"),
 			"area":        text("能力方面（source、target、algorithm、output、config），与 capability 一起用：按该方面的处理结果筛，没有该方面记录的算支持，与总览能力矩阵同一算法。", "overview.get capability.matrix[].drill"),
 			"reason":      text("拒绝原因码：只看带这个码的策略。", "overview.get capability.reasons[].drill"),
@@ -165,7 +167,7 @@ func NativeOperationsWith(handler http.Handler, options NativeOptions) []Operati
 			"cursor":      text("上一页 next_call 的 cursor，不自行构造。", "上一页 next_call 的 cursor"),
 		}, nil, fleet.BoardResponse{}, func(p Params) (string, url.Values) {
 			query := url.Values{"board": {"1"}, "limit": {strconv.Itoa(p.Int("limit", fleet.BoardDefaultRows))}}
-			for _, facet := range []string{"state", "action", "capability", "punctuality", "strategy_id", "area", "reason", "cursor"} {
+			for _, facet := range []string{"state", "action", "capability", "punctuality", "urgency", "strategy_id", "area", "reason", "cursor"} {
 				if value := p.String(facet); value != "" {
 					query.Set(facet, value)
 				}
