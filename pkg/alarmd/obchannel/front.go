@@ -35,6 +35,20 @@ var FrontReads = map[string]bool{
 	// The changes page: the channel's change receipts and alarmd's starts
 	// and stops, by name only (changes.list).
 	"changes.list": true,
+	// The strategy drawer's config block, asked for by the people who run the
+	// deployment: the strategy's source configuration, which strategy.config
+	// already reduces to what may be shown (keys this build does not know as
+	// their shape, credential fields left out and listed). Its source view
+	// only (FrontParams): the published view reads an object by the digest
+	// and query group the page never holds.
+	"strategy.config": true,
+}
+
+// FrontParams narrows a front read to some of its operation's variants: a
+// parameter named here must hold the value given, or the read is refused as
+// one the front does not make.
+var FrontParams = map[string]map[string]string{
+	"strategy.config": {"view": "source"},
 }
 
 // FrontReadHandler serves the front surface's read: an invoke of one of
@@ -111,6 +125,12 @@ func (c *Channel) serveFront(w http.ResponseWriter, r *http.Request, authorize f
 	if err != nil {
 		fail(400, "invalid_input", err.Error())
 		return
+	}
+	for name, want := range FrontParams[req.Operation] {
+		if params.String(name) != want {
+			fail(403, "op_not_permitted_for_front", "The front surface reads "+req.Operation+" with "+name+"="+want+" only; use the CLI for the others.")
+			return
+		}
 	}
 	if target.Explicit() {
 		fail(400, "front_target_not_allowed", "The front read answers for the deployment; it takes no replica target.")

@@ -152,3 +152,37 @@ func TestAnSREReceiptNamesTheOperator(t *testing.T) {
 		t.Fatalf("recorded %d actions, want 4", len(actions))
 	}
 }
+
+// The drawer reads a strategy's source configuration through the front, and
+// only that view: the published view, and a call that names no view, are
+// refused before the operation runs.
+func TestTheFrontReadsAStrategyConfigByItsSourceViewOnly(t *testing.T) {
+	ran := 0
+	c, err := New(Options{Auth: postObservationAuth{}, EnvironmentID: "test", Replica: "replica-1",
+		Operations: []Operation{{ID: "strategy.config", Summary: "config",
+			Fields: map[string]Field{"view": {Type: "string", Enum: []string{"source", "published"}}, "strategy_id": {Type: "string"}},
+			Run: func(context.Context, Params) Outcome {
+				ran++
+				return Outcome{Complete: true, Value: map[string]string{"status": "ok"}}
+			}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := func(params map[string]any) int {
+		raw, _ := json.Marshal(map[string]any{"channel_version": Version, "mode": "invoke", "operation": "strategy.config", "params": params})
+		w := httptest.NewRecorder()
+		c.FrontReadHandler(func(*http.Request) error { return nil }).ServeHTTP(w, httptest.NewRequest(http.MethodPost, cliauth.FrontReadPath, bytes.NewReader(raw)))
+		return w.Code
+	}
+	if code := read(map[string]any{"view": "source", "strategy_id": "80"}); code != http.StatusOK || ran != 1 {
+		t.Fatalf("source view answered %d, ran %d; want it read", code, ran)
+	}
+	for _, params := range []map[string]any{{"view": "published", "strategy_id": "80"}, {"strategy_id": "80"}} {
+		if code := read(params); code != http.StatusForbidden {
+			t.Errorf("%v answered %d, want refused for the front", params, code)
+		}
+	}
+	if ran != 1 {
+		t.Fatalf("a refused view still ran the operation (%d runs)", ran)
+	}
+}
