@@ -127,6 +127,13 @@ var capabilityByReason = map[string]CapabilityClass{
 	"PRIORITY_IGNORED": {IgnoredByDesign: true},
 }
 
+// capabilityCostNotes are the reasons noted on a strategy that runs entirely
+// as written: the note is a cost its owner chose, not a part of it that runs
+// differently, so it is no capability fact and leaves the strategy supported.
+var capabilityCostNotes = map[string]bool{
+	"NO_DATA_GROUP_BOUND_ABOVE_DEFAULT": true,
+}
+
 // capabilityRejected is the area of the configuration refusals that are
 // about one part of the boundary rather than the writer's configuration as
 // a whole; every other refusal is the configuration's.
@@ -151,10 +158,13 @@ var capabilityRuntimeReasons = map[string]CapabilityClass{
 // counted with the writer's configuration as not yet supported, never as
 // supported -- and for a disposition about the source's state rather than
 // the strategy (accepted, incomplete, stale, being removed), which is no
-// capability fact and returns the zero class.
+// capability fact and returns the zero class, as does a cost note.
 func ClassifyCapability(disposition, reason, scope string) (CapabilityClass, bool) {
 	var class CapabilityClass
 	known := true
+	if disposition == dispositionConfigNoted && capabilityCostNotes[reason] {
+		return class, true
+	}
 	switch disposition {
 	case dispositionCapabilityUnsupported, dispositionConfigNoted:
 		class, known = capabilityByReason[reason]

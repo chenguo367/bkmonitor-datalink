@@ -252,6 +252,7 @@ func openProductionPhaseTwoBundleAssembly(
 	discoverLinkd := withLinkdToken(openalerts.DiscoverTarget, linkdTokenSource(linkdTokens))
 	cfg, linkdDiscovery := adoptLinkdLocation(ctx, cfg, discoverLinkd)
 	logLinkdDiscovery(logger, linkdDiscovery)
+	logNoDataGroupBound(logger, cfg)
 	// Phase two limits repeated diagnostics per (reason, Query Group) bucket
 	// and reports suppressed counts; the phase-one per-reason budget hid every
 	// other Query Group's coordinates once one object became noisy.

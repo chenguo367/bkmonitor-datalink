@@ -5,9 +5,11 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/memoryline"
@@ -45,6 +47,37 @@ type phaseTwoCoreResources struct {
 	// alerts (decision-024): the runtime-state store workers read them from.
 	// Nil for a process without the control role.
 	NoDataCloses *state.ExecutionStore
+}
+
+// executionStoreOptions is what a deployment's configuration gives an
+// execution store over router: its key prefix, the value and batch bounds,
+// the TTL bounds the store derives each write's lifetime within (exactly as
+// for the phase-one store built in config.StoreOptions), and the
+// deployment's no-data group bound, zero for the default - an item's own
+// max_groups travels on its mutations. Production and the cases that build
+// a store the way production does take it from here, so a bound read from
+// the configuration cannot be dropped at one of them alone.
+func executionStoreOptions(cfg config.Config, router state.StorageRouter) state.ExecutionStoreOptions {
+	return state.ExecutionStoreOptions{
+		Prefix: cfg.Redis.StatePrefix, Router: router, MaxValueBytes: cfg.Limits.Codec.MaxEncodedBytes,
+		MaxItemsPerCall: cfg.Limits.Store.MaxKeysPerBatch,
+		MinTTL:          cfg.Redis.MinTTL.Duration(), MaxTTL: cfg.Redis.MaxTTL.Duration(),
+		RestartMargin:   cfg.Redis.RestartMargin.Duration(),
+		MaxNoDataGroups: cfg.NoDataMaxGroups(),
+	}
+}
+
+// logNoDataGroupBound writes one line at startup when the deployment's no-data
+// group bound is above the default: the operator raised it, and the line names
+// the one-off Redis cost that buys (contract.NoDataGroupFirstWriteCost). An
+// item's own bound above the default is noted on that strategy instead.
+func logNoDataGroupBound(logger *observability.Logger, cfg config.Config) {
+	if cfg.NoDataMaxGroups() <= contract.DefaultMaxNoDataGroups {
+		return
+	}
+	logger.Warn("no_data_group_bound_above_default", "noted", 0, 0,
+		slog.Int("max_groups", cfg.NoDataMaxGroups()), slog.Int("default", contract.DefaultMaxNoDataGroups),
+		slog.String("first_write_cost", contract.NoDataGroupFirstWriteCost))
 }
 
 func openPhaseTwoCoreResources(ctx context.Context, cfg config.Config, recorder *metric.Recorder, observer observability.Observer,
@@ -278,22 +311,12 @@ func openPhaseTwoCoreResources(ctx context.Context, cfg config.Config, recorder 
 		if err != nil {
 			return nil, err
 		}
-		executionStore, err = state.NewExecutionStore(state.ExecutionStoreOptions{
-			Prefix: cfg.Redis.StatePrefix, Router: storageRouter, MaxValueBytes: cfg.Limits.Codec.MaxEncodedBytes,
-			MaxItemsPerCall: cfg.Limits.Store.MaxKeysPerBatch,
-			// The store derives each write TTL from the Plan retention the request
-			// carries; these only bound it, exactly as they do for the phase-one
-			// store built in config.StoreOptions.
-			MinTTL: cfg.Redis.MinTTL.Duration(), MaxTTL: cfg.Redis.MaxTTL.Duration(),
-			RestartMargin: cfg.Redis.RestartMargin.Duration(),
-			ReadHoldBound: recoveryLimits.MaxReplayAge,
-			// The deployment's no-data group bound, zero for the default; an
-			// item's own max_groups travels on its mutations.
-			MaxNoDataGroups: cfg.NoDataMaxGroups(),
-			// Runtime State writes verify the owner lease inside Redis; without the
-			// resolver the store would fall back to unfenced batched writes.
-			FenceKeys: ownershipStore,
-		})
+		options := executionStoreOptions(cfg, storageRouter)
+		options.ReadHoldBound = recoveryLimits.MaxReplayAge
+		// Runtime State writes verify the owner lease inside Redis; without the
+		// resolver the store would fall back to unfenced batched writes.
+		options.FenceKeys = ownershipStore
+		executionStore, err = state.NewExecutionStore(options)
 		if err != nil {
 			return nil, err
 		}
@@ -317,13 +340,7 @@ func openPhaseTwoCoreResources(ctx context.Context, cfg config.Config, recorder 
 			if err != nil {
 				return nil, err
 			}
-			noDataCloses, err = state.NewExecutionStore(state.ExecutionStoreOptions{
-				Prefix: cfg.Redis.StatePrefix, Router: closeRouter, MaxValueBytes: cfg.Limits.Codec.MaxEncodedBytes,
-				MaxItemsPerCall: cfg.Limits.Store.MaxKeysPerBatch,
-				MinTTL:          cfg.Redis.MinTTL.Duration(), MaxTTL: cfg.Redis.MaxTTL.Duration(),
-				RestartMargin:   cfg.Redis.RestartMargin.Duration(),
-				MaxNoDataGroups: cfg.NoDataMaxGroups(),
-			})
+			noDataCloses, err = state.NewExecutionStore(executionStoreOptions(cfg, closeRouter))
 			if err != nil {
 				return nil, err
 			}

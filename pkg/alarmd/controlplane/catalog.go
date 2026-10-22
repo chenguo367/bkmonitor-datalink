@@ -333,6 +333,12 @@ const ReasonAggIntervalDefaulted = "AGG_INTERVAL_DEFAULTED"
 // owner's choice to make and the warning tells them it is one.
 const ReasonNoDataTriggerBeyondHorizon = "NO_DATA_TRIGGER_BEYOND_HORIZON"
 
+// ReasonNoDataGroupBoundAboveDefault names a Plan whose own no-data group
+// bound is above the default. The Plan runs with it; the note carries the
+// one-off Redis cost of its first whole-record write, which the owner chose
+// by raising the bound.
+const ReasonNoDataGroupBoundAboveDefault = "NO_DATA_GROUP_BOUND_ABOVE_DEFAULT"
+
 // ReasonRecoveryConfigDefaulted names a Level whose recovery takes the
 // platform's default of 5 windows because the backend cannot read a recovery
 // window for it - its own, or another level's, since one unreadable detect
@@ -2637,6 +2643,9 @@ func compilePlan(
 	}
 	if warning := noDataTriggerBeyondHorizon(sourceID, plan.NoData, step.Seconds); warning != nil {
 		dispositions = append(dispositions, *warning)
+	}
+	if note := noDataGroupBoundAboveDefault(sourceID, plan.NoData); note != nil {
+		dispositions = append(dispositions, *note)
 	}
 	if ref.SnapshotRevision > 0 {
 		plan.OutputIdentity = &contract.MonitorOutputIdentity{DynamicDimensions: dataset.DynamicDimensions, DimensionFields: append([]string{}, dataset.IdentityFields...)}

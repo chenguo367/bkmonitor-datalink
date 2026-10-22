@@ -686,7 +686,10 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"without it a Plan whose memory has stopped being writable is indistinguishable from one " +
 			"whose memory is fine, for as long as it lasts. Rising and staying up is one object the " +
 			"store will not take, and the line beside it carries the bytes and the bound. record is " +
-			"empty for a refusal that was not about size.",
+			"empty for a refusal that was not about size. The group bound (record GROUPS) defaults to " +
+			"100,000 and may be raised to 1,000,000 for the deployment or one strategy; a raised bound " +
+			"costs Redis once per state generation, on the Plan's first whole-record write: measured " +
+			"about 120-180 ms at 100,000 groups, 610 ms at 200,000 and 2.9 s at 1,000,000.",
 	}, []string{"reason", "record"})
 	metrics.noDataMemoryWrites = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: metricSubsystem, Name: "worker_no_data_memory_writes_total",

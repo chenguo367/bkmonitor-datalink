@@ -19,6 +19,10 @@ func TestTheNoDataGroupBoundIsReadFromItsKeyOrRefusedAtLoad(t *testing.T) {
 	if err != nil || stated.NoDataMaxGroups() != 5000 {
 		t.Fatalf("NoDataMaxGroups() = %d, %v; want 5000 from phase_two.no_data.max_groups", stated.NoDataMaxGroups(), err)
 	}
+	ceiling, err := load("  no_data:\n    max_groups: 1000000\n")
+	if err != nil || ceiling.NoDataMaxGroups() != 1000000 {
+		t.Fatalf("NoDataMaxGroups() = %d, %v; want the ceiling, 1000000, accepted", ceiling.NoDataMaxGroups(), err)
+	}
 	silent, err := load("")
 	if err != nil || silent.NoDataMaxGroups() != 0 {
 		t.Fatalf("a config stating no bound reads %d, %v; want 0 for the store's default", silent.NoDataMaxGroups(), err)

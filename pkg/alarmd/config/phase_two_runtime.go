@@ -265,9 +265,12 @@ type PhaseTwoNoDataConfig struct {
 	TrackingHorizonSeconds *int64 `yaml:"tracking_horizon_seconds,omitempty"`
 	// MaxGroups is the deployment's bound on how many groups one Plan's no-data
 	// memory may hold; an item's own no_data_config.max_groups overrides it.
-	// Absent is the default, 100000. Over the bound a Plan's memory write is
-	// refused, named and counted, and that strategy detects no no-data until
-	// its groups fall back under it.
+	// Absent is contract.DefaultMaxNoDataGroups; up to
+	// contract.MaxNoDataGroupsCeiling may be stated, and above the default
+	// startup logs the one-off Redis cost the operator has chosen
+	// (contract.NoDataGroupFirstWriteCost). Over the bound a Plan's memory
+	// write is refused, named and counted, and that strategy detects no
+	// no-data until its groups fall back under it.
 	MaxGroups *int `yaml:"max_groups,omitempty"`
 }
 

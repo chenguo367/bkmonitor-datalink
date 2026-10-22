@@ -20,6 +20,12 @@ import (
 // those reasons, held to the control plane's literals by its own test.
 func TestEveryWithheldReasonHasOneCapabilityCell(t *testing.T) {
 	for reason := range withheldReasonWords {
+		if capabilityCostNotes[reason] {
+			if class, known := ClassifyCapability(dispositionConfigNoted, reason, "PLAN"); !known || class != (CapabilityClass{}) {
+				t.Fatalf("cost note %s classified %+v (known %t), want no capability fact", reason, class, known)
+			}
+			continue
+		}
 		for _, disposition := range []string{dispositionCapabilityUnsupported, dispositionConfigNoted} {
 			class, known := ClassifyCapability(disposition, reason, "STRATEGY")
 			if !known {
