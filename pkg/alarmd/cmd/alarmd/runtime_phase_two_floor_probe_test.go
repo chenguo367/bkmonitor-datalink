@@ -267,11 +267,13 @@ func TestAProbeComesDownToWhereItsDataIsWholeAndNoFurther(t *testing.T) {
 	t.Parallel()
 	f := startCutoverFixture(t, leasesOutliveTheRun)
 	// Late only in windows that end after it starts being: a probe already begun - a half needs no standing - reads
-	// no round across that change, its read at the floor before it and the formal read after.
+	// no round across that change, its read at the floor before it and the formal read after. Every fifth window is
+	// counted from the fixture's first Slot, not the wall clock's minute, so the run is the same whichever minute it
+	// starts in.
 	var lateFrom atomic.Int64
 	lateFrom.Store(math.MaxInt64)
 	f.uqHosts = func(end int64) []string {
-		if end > lateFrom.Load() && end%300 == 0 && !f.now().Before(time.Unix(end, 0).Add(20*time.Second)) {
+		if end > lateFrom.Load() && (end-f.base)%300 == 0 && !f.now().Before(time.Unix(end, 0).Add(20*time.Second)) {
 			return []string{"127.0.0.1", "127.0.0.2"}
 		}
 		return []string{"127.0.0.1"}
@@ -295,7 +297,8 @@ func TestAProbeComesDownToWhereItsDataIsWholeAndNoFurther(t *testing.T) {
 	if record.EarlierFloorMillis != nil {
 		floor = *record.EarlierFloorMillis
 	}
-	t.Logf("held %v: came down through %v, floor %d ms; probe events %v, rounds %v, changes %v", hold, came, floor, events, rounds, changes)
+	t.Logf("first Slot %d (%d s into five minutes), held %v: came down through %v, floor %d ms; probe events %v, rounds %v, changes %v",
+		f.base, f.base%300, hold, came, floor, events, rounds, changes)
 	want := []time.Duration{48 * time.Second, 36 * time.Second, 30 * time.Second, 27 * time.Second}
 	if fmt.Sprint(came) != fmt.Sprint(want) || floor != 24000 {
 		t.Fatalf("came down through %v to a floor of %d ms; want %v, to a floor of 24000 ms", came, floor, want)
