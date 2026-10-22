@@ -396,6 +396,22 @@ func TestABoardCursorIsBoundToItsSelection(t *testing.T) {
 	if same.Reread {
 		t.Fatal("the same selection's cursor was not continued")
 	}
+	// Urgency is part of the selection like the other facets: a cursor taken
+	// under one urgency is not continued under another, nor under none.
+	optional := BoardFilter{Urgency: map[Urgency]bool{UrgencyOptional: true}}
+	needed := BoardFilter{Urgency: map[Urgency]bool{UrgencyActionNeeded: true}}
+	under := index.page(optional, "", 1, DiagnosisSummaryFreshFor)
+	for name, filter := range map[string]BoardFilter{"another urgency": needed, "no urgency": {}} {
+		if moved := index.page(filter, under.NextCursor, 1, DiagnosisSummaryFreshFor); under.NextCursor != "" && !moved.Reread {
+			t.Errorf("a cursor taken under OPTIONAL continued under %s", name)
+		}
+	}
+	if from := index.page(BoardFilter{}, first.NextCursor, 3, DiagnosisSummaryFreshFor); from.Reread {
+		t.Fatal("the unfiltered cursor was not continued")
+	}
+	if switched := index.page(optional, first.NextCursor, 3, DiagnosisSummaryFreshFor); !switched.Reread {
+		t.Error("an unfiltered cursor continued under OPTIONAL")
+	}
 }
 
 // An object's class is the one its own replica -- the replica the plan names

@@ -243,8 +243,8 @@ func factSentence(check Check, row Anomaly, at time.Time) (string, *ReasonFacts,
 		return readHoldSentence(row.ReadHold)
 	case row.Kind == KindReadBeforeComplete && row.ReadEarly != nil:
 		return readEarlySentence(row.ReadEarly)
-	case check == CheckNoDataPersistent && !row.Since.IsZero():
-		absent := &DataAbsentReason{Since: utcPointer(row.Since), AbsentSeconds: int64(at.Sub(row.Since) / time.Second),
+	case check == CheckNoDataPersistent && absentSeconds(at, row.Since) > 0:
+		absent := &DataAbsentReason{Since: utcPointer(row.Since), AbsentSeconds: absentSeconds(at, row.Since),
 			SinceIsLowerBound: sinceBasisOf(row.SinceFrom) == SinceAtLeast}
 		longer := ""
 		if absent.SinceIsLowerBound {
@@ -323,13 +323,27 @@ func readEarlySentence(early *ReadEarlyFacts) (string, *ReasonFacts, bool) {
 }
 
 // emptyRoundsSentence is the run of empty rounds: how many, for how long, and
+// absentSeconds is how long since a start, in whole seconds, and 0 when there
+// is no start or it is not before at: a replica whose clock runs ahead of this
+// process's puts its start in the future, and a sentence then says no span
+// rather than a negative one.
+func absentSeconds(at, since time.Time) int64 {
+	if since.IsZero() || !since.Before(at) {
+		return 0
+	}
+	return int64(at.Sub(since) / time.Second)
+}
+
 // whose to look at -- the strategy's period, or its target when the query did
 // return series and the target selected none.
 func emptyRoundsSentence(check Check, empty *EmptyEveryRoundFacts, at time.Time) (string, *ReasonFacts, bool) {
 	absent := &DataAbsentReason{Rounds: empty.Rounds, SinceIsLowerBound: empty.SinceIsLowerBound, NeverSawData: empty.NeverSawData}
 	span := ""
 	if !empty.Since.IsZero() {
-		absent.Since, absent.AbsentSeconds = utcPointer(empty.Since), int64(at.Sub(empty.Since)/time.Second)
+		absent.Since = utcPointer(empty.Since)
+	}
+	if seconds := absentSeconds(at, empty.Since); seconds > 0 {
+		absent.AbsentSeconds = seconds
 		span = "（" + aboutWords(absent.AbsentSeconds)
 		if absent.SinceIsLowerBound {
 			span += "，只会更久"

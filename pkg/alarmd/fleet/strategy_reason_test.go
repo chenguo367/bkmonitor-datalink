@@ -367,3 +367,34 @@ func TestAnUndeterminedOwnersSentenceIsNotAVerdictOnThisService(t *testing.T) {
 		t.Fatal("no check is filed UNDETERMINED; the table this test reads has moved")
 	}
 }
+
+// A replica whose clock runs ahead puts a data-absent start after the moment
+// the board is read. The sentence then gives no span rather than a negative
+// one, and the facts carry no absent seconds.
+func TestADataAbsentStartAheadOfTheClockGivesNoSpan(t *testing.T) {
+	at := time.Unix(1_800_000_000, 0).UTC()
+	reason := func(check Check, row Anomaly) *StrategyReason {
+		words := checkWords[check]
+		return strategyReasonOf(DiagnosisRow{Verdict: words.State, Action: words.Action, Check: check, deciding: &row}, at)
+	}
+	ahead := at.Add(3 * time.Second)
+	for name, got := range map[string]*StrategyReason{
+		"no data":     reason(CheckNoDataPersistent, Anomaly{Kind: KindNoData, Since: ahead, SinceFrom: SinceBusinessState}),
+		"empty every": reason(CheckEmptyEveryRound, Anomaly{Kind: KindEmptyEveryRound, EmptyEveryRound: &EmptyEveryRoundFacts{Rounds: 3, Since: ahead}}),
+	} {
+		if got == nil {
+			continue
+		}
+		if strings.Contains(got.Sentence, "-") || strings.Contains(got.Sentence, "约 0 秒") {
+			t.Errorf("%s: sentence %q gives a span for a start ahead of the clock", name, got.Sentence)
+		}
+		if got.Facts != nil && got.Facts.DataAbsent != nil && got.Facts.DataAbsent.AbsentSeconds != 0 {
+			t.Errorf("%s: absent seconds %d, want none", name, got.Facts.DataAbsent.AbsentSeconds)
+		}
+	}
+	// One second behind is still a span: the clamp is at the start, not a margin.
+	behind := reason(CheckNoDataPersistent, Anomaly{Kind: KindNoData, Since: at.Add(-90 * time.Second), SinceFrom: SinceBusinessState})
+	if behind.Facts == nil || behind.Facts.DataAbsent == nil || behind.Facts.DataAbsent.AbsentSeconds != 90 {
+		t.Fatalf("a start 90 s back = %+v, want 90 absent seconds", behind)
+	}
+}
