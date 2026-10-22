@@ -40,14 +40,21 @@ func TestProbationRoundsSeeTheFirstLateRoundOfNearlyEveryLowering(t *testing.T) 
 					waits = append(waits, round-loweredAt)
 					loweredAt = -1
 				}
+				// Nothing here injects a failure: a reading the controller
+				// refused leaves the hold where it was, and the rounds after it
+				// would measure a search that stopped moving.
 				if round%10 == 0 && hold < this {
-					_ = c.Observe(context.Background(), Evidence{Contract: holdContract("qg", slot, hold.Milliseconds()),
-						ArrivalAge: this + spec.SettlingWait, Rung: "rung", Buckets: []int64{int64(slot)}})
+					if err := c.Observe(context.Background(), Evidence{Contract: holdContract("qg", slot, hold.Milliseconds()),
+						ArrivalAge: this + spec.SettlingWait, Rung: "rung", Buckets: []int64{int64(slot)}}); err != nil {
+						t.Fatalf("arrival %d%%, seed %d, round %d: Observe: %v", percent, seed, round, err)
+					}
 				}
 				if round%10 == 5 {
 					if candidate, tries := c.EarlierCandidate("qg"); tries {
-						_ = c.EarlierRead(context.Background(), EarlierEvidence{Contract: holdContract("qg", slot, hold.Milliseconds()),
-							CandidateHold: candidate, Observed: true, Equal: candidate >= this})
+						if err := c.EarlierRead(context.Background(), EarlierEvidence{Contract: holdContract("qg", slot, hold.Milliseconds()),
+							CandidateHold: candidate, Observed: true, Equal: candidate >= this}); err != nil {
+							t.Fatalf("arrival %d%%, seed %d, round %d: EarlierRead: %v", percent, seed, round, err)
+						}
 					}
 				}
 				if after := c.ReadHold("qg"); after < hold {

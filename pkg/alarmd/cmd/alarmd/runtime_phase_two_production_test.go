@@ -2572,10 +2572,15 @@ func (source *fakePlanActivationSource) LoadActivations(
 	return source.result, nil
 }
 
+// errRejectingExecutorReached is what rejectingSlotExecutor answers every
+// Slot with, named so a case can tell a round that reached the executor from
+// one that ended before it.
+var errRejectingExecutorReached = errors.New("stale fence reached executor")
+
 type rejectingSlotExecutor struct{}
 
 func (rejectingSlotExecutor) Execute(context.Context, execution.SlotExecutionRequest) (execution.SlotExecutionResult, error) {
-	return execution.SlotExecutionResult{}, errors.New("stale fence reached executor")
+	return execution.SlotExecutionResult{}, errRejectingExecutorReached
 }
 
 type slotSourceFunc func(context.Context, execution.QueryGroupIdentity) (scheduler.FrozenSlot, bool, scheduler.SlotDueFacts, error)

@@ -12,6 +12,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -145,8 +147,25 @@ func ownerMeasures(t *testing.T, store *runtimeTestReadHoldControl, schedule exe
 // before its query deadline, which the group's read hold moves later. It
 // returns the takeover facts the round said. The round is attempted either
 // way: diverted, as a replay, or as the normal round it runs as.
+// operationExecutor answers every Slot as rejectingSlotExecutor does and
+// keeps the operation each reached it as: a round diverted to replay reaches
+// it as a replay, one run where it is as a normal round. Only the executor
+// sees which a round was, whether or not anything said so.
+type operationExecutor struct {
+	mu   sync.Mutex
+	seen map[execution.EvaluationTime]execution.Operation
+}
+
+func (executor *operationExecutor) Execute(_ context.Context, request execution.SlotExecutionRequest) (execution.SlotExecutionResult, error) {
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	executor.seen[request.Contract.Slot.EvaluationTime] = request.Operation
+	return execution.SlotExecutionResult{}, errRejectingExecutorReached
+}
+
 func successorRound(t *testing.T, store *runtimeTestReadHoldControl, fact execution.FrozenSlotContractFact,
-	schedule execution.FrozenQueryGroupSchedule, deadline int64, hold time.Duration) ([]observability.ReplayTakeoverFacts, *productionReadHolds) {
+	schedule execution.FrozenQueryGroupSchedule, deadline int64, hold time.Duration,
+) ([]observability.ReplayTakeoverFacts, *productionReadHolds, execution.Operation) {
 	t.Helper()
 	ctx := context.Background()
 	qg := schedule.Segment.QueryGroup
@@ -163,6 +182,8 @@ func successorRound(t *testing.T, store *runtimeTestReadHoldControl, fact execut
 	now := fixture.clock.Now()
 	fixture.store.assignment = ownership.AssignmentRecord{QueryGroup: qg, DesiredWorkerID: "worker-1", AssignmentGeneration: 1,
 		RecordRevision: 1, ControlEpoch: 1, PlacementReason: ownership.PlacementRendezvous, AssignedAt: now}
+	executor := &operationExecutor{seen: map[execution.EvaluationTime]execution.Operation{}}
+	fixture.production.dependencies.Executor = executor
 	holds := inheritedTestHolds(t, store, fixture.clock.Now)
 	fixture.production.dependencies.ReadHolds = holds
 	fixture.production.dependencies.InheritedQueryLatency = readHoldInheritedQueryLatency(holds)
@@ -178,8 +199,12 @@ func successorRound(t *testing.T, store *runtimeTestReadHoldControl, fact execut
 		t.Fatal(err)
 	}
 	fixture.production.LoadOpened(ctx, []execution.QueryGroupIdentity{qg})
-	if _, attempted, _ := runner.RunOne(ctx); !attempted {
-		t.Fatal("the successor did not attempt the round it was handed")
+	// The fixture's executor refuses every Slot that reaches it, and the
+	// takeover facts read below are said before that, when the round is
+	// classified: its refusal is the round being attempted. Any other error
+	// ended the round somewhere the case does not mean.
+	if _, attempted, err := runner.RunOne(ctx); !attempted || !errors.Is(err, errRejectingExecutorReached) {
+		t.Fatalf("the successor's round: attempted=%v error=%v, want it attempted up to the fixture's executor", attempted, err)
 	}
 	var facts []observability.ReplayTakeoverFacts
 	for _, observation := range fixture.observations() {
@@ -187,7 +212,10 @@ func successorRound(t *testing.T, store *runtimeTestReadHoldControl, fact execut
 			facts = append(facts, *observation.ReplayTakeover)
 		}
 	}
-	return facts, holds
+	executor.mu.Lock()
+	operation := executor.seen[fact.Contract.Slot.EvaluationTime]
+	executor.mu.Unlock()
+	return facts, holds, operation
 }
 
 // A group whose query takes nine seconds, taken over with seven seconds left
@@ -209,7 +237,7 @@ func TestATakenOverRoundIsDivertedByTheQueryDurationItsRecordInherited(t *testin
 	store.values[qg] = raw
 	ownerMeasures(t, store, schedule, time.Unix(int64(schedule.Segment.Start)+1, 0))
 
-	facts, holds := successorRound(t, store, fact, schedule, deadline, 30*time.Second)
+	facts, holds, operation := successorRound(t, store, fact, schedule, deadline, 30*time.Second)
 	if got, ok := holds.controller.InheritedQueryDuration(qg); !ok || got != 9*time.Second {
 		t.Fatalf("the successor inherited %v (%v), want 9 s", got, ok)
 	}
@@ -217,9 +245,12 @@ func TestATakenOverRoundIsDivertedByTheQueryDurationItsRecordInherited(t *testin
 		facts[0].FloorSource != observability.TakeoverFloorInherited || facts[0].FloorSeconds != 9 || facts[0].RemainingSeconds != 7 {
 		t.Fatalf("takeover facts %+v, want one diverted with 7 s left against the inherited 9 s", facts)
 	}
+	if operation != execution.OperationReplay {
+		t.Fatalf("the diverted round reached the executor as %q, want a replay", operation)
+	}
 
 	empty := &runtimeTestReadHoldControl{values: map[execution.QueryGroupIdentity][]byte{}}
-	facts, holds = successorRound(t, empty, fact, schedule, deadline, 0)
+	facts, holds, operation = successorRound(t, empty, fact, schedule, deadline, 0)
 	if got, ok := holds.controller.InheritedQueryDuration(qg); ok {
 		t.Fatalf("a group without a record inherited %v", got)
 	}
@@ -227,6 +258,12 @@ func TestATakenOverRoundIsDivertedByTheQueryDurationItsRecordInherited(t *testin
 		if got.Outcome == observability.ReplayTakeoverDiverted {
 			t.Fatalf("without a record the round was diverted: %+v; the 5 s fallback leaves it 7 s to run", got)
 		}
+	}
+	// A round left to run where it is says nothing of it, so the case reads
+	// what the executor was handed: without it, "not diverted" would hold for
+	// a round diverted without a word, or never run at all.
+	if operation != execution.OperationNormal {
+		t.Fatalf("without a record the round reached the executor as %q, want it run as a normal round", operation)
 	}
 }
 

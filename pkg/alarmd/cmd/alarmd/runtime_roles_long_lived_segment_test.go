@@ -191,8 +191,12 @@ func TestALongLivedSegmentKeepsDetectingAcrossASnapshotChangeAndATakeover(t *tes
 			t.Fatalf("publish the second strategy: %v", err)
 		}
 	}
+	// The same round as the two above, repeated until the Query Group opens:
+	// an error from it is no more expected here than there.
 	waitPhaseTwoCondition(t, "the first replica opens the new strategy's Query Group", func() bool {
-		_ = first.refreshAndReconcile(ctx, true)
+		if err := first.refreshAndReconcile(ctx, true); err != nil {
+			t.Fatalf("reconcile while the new strategy's Query Group opens: %v", err)
+		}
 		return len(first.runners) == 2
 	})
 	round(first, 2)

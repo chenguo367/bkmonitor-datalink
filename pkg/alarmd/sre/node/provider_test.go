@@ -167,8 +167,14 @@ func TestLostDispatchAndReplacedPodNeverRestart(t *testing.T) {
 	if err != nil || !result.OutputUnavailable {
 		t.Fatalf("replacement %+v %v", result, err)
 	}
+	// Each repeat has to be answered from the record it already made: a
+	// repeat refused before it read that record would dispatch nothing
+	// either, and the count below would hold for a reason the case is not
+	// about.
 	for i := 0; i < 3; i++ {
-		_, _ = p.Exec(ctx, q)
+		if again, err := p.Exec(ctx, q); err != nil || again.ExecutionID != q.ExecutionID || again.State != "unknown" {
+			t.Fatalf("repeat %d: %+v %v, want the lost execution's own record", i, again, err)
+		}
 	}
 	if e.count() != 1 {
 		t.Fatal("replayed command")

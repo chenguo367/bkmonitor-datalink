@@ -319,22 +319,32 @@ func (fixture *electionFixture) alive() []*electionProcess {
 }
 
 // renewRecords restates every live process's registrations on the injected
-// clock, which the real-clock renewal loops do not follow.
+// clock, which the real-clock renewal loops do not follow. A registration
+// left unrenewed lapses on that clock, and the rounds after it would place
+// Query Groups around a live Worker the case never stopped.
 func (fixture *electionFixture) renewRecords() {
+	fixture.t.Helper()
 	for _, process := range fixture.alive() {
-		_ = process.bundle.register(fixture.ctx, ownership.WorkerReady)
+		if err := process.bundle.register(fixture.ctx, ownership.WorkerReady); err != nil {
+			fixture.t.Fatalf("%s register at %s: %v", process.name, fixture.now().UTC().Format(time.TimeOnly), err)
+		}
 		process.runtime.writeInstance(fixture.ctx, process.health, "disabled", false)
 	}
 }
 
 // tick is one reconcile tick on every live process, in order, with the
-// single-Leader invariant checked after each.
+// single-Leader invariant checked after each. What these cases put a live
+// process through is handled inside its tick - a contention whose lease read
+// failed is counted, a publication a newer Leader fenced off makes it a
+// follower - so an error out of the tick is the fixture's store, clock or
+// source gone wrong, and every round after it would judge a fleet that did
+// not reconcile.
 func (fixture *electionFixture) tick() {
 	fixture.t.Helper()
 	fixture.renewRecords()
 	for _, process := range fixture.alive() {
 		if err := process.bundle.refreshAndReconcile(fixture.ctx, false); err != nil {
-			fixture.t.Logf("%s reconcile: %v", process.name, err)
+			fixture.t.Fatalf("%s reconcile at %s: %v", process.name, fixture.now().UTC().Format(time.TimeOnly), err)
 		}
 		fixture.assertOneLeaderAtMost()
 	}
@@ -408,6 +418,11 @@ func (fixture *electionFixture) pass(r int64, settled bool, want int) int {
 			if !process.bundle.dependencies.Config.HasRole(roles.Worker) {
 				continue
 			}
+			// A Slot's own failure is the dispatcher's to handle and never
+			// comes back here; what does is the pass itself not running
+			// (a draining bundle, an ended context, a target never
+			// dispatched), and the count it returns would then be the
+			// passes before it.
 			var err error
 			if settled {
 				err = runScheduledOnceSettled(fixture.ctx, process.bundle)
@@ -415,7 +430,7 @@ func (fixture *electionFixture) pass(r int64, settled bool, want int) int {
 				err = process.bundle.runScheduledOnce(fixture.ctx)
 			}
 			if err != nil {
-				fixture.t.Logf("%s pass %d: %v", process.name, r, err)
+				fixture.t.Fatalf("%s pass %d: %v", process.name, r, err)
 			}
 		}
 	}
@@ -805,7 +820,11 @@ func TestWorkersRacingForAFreeLeaseEndWithOneLeader(t *testing.T) {
 			ticked.Add(1)
 			go func(process *electionProcess) {
 				defer ticked.Done()
-				_ = process.bundle.refreshAndReconcile(fixture.ctx, false)
+				// Losing the race is not an error: the lease read and the
+				// lost publication are handled inside the tick.
+				if err := process.bundle.refreshAndReconcile(fixture.ctx, false); err != nil {
+					t.Errorf("%s reconcile in round %d: %v", process.name, round, err)
+				}
 			}(process)
 		}
 		ticked.Wait()

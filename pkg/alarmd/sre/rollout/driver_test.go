@@ -398,7 +398,12 @@ func TestAPendingReceiptIsDecidedByTheImage(t *testing.T) {
 			if err := store.Create(context.Background(), testRecord("r1"), "pod-a/1"); err != nil {
 				t.Fatal(err)
 			}
-			_ = store.Release(context.Background(), "r1", "pod-a/1")
+			// The receipt is left pending by a released lease, which the
+			// next driver takes at once; one still held would be taken only
+			// once it ran out.
+			if err := store.Release(context.Background(), "r1", "pod-a/1"); err != nil {
+				t.Fatal(err)
+			}
 			d, _ := testDriver(t, store, cluster, "pod-b/1")
 			run(t, d)
 			waitStateIn(t, store, "r1", tc.states...)

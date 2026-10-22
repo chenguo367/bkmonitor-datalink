@@ -14,12 +14,14 @@ import (
 
 // stopLikeAPod stops a process the way SIGTERM does: the run context goes
 // first, which ends the role runtime and its record, then the bundle drains
-// and releases what it holds.
+// and releases what it holds. The stop is what the case is about, not a
+// cleanup: a Shutdown that failed may have left its leases to run out by TTL,
+// and the rounds after it would read that instead of a release.
 func (fixture *electionFixture) stopLikeAPod(process *electionProcess) {
 	fixture.t.Helper()
 	_ = process.runtime.Close()
 	if err := process.bundle.Shutdown(context.Background()); err != nil {
-		fixture.t.Logf("%s Shutdown: %v", process.name, err)
+		fixture.t.Fatalf("%s Shutdown: %v", process.name, err)
 	}
 	process.alive = false
 }

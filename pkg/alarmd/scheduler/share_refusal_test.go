@@ -345,15 +345,31 @@ func TestAShareChangeStartsTheKeyAgain(t *testing.T) {
 	clock := newMutableClock(time.Unix(102, 0))
 	resized := fmt.Errorf("wrapped: %w", &shareRefusalError{deterministic: true,
 		refusal: execution.ShareRefusal{Phase: "normal_output", OwnUsedBytes: 530 << 20, LimitBytes: 256 << 20}})
-	runner, _, _ := newShareRunnerOver(t, clock, []int64{100, 160}, ownTotalOverShare(), ownTotalOverShare(), resized)
-	for range 3 { // two refusals and the finalization of Slot 100
-		runner.RunOne(context.Background())
+	runner, executor, _ := newShareRunnerOver(t, clock, []int64{100, 160}, ownTotalOverShare(), ownTotalOverShare(), resized)
+	advance := func() {
 		if readyAt := runner.NextReadyAt(); !readyAt.IsZero() {
 			clock.Advance(readyAt.Sub(clock.Now()))
 		}
 	}
+	// Two refusals and the finalization of Slot 100, each checked: a Slot 100
+	// still refused after them would be refused below as well, and the case
+	// would pass without its group ever reaching Slot 160.
+	for refusal := 1; refusal <= 2; refusal++ {
+		if _, attempted, err := runner.RunOne(context.Background()); err == nil || !attempted {
+			t.Fatalf("Slot 100 refusal %d: attempted=%v error=%v, want the refusal", refusal, attempted, err)
+		}
+		advance()
+	}
+	if result, attempted, err := runner.RunOne(context.Background()); err != nil || !attempted ||
+		result.QueryFreeCause != execution.CauseResourceShareExceeded {
+		t.Fatalf("Slot 100 finalization: result=%+v attempted=%v error=%v, want it finalized for its share", result, attempted, err)
+	}
+	advance()
 	if _, _, err := runner.RunOne(context.Background()); err == nil {
 		t.Fatal("Slot 160 was not refused")
+	}
+	if last := executor.requests[len(executor.requests)-1]; last.Contract.Slot.EvaluationTime != 160 {
+		t.Fatalf("the refusal was for Slot %d, want Slot 160", last.Contract.Slot.EvaluationTime)
 	}
 	if runner.NextReadyAt().IsZero() || runner.shareExceeded(shareSlot(160)) {
 		t.Fatal("a refusal against a changed share finalized on one refusal")
