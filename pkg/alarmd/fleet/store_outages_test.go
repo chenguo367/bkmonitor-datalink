@@ -362,7 +362,8 @@ func TestTheStrategyPageFoldsByTheReplayWindow(t *testing.T) {
 		t.Fatalf("board status %d", code)
 	}
 	recorder := httptest.NewRecorder()
-	rig.handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/diagnose?view=1&strategy_id=4101", nil))
+	strategy := "4101"
+	rig.handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/diagnose?view=1&strategy_id="+strategy, nil))
 	var view StrategyViewActual
 	if recorder.Code != http.StatusOK || json.Unmarshal(recorder.Body.Bytes(), &view) != nil {
 		t.Fatalf("view: %d %s", recorder.Code, recorder.Body.String())
