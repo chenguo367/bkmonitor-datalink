@@ -74,7 +74,7 @@ var uptimePolicy = fields("is_enabled type timezone start end begin end_time beg
 	"time_ranges": fields("start end begin end_time begin_time", nil),
 	"date_ranges": fields("start end", nil),
 })
-var noDataPolicy = fields("is_enabled continuous level agg_dimension tracking_horizon_seconds", nil)
+var noDataPolicy = fields("is_enabled continuous level agg_dimension tracking_horizon_seconds max_groups no_data_max_groups", nil)
 var algorithmConfigPolicy = func() *policy {
 	p := fields("method threshold operator threshold_decimal value value_field data_unit threshold_unit_prefix ceil floor ceil_interval floor_interval ratio days count window window_size required_anomalies required_normals check_window trigger_count recovery_count threshold_count sensitivity period upper lower abs is_ratio multiplier comparison unit unit_prefix invalid_policy version floor_ratio ceil_ratio shock shock_unit fetch_type", nil)
 	p.fields["precision"] = fields("decimal_places rounding", nil)
@@ -85,6 +85,11 @@ var algorithmConfigPolicy = func() *policy {
 }()
 var algorithmPolicy = fields("type version level unit_prefix", map[string]*policy{"config": algorithmConfigPolicy})
 var triggerPolicy = fields("type version count check_window window_size required_anomalies required_normals", map[string]*policy{"uptime": uptimePolicy, "config": algorithmConfigPolicy})
+
+// recoveryPolicy is a detect's recovery_config: the trigger's keys, which the
+// frozen recovery plan carries, and status_setter, which the recovery checker
+// reads beside check_window.
+var recoveryPolicy = fields("type version count check_window window_size required_anomalies required_normals status_setter", map[string]*policy{"uptime": uptimePolicy, "config": algorithmConfigPolicy})
 var functionPolicy = fields("id method window dimensions without position field", map[string]*policy{"params": namedValues(fields("id value", nil))})
 var sourceQueryPolicy = fields("alert_name index_set_id promql custom_event_name data_source_label data_type_label metric_id metric_field alias values agg_dimension agg_method agg_interval result_table_id time_field query_string data_label unit time_delay offset expression_mode", map[string]*policy{
 	"agg_condition": conditionPolicy, "functions": functionPolicy,
@@ -108,7 +113,7 @@ var sourcePolicy = fields("id bk_biz_id bk_tenant_id space_uid is_global_strateg
 		// event carries, and each output's name and expression.
 		"query_output_config": fields("response_contract legacy_output_ref", map[string]*policy{"output_list": fields("reference_name expression", nil)}),
 	}),
-	"detects":        fields("level priority connector", map[string]*policy{"trigger_config": triggerPolicy, "recovery_config": triggerPolicy, "effective_time": uptimePolicy}),
+	"detects":        fields("level priority connector", map[string]*policy{"trigger_config": triggerPolicy, "recovery_config": recoveryPolicy, "effective_time": uptimePolicy}),
 	"effective_time": uptimePolicy, "uptime": uptimePolicy, "effective_time_snapshot": effectiveSnapshotPolicy,
 })
 var groupPolicy = fields("model_id model_inst_ids", map[string]*policy{"member_list": memberPolicy})
