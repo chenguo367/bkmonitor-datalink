@@ -239,7 +239,7 @@ func changesOperation(cfg config.Config, binding ChannelBinding, client redis.Un
 			if err != nil {
 				return obchannel.LifecycleRead{}, err
 			}
-			read := obchannel.LifecycleRead{Cap: lifecycleRecordEntries, Undecoded: reading.Unreadable, Events: make([]obchannel.LifecycleEvent, 0, len(reading.Entries))}
+			read := obchannel.LifecycleRead{Cap: lifecycleRecordEntries, Retention: lifecycleRecordTTL, Undecoded: reading.Unreadable, Events: make([]obchannel.LifecycleEvent, 0, len(reading.Entries))}
 			for _, entry := range reading.Entries {
 				read.Events = append(read.Events, obchannel.LifecycleEvent{Replica: entry.Replica, Event: entry.Event, At: entry.At, Build: entry.Build, Reason: entry.Reason})
 			}

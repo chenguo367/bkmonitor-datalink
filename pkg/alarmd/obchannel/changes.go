@@ -89,10 +89,12 @@ type LifecycleEvent struct {
 }
 
 // LifecycleRead is the lifecycle record read once: its entries, how many it
-// keeps at most and how many did not decode.
+// keeps at most, how long it lives past its last write and how many entries
+// did not decode.
 type LifecycleRead struct {
 	Events    []LifecycleEvent
 	Cap       int
+	Retention time.Duration
 	Undecoded int
 }
 
@@ -153,14 +155,22 @@ type ChangesSourceReach struct {
 	RetentionSeconds int64 `json:"retention_seconds,omitempty"`
 }
 
-// ChangesCoverage is each source's reach and the earliest time from which
-// every read source still holds what it held: the latest of their oldest
-// entries.
+// ChangesCoverage is each source's reach. Changes is the change list, which
+// gives the rows and the node.exec counts; PodExecutions the access list,
+// which gives the pod.exec counts; Lifecycle the starts and stops.
+//
+// A list below its cap still holds everything written within its retention,
+// whose clock every write renews; only a full list can have let older
+// entries go. EarliestReadableAt is therefore the latest oldest entry among
+// the full sources, and absent when none is full.
 type ChangesCoverage struct {
-	Changes    ChangesSourceReach `json:"changes"`
-	Executions ChangesSourceReach `json:"executions"`
-	Lifecycle  ChangesSourceReach `json:"lifecycle"`
-	// EarliestReadableAt is absent when no read source holds an entry.
+	Changes       ChangesSourceReach `json:"changes"`
+	PodExecutions ChangesSourceReach `json:"pod_executions"`
+	Lifecycle     ChangesSourceReach `json:"lifecycle"`
+	// Trimmed names the full sources whose oldest entry is after since: the
+	// range asked reaches past what they still hold, so rows or counts in it
+	// may have been pushed out.
+	Trimmed            []string   `json:"trimmed,omitempty"`
 	EarliestReadableAt *time.Time `json:"earliest_readable_at,omitempty"`
 }
 
@@ -187,7 +197,7 @@ func ChangesOperation(options ChangesOptions) Operation {
 			"不经通道的改动（kubectl、helm、流水线）不在其中；经通道的命令执行（node.exec、pod.exec）不列行，按小时计数，明细用 sre.receipts 读。" +
 			"coverage 给出各来源能读到多早（最早一条、上限、是否已满、保留期）：空列表是\"保留范围内没有\"，不是\"没有变更\"。",
 		EvidenceScope: "deployment",
-		Fields: map[string]Field{"since": timestamp, "until": timestamp, "cursor": {Type: "string", MaxLength: 128},
+		Fields: map[string]Field{"since": timestamp, "until": timestamp, "cursor": {Type: "string", MaxLength: 1024},
 			"limit": {Type: "integer", Minimum: &positive, Maximum: &maxRows}},
 		OutputSchema: SchemaOf(ChangesAnswer{}),
 		Limits: map[string]any{"max_window_seconds": int64(ChangesMaxWindow / time.Second), "default_window_seconds": int64(ChangesDefaultWindow / time.Second),
@@ -197,7 +207,8 @@ func ChangesOperation(options ChangesOptions) Operation {
 			if failure != nil {
 				return Outcome{Error: failure}
 			}
-			complete := answer.Coverage.Changes.Read && answer.Coverage.Executions.Read && answer.Coverage.Lifecycle.Read
+			coverage := answer.Coverage
+			complete := coverage.Changes.Read && coverage.PodExecutions.Read && coverage.Lifecycle.Read && len(coverage.Trimmed) == 0
 			out := Outcome{Value: answer, Complete: complete && answer.NextCursor == "",
 				Summary: fmt.Sprintf("%d 条变更（本页 %d 条）", answer.Matched, len(answer.Rows))}
 			if answer.NextCursor != "" {
@@ -207,10 +218,13 @@ func ChangesOperation(options ChangesOptions) Operation {
 				}
 				out.Next = []Call{{Operation: OpChangesList, Params: next, Reason: "同一时间范围的下一页。"}}
 			}
-			for name, reach := range map[string]ChangesSourceReach{"changes": answer.Coverage.Changes, "executions": answer.Coverage.Executions, "lifecycle": answer.Coverage.Lifecycle} {
+			for name, reach := range map[string]ChangesSourceReach{"changes": coverage.Changes, "pod_executions": coverage.PodExecutions, "lifecycle": coverage.Lifecycle} {
 				if !reach.Read {
 					out.Limitations = append(out.Limitations, name+" was not read ("+reach.Reason+"): its rows or counts are missing, not zero.")
 				}
+			}
+			for _, name := range coverage.Trimmed {
+				out.Limitations = append(out.Limitations, name+" is full and its oldest entry is after since: rows or counts before it may have been pushed out, missing rather than none.")
 			}
 			sort.Strings(out.Limitations)
 			return out
@@ -249,7 +263,7 @@ func listChanges(ctx context.Context, options ChangesOptions, p Params) (Changes
 
 	answer := ChangesAnswer{Since: since, Until: until, Rows: []ChangeRow{}, Executions: []ExecutionBucket{}, ExecutionsReadBy: OpSREReceipts}
 	answer.Coverage.Changes = ChangesSourceReach{Cap: MaxSREChangeReceipts, RetentionSeconds: int64(SREReceiptRetention / time.Second)}
-	answer.Coverage.Executions = ChangesSourceReach{Cap: MaxSREAccessReceipts, RetentionSeconds: int64(SREReceiptRetention / time.Second)}
+	answer.Coverage.PodExecutions = ChangesSourceReach{Cap: MaxSREAccessReceipts, RetentionSeconds: int64(SREReceiptRetention / time.Second)}
 	answer.Coverage.Lifecycle = ChangesSourceReach{}
 	inRange := func(at time.Time) bool { return !at.Before(since) && at.Before(until) }
 	var rows []ChangeRow
@@ -264,12 +278,16 @@ func listChanges(ctx context.Context, options ChangesOptions, p Params) (Changes
 
 	// The change list: change rows, and node.exec's count (its cancel and
 	// end receipts are the same command and are not counted again).
-	read := func(effect string, reach *ChangesSourceReach, visit func(SREAction)) {
+	read := func(effect string, light bool, reach *ChangesSourceReach, visit func(SREAction)) {
 		if options.Receipts == nil {
 			reach.Reason = "receipts_unavailable"
 			return
 		}
-		receipts, undecoded, err := options.Receipts.Read(ctx, effect)
+		readList := options.Receipts.Read
+		if light {
+			readList = options.Receipts.ReadStamps
+		}
+		receipts, undecoded, err := readList(ctx, effect)
 		if err != nil {
 			reach.Reason = "store_unavailable"
 			return
@@ -286,13 +304,15 @@ func listChanges(ctx context.Context, options ChangesOptions, p Params) (Changes
 			}
 		}
 	}
-	read(SREEffectChange, &answer.Coverage.Changes, func(receipt SREAction) {
+	read(SREEffectChange, false, &answer.Coverage.Changes, func(receipt SREAction) {
 		if receipt.Op == OpNodeExec {
-			bucket(receipt.At).NodeExec++
+			if started(receipt) {
+				bucket(receipt.At).NodeExec++
+			}
 			return
 		}
 		kind, ok := changeKinds[receipt.Op]
-		if !ok {
+		if !ok || receipt.DryRun {
 			return
 		}
 		row := ChangeRow{At: receipt.At.UTC(), Kind: kind, Op: receipt.Op, Result: receipt.Result,
@@ -300,8 +320,8 @@ func listChanges(ctx context.Context, options ChangesOptions, p Params) (Changes
 		row.Operator, row.OperatorKind = operatorOf(receipt)
 		rows = append(rows, row)
 	})
-	read(SREEffectAccess, &answer.Coverage.Executions, func(receipt SREAction) {
-		if receipt.Op == opPodExec {
+	read(SREEffectAccess, true, &answer.Coverage.PodExecutions, func(receipt SREAction) {
+		if receipt.Op == opPodExec && started(receipt) {
 			bucket(receipt.At).PodExec++
 		}
 	})
@@ -313,6 +333,7 @@ func listChanges(ctx context.Context, options ChangesOptions, p Params) (Changes
 	} else {
 		reach := &answer.Coverage.Lifecycle
 		reach.Read, reach.Cap, reach.Undecoded = true, record.Cap, record.Undecoded
+		reach.RetentionSeconds = int64(record.Retention / time.Second)
 		reach.Kept = len(record.Events) + record.Undecoded
 		reach.Full = record.Cap > 0 && reach.Kept >= record.Cap
 		for _, event := range record.Events {
@@ -331,10 +352,20 @@ func listChanges(ctx context.Context, options ChangesOptions, p Params) (Changes
 		}
 	}
 
-	for _, reach := range []ChangesSourceReach{answer.Coverage.Changes, answer.Coverage.Executions, answer.Coverage.Lifecycle} {
-		if reach.Read && reach.OldestAt != nil && (answer.Coverage.EarliestReadableAt == nil || reach.OldestAt.After(*answer.Coverage.EarliestReadableAt)) {
+	for _, source := range []struct {
+		name  string
+		reach ChangesSourceReach
+	}{{"changes", answer.Coverage.Changes}, {"pod_executions", answer.Coverage.PodExecutions}, {"lifecycle", answer.Coverage.Lifecycle}} {
+		reach := source.reach
+		if !reach.Read || !reach.Full || reach.OldestAt == nil {
+			continue
+		}
+		if answer.Coverage.EarliestReadableAt == nil || reach.OldestAt.After(*answer.Coverage.EarliestReadableAt) {
 			at := *reach.OldestAt
 			answer.Coverage.EarliestReadableAt = &at
+		}
+		if reach.OldestAt.After(since) {
+			answer.Coverage.Trimmed = append(answer.Coverage.Trimmed, source.name)
 		}
 	}
 	for _, counted := range buckets {
@@ -342,9 +373,12 @@ func listChanges(ctx context.Context, options ChangesOptions, p Params) (Changes
 	}
 	sort.Slice(answer.Executions, func(i, j int) bool { return answer.Executions[i].Start.After(answer.Executions[j].Start) })
 
-	// Newest first; rows of the same instant in a fixed order, so a cursor
-	// that names an instant and how many of its rows were given resumes
-	// exactly there whatever is written meanwhile at newer times.
+	// Newest first; rows of the same instant in a fixed order by their key,
+	// so a cursor that names the last row given - its instant and key -
+	// resumes right after it whatever is written meanwhile at newer times. A
+	// row written later at that very instant with a key before the cursor's
+	// is not given; two rows identical in every listed field at one instant
+	// read as one position.
 	sort.SliceStable(rows, func(i, j int) bool {
 		if !rows[i].At.Equal(rows[j].At) {
 			return rows[i].At.After(rows[j].At)
@@ -354,17 +388,22 @@ func listChanges(ctx context.Context, options ChangesOptions, p Params) (Changes
 	answer.Matched = len(rows)
 	start := 0
 	if after != nil {
-		for start < len(rows) && (rows[start].At.After(after.at) || rows[start].At.Equal(after.at) && start < firstAt(rows, after.at)+after.given) {
+		for start < len(rows) && (rows[start].At.After(after.at) || rows[start].At.Equal(after.at) && cursorKey(rows[start]) <= after.key) {
 			start++
 		}
 	}
 	end := min(len(rows), start+limit)
 	answer.Rows = append(answer.Rows, rows[start:end]...)
 	if end < len(rows) {
-		last := rows[end-1].At
-		answer.NextCursor = encodeChangesCursor(last, end-firstAt(rows, last))
+		answer.NextCursor = encodeChangesCursor(rows[end-1].At, cursorKey(rows[end-1]))
 	}
 	return answer, nil
+}
+
+// started says a command receipt is of a command that ran: one refused or
+// forbidden before it started is not counted as an execution.
+func started(receipt SREAction) bool {
+	return receipt.Result != SREResultRefused && receipt.Result != SREResultForbidden
 }
 
 // operatorOf is who a receipt names: the admin user, the deployment
@@ -380,28 +419,33 @@ func operatorOf(receipt SREAction) (string, string) {
 }
 
 func rowKey(row ChangeRow) string {
+	parts := []string{row.Kind, row.Op, row.Replica, row.Result, row.OperatorKind, row.Operator, row.Build, row.StopReason}
 	if row.Object != nil {
-		return row.Kind + "\x00" + row.Op + "\x00" + row.Object.Namespace + "\x00" + row.Object.Kind + "\x00" + row.Object.Name
+		parts = append(parts, row.Object.Namespace, row.Object.Kind, row.Object.Name)
 	}
-	return row.Kind + "\x00" + row.Replica
-}
-
-func firstAt(rows []ChangeRow, at time.Time) int {
-	for index, row := range rows {
-		if row.At.Equal(at) {
-			return index
-		}
-	}
-	return len(rows)
+	return strings.Join(parts, "\x00")
 }
 
 type changesCursor struct {
-	at    time.Time
-	given int
+	at  time.Time
+	key string
 }
 
-func encodeChangesCursor(at time.Time, given int) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(at.UnixNano(), 10) + ":" + strconv.Itoa(given)))
+// maxChangesCursorKey bounds the key a cursor carries. A row's key is cut to
+// it on both sides of the comparison, so rows that share a cut key at one
+// instant read as one position; keys are far shorter in practice.
+const maxChangesCursorKey = 512
+
+func cursorKey(row ChangeRow) string {
+	key := rowKey(row)
+	if len(key) > maxChangesCursorKey {
+		key = key[:maxChangesCursorKey]
+	}
+	return key
+}
+
+func encodeChangesCursor(at time.Time, key string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(at.UnixNano(), 10) + ":" + key))
 }
 
 func decodeChangesCursor(text string) (*changesCursor, error) {
@@ -412,17 +456,13 @@ func decodeChangesCursor(text string) (*changesCursor, error) {
 	if err != nil {
 		return nil, err
 	}
-	nanos, given, found := strings.Cut(string(raw), ":")
-	if !found {
+	nanos, key, found := strings.Cut(string(raw), ":")
+	if !found || len(key) > maxChangesCursorKey {
 		return nil, fmt.Errorf("cursor")
 	}
 	at, err := strconv.ParseInt(nanos, 10, 64)
 	if err != nil {
 		return nil, err
 	}
-	count, err := strconv.Atoi(given)
-	if err != nil || count < 0 {
-		return nil, fmt.Errorf("cursor")
-	}
-	return &changesCursor{at: time.Unix(0, at).UTC(), given: count}, nil
+	return &changesCursor{at: time.Unix(0, at).UTC(), key: key}, nil
 }
