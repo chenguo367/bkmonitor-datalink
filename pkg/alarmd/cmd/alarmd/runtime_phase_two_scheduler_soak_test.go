@@ -147,7 +147,7 @@ func TestSoakTheSchedulerShapeStaggerAndHoldTogether(t *testing.T) {
 	var samples []sample
 	started := time.Now()
 	stepped, unstepped := false, false
-	for time.Since(started) < runFor {
+	for time.Since(started) < runFor { // fixed-wait: the soak runs for its set duration
 		time.Sleep(500 * time.Millisecond) // fixed-wait: the soak sampling cadence
 		switch {
 		case !stepped && time.Since(started) >= stepUpAt:

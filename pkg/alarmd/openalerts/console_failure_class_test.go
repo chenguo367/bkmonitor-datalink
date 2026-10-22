@@ -86,8 +86,8 @@ func TestAConsoleFailureNamesItsCause(t *testing.T) {
 		{"cancelled", execution.TransportFailureCancelled, func(t *testing.T) (*HTTPReconciler, context.Context, string) {
 			server := httptest.NewServer(block)
 			t.Cleanup(server.Close)
-			ctx, cancel := context.WithTimeout(consoleCtx(), time.Hour)
-			time.AfterFunc(100*time.Millisecond, cancel)
+			ctx, cancel := context.WithTimeout(consoleCtx(), time.Hour) // fixed-wait: a deadline far past the case, so the call ends by the cancel below and not by it
+			time.AfterFunc(100*time.Millisecond, cancel)                // fixed-wait: when the caller lets go; before the call or during it, the error is context.Canceled and named cancelled alike
 			t.Cleanup(cancel)
 			return classReader(t, server.URL, server.Client(), nil), ctx, server.URL
 		}},

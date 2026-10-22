@@ -166,14 +166,14 @@ func TestAConsoleCallCutByItsDeadlineIsTimed(t *testing.T) {
 			return err
 		}},
 		{"round deadline", true, func(t *testing.T, url string) error {
-			ctx, cancel := context.WithTimeout(consoleCtx(), 100*time.Millisecond)
+			ctx, cancel := context.WithTimeout(consoleCtx(), 100*time.Millisecond) // fixed-wait: the round's deadline the case runs out
 			defer cancel()
 			_, err := classReader(t, url, &http.Client{}, nil).Reconcile(ctx, keyA)
 			return err
 		}},
 		{"cancelled", false, func(t *testing.T, url string) error {
 			ctx, cancel := context.WithCancel(consoleCtx())
-			time.AfterFunc(100*time.Millisecond, cancel)
+			time.AfterFunc(100*time.Millisecond, cancel) // fixed-wait: when the caller lets go; before the call or during it, the error is context.Canceled and untimed alike
 			_, err := classReader(t, url, &http.Client{}, nil).Reconcile(ctx, keyA)
 			return err
 		}},

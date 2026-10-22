@@ -170,7 +170,7 @@ func TestAFailureOnTheCallersSpentDeadlineIsNamedByTheDeadline(t *testing.T) {
 	cancelled, cancel := context.WithCancel(refresh)
 	cancel()
 	withTime := func(d time.Duration) context.Context {
-		ctx, cancel := context.WithTimeout(refresh, d)
+		ctx, cancel := context.WithTimeout(refresh, d) // fixed-wait: the caller's time left, which each call below sets
 		t.Cleanup(cancel)
 		return ctx
 	}

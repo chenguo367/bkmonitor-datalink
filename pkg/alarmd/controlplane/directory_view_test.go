@@ -468,7 +468,7 @@ func TestADirectoryPageTakesTheReadersTime(t *testing.T) {
 	latest := f.h.publish(t, latestCatalog)
 	f.reconciler.RememberPublicationForTest(latest.Publication, latestCatalog)
 	f.h.client.AddHook(slowObjectReads{prefix: f.h.prefix + ":qgobj:", delay: 1100 * time.Millisecond})
-	ctx, cancel := context.WithTimeout(f.h.ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(f.h.ctx, 30*time.Second) // fixed-wait: the reader's time the page takes its own from, far past the slow reads
 	defer cancel()
 	started := time.Now()
 	s := f.view.Page(ctx, f.at, "", "", "", 0, 100)
@@ -492,7 +492,7 @@ func TestAPartialDirectoryPageGoesOnFromItsCursor(t *testing.T) {
 	api := fleet.WithStrategyDirectory(http.NotFoundHandler(), f.view, nil, nil, "", func() time.Time { return f.at })
 	get := func(within time.Duration, query string) (controlplane.StrategyDirectorySnapshot, string) {
 		t.Helper()
-		ctx, cancel := context.WithTimeout(f.h.ctx, within)
+		ctx, cancel := context.WithTimeout(f.h.ctx, within) // fixed-wait: the reader's time the case sets, which the page stops a margin short of
 		defer cancel()
 		w := httptest.NewRecorder()
 		api.ServeHTTP(w, httptest.NewRequest("GET", "/api/objects?scope=strategies"+query, nil).WithContext(ctx))

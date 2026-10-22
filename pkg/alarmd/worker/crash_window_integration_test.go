@@ -591,7 +591,7 @@ func renewG3ALeaseWhileRunning(t *testing.T, store *ownership.RedisStore, lease 
 	done := make(chan struct{})
 	result := make(chan ownership.Lease, 1)
 	go func() {
-		ticker := time.NewTicker(g3aCrashedLeaseTTL / 4)
+		ticker := time.NewTicker(g3aCrashedLeaseTTL / 4) // fixed-wait: the renewal cadence production keeps, a quarter of the lease's TTL
 		defer ticker.Stop()
 		for {
 			select {
