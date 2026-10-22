@@ -277,6 +277,21 @@ func clockThroughVariables(t *testing.T, start time.Time, done func() bool) {
 	}
 }
 
+// A clock variable set some other way on one path is not the clock on it,
+// and so is not plainly the clock at all.
+func clockSetOtherwise(t *testing.T, start time.Time, early func() bool, done func() bool) {
+	deadline := testwait.Deadline(t)
+	for !done() { /* want clock loop */
+		now := time.Now()
+		if early() {
+			now = start.Add(119 * time.Second)
+		}
+		if now.After(deadline) {
+			return
+		}
+	}
+}
+
 // A variable set from a clock variable assigned further down the loop is
 // the clock too: the next pass reads it so.
 func clockSetBelow(start time.Time, done func() bool) {
