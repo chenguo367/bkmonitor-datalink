@@ -14,6 +14,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"runtime"
 	"sort"
 	"strconv"
@@ -425,12 +427,31 @@ func TestARefusedOrFailedAlignmentLeavesNothingReserved(t *testing.T) {
 	}
 }
 
+// heapMeasureEnv set runs TestTheNamedOutputHoldingsAreWhatTheyCost's
+// measuring itself; unset, the test runs it in a process of its own.
+const heapMeasureEnv = "ALARMD_TEST_HEAP_MEASURE"
+
 // What the alignment is charged while an answer is read is at least what it
 // measures on the heap, and not much more: an indexed point of an output,
 // and a delivered point of the legacy output beside its RecordID.
+//
+// The heap it reads is the whole process's: in the package's own process, a
+// goroutine an earlier test left behind freeing memory during a build read
+// as the build costing less (79 bytes a point against 87-88 alone, past the
+// quarter). So the measuring runs in a process of its own.
 func TestTheNamedOutputHoldingsAreWhatTheyCost(t *testing.T) {
 	if racedetector.Enabled {
 		t.Skip("the race detector changes what an allocation costs")
+	}
+	if os.Getenv(heapMeasureEnv) == "" {
+		measure := exec.Command(os.Args[0], "-test.run=^TestTheNamedOutputHoldingsAreWhatTheyCost$", "-test.count=1", "-test.v")
+		measure.Env = append(os.Environ(), heapMeasureEnv+"=1")
+		out, err := measure.CombinedOutput()
+		if err != nil || !strings.Contains(string(out), "indexed point: measured") {
+			t.Fatalf("measured in a process of its own: %v\n%s", err, out)
+		}
+		t.Logf("measured in a process of its own:\n%s", out)
+		return
 	}
 	const points = 50000
 	labels := alignLabels(responseSeries{GroupKeys: hostOne, GroupValues: []json.RawMessage{json.RawMessage(`"192.0.2.1"`)}})
