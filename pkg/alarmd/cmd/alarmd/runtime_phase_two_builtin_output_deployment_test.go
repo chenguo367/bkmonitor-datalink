@@ -81,8 +81,7 @@ func TestBuiltInPythonOutputWithoutServiceRedisIsRejected(t *testing.T) {
 func TestBuiltInPythonOutputUnreachableServiceRedisHoldsStartup(t *testing.T) {
 	sourceAddress, sourceClient := startPhaseTwoRedis(t)
 	runtimeAddress, _ := startPhaseTwoRedis(t)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+	ctx := context.Background()
 	strategyDocument, err := os.ReadFile("testdata/g1_full_threshold_strategy.json")
 	if err != nil {
 		t.Fatal(err)
@@ -121,28 +120,68 @@ func TestBuiltInPythonOutputUnreachableServiceRedisHoldsStartup(t *testing.T) {
 	}
 
 	recorder := metric.NewRecorder(metric.BuildInfo{})
-	bundle, err := openProductionPhaseTwoBundleWithDependencies(
-		ctx, cfg, recorder, observability.Discard(observability.ComponentRuntime),
-		newPhaseTwoApplicationHealth(),
-		func(client redis.Cmdable, prefix string) (controlplane.StrategySource, error) {
-			return controlplane.NewLegacyRedisStrategySource(client, prefix)
-		},
-		phaseTwoProductionExternalDependencies{
-			Now: time.Now, HTTPClient: uqServer.Client(), StartupWaitInitial: 20 * time.Millisecond,
-			PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
-				return &recordingPhaseTwoEventSink{}, nil
-			}),
-		},
-	)
-	if bundle != nil {
-		t.Cleanup(func() { _ = bundle.Shutdown(context.Background()) })
+	// Startup is held until the process stops; the test stops it once the
+	// hold is observable - the wait on the service Redis counted twice -
+	// rather than betting on how far startup gets within a fixed time.
+	startup, stop := context.WithCancel(ctx)
+	defer stop()
+	type opened struct {
+		bundle *phaseTwoWorkerBundle
+		err    error
+	}
+	done := make(chan opened, 1)
+	go func() {
+		bundle, err := openProductionPhaseTwoBundleWithDependencies(
+			startup, cfg, recorder, observability.Discard(observability.ComponentRuntime),
+			newPhaseTwoApplicationHealth(),
+			func(client redis.Cmdable, prefix string) (controlplane.StrategySource, error) {
+				return controlplane.NewLegacyRedisStrategySource(client, prefix)
+			},
+			phaseTwoProductionExternalDependencies{
+				Now: time.Now, HTTPClient: uqServer.Client(), StartupWaitInitial: 20 * time.Millisecond,
+				PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
+					return &recordingPhaseTwoEventSink{}, nil
+				}),
+			},
+		)
+		done <- opened{bundle, err}
+	}()
+	waits := func() float64 {
+		return counterValue(t, recorder, "alarmd_startup_dependency_wait_total",
+			map[string]string{"dependency": "redis_legacy_output"})
+	}
+	// The only bound is the test's own: a startup that never reaches the
+	// service Redis fails here when go test's deadline nears, not after a
+	// guess at how long startup takes on this machine.
+	var bound <-chan time.Time
+	if deadline, ok := t.Deadline(); ok {
+		timer := time.NewTimer(time.Until(deadline) - 5*time.Second)
+		defer timer.Stop()
+		bound = timer.C
+	}
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for held := false; !held; {
+		select {
+		case early := <-done:
+			if early.bundle != nil {
+				_ = early.bundle.Shutdown(context.Background())
+			}
+			t.Fatalf("startup returned before it was stopped (bundle %v, err %v), want it held on the service Redis",
+				early.bundle != nil, early.err)
+		case <-bound:
+			t.Fatalf("startup_dependency_wait_total{redis_legacy_output} = %v by the test's deadline, want the wait counted twice", waits())
+		case <-tick.C:
+			held = waits() >= 2
+		}
+	}
+	stop()
+	result := <-done
+	if result.bundle != nil {
+		t.Cleanup(func() { _ = result.bundle.Shutdown(context.Background()) })
 		t.Fatal("a bundle was assembled without its compatibility service Redis")
 	}
-	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "redis_legacy_output") {
-		t.Fatalf("err = %v, want startup held on the service Redis until the process stopped", err)
-	}
-	if got := counterValue(t, recorder, "alarmd_startup_dependency_wait_total",
-		map[string]string{"dependency": "redis_legacy_output"}); got < 2 {
-		t.Fatalf("startup_dependency_wait_total{redis_legacy_output} = %v, want the wait counted", got)
+	if !errors.Is(result.err, context.Canceled) || !strings.Contains(result.err.Error(), "redis_legacy_output") {
+		t.Fatalf("err = %v, want startup held on the service Redis until the process stopped", result.err)
 	}
 }
