@@ -507,3 +507,23 @@ func TestADiagnosisPageSaysHowMuchProgressItLeftUnread(t *testing.T) {
 		t.Fatalf("progress %q objects %d deferred %d, want read and nothing more", body.Progress, body.ProgressObjects, body.ProgressDeferred)
 	}
 }
+
+// A row names the tenant its Plans run under, the one Linkd is read under;
+// a strategy ID running under two tenants names none rather than one of them.
+func TestADiagnosisRowNamesItsPlansSoleTenant(t *testing.T) {
+	facts := diagnosisFacts()
+	split := facts["4101"]
+	other := planB
+	other.Tenant = "tenant-b"
+	split.Plans = plans(planA, other)
+	facts["4110"] = split
+	rig := newDiagnosisRig(t, facts, nil)
+	rig.universe = []string{"4101", "4110"}
+	tenants := map[string]string{}
+	for _, row := range rig.page(t, "", 0).Strategies {
+		tenants[row.StrategyID] = row.Tenant
+	}
+	if tenants["4101"] != "default" || tenants["4110"] != "" {
+		t.Fatalf("tenants = %v, want 4101 under default and 4110 under none", tenants)
+	}
+}

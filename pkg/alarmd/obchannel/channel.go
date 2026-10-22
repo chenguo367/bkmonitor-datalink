@@ -713,6 +713,9 @@ func describe(op Operation) map[string]any {
 func validate(op Operation, params Params) error {
 	for _, name := range op.Required {
 		if _, ok := params[name]; !ok {
+			if source := op.Fields[name].Source; source != "" {
+				return fmt.Errorf("required parameter: %s (read it from %s)", name, source)
+			}
 			return fmt.Errorf("required parameter: %s", name)
 		}
 	}

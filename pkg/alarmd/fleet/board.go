@@ -136,7 +136,11 @@ func strategyPunctuality(row DiagnosisRow, due *DueView) Punctuality {
 // for its state, who acts and how sure its duration is, and nothing of the
 // developer's coordinates (objects, replicas, revisions, Slots).
 type BoardRow struct {
-	StrategyID      string      `json:"strategy_id"`
+	StrategyID string `json:"strategy_id"`
+	// Tenant is the strategy's tenant (DiagnosisRow.Tenant), always present:
+	// empty is unknown. A caller passes it back as it is to
+	// strategy.linkd_reconcile, and does not reconcile when it is empty.
+	Tenant          string      `json:"tenant"`
 	BusinessID      string      `json:"business_id,omitempty"`
 	State           StateWord   `json:"state"`
 	StateWord       string      `json:"state_word"`
@@ -314,7 +318,7 @@ func buildBoard(id string, at time.Time, digest string, universe []string, decid
 	}
 	for _, id := range universe {
 		decided := decide(id)
-		row := BoardRow{StrategyID: decided.StrategyID, BusinessID: decided.Business, State: decided.Verdict,
+		row := BoardRow{StrategyID: decided.StrategyID, Tenant: decided.Tenant, BusinessID: decided.Business, State: decided.Verdict,
 			StateWord: words.State[decided.Verdict], Action: decided.Action, ActionWord: words.Action[decided.Action],
 			CapabilityClass: capabilityOf(decided), Punctuality: strategyPunctuality(decided, due), OpenAlerts: strategyOpenAlerts(decided, open),
 			KBAnchor: "state-" + string(decided.Verdict)}

@@ -78,7 +78,7 @@ func reconcileAnswerOf(t *testing.T, out obchannel.Outcome) (linkdReconcileAnswe
 func TestLinkdReconcileCountsBothSidesAndGivesLinkKeysOnly(t *testing.T) {
 	fake := &reconcileFake{result: reconcileResult()}
 	at := time.Date(2026, 10, 17, 6, 0, 0, 0, time.UTC)
-	out := readLinkdReconcile(context.Background(), fake, obchannel.Params{"strategy_id": "77"}, func() time.Time { return at }, time.Second, 1<<20)
+	out := readLinkdReconcile(context.Background(), fake, obchannel.Params{"strategy_id": "77", "tenant": "system"}, func() time.Time { return at }, time.Second, 1<<20)
 	answer, encoded := reconcileAnswerOf(t, out)
 	want := &linkdReconcileCounts{AlarmdOpen: 5, LinkdActive: 3, Both: 2, OnlyAlarmd: 3, OnlyLinkd: 1}
 	if !answer.Answered || !reflect.DeepEqual(answer.Counts, want) || !reflect.DeepEqual(answer.LinkdAlertIDs, []string{"a1", "a2", "a3"}) ||
@@ -100,7 +100,7 @@ func TestLinkdReconcileCountsBothSidesAndGivesLinkKeysOnly(t *testing.T) {
 // counts -- the page shows unknown, never zero -- and is not the call failing.
 func TestLinkdReconcileSaysLinkdDidNotAnswerWithoutCounts(t *testing.T) {
 	fake := &reconcileFake{result: reconcileResult(), hold: make(chan struct{})}
-	out := readLinkdReconcile(context.Background(), fake, obchannel.Params{"strategy_id": "77"}, time.Now, 20*time.Millisecond, 1<<20)
+	out := readLinkdReconcile(context.Background(), fake, obchannel.Params{"strategy_id": "77", "tenant": "system"}, time.Now, 20*time.Millisecond, 1<<20)
 	answer, encoded := reconcileAnswerOf(t, out)
 	if out.Error != nil || answer.Answered || answer.Counts != nil || out.Complete || answer.Line != linkdReconcileNotAnswered {
 		t.Fatalf("a silent Linkd answered %s complete %v error %+v", encoded, out.Complete, out.Error)
@@ -114,7 +114,7 @@ func TestLinkdReconcileSaysLinkdDidNotAnswerWithoutCounts(t *testing.T) {
 // Linkd being silent.
 func TestLinkdReconcileRefusalIsAFailureNotSilence(t *testing.T) {
 	fake := &reconcileFake{err: &openalerts.LinkRefusal{Status: 400, Code: "invalid_query", Message: "unknown strategy"}}
-	out := readLinkdReconcile(context.Background(), fake, obchannel.Params{"strategy_id": "77"}, time.Now, time.Second, 1<<20)
+	out := readLinkdReconcile(context.Background(), fake, obchannel.Params{"strategy_id": "77", "tenant": "system"}, time.Now, time.Second, 1<<20)
 	if out.Error == nil || !strings.HasPrefix(out.Error.Code, "linkd_") || !strings.Contains(out.Error.Message, "unknown strategy") {
 		t.Fatalf("a refusal answered %+v", out)
 	}
@@ -127,7 +127,9 @@ func TestLinkdReconcileReadsAreNotGated(t *testing.T) {
 	op := cliLinkdReconcileOperation(fake)
 	outs := make(chan obchannel.Outcome, 2)
 	for _, id := range []string{"77", "78"} {
-		go func(id string) { outs <- op.Run(context.Background(), obchannel.Params{"strategy_id": id}) }(id)
+		go func(id string) {
+			outs <- op.Run(context.Background(), obchannel.Params{"strategy_id": id, "tenant": "system"})
+		}(id)
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for fake.inFlight() < 2 && time.Now().Before(deadline) {
@@ -147,7 +149,7 @@ func TestLinkdReconcileReadsAreNotGated(t *testing.T) {
 // The ids stop at their share of the response budget and say so; the counts
 // stay whole. Without a Console the operation is listed and unavailable.
 func TestLinkdReconcileCutsIdsAtTheirBudgetAndNeedsAConsole(t *testing.T) {
-	out := readLinkdReconcile(context.Background(), &reconcileFake{result: reconcileResult()}, obchannel.Params{"strategy_id": "77"}, time.Now, time.Second, 6)
+	out := readLinkdReconcile(context.Background(), &reconcileFake{result: reconcileResult()}, obchannel.Params{"strategy_id": "77", "tenant": "system"}, time.Now, time.Second, 6)
 	answer, _ := reconcileAnswerOf(t, out)
 	if !answer.AlertIDsCut || !reflect.DeepEqual(answer.LinkdAlertIDs, []string{"a1"}) || answer.Counts.LinkdActive != 3 || out.Complete {
 		t.Fatalf("cut answer %+v complete %v", answer, out.Complete)
@@ -158,5 +160,15 @@ func TestLinkdReconcileCutsIdsAtTheirBudgetAndNeedsAConsole(t *testing.T) {
 	}
 	if !obchannel.FrontReads["strategy.linkd_reconcile"] {
 		t.Fatal("strategy.linkd_reconcile is not a front read")
+	}
+}
+
+// The reconcile has no tenant of its own to fall back on: the tenant is
+// required, and says it is read from the strategy's row.
+func TestLinkdReconcileRequiresTheRowsTenant(t *testing.T) {
+	op := cliLinkdReconcileOperation(nil)
+	required := strings.Join(op.Required, ",")
+	if required != "strategy_id,tenant" || !strings.Contains(op.Fields["tenant"].Source, "strategy.board") {
+		t.Fatalf("required %q tenant source %q", required, op.Fields["tenant"].Source)
 	}
 }

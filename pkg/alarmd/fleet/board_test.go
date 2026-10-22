@@ -216,7 +216,7 @@ var boardAllowed = map[string][]string{
 	"":       {"generated_at", "max_age_seconds", "universe_digest", "universe", "facets", "late_objects", "late_strategies", "at_least_reason", "matched", "rows", "next_cursor", "reread"},
 	"facets": {"state", "action", "capability", "punctuality"},
 	"count":  {"value", "at_least"},
-	"row": {"strategy_id", "business_id", "state", "state_word", "action", "action_word", "watch", "watch_word",
+	"row": {"strategy_id", "tenant", "business_id", "state", "state_word", "action", "action_word", "watch", "watch_word",
 		"capability_class", "line", "punctuality", "since", "since_basis", "since_word", "open_alerts", "kb_anchor"},
 }
 

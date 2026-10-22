@@ -69,15 +69,16 @@ const linkdReconcileNotAnswered = "Linkd 未应答"
 // another being in flight (10-16 ruling).
 func cliLinkdReconcileOperation(console linkdReconcileReader) obchannel.Operation {
 	return obchannel.Operation{ID: "strategy.linkd_reconcile",
-		Summary: "策略详情的“与 Linkd 对账”：按指纹比较 alarmd 未恢复告警与 Linkd 活跃告警，服务端写好计数——alarmd 未恢复、Linkd 活跃、两边都有、只在 alarmd、只在 Linkd；" +
+		Summary: "策略详情的“与 Linkd 对账”：按策略 ID 与租户（strategy.board 行里的 tenant，原样传回）按指纹比较 alarmd 未恢复告警与 Linkd 活跃告警，服务端写好计数——alarmd 未恢复、Linkd 活跃、两边都有、只在 alarmd、只在 Linkd；" +
 			"链接键只给 Linkd 那边有的告警 ID 与事件源 ID，不给指纹与告警内容。" +
 			"Linkd 10 秒内没应答答 answered=false、不给计数（页面显示未知，不是 0）。",
 		EvidenceScope: "linkd_alerts", ExecutionTimeout: linkdReconcileTimeout + 2*time.Second,
 		Fields: map[string]obchannel.Field{
 			"strategy_id": {Type: "string", Description: "策略 ID。", MinLength: 1, MaxLength: 20, Pattern: "^[1-9][0-9]*$", Source: "strategy.board 的行"},
-			"tenant":      {Type: "string", Description: "租户，默认 system。", MinLength: 1, MaxLength: 256, Pattern: "^[^\\x00-\\x1f\\x7f]+$"},
+			"tenant":      {Type: "string", Description: "策略所属租户，原样取 strategy.board 行或 strategy.view 结论里的 tenant；没有默认值，空的 tenant 表示未知，不能对账。", MinLength: 1, MaxLength: 256, Pattern: "^[^\\x00-\\x1f\\x7f]+$", Source: "strategy.board rows[].tenant 或 strategy.view conclusion.tenant"},
 		},
-		Required:     []string{"strategy_id"},
+		Required:     []string{"strategy_id", "tenant"},
+		Examples:     []obchannel.Params{{"strategy_id": "77", "tenant": "system"}},
 		OutputSchema: obchannel.SchemaOf(linkdReconcileAnswer{}),
 		Limits: map[string]any{"redis_commands": 0, "console_calls": 2,
 			"timeout_ms": linkdReconcileTimeout.Milliseconds()},
@@ -96,9 +97,6 @@ func cliLinkdReconcileOperation(console linkdReconcileReader) obchannel.Operatio
 
 func readLinkdReconcile(ctx context.Context, console linkdReconcileReader, p obchannel.Params, now func() time.Time, bound time.Duration, idBudget int) obchannel.Outcome {
 	tenant := p.String("tenant")
-	if tenant == "" {
-		tenant = "system"
-	}
 	id := p.String("strategy_id")
 	answer := linkdReconcileAnswer{StrategyID: id, ReadAt: now().UTC(), LinkdAlertIDs: []string{}}
 	readCtx, cancel := context.WithTimeout(ctx, bound)

@@ -94,10 +94,14 @@ type DiagnosisPart struct {
 
 // DiagnosisRow is one strategy.
 type DiagnosisRow struct {
-	StrategyID string     `json:"strategy_id"`
-	Business   string     `json:"business,omitempty"`
-	Verdict    StateWord  `json:"verdict"`
-	Action     ActionWord `json:"action,omitempty"`
+	StrategyID string `json:"strategy_id"`
+	Business   string `json:"business,omitempty"`
+	// Tenant is the tenant of every Plan of the strategy, the one Linkd is
+	// read under; empty when no Plan is known, or when the strategy ID runs
+	// under more than one tenant and no single one can be named.
+	Tenant  string     `json:"tenant,omitempty"`
+	Verdict StateWord  `json:"verdict"`
+	Action  ActionWord `json:"action,omitempty"`
 	// Reason is the check the words were decided under, the unknown
 	// reason for UNKNOWN, or the deciding row's own reason where it names
 	// one more precisely (cause_reason).
@@ -244,6 +248,7 @@ func diagnoseStrategyRow(id string, facts StrategyLookupFacts, ctx diagnosisCont
 				Attribution: withheldAttribution(disposition.Disposition, disposition.Reason)})
 		}
 	}
+	row.Tenant = soleTenant(standing.Plans)
 	observed := 0
 	for _, plan := range standing.Plans {
 		entry := DiagnosisPlan{StrategyPlanRef: plan.StrategyPlanRef, Replica: plan.Replica, Existence: plan.Existence}
@@ -562,4 +567,21 @@ func ParseDiagnosisCursor(raw string) (DiagnosisCursor, bool) {
 		return DiagnosisCursor{}, false
 	}
 	return DiagnosisCursor{Diagnosis: parts[1], Digest: parts[2], After: parts[3]}, true
+}
+
+// soleTenant is the one tenant every Plan runs under, or empty when there is
+// no Plan or more than one tenant.
+func soleTenant(plans []StrategyPlanStanding) string {
+	tenant := ""
+	for _, plan := range plans {
+		switch {
+		case plan.Tenant == "":
+			return ""
+		case tenant == "":
+			tenant = plan.Tenant
+		case plan.Tenant != tenant:
+			return ""
+		}
+	}
+	return tenant
 }
