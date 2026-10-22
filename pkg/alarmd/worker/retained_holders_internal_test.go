@@ -128,6 +128,11 @@ func TestTheRetainedPoolIsNamedBySlotAndWhatItHolds(t *testing.T) {
 	if live := len(coordinator.holders.live); live != 0 {
 		t.Fatalf("%d holds still registered after giving everything back", live)
 	}
+	// A released stream does not join again: its since is written once.
+	b.retainBytes(retainPhaseInput, 1)
+	if live := len(coordinator.holders.live); live != 0 {
+		t.Fatalf("a released stream joined the registry again (%d holds)", live)
+	}
 }
 
 // A Plan's frames kept for its write are named by the Slot running it, on

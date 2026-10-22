@@ -101,7 +101,11 @@ type streamedExecution struct {
 	retainedInputNow atomic.Uint64
 	// retainedNow is retainedByPhase again for a reader on another goroutine
 	// (RetainedHolders), and heldSince when this execution first retained;
-	// holding says it is in the coordinator's holder registry.
+	// holding says it has joined the coordinator's holder registry. holding
+	// is set once and never cleared, release included: a stream registers
+	// once, so heldSince is written once, before any reader can reach it.
+	// A stream retaining after its release would show as a reservation no
+	// hold names, not rewrite heldSince under a reader.
 	retainedNow [retainPhaseCount]atomic.Uint64
 	heldSince   time.Time
 	holding     bool
@@ -494,7 +498,6 @@ func (stream *streamedExecution) releaseProvisional() {
 		stream.retainedNow[phase].Store(0)
 	}
 	if stream.holding {
-		stream.holding = false
 		stream.coordinator.holders.remove(stream)
 	}
 }
