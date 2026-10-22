@@ -148,6 +148,7 @@ func (stream *streamedExecution) noDataRoundFor(
 		// Plan was built rather than what the deployment says right now -
 		// which is what lets a retried Slot reach the same answer.
 		TrackingHorizonSeconds: config.TrackingHorizonSeconds,
+		MaxGroups:              config.MaxGroups,
 		// The strategy's manual closes, read with the memory: an absence a
 		// user closed stops being tracked before this round judges it.
 		ManualCloses: manualClosesFor(due, snapshot.ManualCloses),
@@ -558,7 +559,7 @@ func (coordinator *SlotExecutionCoordinator) observeNoDataMemoryRefusal(
 ) {
 	facts := observability.NoDataMemoryRefusalFacts{Reason: string(item.ReasonCode)}
 	if size := item.Size; size != nil {
-		facts.Record, facts.Groups, facts.Limit = string(size.Record), size.Groups, size.Limit
+		facts.Record, facts.Groups, facts.Limit, facts.LimitSource = string(size.Record), size.Groups, size.Limit, size.LimitSource
 	}
 	coordinator.emitObservation(ctx, observability.Observation{
 		Component: observability.ComponentState, Stage: observability.StageNoDataMemoryRefused,

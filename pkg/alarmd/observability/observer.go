@@ -734,6 +734,9 @@ type NoDataMemoryRefusalFacts struct {
 	Record string
 	Groups int
 	Limit  int
+	// LimitSource is whose Limit is: platform (the deployment's) or strategy
+	// (the item's own max_groups).
+	LimitSource string
 }
 
 // NoDataCensusFacts is how many Plans this Slot had that detect no-data, before

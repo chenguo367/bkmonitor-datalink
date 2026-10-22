@@ -287,6 +287,9 @@ func openPhaseTwoCoreResources(ctx context.Context, cfg config.Config, recorder 
 			MinTTL: cfg.Redis.MinTTL.Duration(), MaxTTL: cfg.Redis.MaxTTL.Duration(),
 			RestartMargin: cfg.Redis.RestartMargin.Duration(),
 			ReadHoldBound: recoveryLimits.MaxReplayAge,
+			// The deployment's no-data group bound, zero for the default; an
+			// item's own max_groups travels on its mutations.
+			MaxNoDataGroups: cfg.NoDataMaxGroups(),
 			// Runtime State writes verify the owner lease inside Redis; without the
 			// resolver the store would fall back to unfenced batched writes.
 			FenceKeys: ownershipStore,
@@ -318,7 +321,8 @@ func openPhaseTwoCoreResources(ctx context.Context, cfg config.Config, recorder 
 				Prefix: cfg.Redis.StatePrefix, Router: closeRouter, MaxValueBytes: cfg.Limits.Codec.MaxEncodedBytes,
 				MaxItemsPerCall: cfg.Limits.Store.MaxKeysPerBatch,
 				MinTTL:          cfg.Redis.MinTTL.Duration(), MaxTTL: cfg.Redis.MaxTTL.Duration(),
-				RestartMargin: cfg.Redis.RestartMargin.Duration(),
+				RestartMargin:   cfg.Redis.RestartMargin.Duration(),
+				MaxNoDataGroups: cfg.NoDataMaxGroups(),
 			})
 			if err != nil {
 				return nil, err

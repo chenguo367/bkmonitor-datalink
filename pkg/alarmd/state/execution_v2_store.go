@@ -129,12 +129,14 @@ type gapEnvelope struct {
 	Scopes           []execution.GapScopeState      `json:"scopes,omitempty"`
 }
 
-// DefaultMaxNoDataGroups is the group guard a store takes when none is given.
+// DefaultMaxNoDataGroups is the group guard a store takes when none is given:
+// the deployment's phase_two.no_data.max_groups when it states one, else this.
 //
-// It is derived from what the container can hold rather than from what a Plan
-// is expected to have: the largest memory seen in production is a few thousand
-// groups, and this is two orders of magnitude above it, which is what makes it
-// a guard rather than something a Plan can reach by growing normally.
+// It is a set number, not one derived from what the container can hold: the
+// largest memory seen in production is a few thousand groups, and this is two
+// orders of magnitude above it, which is what makes it a guard rather than
+// something a Plan reaches by growing normally. An item that needs more, or
+// wants less, states its own no_data_config.max_groups.
 const DefaultMaxNoDataGroups = 100000
 
 func NewExecutionStore(options ExecutionStoreOptions) (*ExecutionStore, error) {

@@ -233,6 +233,9 @@ type StrategyNoDataConfig struct {
 	// TrackingHorizonSeconds is the effective horizon compilation froze into
 	// the Plan, the platform's or the item's own; zero is none.
 	TrackingHorizonSeconds int64 `json:"tracking_horizon_seconds,omitempty"`
+	// MaxGroups is the item's own bound on its no-data groups, frozen into
+	// the Plan; absent when the item states none and the deployment's applies.
+	MaxGroups uint32 `json:"max_groups,omitempty"`
 }
 
 // StrategyLevelConfig is one level: its definition, how its algorithms
@@ -327,7 +330,7 @@ func strategyPlanConfigOf(object controlplane.QueryGroupObject, plan controlplan
 	if plan.NoData != nil {
 		config.NoData = &StrategyNoDataConfig{Continuous: plan.NoData.Continuous, Level: plan.NoData.Level,
 			AggDimension:           append([]string(nil), plan.NoData.AggDimension...),
-			TrackingHorizonSeconds: plan.NoData.TrackingHorizonSeconds}
+			TrackingHorizonSeconds: plan.NoData.TrackingHorizonSeconds, MaxGroups: plan.NoData.MaxGroups}
 	}
 	for _, level := range plan.StrategyIR.Levels {
 		entry := StrategyLevelConfig{

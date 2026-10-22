@@ -1800,6 +1800,9 @@ type legacyNoDataConfig struct {
 	// deployment's. Absent means the deployment's applies; a stated zero is an
 	// opt-out and is not the same as absent.
 	TrackingHorizonSeconds json.RawMessage `json:"tracking_horizon_seconds"`
+	// MaxGroups is this item's own bound on its no-data groups, overriding the
+	// deployment's. Absent means the deployment's applies.
+	MaxGroups json.RawMessage `json:"max_groups"`
 }
 
 // legacyNoDataEnabled reads is_enabled the way the backend's truthiness test
@@ -1916,6 +1919,32 @@ func legacyNoDataHorizon(raw json.RawMessage) (int64, bool, error) {
 	return value, true, nil
 }
 
+// legacyNoDataMaxGroups reads an item's max_groups the way legacyNoDataHorizon
+// reads its horizon: absent or null is not stated; a positive whole number,
+// written as a JSON integer or as text holding one, up to the ceiling, is the
+// item's bound; anything else is refused by name for this item alone.
+func legacyNoDataMaxGroups(raw json.RawMessage) (uint32, bool, error) {
+	text := strings.TrimSpace(string(raw))
+	if text == "" || text == "null" {
+		return 0, false, nil
+	}
+	if quoted, err := strconv.Unquote(text); err == nil {
+		text = strings.TrimSpace(quoted)
+		if text == "" {
+			return 0, false, nil
+		}
+	}
+	value, err := strconv.ParseInt(text, 10, 64)
+	if err != nil || value <= 0 {
+		return 0, false, fmt.Errorf("no_data_config max_groups %s must be a positive whole number written as a JSON "+
+			"integer; remove the field to inherit the platform's", text)
+	}
+	if value > contract.MaxNoDataGroupsCeiling {
+		return 0, false, fmt.Errorf("no_data_config max_groups %s is past the ceiling %d", text, contract.MaxNoDataGroupsCeiling)
+	}
+	return uint32(value), true, nil
+}
+
 // defaultNoDataLevel is the backend's read-side default for a level the item
 // omits: mixins/nodata.py reads .get("level", NO_DATA_LEVEL). continuous has no
 // counterpart here on purpose - the same dict literal that defaults level
@@ -2018,6 +2047,13 @@ func frozenNoDataConfig(item legacyItem, policy NoDataPolicy) (*contract.NoDataC
 		// know whose it is.
 		config.TrackingHorizonSeconds = horizon
 		config.TrackingHorizonSource = contract.NoDataHorizonSourceStrategy
+	}
+	maxGroups, statedGroups, err := legacyNoDataMaxGroups(source.MaxGroups)
+	if err != nil {
+		return nil, fmt.Errorf("alarmd controlplane: item %d %w", item.ID, err)
+	}
+	if statedGroups {
+		config.MaxGroups = maxGroups
 	}
 	if err := config.Validate(); err != nil {
 		return nil, fmt.Errorf("alarmd controlplane: item %d no_data_config: %w", item.ID, err)

@@ -263,6 +263,12 @@ type PhaseTwoNoDataConfig struct {
 	// indefinitely"; it is withdrawn in favour of the contract, which gives
 	// every group a finite horizon by default.
 	TrackingHorizonSeconds *int64 `yaml:"tracking_horizon_seconds,omitempty"`
+	// MaxGroups is the deployment's bound on how many groups one Plan's no-data
+	// memory may hold; an item's own no_data_config.max_groups overrides it.
+	// Absent is the default, 100000. Over the bound a Plan's memory write is
+	// refused, named and counted, and that strategy detects no no-data until
+	// its groups fall back under it.
+	MaxGroups *int `yaml:"max_groups,omitempty"`
 }
 
 func (c PhaseTwoNoDataConfig) validate() error {
@@ -281,6 +287,10 @@ func (c PhaseTwoNoDataConfig) validate() error {
 		return fmt.Errorf("phase_two.no_data.tracking_horizon_seconds %d must be a positive number of "+
 			"seconds; omit the key to inherit the platform's horizon (the published dynamic value, else one day)",
 			*c.TrackingHorizonSeconds)
+	}
+	if c.MaxGroups != nil && (*c.MaxGroups < 1 || *c.MaxGroups > contract.MaxNoDataGroupsCeiling) {
+		return fmt.Errorf("phase_two.no_data.max_groups %d must be a positive number of groups up to %d; omit the key "+
+			"to take the default", *c.MaxGroups, contract.MaxNoDataGroupsCeiling)
 	}
 	if c.TrackingHorizonSeconds != nil && *c.TrackingHorizonSeconds > contract.MaxNoDataTrackingHorizonSeconds {
 		return fmt.Errorf("phase_two.no_data.tracking_horizon_seconds %d is past the largest horizon a lifetime "+

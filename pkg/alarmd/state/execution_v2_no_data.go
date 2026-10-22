@@ -285,7 +285,11 @@ func (store *ExecutionStore) applyOneNoData(
 	if err := mutation.ValidateDigest(); err != nil {
 		return reject(contract.ReasonStateCorrupt)
 	}
-	if int(mutation.GroupCount) > store.options.MaxNoDataGroups {
+	limit, source := store.options.MaxNoDataGroups, execution.NoDataLimitPlatform
+	if mutation.GroupLimit > 0 {
+		limit, source = int(mutation.GroupLimit), execution.NoDataLimitStrategy
+	}
+	if int(mutation.GroupCount) > limit {
 		// The one bound left on a memory, and it is a guard rather than a
 		// working limit: the representation has no size ceiling any more, so
 		// this only catches an expected set that has run away. It is refused
@@ -293,7 +297,7 @@ func (store *ExecutionStore) applyOneNoData(
 		// because a Plan whose memory is refused goes on evaluating and only
 		// stops remembering.
 		return tooLarge(execution.NoDataRecordGroups, execution.NoDataRecordSize{
-			Groups: int(mutation.GroupCount), Limit: store.options.MaxNoDataGroups,
+			Groups: int(mutation.GroupCount), Limit: limit, LimitSource: source,
 		})
 	}
 	key, err := PlanNoDataHashKeyV2(store.options.Prefix, mutation.Identity)

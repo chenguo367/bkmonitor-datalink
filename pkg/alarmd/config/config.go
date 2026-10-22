@@ -590,6 +590,15 @@ func (c Config) NoDataTrackingHorizonSeconds() (int64, bool) {
 	return *c.PhaseTwo.NoData.TrackingHorizonSeconds, true
 }
 
+// NoDataMaxGroups is the deployment's no-data group bound, zero when the
+// values state none and the store's default applies.
+func (c Config) NoDataMaxGroups() int {
+	if c.PhaseTwo.NoData.MaxGroups == nil {
+		return 0
+	}
+	return *c.PhaseTwo.NoData.MaxGroups
+}
+
 // PlatformSettingsLayer is the deployment's layer of the platform settings:
 // the platform_settings group, and the no-data horizon from its own leaf.
 func (c Config) PlatformSettingsLayer() platformsettings.Layer {

@@ -158,7 +158,16 @@ type NoDataRecordSize struct {
 	Record NoDataRecordKind
 	Groups int
 	Limit  int
+	// LimitSource is whose Limit is: NoDataLimitPlatform for the deployment's,
+	// NoDataLimitStrategy for the item's own max_groups.
+	LimitSource string
 }
+
+// The two sources a no-data group bound comes from.
+const (
+	NoDataLimitPlatform = "platform"
+	NoDataLimitStrategy = "strategy"
+)
 
 // NoDataRefusal is one shape a deterministic refusal takes, for the partition
 // to pre-create and for a reader to bound the family by.

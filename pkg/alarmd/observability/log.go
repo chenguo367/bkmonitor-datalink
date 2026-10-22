@@ -814,6 +814,7 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 				slog.String("no_data_memory_record", facts.Record),
 				slog.Int("no_data_memory_groups", facts.Groups),
 				slog.Int("no_data_memory_limit", facts.Limit),
+				slog.String("no_data_memory_limit_source", facts.LimitSource),
 			)
 		}
 	}

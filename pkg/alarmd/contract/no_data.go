@@ -32,6 +32,14 @@ const NoDataDimensionTag = "__NO_DATA_DIMENSION__"
 // name rather than let it wrap (retention proposal, section 6).
 const MaxNoDataTrackingHorizonSeconds = math.MaxInt64 / int64(time.Second)
 
+// MaxNoDataGroupsCeiling is the largest no-data group bound a deployment or an
+// item may state, ten times the default. Every reader of the setting - the
+// deployment's values, an item's own override and a frozen Plan's validation
+// - refuses a larger one by name. The bound is a guard against an expected set
+// that has run away, and past this the one Redis script a Plan's memory write
+// is would block the server for longer than a write may.
+const MaxNoDataGroupsCeiling = 1000000
+
 // NoDataPeriodFactField carries, on a synthetic no-data point, how many periods
 // the group has been without data. The output layer states it in the alert
 // text; nothing detects on it.
@@ -120,6 +128,14 @@ type NoDataConfigV1 struct {
 	// is a different object, as it should be: it will follow a different
 	// value next.
 	TrackingHorizonSource NoDataHorizonSource `json:"no_data_tracking_horizon_source,omitempty"`
+	// MaxGroups is this item's own bound on how many groups its no-data memory
+	// may hold, frozen into the Plan from the item's max_groups. Zero means
+	// the item states none and the deployment's bound applies, which is not
+	// frozen: it is a guard, and moving it must not recompile every Plan.
+	// omitempty, so an item without the override is byte-identical to before;
+	// the name carries no second "no_data": token for the reason the horizon's
+	// does not.
+	MaxGroups uint32 `json:"no_data_max_groups,omitempty"`
 }
 
 // NoDataHorizonSource is where a Plan's effective no-data horizon came from.
@@ -172,6 +188,9 @@ func (config *NoDataConfigV1) Validate() error {
 	}
 	if config.TrackingHorizonSource != "" && config.TrackingHorizonSeconds == 0 {
 		return fmt.Errorf("no_data_config tracking horizon source %q beside no horizon", config.TrackingHorizonSource)
+	}
+	if config.MaxGroups > MaxNoDataGroupsCeiling {
+		return fmt.Errorf("no_data_config max groups %d is past the ceiling %d", config.MaxGroups, MaxNoDataGroupsCeiling)
 	}
 	seen := make(map[string]struct{}, len(config.AggDimension))
 	deduplicated := config.AggDimension[:0]

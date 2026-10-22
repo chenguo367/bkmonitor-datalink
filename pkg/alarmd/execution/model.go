@@ -1744,6 +1744,11 @@ type PlanNoDataMutation struct {
 	// reading the groups - so the writer, which has the whole memory in hand,
 	// states the number the group bound is checked against.
 	GroupCount uint32
+	// GroupLimit is the Plan's own bound on GroupCount, from its item's
+	// max_groups, and zero for the deployment's. It is not part of the
+	// statement - the digest is of what is written, not of the bound it is
+	// written under - so it is carried beside it for the store to check.
+	GroupLimit uint32
 	Set        []NoDataGroupDelta
 	Del        []string
 }
