@@ -7,6 +7,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -355,8 +356,10 @@ func TestAShareChangeStartsTheKeyAgain(t *testing.T) {
 	// still refused after them would be refused below as well, and the case
 	// would pass without its group ever reaching Slot 160.
 	for refusal := 1; refusal <= 2; refusal++ {
-		if _, attempted, err := runner.RunOne(context.Background()); err == nil || !attempted {
-			t.Fatalf("Slot 100 refusal %d: attempted=%v error=%v, want the refusal", refusal, attempted, err)
+		// The share's own refusal, not any error: another would read as one.
+		var refused *shareRefusalError
+		if _, attempted, err := runner.RunOne(context.Background()); !errors.As(err, &refused) || !attempted {
+			t.Fatalf("Slot 100 refusal %d: attempted=%v error=%v, want the share's refusal", refusal, attempted, err)
 		}
 		advance()
 	}
