@@ -63,6 +63,11 @@ func overviewMeasured(value float64, unit string) OverviewNumber {
 func overviewUnmeasured(unit string) OverviewNumber { return OverviewNumber{Unit: unit} }
 
 type Overview struct {
+	// StoreOutages is this deployment's own store outages as the page's
+	// line: the windows Redis not answering cost, with the interval the
+	// line speaks for (StoreOutagesResponse, without the rows; outage.list
+	// lists them).
+	StoreOutages  StoreOutageSummary `json:"store_outages"`
 	GeneratedAt   time.Time          `json:"generated_at"`
 	MaxAgeSeconds int                `json:"max_age_seconds"`
 	Build         OverviewBuild      `json:"build"`

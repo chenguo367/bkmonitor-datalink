@@ -50,6 +50,9 @@ type StrategyViewActual struct {
 	// LateWaits is the late and overdue objects grouped by what they waited
 	// on (strategyLateWaits).
 	LateWaits []LateWaitGroup `json:"late_waits,omitempty"`
+	// StoreOutages is the strategy's windows lost to this deployment's own
+	// store outages, with the interval it speaks for.
+	StoreOutages StoreOutageSummary `json:"store_outages"`
 }
 
 // boardViewFacts is what the drawer reads of a strategy beyond its row.
@@ -85,8 +88,15 @@ func (index *boardIndex) view(strategyID string, maxAge time.Duration) (Strategy
 			continue
 		}
 		facts := index.views[strategyID]
+		outages, lost := index.outages[strategyID]
+		if !lost {
+			outages = index.noOutage
+		}
+		if outages.State == "" {
+			outages = unknownStoreOutage()
+		}
 		return StrategyViewActual{GeneratedAt: index.at, MaxAgeSeconds: int(maxAge / time.Second), Row: row,
-			Objects: facts.objects, Check: facts.check, LateWaits: facts.lateWaits}, true
+			Objects: facts.objects, Check: facts.check, LateWaits: facts.lateWaits, StoreOutages: outages}, true
 	}
 	return StrategyViewActual{}, false
 }
@@ -341,8 +351,11 @@ type StrategyView struct {
 	Conclusion    BoardRow          `json:"conclusion"`
 	Expected      ExpectedDetection `json:"expected"`
 	Actual        ActualDetection   `json:"actual"`
-	Check         Check             `json:"check,omitempty"`
-	KBAnchor      string            `json:"kb_anchor"`
+	// StoreOutages is the windows this strategy lost to this deployment's
+	// own store outages (StoreOutageSummary).
+	StoreOutages StoreOutageSummary `json:"store_outages"`
+	Check        Check              `json:"check,omitempty"`
+	KBAnchor     string             `json:"kb_anchor"`
 }
 
 // ComposeStrategyView joins the diagnosis's view of a strategy with its
@@ -352,5 +365,5 @@ func ComposeStrategyView(actual StrategyViewActual, standing *StrategyStanding) 
 		Expected: ExpectedOf(standing),
 		Actual: ActualDetection{Punctuality: actual.Row.Punctuality, PunctualityWord: PunctualityWords[actual.Row.Punctuality],
 			Objects: actual.Objects, OpenAlerts: actual.Row.OpenAlerts, LateWaits: actual.LateWaits},
-		Check: actual.Check, KBAnchor: actual.Row.KBAnchor}
+		StoreOutages: actual.StoreOutages, Check: actual.Check, KBAnchor: actual.Row.KBAnchor}
 }

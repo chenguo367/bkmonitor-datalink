@@ -273,6 +273,9 @@ func openProductionPhaseTwoBundleAssembly(
 	fleetTracker.SetAwaitingViewBound(cfg.PhaseTwo.Ownership.ControlLeaderTTL.Duration() +
 		cfg.PhaseTwo.Control.RefreshInterval.Duration() + cfg.PhaseTwo.Ownership.LeaseRenewInterval.Duration() +
 		cfg.PhaseTwo.Control.ReconcileInterval.Duration())
+	// A span of Slots given up is attributed to a store outage seen up to one
+	// replay window before it: how long after its round a Slot is given up.
+	fleetTracker.SetSkipDependencyWindow(cfg.PhaseTwo.Scheduler.MaxReplayAge.Duration())
 	recorder.SetRoundMemorySource(fleetTracker.RoundMemory)
 	var observer observability.Observer = fleetTracker
 	targetFlow, err := observability.NewTargetFlow(logger)

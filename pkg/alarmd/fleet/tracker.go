@@ -682,6 +682,11 @@ type queryGroupState struct {
 	// correct at zero and only ever rises.
 	sawSomethingWrong bool
 	lastFailure       *FailureRef
+	// lastStoreFailure is the last of this deployment's own store failures
+	// (StoreOutageCodes) a round of this object reported, failed or
+	// retrying: what a span of Slots given up after it is attributed to
+	// (SkippedSpan.DependencyReason). Kept in memory only.
+	lastStoreFailure *storeFailure
 	// lastFailureSlot is the Slot the last failure was observed on, so a
 	// skip can carry the failure that preceded it only when it was this
 	// Slot's -- lastFailure itself is never cleared and would otherwise
@@ -948,6 +953,10 @@ type Tracker struct {
 	blockedRounds  int
 	// awaitingViewBound is SetAwaitingViewBound's.
 	awaitingViewBound time.Duration
+	// skipDependencyWindow is how far before a span's first skip a store
+	// failure of the same object attributes the span to it
+	// (SetSkipDependencyWindow).
+	skipDependencyWindow time.Duration
 	// emptyEveryRoundAfter is how long an object that never returned records
 	// must have completed every round empty before NoData lists it as such;
 	// noDataAfter how long one that did must have gone without them.
@@ -1018,11 +1027,36 @@ func NewTracker(next observability.Observer, replica string, now func() time.Tim
 		emptyEveryRoundAfter: DefaultEmptyEveryRoundAfter,
 		noDataAfter:          DefaultNoDataAfter,
 		maxTracked:           DefaultTrackedQueryGroups,
+		skipDependencyWindow: DefaultSkipDependencyWindow,
 		now:                  now,
 		startedAt:            now(),
 		groups:               make(map[string]*queryGroupState),
 		rejections:           make(map[string]KeptRejection),
 	}
+}
+
+// DefaultSkipDependencyWindow is how far before a span's first skip a store
+// failure attributes the span to a store outage, until the runtime sets it:
+// the replay window, past which a Slot still undone is given up.
+const DefaultSkipDependencyWindow = 10 * time.Minute
+
+// SetSkipDependencyWindow sets how far before a span's first skip a store
+// failure of the same object attributes the span to it: the deployment's
+// replay window (PhaseTwo.Scheduler.MaxReplayAge), since a Slot is given up
+// that long after its round could no longer finish. Zero or less keeps
+// DefaultSkipDependencyWindow.
+func (tracker *Tracker) SetSkipDependencyWindow(window time.Duration) {
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	if window > 0 {
+		tracker.skipDependencyWindow = window
+	}
+}
+
+// storeFailure is one store failure a round of an object reported.
+type storeFailure struct {
+	code string
+	at   time.Time
 }
 
 // SetAwaitingViewBound is how long a Query Group may wait for its Worker's
@@ -1177,6 +1211,12 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	at := tracker.now()
 	if state.firstSeenAt.IsZero() {
 		state.firstSeenAt = at
+	}
+	// A round that failed, or is retried, on this deployment's own store:
+	// remembered for the span its Slots behind it may be given up in.
+	if observation.Stage == observability.StageSlotCompleted && storeOutageCode(string(observation.ReasonCode)) &&
+		(observation.Result == observability.Result(observability.ResultFailed) || observation.Result == observability.ResultRetrying) {
+		state.lastStoreFailure = &storeFailure{code: string(observation.ReasonCode), at: at}
 	}
 	if shareSkip != nil {
 		state.noteShareRefusal(shareSkip.Share, shareSkip.FirstSlot, shareSkip.LastSlot, shareSkip.SlotCount, at)
@@ -2451,7 +2491,7 @@ func (tracker *Tracker) extendSkipSpan(state *queryGroupState, first, last int64
 	continues := span != nil && state.skipSpanOpen && (span.Kind == SkipKindExpiredReplay) == expired &&
 		first > span.LastSlot
 	if !continues {
-		span = &SkippedSpan{FirstSlot: first, Replica: tracker.replica, FirstSeenAt: state.firstSeenAt}
+		span = &SkippedSpan{FirstSlot: first, Replica: tracker.replica, FirstSeenAt: state.firstSeenAt, FirstAt: at}
 		if expired {
 			span.Kind, span.Reason = SkipKindExpiredReplay, snapshotUnavailableCompletion
 		}
@@ -2461,6 +2501,14 @@ func (tracker *Tracker) extendSkipSpan(state *queryGroupState, first, last int64
 	span.Slots += slots
 	span.At = at
 	state.skipSpanOpen = true
+	// The store outage the Slots were given up in: a store failure of this
+	// object from the window before the span's first skip up to this skip
+	// (the failure is the last one seen, so never after the skip).
+	if failure := state.lastStoreFailure; failure != nil &&
+		!failure.at.Before(span.FirstAt.Add(-tracker.skipDependencyWindow)) {
+		failureAt := failure.at
+		span.DependencyReason, span.DependencyAt = failure.code, &failureAt
+	}
 }
 
 // noteAnswerTruncation keeps whether the object's latest answered query may

@@ -4408,6 +4408,22 @@ type SkippedSpan struct {
 	// RewrittenAt is when the Control Leader rewrote the timeline whose loss
 	// this span is (a SCHEDULE_REPAIRED record); nil on every other span.
 	RewrittenAt *time.Time `json:"rewritten_at,omitempty"`
+	// FirstAt is when the span's first Slot was given up; zero on a record
+	// from a build before the field.
+	FirstAt time.Time `json:"first_at,omitempty"`
+	// DependencyReason is the last of this deployment's own store failures
+	// (StoreOutageCodes) the same object's rounds reported, failed or
+	// retrying, from SkipDependencyWindow before FirstAt up to the span's
+	// last skip, and DependencyAt when it was reported: the store outage the
+	// span's Slots were given up in. The Slots given up in an outage are
+	// usually not the ones that failed - the Slot at the head retries and
+	// the ones behind it fall past the replay bound - which is why Reason,
+	// the Slot's own last query failure, does not carry it; the two stand
+	// side by side. Empty when no such failure was seen in that window, on
+	// a record from a build before the field, and for a failure seen before
+	// this replica's process started: the failure is kept in memory only.
+	DependencyReason string     `json:"dependency_reason,omitempty"`
+	DependencyAt     *time.Time `json:"dependency_at,omitempty"`
 }
 
 // ExecutionEvidence is one completion's reading of an earlier attempt, as

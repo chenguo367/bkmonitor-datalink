@@ -193,6 +193,19 @@ func NativeOperationsWith(handler http.Handler, options NativeOptions) []Operati
 			}
 			return "/api/windows", q
 		}),
+		makeOp("outage.list", "列出本部署自己的 Redis 存储不可用造成的漏检：每次一行（“Redis 不可用 T1–T2：N 个对象、M 条策略丢了这些窗口”），下列每个对象被放弃的那段 Slot（策略、首尾 Slot、Slot 数、归因的存储失败 dependency_reason 及其时刻、该 Slot 自己最后一次查询失败 reason）。"+
+			"归因规则：一个对象被放弃的跨度，若同一对象的轮次在跨度首次放弃前一个回放窗口（tolerance_seconds）到这次放弃之间报过 codes 里的存储失败（失败或重试），就归到这次存储不可用；时间相距不超过一个回放窗口的跨度合成一次。"+
+			"没有就是 state=none_seen，只表示 coverage.since 以来没见到，不是从来没有：存储失败只在副本内存里，副本重启前的看不到，更早的构建不归因，一个对象只保留最近一段跨度；没有副本给出启动时刻时答 coverage_unknown。"+
+			"不新增存储；rows 超出范围按名字拒绝（invalid_rows）。", map[string]Field{
+			"rows":        integer("每次停机下列出的对象行上限；默认50。", 1, int64(fleet.StoreOutageMaxRows)),
+			"strategy_id": text("只看这条策略的对象。", "用户给定或 strategy.board 行"),
+		}, nil, fleet.StoreOutagesResponse{}, func(p Params) (string, url.Values) {
+			q := url.Values{"rows": {strconv.Itoa(p.Int("rows", fleet.StoreOutageDefaultRows))}}
+			if value := p.String("strategy_id"); value != "" {
+				q.Set("strategy_id", value)
+			}
+			return "/api/outages", q
+		}),
 		makeOp("absent.list", "列出 leader 最近一轮缺失关闭的候选策略：link 名册成员数、本轮决定与时刻、最近一次关闭找到的告警归属（自己/别人/不明）、身份来源与业务和版本、源里现在有没有它、本任期发出关闭的次数与首次时刻（sends、first_sent_at）。"+
 			"发出不等于关掉：execution.active_after_send 是已发出过关闭之后、这次读 link reconcile 仍列为活动的本部署告警数，大于 0 就是 link 没有关掉已发给它的关闭。"+
 			"表只记循环每轮已做的事，读页面不调 link；每页对快照不列的行做一次文档是否存在的检查。"+

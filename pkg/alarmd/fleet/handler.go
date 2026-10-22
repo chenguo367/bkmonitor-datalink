@@ -979,6 +979,9 @@ func NewHandler(
 	mux.HandleFunc("/api/objects/", func(response http.ResponseWriter, request *http.Request) {
 		objectDetail(response, request, service, now, stallAfter, diagnostics)
 	})
+	mux.HandleFunc("/api/outages", func(response http.ResponseWriter, request *http.Request) {
+		storeOutages(response, request, service, now, stallAfter)
+	})
 	if windows != nil {
 		mux.HandleFunc("/api/windows", func(response http.ResponseWriter, request *http.Request) {
 			observationWindows(response, request, windows, now)
@@ -1001,6 +1004,7 @@ func NewHandler(
 		health := healthOf(&view, part, at)
 		overview := overviewOf(health, running, known, at)
 		overview.CauseReasons = overviewCauseReasonsOf(part)
+		overview.StoreOutages = StoreOutagesOverview(&view, part, at, stallAfter)
 		// The cache computes one at a time, so the readings it keeps are
 		// touched by one computation at once.
 		flows.apply(&overview, health, at)

@@ -636,6 +636,10 @@ func countDiagnosis(counted *summaryCache, entry *diagnosisEntry, replica string
 	summary.Timing.RowsMillis = time.Since(started).Milliseconds()
 	counted.at, counted.body = at, &summary
 	counted.board = buildBoard(entry.id, at, entry.digest, entry.universe, row, lines, due, census, open, waits)
+	if entry.view != nil {
+		counted.board.outages = strategyStoreOutages(entry.view, at, 0)
+		counted.board.noOutage = noStrategyStoreOutage(entry.view, at)
+	}
 	return &summary
 }
 

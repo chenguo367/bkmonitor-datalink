@@ -10,6 +10,7 @@
 package fleet
 
 import (
+	"sort"
 	"strings"
 
 	// Aliased: a test helper in this package is named execution.
@@ -610,12 +611,57 @@ func windowCheck(reason string, coverage *HistoryCoverage) (check Check, under b
 
 // verdict is what a code decides on its own: the check an object carrying it
 // is under, or that the code is a normal value and the object is under none.
+// A DEPENDENCY_DOWN code also says whether it is this deployment's own
+// Redis-backed stores not answering - State, gaps, progress, the control
+// store's timeline, snapshots and activations - or another dependency
+// (Kafka, the output client, the CMDB caches, the view, the control plane's
+// sets). Every one says which (dependencyStore); the store's are the codes a
+// span of Slots given up is attributed to a store outage by (StoreOutageCodes).
 type verdict struct {
 	check  Check
 	normal bool
+	store  dependencyStore
 }
 
+// dependencyStore is a DEPENDENCY_DOWN code's answer to "is it this
+// deployment's own store": undecided on every other code.
+type dependencyStore uint8
+
+const (
+	storeUndecided dependencyStore = iota
+	storeOwn
+	storeOther
+)
+
 func lands(check Check) verdict { return verdict{check: check} }
+
+// storeDown is a DEPENDENCY_DOWN code that is this deployment's Redis-backed
+// stores not answering, or not keeping what they were given.
+func storeDown() verdict { return verdict{check: CheckDependencyDown, store: storeOwn} }
+
+// otherDown is a DEPENDENCY_DOWN code of any other dependency.
+func otherDown() verdict { return verdict{check: CheckDependencyDown, store: storeOther} }
+
+// StoreOutageCodes is every reason code that is this deployment's own
+// Redis-backed stores not answering, sorted: the closed set a skipped span is
+// attributed to a store outage by. It is read from codeChecks, the one place
+// a code's line is decided.
+func StoreOutageCodes() []string {
+	codes := make([]string, 0, 16)
+	for code, decided := range codeChecks {
+		if decided.store == storeOwn {
+			codes = append(codes, code)
+		}
+	}
+	sort.Strings(codes)
+	return codes
+}
+
+// storeOutageCode says a reason code is one of StoreOutageCodes.
+func storeOutageCode(code string) bool {
+	decided, known := codeChecks[code]
+	return known && decided.store == storeOwn
+}
 
 var isNormal = verdict{normal: true}
 
@@ -647,7 +693,7 @@ var codeChecks = map[string]verdict{
 
 	// This deployment's own stores and infrastructure did not answer. Retrying
 	// may help, and nobody outside can help.
-	"REDIS_UNAVAILABLE": lands(CheckDependencyDown),
+	"REDIS_UNAVAILABLE": storeDown(),
 	// Not DEPENDENCY_DOWN: this deployment asked for more than it left time to
 	// receive, and the fix is the size of the read rather than the health of
 	// the store. Landing it with the dependencies is what made 163 of these in
@@ -667,24 +713,24 @@ var codeChecks = map[string]verdict{
 	// (FiledCauses). The strategy's line, not abandoned detection - waiting
 	// or adding replicas does not make one object's Slot fit its share.
 	"RESOURCE_SHARE_EXCEEDED": lands(CheckPlanUnevaluable),
-	"KAFKA_UNAVAILABLE":       lands(CheckDependencyDown),
-	"STATE_WRITE_RETRYABLE":   lands(CheckDependencyDown),
-	"OUTPUT_ACK_UNKNOWN":      lands(CheckDependencyDown),
-	"SNAPSHOT_UNAVAILABLE":    lands(CheckDependencyDown),
+	"KAFKA_UNAVAILABLE":       otherDown(),
+	"STATE_WRITE_RETRYABLE":   storeDown(),
+	"OUTPUT_ACK_UNKNOWN":      otherDown(),
+	"SNAPSHOT_UNAVAILABLE":    otherDown(),
 	// A target read from the CMDB caches: in part is the caches as they
 	// stand - members dropped, nodes missing - and the round runs on what
 	// resolved; not at all is the caches unreadable. Target lines reach no
 	// round row, so these record the decision.
 	"TARGET_RESOLUTION_INCOMPLETE":  isNormal,
-	"TARGET_RESOLUTION_UNAVAILABLE": lands(CheckDependencyDown),
-	"SNAPSHOT_RETRY_PENDING":        lands(CheckDependencyDown),
-	"ACTIVATION_READ_FAILED":        lands(CheckDependencyDown),
+	"TARGET_RESOLUTION_UNAVAILABLE": otherDown(),
+	"SNAPSHOT_RETRY_PENDING":        storeDown(),
+	"ACTIVATION_READ_FAILED":        storeDown(),
 	// The store answered and the activation record was not in it. That is the
 	// infrastructure losing state rather than refusing a read, but it lands
 	// here for the same reason the rest do: nobody outside this deployment can
 	// help, and the question it sends the reader to is whether this
 	// deployment's store is keeping what it is given.
-	"ACTIVATION_MISSING": lands(CheckDependencyDown),
+	"ACTIVATION_MISSING": storeDown(),
 
 	// This deployment refused its own output before a broker was asked: the
 	// converter would not write the decision, or the Kafka client would not
@@ -698,7 +744,7 @@ var codeChecks = map[string]verdict{
 	// about to end: one round of it is the mechanism working at a handover
 	// or a renewal hiccup; rounds of it mean the lease is not being renewed,
 	// which is the store or the leader, not the content.
-	"OUTPUT_LEASE_EXPIRING": lands(CheckDependencyDown),
+	"OUTPUT_LEASE_EXPIRING": otherDown(),
 
 	// What this deployment persisted cannot be read back as written. Retrying
 	// reads the same bytes.
@@ -765,7 +811,7 @@ var codeChecks = map[string]verdict{
 	"GAP_APPLY_STALE_VERSION": lands(CheckDefect),
 	// The write did not land at all. That is the store not answering, which is
 	// the dependency's line, beside STATE_WRITE_RETRYABLE above.
-	"GAP_WRITE_RETRYABLE": lands(CheckDependencyDown),
+	"GAP_WRITE_RETRYABLE": storeDown(),
 	// The ownership store refused this deployment's own worker: its fence
 	// went stale, the assignment names another worker, another owner holds
 	// the lease, or the content scope moved under a fenced write. Each is a
@@ -803,18 +849,18 @@ var codeChecks = map[string]verdict{
 	// found twelve objects whose strategies had been retired days earlier and
 	// were still being retried every thirty seconds: the disposition was known
 	// inside the system and never reached the runner.
-	"BLOCKED_EXACT_SET_UNAVAILABLE": lands(CheckDependencyDown),
+	"BLOCKED_EXACT_SET_UNAVAILABLE": otherDown(),
 	// A timeline this build cannot decode is a defect - corrupt bytes, or a
 	// release whose content the previous build cannot read - not a dependency
 	// that is down.
 	"SCHEDULE_UNREADABLE": lands(CheckDefect),
 	// A timeline whose key the store lost: the store did not have what the
 	// round needed, as the span the reopen records is filed under it.
-	"SCHEDULE_MISSING":        lands(CheckDependencyDown),
-	"SLOT_SOURCE_RETRY":       lands(CheckDependencyDown),
-	"VIEW_NOT_EXECUTABLE":     lands(CheckDependencyDown),
-	"PROGRESS_BEGIN_FAILED":   lands(CheckDependencyDown),
-	"PROGRESS_BEGIN_REJECTED": lands(CheckDependencyDown),
+	"SCHEDULE_MISSING":        storeDown(),
+	"SLOT_SOURCE_RETRY":       storeDown(),
+	"VIEW_NOT_EXECUTABLE":     otherDown(),
+	"PROGRESS_BEGIN_FAILED":   storeDown(),
+	"PROGRESS_BEGIN_REJECTED": otherDown(),
 
 	// Budgets this deployment allocates itself, at run time: work it gave up on
 	// because of its own limits. The next step is capacity, the same as for a
@@ -997,7 +1043,7 @@ func init() {
 			codeChecks[outcome] = lands(CheckDefect)
 			continue
 		}
-		codeChecks[outcome] = lands(CheckDependencyDown)
+		codeChecks[outcome] = otherDown()
 	}
 	// The result contract refused what this deployment produced. An invariant
 	// this deployment violated is its own, and it repeats until fixed.

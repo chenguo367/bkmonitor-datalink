@@ -237,6 +237,10 @@ type boardIndex struct {
 	atLeast     string
 	// views is each strategy's drawer facts beyond its row.
 	views map[string]boardViewFacts
+	// outages is each strategy's windows lost to a store outage, and
+	// noOutage the answer for one that lost none.
+	outages  map[string]StoreOutageSummary
+	noOutage StoreOutageSummary
 }
 
 // boardAtLeastReason is the page's sentence for a lower bound.
