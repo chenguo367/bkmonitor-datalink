@@ -73,12 +73,22 @@ type Record struct {
 	EarlierFloorMillis   *int64 `json:"earlier_floor_ms,omitempty"`
 	EarlierFloorAtMillis int64  `json:"earlier_floor_at_ms,omitempty"`
 	EarlierDifferents    int    `json:"earlier_differents,omitempty"`
+	// EarlierFloorRetests is how many shadow probes of the floor have failed
+	// since it took its value (FloorProbe): each doubles how long the floor
+	// stands before the next. Zero whenever the floor changes value or is
+	// cleared.
+	EarlierFloorRetests int `json:"earlier_floor_retests,omitempty"`
 	// LoweredFromMillis is the hold the last lowering came from, while the
 	// group stays Lowered: a raise right after it goes back there at least.
 	LoweredFromMillis   int64  `json:"lowered_from_ms,omitempty"`
 	RaisedAfterLowering uint64 `json:"raised_after_lowering,omitempty"`
 	Lowered             bool   `json:"lowered,omitempty"`
-	Noise               uint64 `json:"noise,omitempty"`
+	// LoweredVerified marks a lowering to the floor a shadow probe read
+	// clean round by round before it was made (FloorProbeResult): its rounds
+	// are not read again in probation, the probe having read the same rounds
+	// before. Cleared by any other lowering and by a raise.
+	LoweredVerified bool   `json:"lowered_verified,omitempty"`
+	Noise           uint64 `json:"noise,omitempty"`
 	// AtLimit says the latest arrival reading (an observed arrival, or the
 	// seed) wanted a hold past LimitMillis. It is written only there, so it
 	// still says so after trials have lowered the hold below the limit: read
@@ -121,7 +131,7 @@ func Decode(raw []byte) (Record, error) {
 	if !inRange(record.HoldMillis) || !inRange(record.PreviousHoldMillis) || record.SinceSlot <= 0 ||
 		record.PreviousSinceSlot < 0 || record.PreviousSinceSlot > record.SinceSlot ||
 		(record.PendingHoldMillis != nil && !inRange(*record.PendingHoldMillis)) ||
-		(record.EarlierFloorMillis != nil && *record.EarlierFloorMillis < 0) || record.EarlierFloorAtMillis < 0 || record.EarlierDifferents < 0 || record.LoweredFromMillis < 0 ||
+		(record.EarlierFloorMillis != nil && *record.EarlierFloorMillis < 0) || record.EarlierFloorAtMillis < 0 || record.EarlierDifferents < 0 || record.EarlierFloorRetests < 0 || record.LoweredFromMillis < 0 ||
 		record.ArrivalAgeMillis < 0 || record.MaxEarlyIntervalMillis < 0 ||
 		record.EarlierMatches < 0 || record.EarlierMatches > EarlierMatchesRequired || !inRange(record.LimitMillis) ||
 		record.SegmentStart < 0 || record.QueryDurationMillis < 0 || record.QueryDurationAtMillis < 0 {

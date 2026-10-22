@@ -112,6 +112,9 @@ type Stats struct {
 	// EarlierSkipped is the earlier-read trials not run, by why
 	// (EarlierSkipReasons).
 	EarlierSkipped map[string]uint64
+	// FloorProbes is the shadow probes whose end this controller took, by
+	// what it made of them (FloorProbeOutcomes).
+	FloorProbes map[string]uint64
 }
 
 // Why an earlier-read trial was not run, closed. at_limit: the group is held
@@ -287,6 +290,9 @@ type Controller struct {
 	// earlierSkipped is the earlier-read trials not run, by why
 	// (EarlierSkipReasons).
 	earlierSkipped map[string]uint64
+	// floorProbes is the shadow probes taken, by outcome
+	// (FloorProbeOutcomes).
+	floorProbes map[string]uint64
 	// durationWrites is the records written for a query duration, by why
 	// (QueryDurationWriteReasons).
 	durationWrites map[string]uint64
@@ -302,7 +308,7 @@ func NewController(options Options) (*Controller, error) {
 	}
 	return &Controller{options: options, groups: make(map[execution.QueryGroupIdentity]*entry),
 		predecessors: make(map[string]uint64), clamped: make(map[string]uint64), seeds: make(map[string]uint64),
-		durationWrites: make(map[string]uint64), earlierSkipped: make(map[string]uint64)}, nil
+		durationWrites: make(map[string]uint64), earlierSkipped: make(map[string]uint64), floorProbes: make(map[string]uint64)}, nil
 }
 
 // Stats copies the counts.
@@ -326,6 +332,10 @@ func (controller *Controller) Stats() Stats {
 	stats.EarlierSkipped = make(map[string]uint64, len(EarlierSkipReasons))
 	for _, reason := range EarlierSkipReasons {
 		stats.EarlierSkipped[reason] = controller.earlierSkipped[reason]
+	}
+	stats.FloorProbes = make(map[string]uint64, len(FloorProbeOutcomes))
+	for _, outcome := range FloorProbeOutcomes {
+		stats.FloorProbes[outcome] = controller.floorProbes[outcome]
 	}
 	stats.QueryDurationWrites = make(map[string]uint64, len(QueryDurationWriteReasons))
 	for _, reason := range QueryDurationWriteReasons {
@@ -498,14 +508,20 @@ func (record Record) AtLimitHeld(now int64) bool {
 }
 
 // clearFloor forgets the search below the hold: the hold moved up or was
-// set anew, so what was too early under the old one says nothing now.
+// set anew, so what was too early under the old one says nothing now, nor
+// do the probes of it that failed.
 func clearFloor(record *Record) {
 	record.EarlierFloorMillis, record.EarlierFloorAtMillis, record.EarlierDifferents = nil, 0, 0
+	record.EarlierFloorRetests = 0
 }
 
 // setFloor makes floor the search's floor, learned at now, and starts the
-// different trials in a row over: they count at the candidate above it.
+// different trials in a row over: they count at the candidate above it. A
+// floor that takes another value starts its probes' standing over too.
 func setFloor(record *Record, floor, now int64) {
+	if record.EarlierFloorMillis == nil || *record.EarlierFloorMillis != floor {
+		record.EarlierFloorRetests = 0
+	}
 	record.EarlierFloorMillis, record.EarlierFloorAtMillis, record.EarlierDifferents = &floor, now, 0
 }
 
@@ -546,14 +562,16 @@ func (controller *Controller) ReadHoldAt(qg execution.QueryGroupIdentity, at exe
 
 // LastLowering is the Slot the group's frozen hold last changed at, while
 // that change was a lowering - each step of a lowering a step per Slot among
-// them - and false when it was not, or the record is not loaded. A process
+// them - and false when it was not, when a shadow probe verified it
+// (LoweredVerified), or the record is not loaded. A process
 // that takes the group over reads it from the record the old owner left, so
 // the probation after a lowering outlives the process it began in.
 func (controller *Controller) LastLowering(qg execution.QueryGroupIdentity) (execution.EvaluationTime, bool) {
 	state := controller.group(qg)
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if !state.loaded || state.record.SinceSlot <= 0 || state.record.PreviousHoldMillis <= state.record.HoldMillis {
+	if !state.loaded || state.record.SinceSlot <= 0 || state.record.PreviousHoldMillis <= state.record.HoldMillis ||
+		state.record.LoweredVerified {
 		return 0, false
 	}
 	return state.record.SinceSlot, true
@@ -1335,7 +1353,7 @@ func (controller *Controller) Observe(ctx context.Context, evidence Evidence) er
 			next.PendingHoldMillis = &hold
 			if next.Lowered {
 				next.RaisedAfterLowering++
-				next.Lowered = false
+				next.Lowered, next.LoweredVerified = false, false
 			}
 		}
 	}
@@ -1379,7 +1397,7 @@ func (controller *Controller) EarlierRead(ctx context.Context, evidence EarlierE
 		if next.QuietSinceMillis > 0 && now-next.QuietSinceMillis >= quiet && next.EarlierMatches >= EarlierMatchesRequired {
 			next.LoweredFromMillis = hold
 			next.PendingHoldMillis = &candidate
-			next.Lowered, next.EarlierMatches, next.QuietSinceMillis = true, 0, now
+			next.Lowered, next.LoweredVerified, next.EarlierMatches, next.QuietSinceMillis = true, false, 0, now
 			next.ArrivalAgeMillis = state.spec.Delay.Milliseconds() + state.spec.SettlingWait.Milliseconds() + candidate
 			next.ArrivalAgeSeed = ""
 		}

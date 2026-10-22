@@ -95,9 +95,28 @@ func (engine *Engine) lastLowering(query Query) *execution.EvaluationTime {
 	return nil
 }
 
+// loweringVerified asks, outside the engine's lock, whether the lowering a
+// Query Group's round is frozen under was verified by a shadow probe: only
+// for a round frozen lower than the one before it here, the only round it
+// decides anything for.
+func (engine *Engine) loweringVerified(query Query) bool {
+	if engine.options.LoweringVerified == nil || query.Secondary {
+		return false
+	}
+	qg := query.Contract.Slot.QueryGroup
+	engine.mu.Lock()
+	state := engine.groups[qg]
+	lower := state != nil && state.holdSeen && query.Contract.ReadHoldMillis < state.lastHold
+	engine.mu.Unlock()
+	return lower && engine.options.LoweringVerified(qg)
+}
+
 // noteRoundHoldLocked takes the hold a Query Group's round was frozen with. A
 // hold lower than the round before's starts its probation again, a lowering
-// a step at a time among them; a higher one ends it: the hold went back past
+// a step at a time among them, unless the lowering was verified - its floor
+// read clean round by round by a shadow probe before it was made
+// (floor_probe.go), which read the rounds probation would - which ends any
+// probation of the hold before; a higher one ends it: the hold went back past
 // the data, which is what probation watches for.
 //
 // The first round a process sees of a group - after a restart, or taken over
@@ -109,7 +128,7 @@ func (engine *Engine) lastLowering(query Query) *execution.EvaluationTime {
 // rounds the old owner skipped for permits, rereads it had in flight - and a
 // round not read again is no evidence. With its schedule's next Slot
 // unknown, the lowering is taken as recent.
-func (engine *Engine) noteRoundHoldLocked(state *group, query Query, lowering *execution.EvaluationTime) {
+func (engine *Engine) noteRoundHoldLocked(state *group, query Query, lowering *execution.EvaluationTime, verified bool) {
 	hold, slot := query.Contract.ReadHoldMillis, query.Contract.Slot.EvaluationTime
 	switch {
 	case !state.holdSeen:
@@ -123,6 +142,10 @@ func (engine *Engine) noteRoundHoldLocked(state *group, query Query, lowering *e
 		if since < engine.probationRounds() {
 			state.probation = &probationState{}
 		}
+	case hold < state.lastHold && verified:
+		// Read round by round at this hold before it was lowered to: a
+		// probation of the hold before it watches a hold no round has now.
+		state.probation = nil
 	case hold < state.lastHold:
 		state.probation = &probationState{}
 	case hold > state.lastHold:

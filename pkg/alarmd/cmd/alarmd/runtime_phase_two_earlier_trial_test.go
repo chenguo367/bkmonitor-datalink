@@ -11,11 +11,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
 )
 
@@ -85,6 +88,14 @@ func TestAHeldSlotReservesItsEarlierReadTrialAtItsFirstAttempt(t *testing.T) {
 	}
 }
 
+// leasesOutliveTheRun gives the fixture's registration, Control Leader and Query Group leases a week: a run of
+// hours on the fixture's clock passes in seconds of the wall clock its renewals run on, and a lease that ran out on
+// the fixture's clock leaves every Slot after it refused (heldTrialRun fails on that rather than run on).
+func leasesOutliveTheRun(cfg *config.Config) {
+	week := config.Duration(7 * 24 * time.Hour)
+	cfg.PhaseTwo.Worker.RegistrationTTL, cfg.PhaseTwo.Ownership.ControlLeaderTTL, cfg.PhaseTwo.Ownership.LeaseTTL = week, week, week
+}
+
 // heldTrialRun drives a held group's Slots through the production Worker, the clock taken to each Slot's first
 // attempt as the dispatcher wakes it and stepped between, the lookback stepped as its loop steps it, for up to
 // span or until done says so. The group's data is measured landing arrival late, which raises its hold. It
@@ -137,6 +148,10 @@ func heldTrialRun(t *testing.T, f *cutoverStallFixture, arrival, span time.Durat
 		}
 		if next := f.runner.NextReadyAt(); !next.After(f.now()) {
 			result, _, err := f.runner.RunOne(ctx)
+			if errors.Is(err, ownership.ErrStaleFence) {
+				t.Fatalf("RunOne at %s: the group's lease ran out on the fixture's clock, and no Slot after it runs: %v",
+					f.now().UTC().Format(time.TimeOnly), err)
+			}
 			if err != nil {
 				t.Logf("RunOne at %s: %v", f.now().UTC().Format(time.TimeOnly), err)
 			}
@@ -348,7 +363,7 @@ func TestAnIncompleteTrialFromThePreviousSlotLeavesTheHold(t *testing.T) {
 // 46-58 s for 57 hours, and the only reason counted was at_limit, another group's.
 func TestAGroupStuckUnderItsSearchFloorSaysWhy(t *testing.T) {
 	t.Parallel()
-	f := startCutoverFixture(t, nil)
+	f := startCutoverFixture(t, leasesOutliveTheRun)
 	engine, holds := f.bundle.dependencies.Lookback, f.bundle.dependencies.ReadHolds
 	refused := func() map[string]uint64 { return productionLookbackStats(engine, holds).ReadHoldEarlierSkipped }
 	const arrival = 96500 * time.Millisecond

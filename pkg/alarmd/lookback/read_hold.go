@@ -90,6 +90,9 @@ var EarlierOvertakenPaths = []string{OvertakenPreparedLate, OvertakenNextSlot, O
 //     trial rides the next one.
 //   - resting: the group's sample rests past the Slot's readiness, and a
 //     trial rides the sample its rest ends with.
+//   - floor_probe: the group's search below its hold has run out and its
+//     floor is being probed (floor_probe.go): the Slot has a probe round, not
+//     a trial, and is not no_candidate.
 const (
 	EarlierSkipNotOwned       = "not_owned"
 	EarlierSkipNoHold         = "no_hold"
@@ -98,6 +101,7 @@ const (
 	EarlierSkipTrialReserved  = "trial_reserved"
 	EarlierSkipSampleInFlight = "sample_in_flight"
 	EarlierSkipResting        = "resting"
+	EarlierSkipFloorProbe     = "floor_probe"
 )
 
 // EarlierSkipReasons is every reason Prepare reserves no trial. A Slot is
@@ -105,7 +109,7 @@ const (
 // then reserves a trial is counted here and among the trials too, which says
 // what moved its trial past its point.
 var EarlierSkipReasons = []string{EarlierSkipNotOwned, EarlierSkipNoHold, EarlierSkipBackendFailing, EarlierSkipNoCandidate,
-	EarlierSkipTrialReserved, EarlierSkipSampleInFlight, EarlierSkipResting}
+	EarlierSkipTrialReserved, EarlierSkipSampleInFlight, EarlierSkipResting, EarlierSkipFloorProbe}
 
 // skipLocked counts the Slot of query skipped for reason on its group's
 // state, once a Slot: the first Prepare of a Slot decides it, and its
@@ -281,6 +285,10 @@ type earlierSample struct {
 	// when it dropped the trial for it; a trial at its own Slot was read
 	// under the hold its Slot froze at.
 	frozenHold *time.Duration
+	// probe marks a round of a shadow probe of the group's floor, read at
+	// the floor (candidateHold) and kept in the probe's reservations, never
+	// in prepared (floor_probe.go).
+	probe *floorProbeState
 }
 
 // dropTrialLocked ends a trial whose Slot will not compare it, counted
@@ -419,8 +427,11 @@ func (engine *Engine) groupLocked(query Query, now time.Time) *group {
 // retried. Nothing else of the group's state moves: a reservation standing
 // for an earlier Slot stays as it was.
 func (engine *Engine) refuseEarlier(query Query, now time.Time) {
+	defer engine.publishProbeEnds()
 	engine.mu.Lock()
 	state := engine.groupLocked(query, now)
+	// A probe ends when its floor is no longer the one to probe.
+	engine.endProbeLocked(state, FloorProbeHoldMoved, query.Contract)
 	reason := EarlierSkipNoCandidate
 	switch previous := state.prepared; {
 	case state.capturing || state.sample != nil:
@@ -472,12 +483,22 @@ func (engine *Engine) Prepare(query Query) {
 	if hasGiven {
 		var tries bool
 		if given, tries = engine.options.CurrentCandidate(query.Contract.Slot.QueryGroup); !tries {
+			// None to try: the search below the hold has run out. Its floor,
+			// once it has stood long enough, is probed round by round instead.
+			if floor, probing := engine.floorProbe(query.Contract.Slot.QueryGroup); probing {
+				engine.prepareProbe(query, now, hold, base, floor)
+				return
+			}
 			engine.refuseEarlier(query, now)
 			return
 		}
 	}
+	defer engine.publishProbeEnds()
 	engine.mu.Lock()
 	state := engine.groupLocked(query, now)
+	// A candidate to try: the search below the hold is open again, and a
+	// probe of the floor it had run out at ends.
+	engine.endProbeLocked(state, FloorProbeHoldMoved, query.Contract)
 	if previous := state.prepared; previous != nil {
 		switch {
 		case previous.query.Contract.Slot == query.Contract.Slot && previous.ahead:
@@ -629,6 +650,7 @@ func (read *Read) completeEarlier(completion execution.ProviderCompletion, err e
 
 func (engine *Engine) publishReadHold() {
 	engine.publishTrialEnds()
+	engine.publishProbeEnds()
 	if engine.options.OnWholeWindowReadEarly == nil && engine.options.OnReadHoldIgnored == nil {
 		return
 	}

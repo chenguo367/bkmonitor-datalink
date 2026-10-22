@@ -924,6 +924,26 @@ func (holds *productionReadHolds) bindLookback(options *lookback.Options) {
 	// The probation after a lowering is resumed by the process that takes
 	// the group over, from the lowering its record names.
 	options.LastLowering = holds.controller.LastLowering
+	// A group whose search has run out has its floor probed once it has
+	// stood long enough; a probe that passes lowers the hold with no
+	// probation after it, one that fails relearns the floor. One line per
+	// probe end, a probe being two hours of rounds at least.
+	options.FloorProbe, options.LoweringVerified = holds.controller.FloorProbe, holds.controller.LoweringVerified
+	options.OnFloorProbe = func(e lookback.FloorProbeEnd) {
+		if holds.logger != nil {
+			holds.logger.Info("lookback", "floor_probe_ended", 0, 0, slog.String("query_group", string(e.Contract.Slot.QueryGroup)),
+				slog.Int64("slot", int64(e.Contract.Slot.EvaluationTime)), slog.String("source", e.Source), slog.String("event", e.Event),
+				slog.Int64("floor_ms", e.Floor.Milliseconds()), slog.Int64("read_hold_ms", e.Hold.Milliseconds()),
+				slog.Int("clean_rounds", e.Clean), slog.Int64("started_slot", int64(e.Started)))
+		}
+		if e.Event != lookback.FloorProbePassed && e.Event != lookback.FloorProbeFailed {
+			return
+		}
+		holds.observation(e.Contract, func(ctx context.Context) error {
+			return holds.controller.FloorProbeResult(ctx, readhold.FloorProbeEvidence{Contract: e.Contract, Floor: e.Floor,
+				Hold: e.Hold, Passed: e.Event == lookback.FloorProbePassed})
+		})
+	}
 	options.OnEarlierTrialEnd = func(e lookback.EarlierTrialEnd) {
 		if holds.logger == nil {
 			return

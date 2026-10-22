@@ -68,8 +68,13 @@ type counters struct {
 	earlierBytes   map[string]uint64
 	// probations is source|outcome: probation rereads by what they came to
 	// (ProbationOutcomes).
-	probations  map[string]uint64
-	holdIgnored map[string]uint64
+	probations map[string]uint64
+	// floorProbeRounds is source|outcome: shadow probe rounds by what they
+	// came to (FloorProbeRoundOutcomes); floorProbes source|event: probes
+	// started and ended (FloorProbeEvents).
+	floorProbeRounds map[string]uint64
+	floorProbes      map[string]uint64
+	holdIgnored      map[string]uint64
 	// source|outcome and source|age: completed samples whose first read was
 	// empty, and when those whose data arrived later were complete.
 	emptyFirstReads map[string]uint64
@@ -100,6 +105,7 @@ func newCounters(sources, refusals []string) counters {
 		earlierReads: map[string]uint64{}, earlierBytes: map[string]uint64{}, holdIgnored: map[string]uint64{},
 		earlierOvertaken: map[string]uint64{}, earlierPreparedLateMax: map[string]time.Duration{}, earlierAhead: map[string]uint64{},
 		earlierSkipped: map[string]uint64{}, probations: map[string]uint64{},
+		floorProbeRounds: map[string]uint64{}, floorProbes: map[string]uint64{},
 		emptyCompletion: map[string]uint64{}, refusals: map[string]uint64{RefusedOther: 0}, faults: map[string]uint64{}, plans: map[string]uint64{},
 		maxCompletion: map[string]time.Duration{}, recheckBytes: map[string]uint64{}, unknownLookback: map[string]uint64{},
 		yieldReleases: map[string]uint64{}, yieldReleaseSeconds: map[string]float64{}, yieldReleaseMax: map[string]time.Duration{}}
@@ -159,6 +165,12 @@ func newCounters(sources, refusals []string) counters {
 		for _, outcome := range ProbationOutcomes {
 			c.probations[key2(source, outcome)] = 0
 		}
+		for _, outcome := range FloorProbeRoundOutcomes {
+			c.floorProbeRounds[key2(source, outcome)] = 0
+		}
+		for _, event := range FloorProbeEvents {
+			c.floorProbes[key2(source, event)] = 0
+		}
 		for _, slots := range EarlierAheadSlots {
 			c.earlierAhead[key2(source, slots)] = 0
 		}
@@ -207,6 +219,9 @@ type Stats struct {
 	// at_limit, a group held at its limit, whose data arrives past the
 	// longest hold it may have.
 	ReadHoldEarlierSkipped map[string]uint64 `json:"read_hold_earlier_skipped,omitempty"`
+	// ReadHoldFloorProbes is the shadow probes of a floor whose end the
+	// controller took, by what it made of them: lowered, relearned, stale.
+	ReadHoldFloorProbes map[string]uint64 `json:"read_hold_floor_probes,omitempty"`
 	// RoundsReadAtLimit is the decided rounds read at their group's hold
 	// limit while its data was measured landing past it, by the source the
 	// group reads (Sources): each a round decided before its data was all
@@ -386,6 +401,14 @@ type SourceStats struct {
 	// it catches.
 	ProbationRereads map[string]uint64 `json:"probation_rereads"`
 	ProbationGroups  uint64            `json:"probation_groups"`
+	// FloorProbeRounds is the rounds of Query Groups whose floor is probed,
+	// read at the floor beside the formal read, by what they came to
+	// (FloorProbeRoundOutcomes); FloorProbes the probes started and ended
+	// (FloorProbeEvents); FloorProbeGroups the source's Query Groups with a
+	// probe now.
+	FloorProbeRounds map[string]uint64 `json:"floor_probe_rounds"`
+	FloorProbes      map[string]uint64 `json:"floor_probes"`
+	FloorProbeGroups uint64            `json:"floor_probe_groups"`
 	// EmptyFirstReads: outcome -> completed samples whose first read was
 	// complete and held no point - arrived when data came at a later rung,
 	// stayed_empty when none did - and EmptyFirstReadCompletion when those
@@ -436,8 +459,8 @@ var GroupReadHoldClasses = []string{"h0", "h_positive"}
 
 // groupCounts has only the closed dimensions: two hold classes, six rungs,
 // five sample classes, two ignored reasons, eight earlier-read outcomes, six
-// paths an earlier-read trial is overtaken by, four distances ahead and
-// seven reasons a held Slot reserved no trial.
+// paths an earlier-read trial is overtaken by, four distances ahead, eight
+// reasons a held Slot reserved no trial and six probe round outcomes.
 // It belongs to the live group and is discarded by Forget, like supplements.
 type groupCounts struct {
 	since        time.Time
@@ -448,7 +471,8 @@ type groupCounts struct {
 	earlier      [8]uint64
 	overtaken    [6]uint64
 	ahead        [4]uint64
-	skipped      [7]uint64
+	skipped      [8]uint64
+	probeRounds  [6]uint64
 	earlierBytes uint64
 }
 
@@ -494,6 +518,10 @@ type GroupReading struct {
 	// what stood in its trials' way.
 	EarlierSkipped   map[string]uint64 `json:"earlier_skipped"`
 	EarlierReadBytes uint64            `json:"earlier_read_bytes"`
+	// FloorProbeRounds is the group's probe rounds by what they came to
+	// (FloorProbeRoundOutcomes), and FloorProbe its probe now, if any.
+	FloorProbeRounds map[string]uint64 `json:"floor_probe_rounds"`
+	FloorProbe       *GroupFloorProbe  `json:"floor_probe,omitempty"`
 }
 
 // ReadHoldGroups is one source's Query Groups this process holds by their
@@ -538,6 +566,11 @@ func (engine *Engine) GroupReading(queryGroup execution.QueryGroupIdentity) (Gro
 		return GroupReading{}, false
 	}
 	counts, source := state.reading, state.source
+	var probe *GroupFloorProbe
+	if current := state.floorProbe; current != nil {
+		probe = &GroupFloorProbe{FloorMillis: current.floor.Milliseconds(), HoldMillis: current.hold.Milliseconds(),
+			Clean: current.clean, Started: current.started, Reserved: len(current.reserved)}
+	}
 	engine.mu.Unlock()
 	if !engine.options.Owns(queryGroup) {
 		return GroupReading{}, false
@@ -570,6 +603,10 @@ func (engine *Engine) GroupReading(queryGroup execution.QueryGroupIdentity) (Gro
 	}
 	for index, reason := range EarlierSkipReasons {
 		reading.EarlierSkipped[reason] = counts.skipped[index]
+	}
+	reading.FloorProbeRounds, reading.FloorProbe = map[string]uint64{}, probe
+	for index, outcome := range FloorProbeRoundOutcomes {
+		reading.FloorProbeRounds[outcome] = counts.probeRounds[index]
 	}
 	return reading, true
 }
@@ -673,6 +710,7 @@ func (engine *Engine) Stats() Stats {
 		candidates = append(candidates, entry)
 	}
 	probationGroups := engine.probationGroupsLocked()
+	floorProbeGroups := engine.floorProbeGroupsLocked()
 	for _, source := range Sources {
 		entry := SourceStats{FirstReads: engine.counts.firstReads[source], FirstReadBytes: engine.firstReadBytes[source].Load(),
 			RecheckBytes: engine.counts.recheckBytes[source], UnknownLookback: engine.counts.unknownLookback[source],
@@ -710,6 +748,13 @@ func (engine *Engine) Stats() Stats {
 		entry.ProbationRereads, entry.ProbationGroups = map[string]uint64{}, probationGroups[source]
 		for _, outcome := range ProbationOutcomes {
 			entry.ProbationRereads[outcome] = engine.counts.probations[key2(source, outcome)]
+		}
+		entry.FloorProbeRounds, entry.FloorProbes, entry.FloorProbeGroups = map[string]uint64{}, map[string]uint64{}, floorProbeGroups[source]
+		for _, outcome := range FloorProbeRoundOutcomes {
+			entry.FloorProbeRounds[outcome] = engine.counts.floorProbeRounds[key2(source, outcome)]
+		}
+		for _, event := range FloorProbeEvents {
+			entry.FloorProbes[event] = engine.counts.floorProbes[key2(source, event)]
 		}
 		for _, outcome := range EarlyOutcomes {
 			entry.EarlyReads[outcome] = engine.counts.early[key2(source, outcome)]

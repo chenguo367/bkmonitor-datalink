@@ -246,6 +246,18 @@ type Options struct {
 	// A group this process has not seen a round of resumes the probation of
 	// a lowering that recent; nil resumes none.
 	LastLowering func(execution.QueryGroupIdentity) (execution.EvaluationTime, bool)
+	// LoweringVerified says a Query Group's last lowering was to a floor its
+	// shadow probe read clean first (readhold.Controller.LoweringVerified):
+	// the rounds frozen lower start no probation. Nil verifies none.
+	LoweringVerified func(execution.QueryGroupIdentity) bool
+	// FloorProbe is the floor a Query Group whose search below its hold has
+	// run out has its rounds read at as well, and false when it has none to
+	// probe (readhold.Controller.FloorProbe; floor_probe.go). Nil probes none.
+	FloorProbe func(execution.QueryGroupIdentity) (time.Duration, bool)
+	// OnFloorProbe sees every probe end, outside the engine's lock: one that
+	// passed lowers the hold to its floor, one that failed relearns the floor
+	// (readhold.Controller.FloorProbeResult).
+	OnFloorProbe func(FloorProbeEnd)
 }
 
 // Query is what the access layer knows about a physical query before it is
@@ -300,6 +312,7 @@ type Engine struct {
 	holdEvidence    []ReadHoldEvidence
 	ignoredEvidence []ignoredReadHold
 	trialEnds       []EarlierTrialEnd
+	probeEnds       []FloorProbeEnd
 	// plans is the control plane's plan set for this Worker (plan.go).
 	plans map[execution.QueryGroupIdentity]Plan
 }
@@ -360,8 +373,11 @@ type group struct {
 	sampled  bool
 	planKept bool
 	prepared *earlierSample
-	sample   *sample
-	nextAt   time.Time
+	// floorProbe is its shadow probe of its floor while one runs
+	// (floor_probe.go): apart from prepared, which its trials ride on.
+	floorProbe *floorProbeState
+	sample     *sample
+	nextAt     time.Time
 	// decided is the latest Slot Prepare reserved a trial for or counted
 	// skipped (skipLocked), so a Slot prepared again on a readiness retry -
 	// even after a later Slot's first attempt - is counted, and
@@ -520,6 +536,7 @@ func (engine *Engine) Begin(query Query) *Read {
 	slot := query.Contract.Slot
 	now := engine.options.Now()
 	lowering := engine.lastLowering(query)
+	verified := engine.loweringVerified(query)
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
 	engine.counts.firstReads[source]++
@@ -545,12 +562,13 @@ func (engine *Engine) Begin(query Query) *Read {
 	if state.seriesLate != nil && engine.options.Supplement != nil {
 		read.directed = engine.captureDirectedLocked(state, query, source, step, now)
 	}
-	engine.noteRoundHoldLocked(state, query, lowering)
+	engine.noteRoundHoldLocked(state, query, lowering, verified)
 	read.probation = state.probation != nil
+	engine.attachProbeLocked(state, read, query)
+	if read.probation || read.floorProbe != nil {
+		engine.trackLocked(read, query, step, now, state.depth)
+	}
 	if state.capturing || state.sample != nil || now.Before(state.nextAt) {
-		if read.probation {
-			engine.trackLocked(read, query, step, now, state.depth)
-		}
 		return read
 	}
 	if state.prepared != nil {
@@ -567,7 +585,9 @@ func (engine *Engine) Begin(query Query) *Read {
 		}
 	}
 	state.capturing, read.sampled = true, true
-	engine.trackLocked(read, query, step, now, state.depth)
+	if read.summary == nil {
+		engine.trackLocked(read, query, step, now, state.depth)
+	}
 	return read
 }
 
@@ -601,6 +621,9 @@ type Read struct {
 	// read, on a directed Query Group; nil otherwise.
 	directed *directedQuery
 	earlier  *earlierSample
+	// floorProbe is the probe round reserved for its Slot, compared with it
+	// once it completes (completeFloorProbe).
+	floorProbe *earlierSample
 	// sampled is a read taken as its group's sample, probation one kept as
 	// a probation reread; either keeps summary.
 	sampled   bool
@@ -631,6 +654,7 @@ func (read *Read) Complete(completion execution.ProviderCompletion, err error) {
 		return
 	}
 	defer read.completeEarlier(completion, err)
+	defer read.completeFloorProbe(completion, err)
 	if !read.sentAt.IsZero() && err == nil && completion.Completeness == execution.CompletenessFull {
 		now := read.engine.options.Now()
 		read.engine.mu.Lock()
@@ -798,6 +822,9 @@ type Busy struct {
 	DirectedPending  int
 	ReadsInFlight    int
 	TrialPrepared    bool
+	// FloorProbeRounds is its shadow probe's rounds reserved and not yet
+	// compared.
+	FloorProbeRounds int
 }
 
 func (engine *Engine) Busy(queryGroup execution.QueryGroupIdentity) (Busy, bool) {
@@ -840,6 +867,14 @@ func (engine *Engine) Busy(queryGroup execution.QueryGroupIdentity) (Busy, bool)
 		busy.TrialPrepared = true
 		if trial.running {
 			busy.ReadsInFlight++
+		}
+	}
+	if probe := state.floorProbe; probe != nil {
+		for _, round := range probe.reserved {
+			busy.FloorProbeRounds++
+			if round.running {
+				busy.ReadsInFlight++
+			}
 		}
 	}
 	return busy, true
@@ -886,6 +921,7 @@ func (engine *Engine) Forget(queryGroup execution.QueryGroupIdentity) {
 	for _, slot := range state.directed {
 		slot.dropped = true
 	}
+	engine.endProbeLocked(state, FloorProbeOwnerLost, execution.FrozenExecutionContractRef{Slot: execution.SlotIdentity{QueryGroup: queryGroup}})
 	delete(engine.groups, queryGroup)
 }
 

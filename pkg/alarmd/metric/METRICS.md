@@ -1029,7 +1029,7 @@ Candidate h/2 read trials by how they ended, by source: equal or different from 
 
 Labels: `source`, `reason`
 
-Held Slots whose first attempt reserved no earlier-read trial, once a Slot, by source and why: not_owned (the group is not this process's; counted at each attempt), no_hold (its hold came down to none since the Slot was frozen), backend_failing (its queries are failing), no_candidate (the read-hold controller gave none; read_hold_earlier_skipped_total says why), trial_reserved (a trial is reserved for a later Slot), sample_in_flight (its sample is being taken or read), resting (its sample rests past the Slot's readiness). Reader: why a held group is not tried; the group's own counts are on its lookback reading.
+Held Slots whose first attempt reserved no earlier-read trial, once a Slot, by source and why: not_owned (the group is not this process's; counted at each attempt), no_hold (its hold came down to none since the Slot was frozen), backend_failing (its queries are failing), no_candidate (the read-hold controller gave none; read_hold_earlier_skipped_total says why), trial_reserved (a trial is reserved for a later Slot), sample_in_flight (its sample is being taken or read), resting (its sample rests past the Slot's readiness), floor_probe (its search has run out and its floor is being probed: the Slot has a probe round, lookback_floor_probe_rounds_total). Reader: why a held group is not tried; the group's own counts are on its lookback reading.
 
 ## alarmd_lookback_faults_total
 
@@ -1048,6 +1048,24 @@ Bytes the formal first reads delivered, by source, counted as the rechecks' are.
 Labels: `source`
 
 Formal first reads seen, by source - the data source the Query Group reads, labelled as the directory labels its Query Groups, so every lookback family reads beside them: the denominator of the query volume the lookback adds (lookback_rechecks_total over it).
+
+## alarmd_lookback_floor_probe_groups
+
+Labels: `source`
+
+The source's Query Groups whose floor is being probed now.
+
+## alarmd_lookback_floor_probe_rounds_total
+
+Labels: `source`, `outcome`
+
+Rounds of Query Groups whose floor is being probed - their search below the hold run out at a floor that has stood long enough - read at the floor beside the formal read at the hold, which decides the round, by source and what they came to: clean (the same as the formal read), different (ends the probe; the floor stands longer), and, no evidence either way, skipped_for_permits, read_failed, unclassified (the formal read not whole or a series table refused) and overtaken (not read in time, or its Slot froze otherwise than it was reserved for). Reader: what the probes cost and how often their rounds count; their reads' bytes are in lookback_earlier_read_bytes_total.
+
+## alarmd_lookback_floor_probes_total
+
+Labels: `source`, `event`
+
+Shadow probes of a floor by source and what happened to them: started, passed (lookback.ProbationRounds rounds in a row clean), failed (a round different), hold_moved (the hold, the floor or the search under them moved before the probe ended), owner_lost (the group left this process). A probe whose process stops first ends with none of them: started rising while passed and failed do not is probes that never live to finish, as under rollouts more frequent than a probe's rounds.
 
 ## alarmd_lookback_pending
 
@@ -1489,7 +1507,13 @@ New Slots frozen with the hold their Query Group last read -- zero for a group w
 
 Labels: `reason`
 
-Earlier-read trials not run, by why, one per Slot a trial would have been reserved for (its group's sampling rest over, nothing of it in flight): at_limit (the group is held at its limit and was read early within its quiet bar, so its data arrives past the longest hold it may have; a read below the hold and the formal read both come before the data, and their agreeing would say nothing of it). A group counted here keeps its hold at the limit; its trials resume once an arrival reading wants a hold below the limit, or once it has gone its quiet bar without being read early. search_done (the search below the hold has run out: the gap between its floor and the hold is no wider than a step; the group's read-hold record says when the floor was learned, earlier_floor_at_ms). Every reason exists from the start.
+Earlier-read trials not run, by why, one per Slot a trial would have been reserved for (its group's sampling rest over, nothing of it in flight): at_limit (the group is held at its limit and was read early within its quiet bar, so its data arrives past the longest hold it may have; a read below the hold and the formal read both come before the data, and their agreeing would say nothing of it). A group counted here keeps its hold at the limit; its trials resume once an arrival reading wants a hold below the limit, or once it has gone its quiet bar without being read early. search_done (the search below the hold has run out: the gap between its floor and the hold is no wider than a step; the group's read-hold record says when the floor was learned, earlier_floor_at_ms). A group whose floor is being probed is counted under neither: its Slots are lookback_earlier_skipped_total{reason="floor_probe"}. Every reason exists from the start.
+
+## alarmd_read_hold_floor_probes_total
+
+Labels: `outcome`
+
+Shadow probes of a floor whose end the read-hold controller took, by what it made of it: lowered (the probe read lookback.ProbationRounds rounds in a row the same at the floor as at the hold, and the hold comes down to the floor with no probation after it), relearned (a round read differently: the floor stays, dated now, and stands twice as long as before before the next probe), stale (the record had moved since the probe began - its hold, its floor or its search - and the probe changed nothing). Probes that did not end are on lookback_floor_probes_total. Every outcome exists from the start.
 
 ## alarmd_read_hold_groups
 

@@ -147,6 +147,10 @@ func productionLookbackStats(engine *lookback.Engine, holds *productionReadHolds
 		for _, reason := range readhold.EarlierSkipReasons {
 			stats.ReadHoldEarlierSkipped[reason] = controller.EarlierSkipped[reason]
 		}
+		stats.ReadHoldFloorProbes = make(map[string]uint64, len(readhold.FloorProbeOutcomes))
+		for _, outcome := range readhold.FloorProbeOutcomes {
+			stats.ReadHoldFloorProbes[outcome] = controller.FloorProbes[outcome]
+		}
 		stats.RoundsReadAtLimit = make(map[string]uint64, len(lookback.Sources))
 		holds.readAtLimitMu.Lock()
 		for _, source := range lookback.Sources {
