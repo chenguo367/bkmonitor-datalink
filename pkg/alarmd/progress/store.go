@@ -639,6 +639,12 @@ func encode(progress execution.ScheduleProgress) ([]byte, error) {
 	if err := progress.Validate(); err != nil {
 		return nil, err
 	}
+	return encodeValidated(progress)
+}
+
+// encodeValidated is encode past the record's validation: the bytes stored
+// for it, a range record without the fields an older range decoder rejects.
+func encodeValidated(progress execution.ScheduleProgress) ([]byte, error) {
 	schema := schemaV2
 	if progress.UnfinishedRange != nil {
 		schema = schemaRangeV1
@@ -659,15 +665,20 @@ func encode(progress execution.ScheduleProgress) ([]byte, error) {
 // know. Range records are decoded strictly (DisallowUnknownFields, below), and
 // during a rolling update or after a rollback an older replica reads what a
 // newer one wrote; a field it does not know makes the whole record corrupt to
-// it. IdentityRounds is such a field. Dropping it costs only the run: the
-// range is a run of expired Slots, which ends any run of identity-emptied
-// rounds anyway, so the count would start again after it.
+// it. IdentityRounds and Unfilled are such fields, both newer than the
+// previous upstream snapshot's decoder. Dropping IdentityRounds costs only
+// the run: the range is a run of expired Slots, which ends any run of
+// identity-emptied rounds anyway, so the count would start again after it.
+// Dropping Unfilled costs a replica restarted during the range the
+// unfilled-count word on the group's row until its next real completion
+// writes it again. TestARangeRecordCarriesOnlyFieldsThePreviousSnapshotDecodes
+// holds every field a range record can carry to that decoder's.
 func rangeLastCompletion(summary *execution.LastCompletionSummary) *execution.LastCompletionSummary {
-	if summary == nil || summary.Empty == nil || summary.Empty.IdentityRounds == 0 {
+	if summary == nil || summary.Empty == nil || summary.Empty.IdentityRounds == 0 && !summary.Empty.Unfilled {
 		return summary
 	}
 	copied, empty := *summary, *summary.Empty
-	empty.IdentityRounds = 0
+	empty.IdentityRounds, empty.Unfilled = 0, false
 	copied.Empty = &empty
 	if !empty.Quiet && !empty.EmptiedByTarget {
 		// Nothing else was said about the round: no summary, as before

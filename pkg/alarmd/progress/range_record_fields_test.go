@@ -10,7 +10,6 @@
 package progress
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"sort"
@@ -54,10 +53,11 @@ func emptyRoundFieldsIn(t *testing.T, raw []byte) []string {
 	return fields
 }
 
-// A range begun on a record whose last round was identity-emptied writes no
-// field the deployed range decoder rejects; what the round said otherwise is
-// kept, and a round that said nothing else carries no summary. The single-Slot
-// record, decoded leniently by every release, keeps the count.
+// A range begun on a record whose last round was identity-emptied, or an
+// unfilled count, writes no field the deployed range decoder rejects; what
+// the round said otherwise is kept, and a round that said nothing else
+// carries no summary. The single-Slot record, decoded leniently by every
+// release, keeps all of it.
 func TestARangeRecordCarriesNoEmptyRoundFieldTheDeployedDecoderRejects(t *testing.T) {
 	ctx := context.Background()
 	identity := execution.ProgressIdentity{QueryGroup: "q"}
@@ -69,11 +69,22 @@ func TestARangeRecordCarriesNoEmptyRoundFieldTheDeployedDecoderRejects(t *testin
 		{"identity and outside", &execution.EmptyRoundSummary{EmptiedByTarget: true, ContentScope: "c", IdentityRounds: 3},
 			&execution.EmptyRoundSummary{EmptiedByTarget: true, ContentScope: "c"}},
 		{"identity only", &execution.EmptyRoundSummary{ContentScope: "c", IdentityRounds: 3}, nil},
+		{"unfilled only", &execution.EmptyRoundSummary{Unfilled: true, ContentScope: "c"}, nil},
+		{"unfilled and quiet", &execution.EmptyRoundSummary{Quiet: true, Unfilled: true, ContentScope: "c"},
+			&execution.EmptyRoundSummary{Quiet: true, ContentScope: "c"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			single := mustEncode(t, execution.ScheduleProgress{Identity: identity, NextSlot: 60, LastCompletion: lastCompletionAt60(tc.said)})
-			if !bytes.Contains(single, []byte(`"identity_rounds":3`)) {
-				t.Fatalf("the single-Slot record lost the count: %s", single)
+			said, err := json.Marshal(tc.said)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var saidFields map[string]json.RawMessage
+			if err := json.Unmarshal(said, &saidFields); err != nil {
+				t.Fatal(err)
+			}
+			if kept := emptyRoundFieldsIn(t, single); len(kept) != len(saidFields) {
+				t.Fatalf("the single-Slot record keeps %v of what the round said, %s", kept, said)
 			}
 			fake := &controlFake{value: single}
 			store := mustStore(t, fake)
