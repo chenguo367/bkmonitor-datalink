@@ -20,11 +20,61 @@ import (
 	"unicode/utf8"
 )
 
+// CloneLevelResultsV1 copies level results so that the copy shares nothing
+// with them: a LevelResultV1 holds its Detect evidence by pointer, and the
+// evidence holds its normalized value and ordinals by reference, so a plain
+// copy of the slice is one set of evidence under two names, and writing one
+// rewrites the other.
+func CloneLevelResultsV1(results []LevelResultV1) []LevelResultV1 {
+	if results == nil {
+		return nil
+	}
+	cloned := make([]LevelResultV1, len(results))
+	for index, result := range results {
+		if result.DetectEvidence != nil {
+			evidence := *result.DetectEvidence
+			if evidence.NormalizedValue != nil {
+				evidence.NormalizedValue = append(json.RawMessage{}, evidence.NormalizedValue...)
+			}
+			evidence.MatchedAlgorithmOrdinal = cloneUint32(evidence.MatchedAlgorithmOrdinal)
+			evidence.MatchedGroupOrdinal = cloneUint32(evidence.MatchedGroupOrdinal)
+			result.DetectEvidence = &evidence
+		}
+		cloned[index] = result
+	}
+	return cloned
+}
+
+func cloneRawValues(values map[string]json.RawMessage) map[string]json.RawMessage {
+	if values == nil {
+		return nil
+	}
+	cloned := make(map[string]json.RawMessage, len(values))
+	for key, value := range values {
+		if value != nil {
+			value = append(json.RawMessage{}, value...)
+		}
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func cloneUint32(value *uint32) *uint32 {
+	if value == nil {
+		return nil
+	}
+	copied := *value
+	return &copied
+}
+
+// BuildTriggerEventV1 builds the event from its input; the event shares
+// nothing with the input it was built from: its level results, record
+// dimensions and observed values are copies (CloneLevelResultsV1).
 func BuildTriggerEventV1(input TriggerEventBuildInputV1) (*TriggerEventV1, error) {
 	if input.MaxEvidenceBytes <= 0 {
 		return nil, invalid("trigger_event.max_evidence_bytes", "must be positive")
 	}
-	results := append([]LevelResultV1(nil), input.LevelResults...)
+	results := CloneLevelResultsV1(input.LevelResults)
 	sort.Slice(results, func(left, right int) bool { return results[left].LevelID < results[right].LevelID })
 	if err := validateSuccessfulLevelResultsV1(results, input.RecordRef.Absent); err != nil {
 		return nil, err
@@ -56,11 +106,15 @@ func BuildTriggerEventV1(input TriggerEventBuildInputV1) (*TriggerEventV1, error
 	if err != nil {
 		return nil, err
 	}
+	// The record's dimensions and the observed values are maps of raw
+	// values, copied for the reason the level results are.
+	recordRef, observed := input.RecordRef, input.Observed
+	recordRef.Dimensions, observed.Values = cloneRawValues(recordRef.Dimensions), cloneRawValues(observed.Values)
 	event := &TriggerEventV1{
 		Schema: Schema{Name: TriggerEventSchemaV1, Major: 1, Minor: 0}, RequiredFeatures: []string{},
 		EventID: eventID, EventSemanticDigest: semanticDigest, EventKind: input.EventKind, PrimaryLevelID: primary,
-		TenantID: input.TenantID, BusinessID: input.BusinessID, PlanRef: input.PlanRef, RecordRef: input.RecordRef,
-		Observed: input.Observed, LevelResults: results, EvaluationTime: input.EvaluationTime,
+		TenantID: input.TenantID, BusinessID: input.BusinessID, PlanRef: input.PlanRef, RecordRef: recordRef,
+		Observed: observed, LevelResults: results, EvaluationTime: input.EvaluationTime,
 		DetectPlanFingerprint: input.DetectPlanFingerprint, TriggerStateFingerprint: input.TriggerStateFingerprint,
 		Trace:     TriggerEventTraceV1{ExecutionID: input.ExecutionID},
 		DedupeMD5: input.DedupeMD5,
