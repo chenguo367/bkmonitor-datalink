@@ -151,13 +151,39 @@ const (
 var DroppedMemberReasons = []string{DroppedMemberInvalid, DroppedMemberUnlisted, DroppedMemberLost, DroppedModelMismatch,
 	DroppedNoHostID, DroppedHostUnindexed, DroppedHostOtherTenant, DroppedAddressShared}
 
+// MaxDroppedMemberIDBytes bounds one named id: an instance or host id is a
+// number, so anything longer is a writer's mistake and its head is enough.
+const MaxDroppedMemberIDBytes = 64
+
 // NameDropped adds a dropped member to named while fewer than
-// MaxNamedDroppedMembers are there.
+// MaxNamedDroppedMembers are there. The id is the source's text, so it is
+// cut to MaxDroppedMemberIDBytes and every byte outside [A-Za-z0-9._-]
+// becomes "_": the line writes members as "<id>:<reason>" joined by commas,
+// and an id carrying ",", ":", a space or "=" would split one name into two
+// or end the field. An empty id is "-".
 func NameDropped(named []DroppedMember, id, reason string) []DroppedMember {
 	if len(named) >= MaxNamedDroppedMembers {
 		return named
 	}
-	return append(named, DroppedMember{ID: id, Reason: reason})
+	return append(named, DroppedMember{ID: droppedMemberID(id), Reason: reason})
+}
+
+func droppedMemberID(id string) string {
+	if id == "" {
+		return "-"
+	}
+	if len(id) > MaxDroppedMemberIDBytes {
+		id = id[:MaxDroppedMemberIDBytes]
+	}
+	clean := []byte(id)
+	for i, b := range clean {
+		switch {
+		case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9', b == '.', b == '_', b == '-':
+		default:
+			clean[i] = '_'
+		}
+	}
+	return string(clean)
 }
 
 // ResolutionState is the whole target plan's state, composed from its

@@ -348,14 +348,14 @@ func (resolver *TargetResolver) resolveGroup(ctx context.Context, plan *contract
 // read by host identity to host ids through the host cache.
 //
 // A member the cache knows as a host is that host's id. A member it does
-// not know is dropped and counted, as a group member that fails validation
-// is. When it knows none of them, it depends on the model. If the cache
-// lists hosts under it, the members are hosts that are gone: Incomplete,
-// members_dropped, as a group whose every member was refused - not an empty
-// target either. If it lists none - a non-host model the writer named no
-// model_match for, or a writer that does not put the canonical identity on
-// its host records - the selector is Unavailable by name: these members
-// cannot be placed against the data at all.
+// not know is dropped, counted and named host_unindexed, as a group member
+// that fails validation is. When it knows none of them, it depends on the
+// model. If the cache lists hosts under it, the members are hosts that are
+// gone: Incomplete, members_dropped, as a group whose every member was
+// refused - not an empty target either. If it lists none - a non-host model
+// the writer named no model_match for, or a writer that does not put the
+// canonical identity on its host records - the selector is Unavailable by
+// name: these members cannot be placed against the data at all.
 func (resolver *TargetResolver) resolveStaticMembers(plan *contract.TargetPlanV1, index *Index, unusable string) targetplan.SelectorResult {
 	result := targetplan.SelectorResult{Kind: targetplan.SelectorKindStatic, ID: plan.ModelID, Reason: targetplan.ReasonNone}
 	if resolver == nil || resolver.hosts == nil {
@@ -368,9 +368,12 @@ func (resolver *TargetResolver) resolveStaticMembers(plan *contract.TargetPlanV1
 	}
 	members := make(map[string]struct{}, len(plan.StaticMembers))
 	for _, member := range plan.StaticMembers {
+		// The index lists a host by (model, instance) only when it has a host
+		// id, so a member it finds has one.
 		host, found := index.LookupModelInstance(member.ModelID, member.ModelInstID)
-		if !found || host.HostID == "" {
+		if !found {
 			result.Dropped++
+			result.DroppedMembers = targetplan.NameDropped(result.DroppedMembers, member.ModelInstID, targetplan.DroppedHostUnindexed)
 			continue
 		}
 		members[plan.Identity.HostKey(host.HostID)] = struct{}{}
