@@ -17,21 +17,12 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 )
 
-// NativeOperations adapts only registered reads to the existing Fleet handlers.
-// ServeHTTP is called in-process: there is no localhost HTTP request, arbitrary
-// route forwarding or second Fleet aggregation. The existing Leader hop stays
-// owned by Fleet. This preserves its evolving domain decisions without copying
-// them into another service or asking every handler to change its public API.
 // The scopes of strategy.list: the strategies needing attention, as fact
 // rows hold them, or every strategy the published catalog accepted.
 const (
 	strategyScopeAttention = "attention"
 	strategyScopeAccepted  = "accepted"
 )
-
-func NativeOperations(handler http.Handler) []Operation {
-	return NativeOperationsWith(handler, NativeOptions{})
-}
 
 // NativeOptions are the facts the native operations add to an answer from
 // this process alone, never from the route they read.
@@ -42,7 +33,12 @@ type NativeOptions struct {
 	Rejections func(queryGroup string) (fleet.KeptRejection, bool)
 }
 
-// NativeOperationsWith is NativeOperations with what options add.
+// NativeOperationsWith adapts only registered reads to the existing Fleet
+// handlers, with what options add. ServeHTTP is called in-process: there is
+// no localhost HTTP request, arbitrary route forwarding or second Fleet
+// aggregation. The existing Leader hop stays owned by Fleet. This preserves
+// its evolving domain decisions without copying them into another service or
+// asking every handler to change its public API.
 func NativeOperationsWith(handler http.Handler, options NativeOptions) []Operation {
 	text := func(description, source string) Field {
 		return Field{Type: "string", Description: description, Source: source, MinLength: 1, MaxLength: 256}

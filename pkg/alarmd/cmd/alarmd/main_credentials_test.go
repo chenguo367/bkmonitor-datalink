@@ -127,7 +127,7 @@ func TestTheAdoptedLinkdConnectionCarriesAPasswordReadFromAFile(t *testing.T) {
 		"platform_cache:\n  dynamic_group_key_prefix: 'groups:'\n  target_group:\n    mode: standalone\n    address: 192.0.2.10:6379\n" +
 		"    password_file: " + write("groups-password", "test-password-2\n") + "\n"
 	path := write("alarmd.yaml", contents)
-	cfg, err := config.LoadWithRoles(path, nil)
+	cfg, err := config.LoadWithCredentials(path, nil, config.CredentialsForRoles)
 	if err != nil {
 		t.Fatal(err)
 	}

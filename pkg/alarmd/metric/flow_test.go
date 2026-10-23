@@ -11,13 +11,23 @@ package metric
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
+
+// The bounds the summary's block is read by are the metrics' own.
+func TestTheFlowBoundsAreTheMetricsBounds(t *testing.T) {
+	if !slices.Equal(fleet.FlowQueryBounds, QueryDurationBuckets) || !slices.Equal(fleet.FlowDecisionBounds, DecisionLagBuckets) ||
+		!slices.Equal(fleet.FlowRedisBounds, redisDurationBuckets) {
+		t.Fatal("the flow block's bounds are not the metrics' bounds")
+	}
+}
 
 // A physical query is one count on the work series that always read zero,
 // one duration, and, when it failed, one count under its cause; a cause the

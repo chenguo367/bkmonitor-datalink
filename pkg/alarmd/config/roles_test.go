@@ -245,3 +245,9 @@ func TestChannelAuthenticationAndPublicSurface(t *testing.T) {
 		t.Fatal("Worker-only public surface was restricted by an unused CLI key")
 	}
 }
+
+// LoadWithRoles is LoadWithCredentials reading the credential references the
+// selected roles use, as the process does.
+func LoadWithRoles(path string, override roles.Set) (Config, error) {
+	return LoadWithCredentials(path, override, CredentialsForRoles)
+}

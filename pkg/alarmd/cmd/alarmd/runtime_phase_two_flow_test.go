@@ -95,14 +95,6 @@ func TestTheQueryFailureCausesAreOneList(t *testing.T) {
 	}
 }
 
-// The bounds the summary's block is read by are the metrics' own.
-func TestTheFlowBoundsAreTheMetricsBounds(t *testing.T) {
-	if !slices.Equal(fleet.FlowQueryBounds, metric.QueryDurationBuckets) || !slices.Equal(fleet.FlowDecisionBounds, metric.DecisionLagBuckets) ||
-		!slices.Equal(fleet.FlowRedisBounds, metric.RedisDurationBuckets()) {
-		t.Fatal("the flow block's bounds are not the metrics' bounds")
-	}
-}
-
 // The block a replica publishes is the metrics' values, with the roles it
 // runs and the heap only once sampled.
 func TestTheFlowBlockIsTheMetricsValues(t *testing.T) {

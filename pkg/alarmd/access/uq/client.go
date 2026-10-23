@@ -600,10 +600,6 @@ func (reader *countingReader) Read(buffer []byte) (int, error) {
 	return count, err
 }
 
-func buildRequest(spec execution.PhysicalQuerySpec) (request, error) {
-	return buildRequestCarrying(spec, carriesAPMApp(spec))
-}
-
 func buildRequestCarrying(spec execution.PhysicalQuerySpec, carryApp bool) (request, error) {
 	if err := spec.Validate(); err != nil {
 		return request{}, err

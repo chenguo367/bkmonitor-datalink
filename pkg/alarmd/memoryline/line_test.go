@@ -277,9 +277,9 @@ func TestAClosedLineIsToldOfNoMoreCollections(t *testing.T) {
 // Holds and grants share the one line.
 func TestAHoldCountsOnlyWhileItIsHeld(t *testing.T) {
 	line := newLine((&fakeHeap{heap{limit: 1000, live: 600, cycles: 1}}).read)
-	release, held := line.Hold(ConsumerDiagnosisProgress, 300)
-	if !held {
-		t.Fatal("300 refused with 400 of room")
+	release := line.HoldObserved(ConsumerDiagnosisProgress, 300)
+	if over := line.Read().OverTotal[ConsumerDiagnosisProgress]; over != 0 {
+		t.Fatalf("300 with 400 of room counted over the line %d times", over)
 	}
 	if line.Admit(ConsumerLookback, 101) {
 		t.Fatal("admitted past the line while 300 were held")
@@ -294,7 +294,8 @@ func TestAHoldCountsOnlyWhileItIsHeld(t *testing.T) {
 	if reading := line.Read(); reading.HeldBytes != 0 {
 		t.Fatalf("held after release = %d, want 0", reading.HeldBytes)
 	}
-	if _, held := line.Hold(ConsumerDiagnosisProgress, 300); !held {
+	line.HoldObserved(ConsumerDiagnosisProgress, 300)
+	if over := line.Read().OverTotal[ConsumerDiagnosisProgress]; over != 0 {
 		t.Fatal("the released 300 were not the next asker's before a collection")
 	}
 	reading := line.Read()
@@ -307,9 +308,10 @@ func TestAHoldCountsOnlyWhileItIsHeld(t *testing.T) {
 // must not give back another hold's bytes.
 func TestAHoldIsReleasedOnce(t *testing.T) {
 	line := newLine((&fakeHeap{heap{limit: 1000, live: 400, cycles: 1}}).read)
-	first, _ := line.Hold(ConsumerDiagnosisProgress, 300)
-	if _, held := line.Hold(ConsumerDiagnosisProgress, 300); !held {
-		t.Fatal("second hold refused with 300 of room")
+	first := line.HoldObserved(ConsumerDiagnosisProgress, 300)
+	line.HoldObserved(ConsumerDiagnosisProgress, 300)
+	if over := line.Read().OverTotal[ConsumerDiagnosisProgress]; over != 0 {
+		t.Fatal("second hold counted over the line with 300 of room")
 	}
 	first()
 	first()
@@ -321,21 +323,6 @@ func TestAHoldIsReleasedOnce(t *testing.T) {
 	}
 }
 
-// A refused hold takes nothing, is counted, and its release does nothing.
-func TestARefusedHoldTakesNothing(t *testing.T) {
-	line := newLine((&fakeHeap{heap{limit: 1000, live: 900, cycles: 1}}).read)
-	keep, _ := line.Hold(ConsumerDiagnosisProgress, 50)
-	release, held := line.Hold(ConsumerDiagnosisProgress, 51)
-	if held {
-		t.Fatal("51 held with 50 of room")
-	}
-	release()
-	if reading := line.Read(); reading.HeldBytes != 50 || reading.RefusedTotal[ConsumerDiagnosisProgress] != 1 {
-		t.Fatalf("reading = %+v, want the first hold's 50 and one refusal", reading)
-	}
-	keep()
-}
-
 // A collection does not end a hold: what it has allocated is in the live
 // heap the collection measured, what it has not is in neither, so it counts
 // until it is released - twice for the part both hold, for as long as the
@@ -343,7 +330,7 @@ func TestARefusedHoldTakesNothing(t *testing.T) {
 func TestAHoldOutlastsACollectionUntilReleased(t *testing.T) {
 	h := &fakeHeap{heap{limit: 1000, live: 400, cycles: 1}}
 	line := newLine(h.read)
-	release, _ := line.Hold(ConsumerDiagnosisProgress, 300)
+	release := line.HoldObserved(ConsumerDiagnosisProgress, 300)
 	line.Admit(ConsumerLookback, 100)
 	h.heap = heap{limit: 1000, live: 500, cycles: 2}
 	reading := line.Read()
@@ -362,9 +349,6 @@ func TestAHoldOutlastsACollectionUntilReleased(t *testing.T) {
 // A nil line holds everything and its release does nothing.
 func TestANilLineHoldsEverything(t *testing.T) {
 	var line *Line
-	release, held := line.Hold(ConsumerDiagnosisProgress, math.MaxUint64)
-	if !held {
-		t.Fatal("a nil line refused a hold")
-	}
+	release := line.HoldObserved(ConsumerDiagnosisProgress, math.MaxUint64)
 	release()
 }

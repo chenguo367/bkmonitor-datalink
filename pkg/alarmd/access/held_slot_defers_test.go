@@ -111,17 +111,17 @@ func TestAHeldSlotComesBackWhenItsLastQueryIsReady(t *testing.T) {
 		return PlannedQuery{Requirements: []execution.DataRequirement{{RequirementID: execution.RequirementID(id)}}, ReadyAtUnixMilli: now.Add(after).UnixMilli()}
 	}
 	pending := []PlannedQuery{query("history", 310*time.Second), query("primary", 330*time.Second)}
-	if got := slotPendingReadiness(pending, 300_000, now); !got.Equal(now.Add(330 * time.Second)) {
+	if got, _ := slotPendingReadinessOf(pending, 300_000, now); !got.Equal(now.Add(330 * time.Second)) {
 		t.Fatalf("held, two pending = %s, want the last ready %s", got, now.Add(330*time.Second))
 	}
 	readable := []PlannedQuery{query("history", -time.Hour), query("primary", 330*time.Second)}
-	if got := slotPendingReadiness(readable, 300_000, now); !got.Equal(now.Add(330 * time.Second)) {
+	if got, _ := slotPendingReadinessOf(readable, 300_000, now); !got.Equal(now.Add(330 * time.Second)) {
 		t.Fatalf("held, one readable = %s, want the pending one's %s", got, now.Add(330*time.Second))
 	}
-	if got := slotPendingReadiness(pending, 0, now); !got.IsZero() {
+	if got, _ := slotPendingReadinessOf(pending, 0, now); !got.IsZero() {
 		t.Fatalf("not held, two pending at different times = %s, want no deferral (settling waited inside)", got)
 	}
-	if got := slotPendingReadiness([]PlannedQuery{query("primary", -time.Second)}, 300_000, now); !got.IsZero() {
+	if got, _ := slotPendingReadinessOf([]PlannedQuery{query("primary", -time.Second)}, 300_000, now); !got.IsZero() {
 		t.Fatalf("held and ready = %s, want no deferral", got)
 	}
 }

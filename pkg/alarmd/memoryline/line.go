@@ -23,13 +23,13 @@
 // the live heap from the next collection on, and the grant counts until
 // then. A reader that takes memory for one piece of work and drops it when
 // the work is done - a page that decodes the fleet's snapshots and builds a
-// view of them, garbage once the response is written - holds it (Hold) and
-// releases it: what is released is not in the live heap at the next
-// collection, so counting it until then would hold observation off with
-// memory nothing keeps. Work whose result is then kept - a view put in a
-// cache - releases its hold and admits what it keeps as it keeps it: a hold
-// on something that stays would count it twice, in the live heap and held,
-// for as long as it stays.
+// view of them, garbage once the response is written - holds it
+// (HoldObserved) and releases it: what is released is not in the live heap
+// at the next collection, so counting it until then would hold observation
+// off with memory nothing keeps. Work whose result is then kept - a view put
+// in a cache - releases its hold and admits what it keeps as it keeps it: a
+// hold on something that stays would count it twice, in the live heap and
+// held, for as long as it stays.
 //
 // There is no ratio, no order among the consumers and no count they are held
 // to: a deployment far from its limit never refuses, and one near it refuses
@@ -126,7 +126,7 @@ type Line struct {
 	// about to take, before it has taken it.
 	cycle   uint64
 	granted uint64
-	// held is what the holds not yet released take (Hold). A collection
+	// held is what the holds not yet released take (HoldObserved). A collection
 	// does not end a hold: a hold that spans one is counted in the live
 	// heap it measured as well as here, until it is released, because the
 	// part of it not yet allocated when the collection ran is in neither.
@@ -249,43 +249,6 @@ func (line *Line) Admit(consumer Consumer, bytes uint64) bool {
 	return admitted
 }
 
-// Hold answers whether consumer may take bytes for one piece of work it
-// drops when done, by the same line as Admit. Held, the bytes count against
-// the line until release is called, and no longer: release once the memory
-// is no longer referred to - a page's response written. What is kept past
-// the work is not held but admitted as it is kept (see the package comment).
-// release is safe to call more than once, and to defer; a refused hold's
-// release does nothing. A hold never released is never given back: the
-// line counts it until the process ends, and observation_memory_held_bytes
-// stays above zero between pieces of work. Defer the release as soon as the
-// hold is taken. Refused, the consumer does not take the memory, and the
-// refusal is counted.
-func (line *Line) Hold(consumer Consumer, bytes uint64) (release func(), held bool) {
-	if line == nil {
-		return func() {}, true
-	}
-	index := consumerIndex(consumer)
-	reading := line.read()
-	line.mu.Lock()
-	held = line.fitsLocked(reading, bytes)
-	if held {
-		line.held = saturatingAdd(line.held, bytes)
-	}
-	line.mu.Unlock()
-	line.count(index, held, bytes)
-	if !held {
-		return func() {}, false
-	}
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			line.mu.Lock()
-			line.held -= min(line.held, bytes)
-			line.mu.Unlock()
-		})
-	}, true
-}
-
 // Observe takes bytes for consumer the way Admit does, for an operator's
 // read the line must never refuse: an operator's reads are a handful next to
 // the detection's work. It always grants; an ask that would not have fit is
@@ -307,10 +270,16 @@ func (line *Line) Observe(consumer Consumer, bytes uint64) bool {
 	return true
 }
 
-// HoldObserved holds bytes for consumer for one piece of work, as Hold does,
-// and like Observe never refuses: past the line it holds them anyway and
-// counts the ask as over. Release once the work is done; it is safe to call
-// more than once.
+// HoldObserved holds bytes for consumer for one piece of work it drops when
+// done, and like Observe never refuses: past the line it holds them anyway
+// and counts the ask as over. Held, the bytes count against the line until
+// release is called, and no longer: release once the memory is no longer
+// referred to - a page's response written. What is kept past the work is not
+// held but admitted as it is kept (see the package comment). release is safe
+// to call more than once, and to defer. A hold never released is never given
+// back: the line counts it until the process ends, and
+// observation_memory_held_bytes stays above zero between pieces of work.
+// Defer the release as soon as the hold is taken.
 func (line *Line) HoldObserved(consumer Consumer, bytes uint64) (release func()) {
 	if line == nil {
 		return func() {}
@@ -402,7 +371,7 @@ func (line *Line) reservedLocked(cycle uint64) uint64 {
 // after the last collection, what the detection budgets may still take,
 // Headroom - the limit less the other two, negative past the line - and what
 // observation was granted since that collection and what it holds now
-// (Hold), which admission also takes out of the headroom.
+// (HoldObserved), which admission also takes out of the headroom.
 type Reading struct {
 	LimitBytes    uint64
 	LiveBytes     uint64

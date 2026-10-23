@@ -584,21 +584,12 @@ func appendKept(events []contract.TriggerEventV1, withoutMessage []execution.Eve
 	return append(events, state.Events...), append(withoutMessage, state.WithoutMessage...)
 }
 
-// evaluateSeries evaluates one due Plan and one series. The slice contains one
-// named-input request per compiled Level and must exactly cover the Plan.
-func (e *Evaluator) evaluateSeries(
-	ctx context.Context,
-	header execution.InternalExecutionHeader,
-	inputs []execution.SeriesEvaluationInputRequest,
-	stateResult execution.StatePreflightResult,
-	gaps execution.GapLoadResult,
-	openAlerts contract.OpenAlertSet,
-) (execution.PlanEvaluationResult, error) {
-	return e.evaluateSeriesWith(ctx, header, inputs, stateResult, gaps, openAlerts, nil, nil)
-}
-
-// evaluateSeriesWith is evaluateSeries for a series whose alert identity
-// reads the host overlay over its own dimensions (EvaluationRequest.HostOverlay).
+// evaluateSeriesWith evaluates one due Plan and one series. The slice
+// contains one named-input request per compiled Level and must exactly cover
+// the Plan. hostOverlay, when the series has one, is what its alert identity
+// reads over its own dimensions (EvaluationRequest.HostOverlay); namedOutputs,
+// when the Plan records named outputs, is where they are recorded
+// (EvaluationRequest.NamedOutputs).
 func (e *Evaluator) evaluateSeriesWith(
 	ctx context.Context,
 	header execution.InternalExecutionHeader,
@@ -1331,7 +1322,7 @@ func buildMutation(request execution.EvaluationRequest, due execution.DuePlan, r
 		return execution.StateMutation{}, versionErr
 	}
 	// Provisional: only the mutation that survives the series is digested, by
-	// evaluateSeries, once its full affected-record set is known.
+	// evaluateSeriesWith, once its full affected-record set is known.
 	//
 	// One point, not the window. The record this write leaves behind is the
 	// loaded history with this point merged in, bounded by the retention, and

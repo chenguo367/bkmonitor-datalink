@@ -806,15 +806,11 @@ func splitUnknownKeys(err error) ([]string, error) {
 	return unknown, nil
 }
 
-// LoadWithRoles applies a CLI selection before validating dependencies. A nil
-// override keeps the file's selection; a non-nil empty override is refused.
-// It reads the credential references the selected roles use.
-func LoadWithRoles(path string, override roles.Set) (Config, error) {
-	return LoadWithCredentials(path, override, CredentialsForRoles)
-}
-
-// LoadWithCredentials is LoadWithRoles with the treatment of credential
-// references stated: see CredentialMode.
+// LoadWithCredentials applies a CLI selection before validating
+// dependencies. A nil override keeps the file's selection; a non-nil empty
+// override is refused. credentials states how the credential references are
+// treated: see CredentialMode (CredentialsForRoles reads the ones the
+// selected roles use).
 func LoadWithCredentials(path string, override roles.Set, credentials CredentialMode) (Config, error) {
 	cfg := Default().WithContainerCapacity()
 	if path == "" {

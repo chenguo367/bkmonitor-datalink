@@ -20,7 +20,7 @@ import (
 // sharedReadinessBoundary reports the one moment this execution's queries agree
 // their data is readable.
 //
-// It is deliberately separate from sharedPendingReadiness, which decides
+// It is deliberately separate from sharedPendingReadinessOf, which decides
 // whether to defer and therefore only answers about boundaries still in the
 // future. This one answers about the boundary itself, past or future, and
 // changes no decision.

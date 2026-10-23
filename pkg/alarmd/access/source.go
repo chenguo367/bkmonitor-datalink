@@ -1082,7 +1082,7 @@ func frozenSchedules(frozen FrozenPlan) (map[execution.PlanIdentity]execution.Sc
 	return schedules, nil
 }
 
-// slotPendingReadiness is when a Slot that is not ready comes back, instead
+// slotPendingReadinessOf is when a Slot that is not ready comes back, instead
 // of waiting inside its execution. A Slot carrying a read hold comes back
 // when the last of its queries is ready, whenever any is still pending: it
 // waits in the due index, as its held readiness is its due time there, and
@@ -1091,14 +1091,10 @@ func frozenSchedules(frozen FrozenPlan) (map[execution.PlanIdentity]execution.Sc
 // same and no less complete. A Slot without a hold keeps the shared rule:
 // deferred only when every query waits for the same moment, otherwise the
 // settling wait for the earliest is spent inside the execution.
-func slotPendingReadiness(queries []PlannedQuery, readHoldMillis int64, now time.Time) time.Time {
-	readyAt, _ := slotPendingReadinessOf(queries, readHoldMillis, now)
-	return readyAt
-}
-
-// slotPendingReadinessOf is slotPendingReadiness with the index of the query
-// whose readiness decided it: the latest pending one under a read hold, the
-// first of the shared moment without; -1 with a zero time.
+//
+// With the time comes the index of the query whose readiness decided it:
+// the latest pending one under a read hold, the first of the shared moment
+// without; -1 with a zero time.
 func slotPendingReadinessOf(queries []PlannedQuery, readHoldMillis int64, now time.Time) (time.Time, int) {
 	if readHoldMillis <= 0 {
 		return sharedPendingReadinessOf(queries, now)
@@ -1114,11 +1110,6 @@ func slotPendingReadinessOf(queries []PlannedQuery, readHoldMillis int64, now ti
 		}
 	}
 	return latest, index
-}
-
-func sharedPendingReadiness(queries []PlannedQuery, now time.Time) time.Time {
-	readyAt, _ := sharedPendingReadinessOf(queries, now)
-	return readyAt
 }
 
 func sharedPendingReadinessOf(queries []PlannedQuery, now time.Time) (time.Time, int) {

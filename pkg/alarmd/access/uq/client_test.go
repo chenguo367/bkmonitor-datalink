@@ -677,3 +677,9 @@ func wantLimitCompletion(t *testing.T, client *Client, detail string) {
 		t.Fatalf("completion delivery = %d series, the sink received %d: delivery is not conserved", completion.Delivery.Series, delivered)
 	}
 }
+
+// buildRequest is the request the client sends for spec, carrying the APM
+// application exactly when the client would.
+func buildRequest(spec execution.PhysicalQuerySpec) (request, error) {
+	return buildRequestCarrying(spec, carriesAPMApp(spec))
+}

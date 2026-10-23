@@ -9,7 +9,6 @@ package redact
 import (
 	"encoding/json"
 	"regexp"
-	"sort"
 	"strings"
 )
 
@@ -126,17 +125,6 @@ func credentialBundleField(normalized string) bool {
 // holds the same table (alarmd-cli internal/cli output.go).
 var referenceFields = map[string]bool{"secretName": true, "name": true, "key": true, "optional": true, "items": true,
 	"path": true, "mode": true, "defaultMode": true, "namespace": true}
-
-// ReferenceFields is the table, sorted, for the test that holds both copies
-// to it.
-func ReferenceFields() []string {
-	fields := make([]string, 0, len(referenceFields))
-	for field := range referenceFields {
-		fields = append(fields, field)
-	}
-	sort.Strings(fields)
-	return fields
-}
 
 // reference is a structure under a credential-named key as it is shown: a
 // reference's fields, walked the same way, and every other value masked - a

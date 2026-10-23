@@ -88,12 +88,6 @@ func observationAdmit(line *memoryline.Line, consumer memoryline.Consumer) func(
 	return func(bytes uint64) bool { return line.Admit(consumer, bytes) }
 }
 
-// observationHold is the line's Hold for one consumer: memory one piece of
-// work takes and releases when it is done.
-func observationHold(line *memoryline.Line, consumer memoryline.Consumer) func(bytes uint64) (func(), bool) {
-	return func(bytes uint64) (func(), bool) { return line.Hold(consumer, bytes) }
-}
-
 // observationObserve is the line's report-only admission for an operator's
 // read: it always goes ahead, and past the line it is counted as over.
 func observationObserve(line *memoryline.Line, consumer memoryline.Consumer) func(bytes uint64) bool {

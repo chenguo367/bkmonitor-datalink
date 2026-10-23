@@ -621,3 +621,8 @@ func TestObjectGetSummarySaysHowMuchOfTheObjectTheFactCovers(t *testing.T) {
 		})
 	}
 }
+
+// NativeOperations is NativeOperationsWith adding nothing from this process.
+func NativeOperations(handler http.Handler) []Operation {
+	return NativeOperationsWith(handler, NativeOptions{})
+}

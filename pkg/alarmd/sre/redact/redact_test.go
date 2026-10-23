@@ -5,6 +5,8 @@ package redact
 
 import (
 	"encoding/json"
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -95,7 +97,7 @@ func TestUnderACredentialNameOnlyAReferenceComesThrough(t *testing.T) {
 // The reference fields are one table, the same one the CLI holds.
 func TestTheReferenceFieldsAreTheSharedTable(t *testing.T) {
 	want := []string{"defaultMode", "items", "key", "mode", "name", "namespace", "optional", "path", "secretName"}
-	got := ReferenceFields()
+	got := slices.Sorted(maps.Keys(referenceFields))
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("reference fields %v, want %v", got, want)
 	}

@@ -86,8 +86,6 @@ type counters struct {
 	last   map[string]time.Time
 }
 
-func (c *counters) add(name string, at time.Time) { c.addN(name, 1, at) }
-
 func (c *counters) addN(name string, n uint64, at time.Time) {
 	if n == 0 {
 		return
