@@ -52,39 +52,40 @@ type lookbackCollector struct {
 	supplementHold       *prometheus.Desc
 	supplementHoldMax    *prometheus.Desc
 	// The early reads of directed Slots, before their next Slot reads.
-	earlyReads          *prometheus.Desc
-	earlyUndecided      *prometheus.Desc
-	earlyBytes          *prometheus.Desc
-	earlierBytes        *prometheus.Desc
-	earlierReads        *prometheus.Desc
-	earlierOvertaken    *prometheus.Desc
-	earlierPreparedLate *prometheus.Desc
-	earlierAhead        *prometheus.Desc
-	earlierSkipped      *prometheus.Desc
-	probationRereads    *prometheus.Desc
-	probationCaught     *prometheus.Desc
-	probationGroups     *prometheus.Desc
-	floorProbeRounds    *prometheus.Desc
-	floorProbes         *prometheus.Desc
-	floorProbeGroups    *prometheus.Desc
-	floorProbeChanges   *prometheus.Desc
-	readHoldFloorProbes *prometheus.Desc
-	readHoldFindings    *prometheus.Desc
-	holdIgnored         *prometheus.Desc
-	readHoldTransition  *prometheus.Desc
-	readHoldOvertaken   *prometheus.Desc
-	readHoldPredecessor *prometheus.Desc
-	readHoldSeed        *prometheus.Desc
-	readHoldDuration    *prometheus.Desc
-	readHoldEarlierSkip *prometheus.Desc
-	roundsReadAtLimit   *prometheus.Desc
-	readHoldClamped     *prometheus.Desc
-	readHoldCorrupt     *prometheus.Desc
-	readHoldRetireClose *prometheus.Desc
-	readHoldCloseSkip   *prometheus.Desc
-	readHoldDegraded    *prometheus.Desc
-	readHoldGroups      *prometheus.Desc
-	readHoldMax         *prometheus.Desc
+	earlyReads            *prometheus.Desc
+	earlyUndecided        *prometheus.Desc
+	earlyBytes            *prometheus.Desc
+	earlierBytes          *prometheus.Desc
+	earlierReads          *prometheus.Desc
+	earlierOvertaken      *prometheus.Desc
+	earlierPreparedLate   *prometheus.Desc
+	earlierAhead          *prometheus.Desc
+	earlierSkipped        *prometheus.Desc
+	probationRereads      *prometheus.Desc
+	probationCaught       *prometheus.Desc
+	probationGroups       *prometheus.Desc
+	floorProbeRounds      *prometheus.Desc
+	floorProbes           *prometheus.Desc
+	floorProbeGroups      *prometheus.Desc
+	floorProbeChanges     *prometheus.Desc
+	readHoldFloorProbes   *prometheus.Desc
+	readHoldProbeProgress *prometheus.Desc
+	readHoldFindings      *prometheus.Desc
+	holdIgnored           *prometheus.Desc
+	readHoldTransition    *prometheus.Desc
+	readHoldOvertaken     *prometheus.Desc
+	readHoldPredecessor   *prometheus.Desc
+	readHoldSeed          *prometheus.Desc
+	readHoldDuration      *prometheus.Desc
+	readHoldEarlierSkip   *prometheus.Desc
+	roundsReadAtLimit     *prometheus.Desc
+	readHoldClamped       *prometheus.Desc
+	readHoldCorrupt       *prometheus.Desc
+	readHoldRetireClose   *prometheus.Desc
+	readHoldCloseSkip     *prometheus.Desc
+	readHoldDegraded      *prometheus.Desc
+	readHoldGroups        *prometheus.Desc
+	readHoldMax           *prometheus.Desc
 }
 
 func newLookbackCollector() *lookbackCollector {
@@ -138,6 +139,12 @@ func newLookbackCollector() *lookbackCollector {
 				"or its search - and the probe changed nothing), moot (verify: the candidate was no longer below the hold "+
 				"and above the floor, and was cleared unread). Probes that did not end are on "+
 				"lookback_floor_probes_total. Every kind and outcome exists from the start.", "kind", "outcome"),
+		readHoldProbeProgress: desc("read_hold_floor_probe_progress_writes_total",
+			"Writes keeping a running shadow probe's clean rounds in its group's record, every "+
+				"lookback.FloorProbeProgressEvery of them, so the probe goes on from them after a rollout or a takeover, by "+
+				"what came of them: written, stale (the record's probe had ended or moved first, nothing written) and "+
+				"conflict (the compare lost to another write, the progress dropped, the move that won kept). A probe that "+
+				"goes on from them is lookback_floor_probes_total{event=\"resumed\"}. Every outcome exists from the start.", "outcome"),
 		readHoldDuration: desc("read_hold_query_duration_writes_total",
 			"Read-hold records written for the query duration they keep, by why: changed (the owner's measured "+
 				"duration moved by a second, a minute or more after the last write) or refreshed (the same reading "+
@@ -359,7 +366,7 @@ func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, desc := range []*prometheus.Desc{c.firstReads, c.checks, c.changed, c.changes, c.classes, c.readEarly, c.seriesLate, c.supplementWindows, c.supplementUnobserved, c.supplementSeries,
 		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.earlierBytes, c.earlierReads, c.earlierOvertaken, c.earlierPreparedLate, c.earlierAhead, c.earlierSkipped, c.probationRereads, c.probationCaught, c.probationGroups, c.floorProbeRounds, c.floorProbes, c.floorProbeGroups, c.floorProbeChanges, c.holdIgnored, c.readBytes, c.checkBytes, c.unknown, c.coverage,
 		c.pending, c.yields, c.refused, c.faults, c.plans, c.planHeld, c.readHoldTransition, c.readHoldOvertaken,
-		c.readHoldPredecessor, c.readHoldSeed, c.readHoldDuration, c.readHoldEarlierSkip, c.readHoldFloorProbes, c.readHoldFindings, c.roundsReadAtLimit, c.readHoldClamped, c.readHoldCorrupt, c.readHoldRetireClose, c.readHoldCloseSkip, c.readHoldDegraded,
+		c.readHoldPredecessor, c.readHoldSeed, c.readHoldDuration, c.readHoldEarlierSkip, c.readHoldFloorProbes, c.readHoldProbeProgress, c.readHoldFindings, c.roundsReadAtLimit, c.readHoldClamped, c.readHoldCorrupt, c.readHoldRetireClose, c.readHoldCloseSkip, c.readHoldDegraded,
 		c.readHoldGroups, c.readHoldMax} {
 		ch <- desc
 	}
@@ -404,6 +411,9 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	for _, outcome := range readhold.ProbationFindingOutcomes {
 		counter(c.readHoldFindings, stats.ReadHoldProbationFindings[outcome], outcome)
+	}
+	for _, outcome := range readhold.ProbeProgressOutcomes {
+		counter(c.readHoldProbeProgress, stats.ReadHoldFloorProbeProgress[outcome], outcome)
 	}
 	for _, source := range lookback.Sources {
 		counter(c.roundsReadAtLimit, stats.RoundsReadAtLimit[source], source)

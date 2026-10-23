@@ -351,3 +351,45 @@ func TestAProbeComesDownToWhereItsDataIsWholeAndNoFurther(t *testing.T) {
 		t.Fatalf("%d Slots skipped, verified %v", skipped, holds.controller.LoweringVerified(f.queryGroup))
 	}
 }
+
+// A probe's clean rounds are kept in its group's record every lookback.FloorProbeProgressEvery of them, and a group
+// that leaves the process and comes back - a takeover, a rollout - has its probe go on from what was kept, from the
+// Slot it started at, not from none. The rounds read after the last kept ones are read again: the safe direction.
+func TestAProbeGoesOnFromItsKeptRoundsWhenItsGroupComesBack(t *testing.T) {
+	t.Parallel()
+	f := startCutoverFixture(t, leasesOutliveTheRun)
+	engine, holds := f.bundle.dependencies.Lookback, f.bundle.dependencies.ReadHolds
+	stuckUnderFloor(t, f, 96500*time.Millisecond)
+	ageFloor(t, f, readhold.FloorStanding)
+	kept := func() int {
+		record, _ := holds.controller.Reading(f.queryGroup)
+		if record.Probe == nil {
+			return 0
+		}
+		return record.Probe.Clean
+	}
+	heldRounds(t, f, 3*time.Hour, func(time.Duration) bool { return kept() >= 2*lookback.FloorProbeProgressEvery })
+	before, _ := engine.GroupReading(f.queryGroup)
+	rounds := kept()
+	if rounds < 2*lookback.FloorProbeProgressEvery || before.FloorProbe == nil || before.FloorProbe.Kind != readhold.FloorProbeKindMidpoint {
+		t.Fatalf("fixture: %d rounds kept, probe %+v; want a midpoint's 20 rounds kept", rounds, before.FloorProbe)
+	}
+	// The group leaves this process and comes back.
+	engine.Forget(f.queryGroup)
+	heldRounds(t, f, time.Hour, func(time.Duration) bool {
+		reading, _ := engine.GroupReading(f.queryGroup)
+		return reading.FloorProbe != nil
+	})
+	after, _ := engine.GroupReading(f.queryGroup)
+	if after.FloorProbe == nil || after.FloorProbe.ResumedFrom != rounds || after.FloorProbe.Started != before.FloorProbe.Started ||
+		after.FloorProbe.FloorMillis != before.FloorProbe.FloorMillis {
+		t.Fatalf("the probe after coming back %+v, want it gone on from the %d rounds kept, started at %d", after.FloorProbe, rounds,
+			before.FloorProbe.Started)
+	}
+	if events := probeEventsOf(engine, "midpoint"); events[lookback.FloorProbeResumed] != 1 || events[lookback.FloorProbeOwnerLost] != 1 {
+		t.Fatalf("midpoint events %v, want one owner_lost and one resumed", events)
+	}
+	if got := holds.controller.Stats().ProbeProgress; got[readhold.ProbeProgressWritten] < 2 || got[readhold.ProbeProgressConflict] != 0 {
+		t.Fatalf("progress writes %v, want the kept rounds written and none lost to a conflict", got)
+	}
+}

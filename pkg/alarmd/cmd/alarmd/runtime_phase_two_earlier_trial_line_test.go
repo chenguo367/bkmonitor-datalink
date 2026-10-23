@@ -99,6 +99,23 @@ func TestTheFloorProbeLineNamesItsKind(t *testing.T) {
 	if fmt.Sprint(lookback.FloorProbeKinds) != fmt.Sprint(readhold.FloorProbeKinds) {
 		t.Fatalf("lookback kinds %v, controller kinds %v", lookback.FloorProbeKinds, readhold.FloorProbeKinds)
 	}
+	// A probe's start says the clean rounds it went on from, and the lookback hands its rounds on to be kept as
+	// often as the controller keeps them.
+	out.Reset()
+	if options.FloorProbeResume == nil || options.OnFloorProbeProgress == nil {
+		t.Fatal("the lookback is not told how far a probe had read, nor hands on its rounds")
+	}
+	options.OnFloorProbeStart(lookback.FloorProbeStart{Contract: contract, Source: "time_series", Kind: "verify", Floor: 150 * time.Second,
+		Hold: 5 * time.Minute, Rounds: 480, Started: 120, ResumedFrom: 30})
+	for _, field := range []string{`"floor_probe_started"`, `"kind":"verify"`, `"resumed_from":30`, `"rounds_required":480`, `"started_slot":120`} {
+		if !strings.Contains(out.String(), field) {
+			t.Errorf("the start line %s lacks %s", out.String(), field)
+		}
+	}
+	if lookback.FloorProbeProgressEvery != readhold.ProbeProgressEvery {
+		t.Fatalf("the lookback hands on every %d rounds, the controller keeps every %d", lookback.FloorProbeProgressEvery,
+			readhold.ProbeProgressEvery)
+	}
 }
 
 // A limit that cuts a group's hold by more Slots than a replay covers is

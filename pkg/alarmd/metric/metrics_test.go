@@ -525,6 +525,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["alarmd_lookback_floor_probe_groups"] = "variableLabels: {source}"
 	expected["alarmd_lookback_floor_probe_changes_total"] = "variableLabels: {source,change}"
 	expected["alarmd_read_hold_floor_probes_total"] = "variableLabels: {kind,outcome}"
+	expected["alarmd_read_hold_floor_probe_progress_writes_total"] = "variableLabels: {outcome}"
 	expected["alarmd_read_hold_probation_findings_total"] = "variableLabels: {outcome}"
 	expected["alarmd_read_hold_query_duration_writes_total"] = "variableLabels: {reason}"
 	expected["alarmd_lookback_earlier_prepared_late_max_seconds"] = "variableLabels: {source}"

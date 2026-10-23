@@ -490,7 +490,7 @@ func (engine *Engine) Prepare(query Query) {
 			// None to try: the search below the hold has run out. Its floor,
 			// once it has stood long enough, is probed round by round instead.
 			if floor, kind, edge, probing := engine.floorProbe(query.Contract.Slot.QueryGroup); probing {
-				engine.prepareProbe(query, now, hold, base, floor, kind, edge)
+				engine.prepareProbe(query, now, hold, base, floor, kind, edge, engine.probeResume(query.Contract.Slot.QueryGroup, kind, floor))
 				return
 			}
 			engine.refuseEarlier(query, now)

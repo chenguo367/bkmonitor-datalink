@@ -1527,6 +1527,12 @@ Labels: `reason`
 
 Earlier-read trials not run, by why, one per Slot a trial would have been reserved for (its group's sampling rest over, nothing of it in flight): at_limit (the group is held at its limit and was read early within its quiet bar, so its data arrives past the longest hold it may have; a read below the hold and the formal read both come before the data, and their agreeing would say nothing of it). A group counted here keeps its hold at the limit; its trials resume once an arrival reading wants a hold below the limit, or once it has gone its quiet bar without being read early. search_done (the search below the hold has run out: the gap between its floor and the hold is no wider than a step; the group's read-hold record says when the floor was learned, earlier_floor_at_ms). A group whose floor is being probed is counted under neither: its Slots are lookback_earlier_skipped_total{reason="floor_probe"}. Every reason exists from the start.
 
+## alarmd_read_hold_floor_probe_progress_writes_total
+
+Labels: `outcome`
+
+Writes keeping a running shadow probe's clean rounds in its group's record, every lookback.FloorProbeProgressEvery of them, so the probe goes on from them after a rollout or a takeover, by what came of them: written, stale (the record's probe had ended or moved first, nothing written) and conflict (the compare lost to another write, the progress dropped, the move that won kept). A probe that goes on from them is lookback_floor_probes_total{event="resumed"}. Every outcome exists from the start.
+
 ## alarmd_read_hold_floor_probes_total
 
 Labels: `kind`, `outcome`

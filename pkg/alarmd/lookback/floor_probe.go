@@ -61,8 +61,11 @@ var FloorProbeRoundOutcomes = []string{FloorProbeClean, FloorProbeDifferent, Flo
 // group left this process. A probe in flight when its process stops ends
 // with none of them: started rising while none of the ends does is probes
 // that do not live long enough to finish.
+// resumed is a start that goes on from the clean rounds the probe's record
+// kept (FloorProbeResume), counted with started.
 const (
 	FloorProbeStarted   = "started"
+	FloorProbeResumed   = "resumed"
 	FloorProbePassed    = "passed"
 	FloorProbeFailed    = "failed"
 	FloorProbeHoldMoved = "hold_moved"
@@ -70,7 +73,38 @@ const (
 )
 
 // FloorProbeEvents is every probe event.
-var FloorProbeEvents = []string{FloorProbeStarted, FloorProbePassed, FloorProbeFailed, FloorProbeHoldMoved, FloorProbeOwnerLost}
+var FloorProbeEvents = []string{FloorProbeStarted, FloorProbeResumed, FloorProbePassed, FloorProbeFailed, FloorProbeHoldMoved, FloorProbeOwnerLost}
+
+// FloorProbeProgressEvery is how many clean rounds of a probe go between the
+// writes that keep them (readhold.ProbeProgressEvery).
+const FloorProbeProgressEvery = 10
+
+// FloorProbeProgress is a running probe's clean rounds in a row, every
+// FloorProbeProgressEvery of them, with what it reads and the Slot it started
+// at; Contract is the Slot of its latest clean round.
+type FloorProbeProgress struct {
+	Contract execution.FrozenExecutionContractRef
+	Source   string
+	Kind     string
+	Floor    time.Duration
+	Hold     time.Duration
+	Clean    int
+	Started  execution.EvaluationTime
+}
+
+// FloorProbeStart is a probe's start: what it reads, the clean rounds it
+// needs, the Slot it started at, and the clean rounds it goes on from, kept
+// by the process that ran it before (ResumedFrom; none for a fresh one).
+type FloorProbeStart struct {
+	Contract    execution.FrozenExecutionContractRef
+	Source      string
+	Kind        string
+	Floor       time.Duration
+	Hold        time.Duration
+	Rounds      int
+	Started     execution.EvaluationTime
+	ResumedFrom int
+}
 
 // FloorProbeKinds is every kind of probe the controller gives
 // (readhold.FloorProbeKinds): verify, the candidate a group's trials chose,
@@ -89,12 +123,15 @@ type floorProbeState struct {
 	// edge: the floor is near one a probe has failed at, and the probe reads
 	// EdgeProbeSpan of its rounds clean, period apart, if that is more than
 	// ProbationRounds.
-	edge     bool
-	period   time.Duration
-	clean    int
-	started  execution.EvaluationTime
-	prepared execution.EvaluationTime
-	reserved map[execution.EvaluationTime]*earlierSample
+	edge   bool
+	period time.Duration
+	clean  int
+	// resumedFrom is the clean rounds it went on from, kept by the process
+	// that ran it before; none for a fresh one.
+	resumedFrom int
+	started     execution.EvaluationTime
+	prepared    execution.EvaluationTime
+	reserved    map[execution.EvaluationTime]*earlierSample
 }
 
 // FloorProbeEnd is how a probe ended (FloorProbeEvents but started): the Slot
@@ -116,9 +153,10 @@ type FloorProbeEnd struct {
 	Clean int
 	// Rounds is the clean rounds it needed to pass: ProbationRounds, or near a
 	// floor a probe failed at EdgeProbeSpan of rounds if that is more.
-	Rounds  int
-	Started execution.EvaluationTime
-	Changes map[string]int
+	Rounds      int
+	Started     execution.EvaluationTime
+	ResumedFrom int
+	Changes     map[string]int
 }
 
 // GroupFloorProbe is a Query Group's probe now, for its group reading.
@@ -129,6 +167,7 @@ type GroupFloorProbe struct {
 	Clean       int                      `json:"clean_rounds"`
 	Rounds      int                      `json:"rounds_required"`
 	Started     execution.EvaluationTime `json:"started_slot"`
+	ResumedFrom int                      `json:"resumed_from"`
 	Reserved    int                      `json:"reserved"`
 }
 
@@ -158,6 +197,26 @@ func (engine *Engine) floorProbe(queryGroup execution.QueryGroupIdentity) (time.
 	return engine.options.FloorProbe(queryGroup)
 }
 
+// probeResume is how far a probe of the group at floor, of kind, had read
+// before, asked outside the engine's lock; nothing with no controller to ask.
+func (engine *Engine) probeResume(queryGroup execution.QueryGroupIdentity, kind string, floor time.Duration) probeResume {
+	if engine.options.FloorProbeResume == nil {
+		return probeResume{}
+	}
+	clean, started, ok := engine.options.FloorProbeResume(queryGroup, kind, floor)
+	if !ok || clean <= 0 || started <= 0 {
+		return probeResume{}
+	}
+	return probeResume{clean: clean, started: started}
+}
+
+// probeResume is the clean rounds a probe goes on from and the Slot it
+// started at; none for a fresh probe.
+type probeResume struct {
+	clean   int
+	started execution.EvaluationTime
+}
+
 // probeRounds is how many clean rounds in a row pass a probe.
 func (engine *Engine) probeRounds(probe *floorProbeState) int {
 	rounds := engine.probationRounds()
@@ -172,7 +231,7 @@ func (engine *Engine) probeRounds(probe *floorProbeState) int {
 // attempt, it takes the reservation made for it ahead and reserves the read
 // of a round - its own while its point is still ahead, otherwise the first
 // Slot on whose point is.
-func (engine *Engine) prepareProbe(query Query, now time.Time, hold, base, floor time.Duration, kind string, edge bool) {
+func (engine *Engine) prepareProbe(query Query, now time.Time, hold, base, floor time.Duration, kind string, edge bool, resume probeResume) {
 	engine.mu.Lock()
 	state := engine.groupLocked(query, now)
 	slot := query.Contract.Slot.EvaluationTime
@@ -190,8 +249,16 @@ func (engine *Engine) prepareProbe(query Query, now time.Time, hold, base, floor
 		}
 		probe = &floorProbeState{floor: floor, kind: kind, hold: base, edge: edge, period: period, started: slot,
 			reserved: map[execution.EvaluationTime]*earlierSample{}}
+		// The process that ran it before kept its clean rounds: it goes on
+		// from them, from the Slot it started at there.
+		if resume.clean > 0 {
+			probe.clean, probe.resumedFrom, probe.started = resume.clean, resume.clean, resume.started
+			engine.counts.floorProbes[key3(state.source, kind, FloorProbeResumed)]++
+		}
 		state.floorProbe = probe
 		engine.counts.floorProbes[key3(state.source, kind, FloorProbeStarted)]++
+		engine.probeStarts = append(engine.probeStarts, FloorProbeStart{Contract: query.Contract, Source: state.source, Kind: kind,
+			Floor: floor, Hold: base, Rounds: engine.probeRounds(probe), Started: probe.started, ResumedFrom: probe.resumedFrom})
 	}
 	engine.skipLocked(state, query, EarlierSkipFloorProbe)
 	if slot <= probe.prepared {
@@ -325,21 +392,32 @@ func (engine *Engine) endProbeLocked(state *group, event string, contract execut
 	}
 	engine.counts.floorProbes[key3(state.source, probe.kind, event)]++
 	engine.probeEnds = append(engine.probeEnds, FloorProbeEnd{Contract: contract, Source: state.source, Event: event,
-		Floor: probe.floor, Kind: probe.kind, Hold: probe.hold, Clean: probe.clean, Rounds: engine.probeRounds(probe), Started: probe.started})
+		Floor: probe.floor, Kind: probe.kind, Hold: probe.hold, Clean: probe.clean, Rounds: engine.probeRounds(probe), Started: probe.started,
+		ResumedFrom: probe.resumedFrom})
 }
 
-// publishProbeEnds hands the kept probe ends to OnFloorProbe, outside the
-// engine's lock.
+// publishProbeEnds hands the kept probe starts, progress and ends to
+// OnFloorProbeStart, OnFloorProbeProgress and OnFloorProbe, in that order,
+// outside the engine's lock.
 func (engine *Engine) publishProbeEnds() {
 	engine.mu.Lock()
-	ends := engine.probeEnds
-	engine.probeEnds = nil
+	starts, progress, ends := engine.probeStarts, engine.probeProgress, engine.probeEnds
+	engine.probeStarts, engine.probeProgress, engine.probeEnds = nil, nil, nil
 	engine.mu.Unlock()
-	if engine.options.OnFloorProbe == nil {
-		return
+	if engine.options.OnFloorProbeStart != nil {
+		for _, start := range starts {
+			engine.options.OnFloorProbeStart(start)
+		}
 	}
-	for _, end := range ends {
-		engine.options.OnFloorProbe(end)
+	if engine.options.OnFloorProbeProgress != nil {
+		for _, kept := range progress {
+			engine.options.OnFloorProbeProgress(kept)
+		}
+	}
+	if engine.options.OnFloorProbe != nil {
+		for _, end := range ends {
+			engine.options.OnFloorProbe(end)
+		}
 	}
 }
 
@@ -413,8 +491,12 @@ func (read *Read) completeFloorProbe(completion execution.ProviderCompletion, er
 	if state := engine.groups[qg]; state != nil && state.floorProbe == probe && round.query.Contract.ReadHoldMillis == probe.hold.Milliseconds() {
 		switch outcome {
 		case FloorProbeClean:
-			if probe.clean++; probe.clean >= engine.probeRounds(probe) {
+			switch probe.clean++; {
+			case probe.clean >= engine.probeRounds(probe):
 				engine.endProbeLocked(state, FloorProbePassed, round.query.Contract)
+			case probe.clean%FloorProbeProgressEvery == 0:
+				engine.probeProgress = append(engine.probeProgress, FloorProbeProgress{Contract: round.query.Contract, Source: round.source,
+					Kind: probe.kind, Floor: probe.floor, Hold: probe.hold, Clean: probe.clean, Started: probe.started})
 			}
 		case FloorProbeDifferent:
 			engine.endProbeLocked(state, FloorProbeFailed, round.query.Contract)

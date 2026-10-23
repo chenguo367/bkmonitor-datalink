@@ -120,6 +120,9 @@ type Stats struct {
 	// ProbationFindings is the probation findings this controller took, by
 	// what it made of them (ProbationFindingOutcomes).
 	ProbationFindings map[string]uint64
+	// ProbeProgress is the probe progress writes, by what came of them
+	// (ProbeProgressOutcomes).
+	ProbeProgress map[string]uint64
 }
 
 // What a probation's finding made of the group's record, closed: undone, a
@@ -314,6 +317,9 @@ type Controller struct {
 	// (ProbationFindingOutcomes).
 	floorProbes       map[string]uint64
 	probationFindings map[string]uint64
+	// probeProgress is the probe progress writes, by what came of them
+	// (ProbeProgressOutcomes).
+	probeProgress map[string]uint64
 	// durationWrites is the records written for a query duration, by why
 	// (QueryDurationWriteReasons).
 	durationWrites map[string]uint64
@@ -330,7 +336,7 @@ func NewController(options Options) (*Controller, error) {
 	return &Controller{options: options, groups: make(map[execution.QueryGroupIdentity]*entry),
 		predecessors: make(map[string]uint64), clamped: make(map[string]uint64), seeds: make(map[string]uint64),
 		durationWrites: make(map[string]uint64), earlierSkipped: make(map[string]uint64), floorProbes: make(map[string]uint64),
-		probationFindings: make(map[string]uint64)}, nil
+		probationFindings: make(map[string]uint64), probeProgress: make(map[string]uint64)}, nil
 }
 
 // Stats copies the counts.
@@ -364,6 +370,10 @@ func (controller *Controller) Stats() Stats {
 			stats.FloorProbesByKind[kind][outcome] = count
 			stats.FloorProbes[outcome] += count
 		}
+	}
+	stats.ProbeProgress = make(map[string]uint64, len(ProbeProgressOutcomes))
+	for _, outcome := range ProbeProgressOutcomes {
+		stats.ProbeProgress[outcome] = controller.probeProgress[outcome]
 	}
 	stats.ProbationFindings = make(map[string]uint64, len(ProbationFindingOutcomes))
 	for _, outcome := range ProbationFindingOutcomes {
@@ -707,6 +717,14 @@ func clone(record Record) Record {
 		candidate := *record.VerifyCandidateMillis
 		record.VerifyCandidateMillis = &candidate
 	}
+	if record.Probe != nil {
+		probe := *record.Probe
+		if probe.FloorMillis != nil {
+			floor := *probe.FloorMillis
+			probe.FloorMillis = &floor
+		}
+		record.Probe = &probe
+	}
 	record.Buckets = append([]int64(nil), record.Buckets...)
 	record.EarlyGaps = append([]EarlyGap(nil), record.EarlyGaps...)
 	record.Plans = append([]PlanRecord(nil), record.Plans...)
@@ -738,6 +756,9 @@ func (controller *Controller) persist(ctx context.Context, qg execution.QueryGro
 		return errors.New("alarmd readhold: owner differs from Query Group")
 	}
 	prunePlans(&next, state.spec.Plans, controller.options.Now().Unix()-int64(RecordTTL/time.Second))
+	// A probe's progress kept only while it is of the probe the record has
+	// now: a write that moves what the probe reads clears it (ProbeProgress).
+	settleProgress(&next, state.spec.Step, controller.options.Now().UnixMilli())
 	next.RenewedAtMillis = controller.options.Now().UnixMilli()
 	raw, err := json.Marshal(next)
 	if err != nil {

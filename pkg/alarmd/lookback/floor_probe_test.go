@@ -12,6 +12,7 @@ package lookback
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -640,4 +641,72 @@ func TestARoundsReadReadsTheQueryItStartedWith(t *testing.T) {
 		busy, _ := r.f.engine.Busy("qg")
 		return busy.ReadsInFlight == 0
 	})
+}
+
+// A probe whose group's record kept its clean rounds - a rollout, a takeover - goes on from them, from the Slot it
+// started at, counted resumed beside started, and passes once the rounds it still needs read clean. Every
+// FloorProbeProgressEvery clean rounds of it are handed on to be kept, and its start is seen with the rounds it went on
+// from. A probe with none kept starts from none.
+func TestAProbeGoesOnFromTheRoundsItsRecordKept(t *testing.T) {
+	for _, kept := range []int{0, 15} {
+		t.Run(fmt.Sprint(kept), func(t *testing.T) {
+			r := newProbeRun(t, 2*time.Minute, 0, 25)
+			first := r.f.clock.now().Unix() / 60 * 60
+			startedAt := execution.EvaluationTime(first - 3600)
+			var starts []FloorProbeStart
+			var progress []FloorProbeProgress
+			options := &r.f.engine.options
+			options.FloorProbeResume = func(_ execution.QueryGroupIdentity, kind string, floor time.Duration) (int, execution.EvaluationTime, bool) {
+				if kept == 0 || kind != "floor" || floor != r.floor {
+					return 0, 0, false
+				}
+				return kept, startedAt, true
+			}
+			options.OnFloorProbeStart = func(start FloorProbeStart) {
+				r.mu.Lock()
+				starts = append(starts, start)
+				r.mu.Unlock()
+			}
+			options.OnFloorProbeProgress = func(round FloorProbeProgress) {
+				r.mu.Lock()
+				progress = append(progress, round)
+				r.mu.Unlock()
+			}
+			left := 25 - kept
+			r.run(first, left+3)
+			wantStarted := map[bool]execution.EvaluationTime{true: startedAt, false: execution.EvaluationTime(first)}[kept > 0]
+			ends := r.endsSeen()
+			if len(ends) != 1 || ends[0].Event != FloorProbePassed || ends[0].Clean != 25 || ends[0].ResumedFrom != kept ||
+				ends[0].Started != wantStarted {
+				t.Fatalf("ends %+v, want it passed at 25 clean rounds, resumed from %d, started at %d", ends, kept, wantStarted)
+			}
+			// Here it read only the rounds it still needed.
+			if got := r.rounds()[FloorProbeClean]; got != uint64(left) {
+				t.Fatalf("%d clean rounds read here, want the %d left", got, left)
+			}
+			r.mu.Lock()
+			gotStarts, gotProgress := append([]FloorProbeStart(nil), starts...), append([]FloorProbeProgress(nil), progress...)
+			r.mu.Unlock()
+			// The first start; the fixture's floor stays to probe, and another starts after it passed.
+			if len(gotStarts) == 0 || gotStarts[0].ResumedFrom != kept || gotStarts[0].Started != wantStarted || gotStarts[0].Kind != "floor" ||
+				gotStarts[0].Rounds != 25 {
+				t.Fatalf("starts %+v, want the first of the floor resumed from %d", gotStarts, kept)
+			}
+			var cleans []int
+			for _, round := range gotProgress {
+				if round.Started != wantStarted || round.Kind != "floor" || round.Floor != r.floor || round.Hold != r.hold {
+					t.Fatalf("progress %+v, want the probe's", round)
+				}
+				cleans = append(cleans, round.Clean)
+			}
+			want := map[int]string{0: "[10 20]", 15: "[20]"}[kept]
+			if fmt.Sprint(cleans) != want {
+				t.Fatalf("progress handed on at %v clean rounds, want %s", cleans, want)
+			}
+			events := r.f.engine.Stats().Sources[sourceTimeSeries].FloorProbesByKind["floor"]
+			if events[FloorProbeStarted] != uint64(len(gotStarts)) || events[FloorProbeResumed] != map[bool]uint64{true: uint64(len(gotStarts)), false: 0}[kept > 0] {
+				t.Fatalf("events %v, %d starts seen, want each counted started, and resumed when it went on from kept rounds", events, len(gotStarts))
+			}
+		})
+	}
 }

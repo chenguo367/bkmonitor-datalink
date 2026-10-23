@@ -929,6 +929,27 @@ func (holds *productionReadHolds) bindLookback(options *lookback.Options) {
 	// after it as after every lowering, one that fails relearns the floor. One line per
 	// probe end, a probe being two hours of rounds at least.
 	options.FloorProbe, options.LoweringVerified = holds.controller.FloorProbe, holds.controller.LoweringVerified
+	// A probe goes on, after a rollout or a takeover, from the clean rounds its
+	// record kept, written every lookback.FloorProbeProgressEvery of them; a
+	// write that loses its compare is dropped, the move that won it taken.
+	options.FloorProbeResume = holds.controller.FloorProbeResume
+	options.OnFloorProbeProgress = func(e lookback.FloorProbeProgress) {
+		holds.observation(e.Contract, func(ctx context.Context) error {
+			return holds.controller.FloorProbeProgress(ctx, readhold.FloorProbeProgressEvidence{Contract: e.Contract, Floor: e.Floor,
+				Kind: e.Kind, Hold: e.Hold, Clean: e.Clean, Started: e.Started})
+		})
+	}
+	// One line per probe start: resumed_from is the clean rounds it went on
+	// from, kept by the process that ran it before, 0 for a fresh one.
+	options.OnFloorProbeStart = func(e lookback.FloorProbeStart) {
+		if holds.logger == nil {
+			return
+		}
+		holds.logger.Info("lookback", "floor_probe_started", 0, 0, slog.String("query_group", string(e.Contract.Slot.QueryGroup)),
+			slog.Int64("slot", int64(e.Contract.Slot.EvaluationTime)), slog.String("source", e.Source), slog.String("kind", e.Kind),
+			slog.Int64("probe_ms", e.Floor.Milliseconds()), slog.Int64("read_hold_ms", e.Hold.Milliseconds()),
+			slog.Int("rounds_required", e.Rounds), slog.Int64("started_slot", int64(e.Started)), slog.Int("resumed_from", e.ResumedFrom))
+	}
 	options.OnFloorProbe = func(e lookback.FloorProbeEnd) {
 		if holds.logger != nil {
 			// kind is what the probe read: verify, the candidate the trials chose
@@ -948,7 +969,8 @@ func (holds *productionReadHolds) bindLookback(options *lookback.Options) {
 			attrs := []slog.Attr{slog.String("query_group", string(e.Contract.Slot.QueryGroup)),
 				slog.Int64("slot", int64(e.Contract.Slot.EvaluationTime)), slog.String("source", e.Source), slog.String("event", e.Event),
 				slog.String("kind", e.Kind), slog.Int64("probe_ms", e.Floor.Milliseconds()), slog.Int64("floor_ms", floor), slog.Int64("read_hold_ms", e.Hold.Milliseconds()),
-				slog.Int("clean_rounds", e.Clean), slog.Int("rounds_required", e.Rounds), slog.Int64("started_slot", int64(e.Started))}
+				slog.Int("clean_rounds", e.Clean), slog.Int("rounds_required", e.Rounds), slog.Int64("started_slot", int64(e.Started)),
+				slog.Int("resumed_from", e.ResumedFrom)}
 			if e.Event == lookback.FloorProbeFailed {
 				for _, change := range lookback.Changes {
 					attrs = append(attrs, slog.Int(change, e.Changes[change]))

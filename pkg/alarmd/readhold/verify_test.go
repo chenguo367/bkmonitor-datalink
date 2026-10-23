@@ -24,6 +24,8 @@ import (
 func verifyingGroup(t *testing.T, extra string) (*Controller, *memoryControl, *time.Time) {
 	t.Helper()
 	c, store, now := controllerFixture(t)
+	// Two days on, so the Slots and times of the hours before it are real ones.
+	*now = now.Add(48 * time.Hour)
 	store.values["qg"] = []byte(fmt.Sprintf(`{"hold_ms":400000,"since_slot":60,"arrival_age_ms":430000,"quiet_since_ms":%d,`+
 		`"verify_candidate_ms":300000%s}`, now.Add(-3*time.Hour).UnixMilli(), extra))
 	spec := groupSpec("qg", 0)

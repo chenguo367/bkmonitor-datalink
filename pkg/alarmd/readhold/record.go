@@ -95,6 +95,9 @@ type Record struct {
 	// and by the probe's end; a renewal clearing the floor keeps it, a
 	// candidate the trials chose being no floor's. Nil while there is none.
 	VerifyCandidateMillis *int64 `json:"verify_candidate_ms,omitempty"`
+	// Probe is how far the group's shadow probe has read, kept so the probe
+	// outlives a rollout or a takeover (ProbeProgress). Nil while none is kept.
+	Probe *ProbeProgress `json:"probe,omitempty"`
 	// LoweredFromMillis is the hold the last lowering came from, while the
 	// group stays Lowered: a raise right after it goes back there at least.
 	LoweredFromMillis   int64  `json:"lowered_from_ms,omitempty"`
@@ -149,7 +152,7 @@ func Decode(raw []byte) (Record, error) {
 	if !inRange(record.HoldMillis) || !inRange(record.PreviousHoldMillis) || record.SinceSlot <= 0 ||
 		record.PreviousSinceSlot < 0 || record.PreviousSinceSlot > record.SinceSlot ||
 		(record.PendingHoldMillis != nil && !inRange(*record.PendingHoldMillis)) ||
-		(record.EarlierFloorMillis != nil && *record.EarlierFloorMillis < 0) || (record.VerifyCandidateMillis != nil && *record.VerifyCandidateMillis < 0) || record.EarlierFloorAtMillis < 0 || record.EarlierDifferents < 0 || record.EarlierFloorRetests < 0 || record.LoweredFromMillis < 0 ||
+		(record.EarlierFloorMillis != nil && *record.EarlierFloorMillis < 0) || (record.VerifyCandidateMillis != nil && *record.VerifyCandidateMillis < 0) || !record.Probe.valid() || record.EarlierFloorAtMillis < 0 || record.EarlierDifferents < 0 || record.EarlierFloorRetests < 0 || record.LoweredFromMillis < 0 ||
 		record.ArrivalAgeMillis < 0 || record.MaxEarlyIntervalMillis < 0 ||
 		record.EarlierMatches < 0 || record.EarlierMatches > EarlierMatchesRequired || !inRange(record.LimitMillis) ||
 		record.SegmentStart < 0 || record.QueryDurationMillis < 0 || record.QueryDurationAtMillis < 0 {
@@ -204,4 +207,26 @@ func inRange(hold int64) bool {
 // cannot leave it standing.
 func (record Record) HeldAtLimit() bool {
 	return record.AtLimit && record.LimitMillis > 0 && current(record) >= record.LimitMillis
+}
+
+// ProbeProgress is how far a shadow probe has read: what it reads - its kind,
+// the hold it reads its rounds at, and the group's hold and floor then - the
+// Slot it started at, and its clean rounds in a row. It is the progress of
+// that probe alone: the probe the record has now, of the same kind at the
+// same holds over the same floor, started less than FloorStanding ago, goes
+// on from it (FloorProbeResume); any other starts from none. The lookback
+// writes it every ProbeProgressEvery clean rounds (FloorProbeProgress); a
+// probe's end, and every write that moves what the probe reads, clears it.
+type ProbeProgress struct {
+	Kind            string                   `json:"kind"`
+	CandidateMillis int64                    `json:"candidate_ms"`
+	HoldMillis      int64                    `json:"hold_ms"`
+	FloorMillis     *int64                   `json:"floor_ms,omitempty"`
+	Clean           int                      `json:"clean_rounds"`
+	StartedSlot     execution.EvaluationTime `json:"started_slot"`
+}
+
+func (progress *ProbeProgress) valid() bool {
+	return progress == nil || (progress.CandidateMillis >= 0 && progress.HoldMillis > progress.CandidateMillis &&
+		(progress.FloorMillis == nil || *progress.FloorMillis >= 0) && progress.Clean >= 0 && progress.StartedSlot > 0)
 }

@@ -293,6 +293,9 @@ func (controller *Controller) FloorProbeResult(ctx context.Context, evidence Flo
 		return nil
 	}
 	next := clone(state.record)
+	// The probe ended, and its progress goes in this write whatever it came to
+	// (persist, settleProgress): the hold lowered, the floor moved, or the
+	// floor relearned to stand longer before its next probe.
 	var outcome string
 	switch {
 	case evidence.Passed:

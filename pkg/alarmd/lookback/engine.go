@@ -263,6 +263,17 @@ type Options struct {
 	// passed lowers the hold to the hold it read at, one that failed makes it
 	// the floor or relearns the floor (readhold.Controller.FloorProbeResult).
 	OnFloorProbe func(FloorProbeEnd)
+	// FloorProbeResume is how far a probe of the group at floor, of kind, had
+	// read in the process that ran it before - a rollout, a takeover - for a
+	// probe starting here to go on from (readhold.Controller.
+	// FloorProbeResume). Nil resumes none.
+	FloorProbeResume func(queryGroup execution.QueryGroupIdentity, kind string, floor time.Duration) (clean int, started execution.EvaluationTime, ok bool)
+	// OnFloorProbeProgress sees a running probe's clean rounds every
+	// FloorProbeProgressEvery of them, outside the engine's lock, to keep them
+	// for the next process (readhold.Controller.FloorProbeProgress).
+	OnFloorProbeProgress func(FloorProbeProgress)
+	// OnFloorProbeStart sees every probe start, outside the engine's lock.
+	OnFloorProbeStart func(FloorProbeStart)
 }
 
 // Query is what the access layer knows about a physical query before it is
@@ -318,6 +329,8 @@ type Engine struct {
 	ignoredEvidence []ignoredReadHold
 	trialEnds       []EarlierTrialEnd
 	probeEnds       []FloorProbeEnd
+	probeStarts     []FloorProbeStart
+	probeProgress   []FloorProbeProgress
 	// plans is the control plane's plan set for this Worker (plan.go).
 	plans map[execution.QueryGroupIdentity]Plan
 }

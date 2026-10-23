@@ -238,6 +238,9 @@ type Stats struct {
 	// together, and ReadHoldFloorProbesByKind by kind and outcome.
 	ReadHoldFloorProbes       map[string]uint64            `json:"read_hold_floor_probes,omitempty"`
 	ReadHoldFloorProbesByKind map[string]map[string]uint64 `json:"read_hold_floor_probes_by_kind,omitempty"`
+	// ReadHoldFloorProbeProgress is the writes keeping a running probe's clean
+	// rounds, by what came of them: written, stale, conflict.
+	ReadHoldFloorProbeProgress map[string]uint64 `json:"read_hold_floor_probe_progress,omitempty"`
 	// ReadHoldProbationFindings is the probation findings the controller
 	// took, by what it made of them: undone, quiet.
 	ReadHoldProbationFindings map[string]uint64 `json:"read_hold_probation_findings,omitempty"`
@@ -598,7 +601,8 @@ func (engine *Engine) GroupReading(queryGroup execution.QueryGroupIdentity) (Gro
 	var probe *GroupFloorProbe
 	if current := state.floorProbe; current != nil {
 		probe = &GroupFloorProbe{FloorMillis: current.floor.Milliseconds(), Kind: current.kind, HoldMillis: current.hold.Milliseconds(),
-			Clean: current.clean, Rounds: engine.probeRounds(current), Started: current.started, Reserved: len(current.reserved)}
+			Clean: current.clean, Rounds: engine.probeRounds(current), Started: current.started, ResumedFrom: current.resumedFrom,
+			Reserved: len(current.reserved)}
 	}
 	engine.mu.Unlock()
 	if !engine.options.Owns(queryGroup) {
