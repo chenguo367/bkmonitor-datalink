@@ -28,13 +28,20 @@ func keepProgress(t *testing.T, c *Controller, kind string, candidate time.Durat
 	keepProgressAt(t, c, kind, candidate, clean, started, started+60)
 }
 
-// keepProgressAt is keepProgress whose latest clean round is the Slot kept.
+// keepProgressAt is keepProgress whose latest clean round is the Slot kept, of a probe a minute's period.
 func keepProgressAt(t *testing.T, c *Controller, kind string, candidate time.Duration, clean int, started, kept execution.EvaluationTime) {
+	t.Helper()
+	keepProgressEvery(t, c, kind, candidate, clean, started, kept, time.Minute)
+}
+
+// keepProgressEvery is keepProgressAt of a probe whose rounds are period apart.
+func keepProgressEvery(t *testing.T, c *Controller, kind string, candidate time.Duration, clean int, started, kept execution.EvaluationTime,
+	period time.Duration) {
 	t.Helper()
 	record, _ := c.Reading("qg")
 	hold := current(record)
 	if err := c.FloorProbeProgress(context.Background(), FloorProbeProgressEvidence{Contract: holdContract("qg", kept, hold),
-		Floor: candidate, Kind: kind, Hold: time.Duration(hold) * time.Millisecond, Clean: clean, Started: started}); err != nil {
+		Floor: candidate, Kind: kind, Hold: time.Duration(hold) * time.Millisecond, Clean: clean, Started: started, Period: period}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -148,8 +155,8 @@ func TestKeptRoundsOverAnotherFloorAreNotResumed(t *testing.T) {
 		name, kept string
 		resumes    bool
 	}{
-		{"no floor as kept", `,"probe":{"kind":"verify","candidate_ms":300000,"hold_ms":400000,"clean_rounds":50,"started_slot":%[1]d,"kept_slot":%[1]d}`, true},
-		{"a floor the record has not", `,"probe":{"kind":"verify","candidate_ms":300000,"hold_ms":400000,"floor_ms":100000,"clean_rounds":50,"started_slot":%[1]d,"kept_slot":%[1]d}`, false},
+		{"no floor as kept", `,"probe":{"kind":"verify","candidate_ms":300000,"hold_ms":400000,"clean_rounds":50,"started_slot":%[1]d,"kept_slot":%[1]d,"period_ms":60000}`, true},
+		{"a floor the record has not", `,"probe":{"kind":"verify","candidate_ms":300000,"hold_ms":400000,"floor_ms":100000,"clean_rounds":50,"started_slot":%[1]d,"kept_slot":%[1]d,"period_ms":60000}`, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ctl, store, now := controllerFixture(t)
@@ -193,10 +200,12 @@ func TestKeptRoundsADayOldAreNoEvidence(t *testing.T) {
 	}
 }
 
-// A probe of a long period runs past a day: ProbationRounds rounds take a day at twelve minutes, five at an hour, and
-// longer where rounds are overtaken. Its progress is written every ProbeProgressEvery clean rounds all the way and kept
-// each time, and a process that takes the group over past the probe's first day - half an hour after the latest
-// write - goes on from the rounds kept, from the Slot the probe started at.
+// A probe of a long period runs past a day: ProbationRounds rounds take a day at twelve minutes, five at an hour, twenty
+// at four hours, and longer where rounds are overtaken. Its progress is written every ProbeProgressEvery clean rounds
+// all the way and kept each time, and a process that takes the group over past the probe's first day goes on from the
+// rounds kept, from the Slot the probe started at - at four hours even forty hours after the latest write, just
+// before the next would come. Kept rounds go stale at FloorStanding after the latest, or, where ProbeProgressEvery
+// rounds take longer, at that and a round more: at four hours, 44 h.
 func TestAProbeOfALongPeriodGoesOnPastItsFirstDay(t *testing.T) {
 	for _, c := range []struct {
 		name   string
@@ -204,9 +213,15 @@ func TestAProbeOfALongPeriodGoesOnPastItsFirstDay(t *testing.T) {
 		// slotsPerWrite is the Slots between two writes: ProbeProgressEvery
 		// clean rounds and those overtaken between them.
 		slotsPerWrite, writes int
+		// takeover is how long after the latest write another process
+		// takes the group over; stale is when the kept rounds are no
+		// longer gone on from.
+		takeover, stale time.Duration
 	}{
-		{"twelve minutes, two rounds in ten overtaken", 12 * time.Minute, 12, 11},
-		{"an hour", time.Hour, ProbeProgressEvery, 3},
+		{"twelve minutes, two rounds in ten overtaken", 12 * time.Minute, 12, 11, 30 * time.Minute, FloorStanding},
+		{"an hour", time.Hour, ProbeProgressEvery, 3, 30 * time.Minute, FloorStanding},
+		{"four hours, taken over just before the next write", 4 * time.Hour, ProbeProgressEvery, 2, 40*time.Hour - time.Minute,
+			time.Duration(ProbeProgressEvery+1) * 4 * time.Hour},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ctl, _, now := verifyingGroup(t, "")
@@ -215,7 +230,7 @@ func TestAProbeOfALongPeriodGoesOnPastItsFirstDay(t *testing.T) {
 			for write := 1; write <= c.writes; write++ {
 				kept = started + execution.EvaluationTime(int64(write*c.slotsPerWrite)*int64(c.period/time.Second))
 				*now = time.Unix(int64(kept), 0)
-				keepProgressAt(t, ctl, FloorProbeKindVerify, 5*time.Minute, write*ProbeProgressEvery, started, kept)
+				keepProgressEvery(t, ctl, FloorProbeKindVerify, 5*time.Minute, write*ProbeProgressEvery, started, kept, c.period)
 				if record, _ := ctl.Reading("qg"); record.Probe == nil || record.Probe.Clean != write*ProbeProgressEvery {
 					t.Fatalf("write %d, %v into the probe, kept %+v", write, time.Duration(kept-started)*time.Second, record.Probe)
 				}
@@ -223,10 +238,20 @@ func TestAProbeOfALongPeriodGoesOnPastItsFirstDay(t *testing.T) {
 			if elapsed := time.Duration(kept-started) * time.Second; elapsed <= FloorStanding {
 				t.Fatalf("fixture: the latest write is %v into the probe, want past its first day", elapsed)
 			}
-			*now = time.Unix(int64(kept), 0).Add(30 * time.Minute)
+			latest := time.Unix(int64(kept), 0)
+			*now = latest.Add(c.takeover)
 			clean, from, ok := takenOver(t, ctl).FloorProbeResume("qg", FloorProbeKindVerify, 5*time.Minute)
 			if want := c.writes * ProbeProgressEvery; !ok || clean != want || from != started {
-				t.Fatalf("taken over resumed %d from %d (%v), want %d from %d", clean, from, ok, want, started)
+				t.Fatalf("taken over %v after the latest write resumed %d from %d (%v), want %d from %d", c.takeover, clean, from, ok,
+					want, started)
+			}
+			*now = latest.Add(c.stale - time.Second)
+			if _, _, ok := takenOver(t, ctl).FloorProbeResume("qg", FloorProbeKindVerify, 5*time.Minute); !ok {
+				t.Fatalf("kept rounds %v old are not gone on from, want them fresh until %v", c.stale-time.Second, c.stale)
+			}
+			*now = latest.Add(c.stale)
+			if _, _, ok := takenOver(t, ctl).FloorProbeResume("qg", FloorProbeKindVerify, 5*time.Minute); ok {
+				t.Fatalf("kept rounds %v old are gone on from", c.stale)
 			}
 		})
 	}
@@ -241,7 +266,8 @@ func TestProgressWhoseLatestRoundPrecedesItsProbeIsRefused(t *testing.T) {
 	hold := current(record)
 	writes := len(store.requests)
 	err := c.FloorProbeProgress(context.Background(), FloorProbeProgressEvidence{Contract: holdContract("qg", started-60, hold),
-		Floor: 5 * time.Minute, Kind: FloorProbeKindVerify, Hold: time.Duration(hold) * time.Millisecond, Clean: 10, Started: started})
+		Floor: 5 * time.Minute, Kind: FloorProbeKindVerify, Hold: time.Duration(hold) * time.Millisecond, Clean: 10, Started: started,
+		Period: time.Minute})
 	if err == nil || len(store.requests) != writes {
 		t.Fatalf("progress kept before its probe started: %v, %d writes", err, len(store.requests)-writes)
 	}
@@ -283,7 +309,7 @@ func TestKeptRoundsDecodeBothWays(t *testing.T) {
 		want int
 	}{
 		{`{"hold_ms":600000,"since_slot":60}`, -1},
-		{`{"hold_ms":600000,"since_slot":60,"probe":{"kind":"verify","candidate_ms":300000,"hold_ms":600000,"clean_rounds":50,"started_slot":120,"kept_slot":720}}`, 50},
+		{`{"hold_ms":600000,"since_slot":60,"probe":{"kind":"verify","candidate_ms":300000,"hold_ms":600000,"clean_rounds":50,"started_slot":120,"kept_slot":720,"period_ms":60000}}`, 50},
 	} {
 		record, err := Decode([]byte(c.raw))
 		if err != nil || (record.Probe == nil) != (c.want < 0) || (record.Probe != nil && record.Probe.Clean != c.want) {
@@ -295,10 +321,12 @@ func TestKeptRoundsDecodeBothWays(t *testing.T) {
 		}
 	}
 	for _, raw := range []string{
-		`{"hold_ms":600000,"since_slot":60,"probe":{"kind":"verify","candidate_ms":300000,"hold_ms":600000,"clean_rounds":-1,"started_slot":120,"kept_slot":720}}`,
-		`{"hold_ms":600000,"since_slot":60,"probe":{"kind":"verify","candidate_ms":300000,"hold_ms":200000,"clean_rounds":5,"started_slot":120,"kept_slot":720}}`,
+		`{"hold_ms":600000,"since_slot":60,"probe":{"kind":"verify","candidate_ms":300000,"hold_ms":600000,"clean_rounds":-1,"started_slot":120,"kept_slot":720,"period_ms":60000}}`,
+		`{"hold_ms":600000,"since_slot":60,"probe":{"kind":"verify","candidate_ms":300000,"hold_ms":200000,"clean_rounds":5,"started_slot":120,"kept_slot":720,"period_ms":60000}}`,
+		// No period.
+		`{"hold_ms":600000,"since_slot":60,"probe":{"kind":"verify","candidate_ms":300000,"hold_ms":600000,"clean_rounds":5,"started_slot":120,"kept_slot":720}}`,
 		// Its latest round before it started.
-		`{"hold_ms":600000,"since_slot":60,"probe":{"kind":"verify","candidate_ms":300000,"hold_ms":600000,"clean_rounds":5,"started_slot":120,"kept_slot":60}}`,
+		`{"hold_ms":600000,"since_slot":60,"probe":{"kind":"verify","candidate_ms":300000,"hold_ms":600000,"clean_rounds":5,"started_slot":120,"kept_slot":60,"period_ms":60000}}`,
 	} {
 		if _, err := Decode([]byte(raw)); err == nil {
 			t.Fatalf("%s decoded", raw)

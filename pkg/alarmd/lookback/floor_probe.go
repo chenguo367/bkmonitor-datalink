@@ -81,7 +81,8 @@ const FloorProbeProgressEvery = 10
 
 // FloorProbeProgress is a running probe's clean rounds in a row, every
 // FloorProbeProgressEvery of them, with what it reads and the Slot it started
-// at; Contract is the Slot of its latest clean round.
+// at; Contract is the Slot of its latest clean round, Period the distance
+// between its rounds.
 type FloorProbeProgress struct {
 	Contract execution.FrozenExecutionContractRef
 	Source   string
@@ -90,6 +91,7 @@ type FloorProbeProgress struct {
 	Hold     time.Duration
 	Clean    int
 	Started  execution.EvaluationTime
+	Period   time.Duration
 }
 
 // FloorProbeStart is a probe's start: what it reads, the clean rounds it
@@ -496,7 +498,7 @@ func (read *Read) completeFloorProbe(completion execution.ProviderCompletion, er
 				engine.endProbeLocked(state, FloorProbePassed, round.query.Contract)
 			case probe.clean%FloorProbeProgressEvery == 0:
 				engine.probeProgress = append(engine.probeProgress, FloorProbeProgress{Contract: round.query.Contract, Source: round.source,
-					Kind: probe.kind, Floor: probe.floor, Hold: probe.hold, Clean: probe.clean, Started: probe.started})
+					Kind: probe.kind, Floor: probe.floor, Hold: probe.hold, Clean: probe.clean, Started: probe.started, Period: probe.period})
 			}
 		case FloorProbeDifferent:
 			engine.endProbeLocked(state, FloorProbeFailed, round.query.Contract)

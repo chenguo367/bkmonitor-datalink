@@ -937,7 +937,7 @@ func (holds *productionReadHolds) bindLookback(options *lookback.Options) {
 	options.OnFloorProbeProgress = func(e lookback.FloorProbeProgress) {
 		holds.observation(e.Contract, func(ctx context.Context) error {
 			return holds.controller.FloorProbeProgress(ctx, readhold.FloorProbeProgressEvidence{Contract: e.Contract, Floor: e.Floor,
-				Kind: e.Kind, Hold: e.Hold, Clean: e.Clean, Started: e.Started})
+				Kind: e.Kind, Hold: e.Hold, Clean: e.Clean, Started: e.Started, Period: e.Period})
 		})
 	}
 	// One line per round found read early, not sampled: what it was read at

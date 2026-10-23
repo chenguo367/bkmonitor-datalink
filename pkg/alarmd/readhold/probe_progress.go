@@ -52,8 +52,8 @@ var ProbeProgressOutcomes = []string{ProbeProgressWritten, ProbeProgressStale, P
 
 // FloorProbeProgressEvidence is how far a running probe has read: the hold
 // its rounds are read at (Floor) and its Kind, the hold of their formal reads,
-// its clean rounds in a row and the Slot it started at. Contract is the Slot of
-// its latest clean round.
+// its clean rounds in a row, the Slot it started at and the distance between
+// its rounds (Period). Contract is the Slot of its latest clean round.
 type FloorProbeProgressEvidence struct {
 	Contract execution.FrozenExecutionContractRef
 	Floor    time.Duration
@@ -61,12 +61,23 @@ type FloorProbeProgressEvidence struct {
 	Hold     time.Duration
 	Clean    int
 	Started  execution.EvaluationTime
+	Period   time.Duration
+}
+
+// progressStale is whether kept rounds whose latest was read at kept are too
+// old to go on from at now: FloorStanding, or, for a probe whose rounds are
+// so far apart that ProbeProgressEvery of them take longer, the time from
+// one write to the next and a round more - so a probe taken over just before
+// its next write still goes on.
+func progressStale(probe ProbeProgress, now int64) bool {
+	standing := max(FloorStanding.Milliseconds(), int64(ProbeProgressEvery+1)*probe.PeriodMillis)
+	return now-int64(probe.KeptSlot)*1000 >= standing
 }
 
 // progressOf is the record's progress of the probe of kind at candidate, and
 // false when the record keeps none for it: none kept, or one of another
-// probe - another kind, holds or floor - or one whose latest kept round was
-// read FloorStanding ago or more, whose rounds say nothing of the data now.
+// probe - another kind, holds or floor - or one whose latest kept round is
+// stale (progressStale), whose rounds say nothing of the data now.
 func progressOf(record Record, kind string, candidate, now int64) (ProbeProgress, bool) {
 	probe := record.Probe
 	if probe == nil || probe.Kind != kind || probe.CandidateMillis != candidate || probe.HoldMillis != current(record) {
@@ -76,7 +87,7 @@ func progressOf(record Record, kind string, candidate, now int64) (ProbeProgress
 		(probe.FloorMillis != nil && *probe.FloorMillis != *record.EarlierFloorMillis) {
 		return ProbeProgress{}, false
 	}
-	if now-int64(probe.KeptSlot)*1000 >= FloorStanding.Milliseconds() {
+	if progressStale(*probe, now) {
 		return ProbeProgress{}, false
 	}
 	return *probe, true
@@ -115,7 +126,7 @@ func (controller *Controller) FloorProbeResume(qg execution.QueryGroupIdentity, 
 // the write dropped when it loses its compare.
 func (controller *Controller) FloorProbeProgress(ctx context.Context, evidence FloorProbeProgressEvidence) error {
 	if evidence.Contract.Validate() != nil || evidence.Floor < 0 || evidence.Hold <= evidence.Floor ||
-		!slices.Contains(FloorProbeKinds, evidence.Kind) || evidence.Clean < 0 || evidence.Started <= 0 ||
+		!slices.Contains(FloorProbeKinds, evidence.Kind) || evidence.Clean < 0 || evidence.Started <= 0 || evidence.Period <= 0 ||
 		evidence.Contract.Slot.EvaluationTime < evidence.Started {
 		return errors.New("alarmd readhold: invalid floor probe progress")
 	}
@@ -137,7 +148,7 @@ func (controller *Controller) FloorProbeProgress(ctx context.Context, evidence F
 	}
 	next := clone(state.record)
 	next.Probe = &ProbeProgress{Kind: kind, CandidateMillis: candidate, HoldMillis: current(next), Clean: evidence.Clean,
-		StartedSlot: evidence.Started, KeptSlot: evidence.Contract.Slot.EvaluationTime}
+		StartedSlot: evidence.Started, KeptSlot: evidence.Contract.Slot.EvaluationTime, PeriodMillis: evidence.Period.Milliseconds()}
 	if next.EarlierFloorMillis != nil {
 		floor := *next.EarlierFloorMillis
 		next.Probe.FloorMillis = &floor
