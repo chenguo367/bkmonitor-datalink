@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -42,6 +43,9 @@ type Instance struct {
 	command *exec.Cmd
 	exited  chan struct{}
 	output  *lockedOutput
+	// recorded is the server's file in the orphan registry, removed when
+	// it stops (orphans.go).
+	recorded string
 }
 
 // Start starts a redis-server for the test on a free local port and returns
@@ -61,6 +65,7 @@ func Start(tb testing.TB, extra ...string) *Instance {
 	if executable == "" {
 		return nil
 	}
+	reapOrphansOnce(tb)
 	var reasons []string
 	for attempt := 0; attempt < startAttempts; attempt++ {
 		address, err := freeAddress()
@@ -101,6 +106,7 @@ func TryStartAt(tb testing.TB, address string, extra ...string) (*Instance, stri
 	if executable == "" {
 		return nil, "no redis-server"
 	}
+	reapOrphansOnce(tb)
 	instance := newInstance(tb, executable, address, extra)
 	if reason := instance.start(); reason != "" {
 		return nil, reason
@@ -181,6 +187,7 @@ func (instance *Instance) start() string {
 	arguments := append([]string{"--bind", host, "--port", port, "--save", "", "--appendonly", "no",
 		"--dir", instance.dir, "--daemonize", "no", "--loglevel", "warning"}, instance.extra...)
 	command := exec.Command(instance.executable, arguments...)
+	lifeline(command)
 	output := &lockedOutput{}
 	command.Stdout, command.Stderr = output, output
 	if err := command.Start(); err != nil {
@@ -191,8 +198,9 @@ func (instance *Instance) start() string {
 		_ = command.Wait()
 		close(exited)
 	}()
+	recorded := register(instance.tb, registration{Owner: os.Getpid(), Server: command.Process.Pid, Addr: instance.Addr, Dir: resolved})
 	instance.mu.Lock()
-	instance.command, instance.exited, instance.output = command, exited, output
+	instance.command, instance.exited, instance.output, instance.recorded = command, exited, output, recorded
 	instance.mu.Unlock()
 
 	probe := redis.NewClient(&redis.Options{Addr: instance.Addr, MaxRetries: -1,
@@ -237,6 +245,10 @@ func (instance *Instance) stopLocked() {
 		<-instance.exited
 	}
 	instance.command = nil
+	if instance.recorded != "" {
+		_ = os.Remove(instance.recorded)
+		instance.recorded = ""
+	}
 }
 
 func freeAddress() (string, error) {
