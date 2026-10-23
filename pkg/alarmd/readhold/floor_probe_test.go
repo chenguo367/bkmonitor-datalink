@@ -11,7 +11,9 @@ package readhold
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,11 +57,11 @@ func TestAFloorStandsADayAndEachFailedProbeDoublesIt(t *testing.T) {
 	for index, standing := range []time.Duration{24 * time.Hour, 48 * time.Hour, 96 * time.Hour, 7 * 24 * time.Hour, 7 * 24 * time.Hour} {
 		learned := *now
 		*now = learned.Add(standing - time.Millisecond)
-		if floor, probing := c.FloorProbe("qg"); probing {
+		if floor, _, probing := c.FloorProbe("qg"); probing {
 			t.Fatalf("probe %d: probed at %v a millisecond before the floor stood %v", index, floor, standing)
 		}
 		*now = learned.Add(standing)
-		floor, probing := c.FloorProbe("qg")
+		floor, _, probing := c.FloorProbe("qg")
 		if !probing || floor != 117*time.Second {
 			t.Fatalf("probe %d: %v %v once the floor stood %v, want the floor at 117 s", index, floor, probing, standing)
 		}
@@ -83,7 +85,7 @@ func TestAFloorStandsADayAndEachFailedProbeDoublesIt(t *testing.T) {
 func TestAProbeThatPassesLowersTheHoldToItsFloorVerified(t *testing.T) {
 	c, store, now := stuckGroup(t, "")
 	*now = now.Add(FloorStanding)
-	if _, probing := c.FloorProbe("qg"); !probing {
+	if _, _, probing := c.FloorProbe("qg"); !probing {
 		t.Fatal("fixture: no probe once the floor stood")
 	}
 	writes := len(store.requests)
@@ -213,7 +215,7 @@ func TestAnUndatedFloorIsDatedByItsDayAndGroup(t *testing.T) {
 		start := *now
 		for step := time.Duration(0); step <= 2*FloorStanding; step += 10 * time.Minute {
 			*now = start.Add(step)
-			if _, probing := c.FloorProbe(qg); probing {
+			if _, _, probing := c.FloorProbe(qg); probing {
 				return reading.EarlierFloorAtMillis, *now
 			}
 		}
@@ -259,22 +261,105 @@ func TestAFloorsProbeFieldsDecode(t *testing.T) {
 	if _, err := Decode([]byte(`{"hold_ms":100000,"since_slot":60,"earlier_floor_retests":-1}`)); err == nil {
 		t.Fatal("a negative retest count decoded")
 	}
+	// A record written before floors were marked probed is one whose floor no
+	// probe failed at; one marked so decodes so, and a floor no probe failed at
+	// writes no mark.
+	for _, c := range []struct {
+		raw    string
+		probed bool
+	}{
+		{`{"hold_ms":100000,"since_slot":60,"earlier_floor_ms":90000}`, false},
+		{`{"hold_ms":100000,"since_slot":60,"earlier_floor_ms":90000,"earlier_floor_probed":true}`, true},
+	} {
+		record, err := Decode([]byte(c.raw))
+		if err != nil || record.EarlierFloorProbed != c.probed {
+			t.Fatalf("%s decoded probed %v %v, want %v", c.raw, record.EarlierFloorProbed, err, c.probed)
+		}
+		encoded, err := json.Marshal(record)
+		if err != nil || strings.Contains(string(encoded), "earlier_floor_probed") != c.probed {
+			t.Fatalf("%s encoded %s %v", c.raw, encoded, err)
+		}
+	}
+}
+
+// A floor the search learned is no floor a probe failed at, however near the
+// hold its halves come: a probe of one is on the plain rounds. Probed, the
+// same half is, and a half further above it than EdgeProbeReach is not. A
+// floor a probe failed at loses the mark when it takes another value or is
+// cleared.
+func TestOnlyAFloorAProbeFailedAtMakesItsProbesNearIt(t *testing.T) {
+	for _, c := range []struct {
+		hold      int64
+		probed    string
+		candidate time.Duration
+		edge      bool
+	}{
+		{20000, ``, 15 * time.Second, false},
+		{20000, `,"earlier_floor_probed":true`, 15 * time.Second, true},
+		{40000, `,"earlier_floor_probed":true`, 25 * time.Second, false},
+	} {
+		ctl, store, now := controllerFixture(t)
+		spec := groupSpec("qg", 0)
+		spec.Step = time.Minute
+		store.values["qg"] = []byte(fmt.Sprintf(`{"hold_ms":%d,"since_slot":60,"lowered":true,"lowered_from_ms":%d,`+
+			`"earlier_floor_ms":10000,"earlier_floor_at_ms":%d%s}`, c.hold, 2*c.hold, now.UnixMilli(), c.probed))
+		prepare(t, ctl, spec)
+		if candidate, edge, probing := ctl.FloorProbe("qg"); !probing || candidate != c.candidate || edge != c.edge {
+			t.Fatalf("hold %d ms over a floor of 10 s%s: probe %v near a failed floor %v %v, want %v, near %v",
+				c.hold, c.probed, candidate, edge, probing, c.candidate, c.edge)
+		}
+	}
+	record := Record{}
+	setFloor(&record, 10000, 1)
+	record.EarlierFloorProbed = true
+	if setFloor(&record, 10000, 2); !record.EarlierFloorProbed {
+		t.Fatal("the same floor learned again lost its probe's failure")
+	}
+	if setFloor(&record, 12000, 3); record.EarlierFloorProbed {
+		t.Fatal("a floor of another value kept the mark of a probe that failed at the old one")
+	}
+	record.EarlierFloorProbed = true
+	if clearFloor(&record); record.EarlierFloorProbed {
+		t.Fatal("a cleared floor kept the mark of a probe that failed at it")
+	}
+}
+
+// A floor the search learned that fails its own probe is a floor a probe
+// failed at from then on: relearned, its next probe, two days on, is near it.
+func TestAFloorThatFailsItsOwnProbeIsOneAProbeFailedAt(t *testing.T) {
+	c, store, now := controllerFixture(t)
+	spec := groupSpec("qg", 0)
+	spec.Step = time.Minute
+	store.values["qg"] = []byte(fmt.Sprintf(`{"hold_ms":3000,"since_slot":60,"lowered":true,"lowered_from_ms":6000,`+
+		`"earlier_floor_ms":0,"earlier_floor_at_ms":%d}`, now.UnixMilli()))
+	prepare(t, c, spec)
+	*now = now.Add(FloorStanding)
+	probed, outcomes, edges := bisect(t, c, 3*time.Second)
+	if fmt.Sprint(probed) != fmt.Sprint([]time.Duration{0}) || fmt.Sprint(outcomes) != fmt.Sprint([]string{FloorProbeRelearned}) ||
+		fmt.Sprint(edges) != fmt.Sprint([]bool{false}) {
+		t.Fatalf("probed %v taken %v near a failed floor %v, want the search's floor read once, on the plain rounds, and relearned",
+			probed, outcomes, edges)
+	}
+	*now = now.Add(2 * FloorStanding)
+	if floor, edge, probing := c.FloorProbe("qg"); !probing || floor != 0 || !edge {
+		t.Fatalf("two days on: probe %v near a failed floor %v %v, want the floor again, now one a probe failed at", floor, edge, probing)
+	}
 }
 
 // bisect runs probes on qg one after another as long as the controller gives
 // one at once, each passing when it reads at or past visible - the hold from
-// which the group's data reads whole - and returns the holds read at and how
-// each was taken.
-func bisect(t *testing.T, c *Controller, visible time.Duration) (probed []time.Duration, outcomes []string) {
+// which the group's data reads whole - and returns the holds read at, how
+// each was taken and whether each was near a floor a probe failed at.
+func bisect(t *testing.T, c *Controller, visible time.Duration) (probed []time.Duration, outcomes []string, edges []bool) {
 	t.Helper()
 	for slot := execution.EvaluationTime(600); ; slot += 60 {
-		candidate, probing := c.FloorProbe("qg")
+		candidate, edge, probing := c.FloorProbe("qg")
 		if !probing {
-			return probed, outcomes
+			return probed, outcomes, edges
 		}
 		before := c.Stats().FloorProbes
 		probeEnd(t, c, slot, candidate, c.ReadHold("qg"), candidate >= visible)
-		probed = append(probed, candidate)
+		probed, edges = append(probed, candidate), append(edges, edge)
 		for _, outcome := range FloorProbeOutcomes {
 			if c.Stats().FloorProbes[outcome] > before[outcome] {
 				outcomes = append(outcomes, outcome)
@@ -291,7 +376,10 @@ func bisect(t *testing.T, c *Controller, visible time.Duration) (probed []time.D
 // another with no standing between: 29.3 s reads clean and the hold comes
 // down to it, 14.6 s does not and is the floor, 21.9 s is the hold, 18.3 s
 // the floor. Under 5 s apart the probes stop; the floor itself is read again
-// only once it has stood a day. Every lowering is verified.
+// only once it has stood a day. Every lowering is verified. The floor of none
+// is the search's, so the first two halves need the plain rounds; 21.9 and
+// 18.3 s are within EdgeProbeReach of the 14.6 s a probe failed at, and so
+// is that floor itself a day on, so they need more.
 func TestAProbeReadsMidpointsUntilTheFloorIsNearTheHold(t *testing.T) {
 	c, store, now := controllerFixture(t)
 	spec := groupSpec("qg", 0)
@@ -299,11 +387,13 @@ func TestAProbeReadsMidpointsUntilTheFloorIsNearTheHold(t *testing.T) {
 	store.values["qg"] = []byte(fmt.Sprintf(`{"hold_ms":58514,"since_slot":60,"lowered":true,"lowered_from_ms":117029,`+
 		`"earlier_floor_ms":0,"earlier_floor_at_ms":%d}`, now.UnixMilli()))
 	prepare(t, c, spec)
-	probed, outcomes := bisect(t, c, 20*time.Second)
+	probed, outcomes, edges := bisect(t, c, 20*time.Second)
 	wantProbed := []time.Duration{29257 * time.Millisecond, 14628 * time.Millisecond, 21942 * time.Millisecond, 18285 * time.Millisecond}
 	wantOutcomes := []string{FloorProbeLowered, FloorProbeFloorRaised, FloorProbeLowered, FloorProbeFloorRaised}
-	if fmt.Sprint(probed) != fmt.Sprint(wantProbed) || fmt.Sprint(outcomes) != fmt.Sprint(wantOutcomes) {
-		t.Fatalf("probed %v taken %v, want %v taken %v", probed, outcomes, wantProbed, wantOutcomes)
+	if fmt.Sprint(probed) != fmt.Sprint(wantProbed) || fmt.Sprint(outcomes) != fmt.Sprint(wantOutcomes) ||
+		fmt.Sprint(edges) != fmt.Sprint([]bool{false, false, true, true}) {
+		t.Fatalf("probed %v taken %v near a failed floor %v, want %v taken %v near one [false false true true]",
+			probed, outcomes, edges, wantProbed, wantOutcomes)
 	}
 	record, _ := c.Reading("qg")
 	if c.ReadHold("qg") != 21942*time.Millisecond || record.EarlierFloorMillis == nil || *record.EarlierFloorMillis != 18285 ||
@@ -312,8 +402,8 @@ func TestAProbeReadsMidpointsUntilTheFloorIsNearTheHold(t *testing.T) {
 			c.ReadHold("qg"), record.EarlierFloorMillis, c.LoweringVerified("qg"))
 	}
 	*now = now.Add(FloorStanding)
-	if floor, probing := c.FloorProbe("qg"); !probing || floor != 18285*time.Millisecond {
-		t.Fatalf("a day on: probe %v %v, want the floor itself", floor, probing)
+	if floor, edge, probing := c.FloorProbe("qg"); !probing || floor != 18285*time.Millisecond || !edge {
+		t.Fatalf("a day on: probe %v near a failed floor %v %v, want the floor itself, a probe having failed at it", floor, edge, probing)
 	}
 }
 
@@ -329,18 +419,25 @@ func TestAProbeOfAHoldAtItsDataBoundaryRaisesTheFloorAndLeavesTheHold(t *testing
 	store.values["qg"] = []byte(fmt.Sprintf(`{"hold_ms":20000,"since_slot":60,"lowered":true,"lowered_from_ms":40000,`+
 		`"earlier_floor_ms":0,"earlier_floor_at_ms":%d}`, now.UnixMilli()))
 	prepare(t, c, spec)
-	probed, outcomes := bisect(t, c, 20*time.Second)
+	probed, outcomes, edges := bisect(t, c, 20*time.Second)
 	if fmt.Sprint(probed) != fmt.Sprint([]time.Duration{10 * time.Second, 15 * time.Second}) ||
-		fmt.Sprint(outcomes) != fmt.Sprint([]string{FloorProbeFloorRaised, FloorProbeFloorRaised}) || c.ReadHold("qg") != 20*time.Second {
-		t.Fatalf("probed %v taken %v, hold %v; want 10 s and 15 s raising the floor, the hold left at 20 s", probed, outcomes, c.ReadHold("qg"))
+		fmt.Sprint(outcomes) != fmt.Sprint([]string{FloorProbeFloorRaised, FloorProbeFloorRaised}) || c.ReadHold("qg") != 20*time.Second ||
+		fmt.Sprint(edges) != fmt.Sprint([]bool{false, true}) {
+		t.Fatalf("probed %v taken %v near a failed floor %v, hold %v; want 10 s, then 15 s near the 10 s a probe failed at, "+
+			"both raising the floor, the hold left at 20 s", probed, outcomes, edges, c.ReadHold("qg"))
 	}
 	*now = now.Add(FloorStanding)
-	probed, outcomes = bisect(t, c, 20*time.Second)
-	if fmt.Sprint(probed) != fmt.Sprint([]time.Duration{15 * time.Second}) || fmt.Sprint(outcomes) != fmt.Sprint([]string{FloorProbeRelearned}) {
-		t.Fatalf("a day on: probed %v taken %v, want the floor read once and relearned", probed, outcomes)
+	probed, outcomes, edges = bisect(t, c, 20*time.Second)
+	if fmt.Sprint(probed) != fmt.Sprint([]time.Duration{15 * time.Second}) || fmt.Sprint(outcomes) != fmt.Sprint([]string{FloorProbeRelearned}) ||
+		fmt.Sprint(edges) != fmt.Sprint([]bool{true}) {
+		t.Fatalf("a day on: probed %v taken %v near a failed floor %v, want the floor read once, as one a probe failed at, and relearned",
+			probed, outcomes, edges)
+	}
+	if record, _ := c.Reading("qg"); !record.EarlierFloorProbed || !strings.Contains(string(store.values["qg"]), `"earlier_floor_probed":true`) {
+		t.Fatalf("relearned: probed %v, stored %s; want the floor kept as one a probe failed at", record.EarlierFloorProbed, store.values["qg"])
 	}
 	*now = now.Add(2*FloorStanding - time.Millisecond)
-	if _, probing := c.FloorProbe("qg"); probing {
+	if _, _, probing := c.FloorProbe("qg"); probing {
 		t.Fatal("the floor relearned once is read again before it stood two days")
 	}
 }

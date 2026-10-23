@@ -78,6 +78,15 @@ type Record struct {
 	// stands before the next. Zero whenever the floor changes value or is
 	// cleared.
 	EarlierFloorRetests int `json:"earlier_floor_retests,omitempty"`
+	// EarlierFloorProbed says a shadow probe failed at the floor's value: a
+	// midpoint that read differently became the floor (floor_raised), or the
+	// floor itself read differently (relearned). A probe of the floor, or of
+	// a midpoint within EdgeProbeReach above it, reads near a line the
+	// group's data has been seen on both sides of, and needs more clean
+	// rounds to pass (FloorProbe). False for a floor the search learned - a
+	// raise right after a lowering, different trials in a row - and for a
+	// record written before the field: such a floor was not probed.
+	EarlierFloorProbed bool `json:"earlier_floor_probed,omitempty"`
 	// LoweredFromMillis is the hold the last lowering came from, while the
 	// group stays Lowered: a raise right after it goes back there at least.
 	LoweredFromMillis   int64  `json:"lowered_from_ms,omitempty"`

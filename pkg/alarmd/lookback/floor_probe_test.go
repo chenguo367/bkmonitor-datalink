@@ -34,6 +34,7 @@ type probeRun struct {
 	mu sync.Mutex
 	// probing is what FloorProbe answers; candidate whether CurrentCandidate gives one.
 	probing   bool
+	edge      bool
 	candidate bool
 	ends      []FloorProbeEnd
 	refused   int
@@ -70,10 +71,10 @@ func newProbeRun(t *testing.T, hold, floor time.Duration, rounds int) *probeRun 
 		defer r.mu.Unlock()
 		return hold / 2, r.candidate
 	}
-	options.FloorProbe = func(execution.QueryGroupIdentity) (time.Duration, bool) {
+	options.FloorProbe = func(execution.QueryGroupIdentity) (time.Duration, bool, bool) {
 		r.mu.Lock()
 		defer r.mu.Unlock()
-		return r.floor, r.probing
+		return r.floor, r.edge, r.probing
 	}
 	options.EarlierRefused = func(execution.QueryGroupIdentity) {
 		r.mu.Lock()
@@ -316,7 +317,7 @@ func TestEachRoundOfAProbeIsReadAtTheFloorAndPassesTheProbe(t *testing.T) {
 			// The first c.ahead Slots are past their own rounds' points with none reserved before them.
 			passedAt := first + int64(c.ahead+rounds-1)*60
 			if len(ends) != 1 || ends[0].Event != FloorProbePassed || int64(ends[0].Contract.Slot.EvaluationTime) != passedAt ||
-				ends[0].Clean != rounds || ends[0].Floor != 0 || ends[0].Hold != c.hold {
+				ends[0].Clean != rounds || ends[0].Rounds != rounds || ends[0].Floor != 0 || ends[0].Hold != c.hold {
 				t.Fatalf("ends %+v, want one passed at Slot %d with %d clean rounds at floor 0, hold %v", ends, passedAt, rounds, c.hold)
 			}
 			for slot, ahead := range r.reservedAhead {
@@ -335,6 +336,28 @@ func TestEachRoundOfAProbeIsReadAtTheFloorAndPassesTheProbe(t *testing.T) {
 				t.Fatalf("skipped %v, on its group %v, refusals heard %d; want every Slot floor_probe and none refused", sources, group, r.refused)
 			}
 		})
+	}
+}
+
+// A probe near a floor a probe failed at passes on EdgeProbeFactor times its rounds clean and not one fewer, and its
+// reading and its end say how many it needs.
+func TestAProbeNearAFailedFloorPassesOnMoreRounds(t *testing.T) {
+	const rounds = 3
+	need := EdgeProbeFactor * rounds
+	r := newProbeRun(t, 30*time.Second, 0, rounds)
+	r.edge = true
+	first := r.f.clock.now().Unix() / 60 * 60
+	r.run(first, need-1)
+	if ends := r.endsSeen(); len(ends) != 0 {
+		t.Fatalf("ends %+v after %d clean rounds, want none before %d", ends, need-1, need)
+	}
+	if reading, _ := r.f.engine.GroupReading("qg"); reading.FloorProbe == nil || reading.FloorProbe.Rounds != need {
+		t.Fatalf("the group's probe %+v, want one needing %d rounds", reading.FloorProbe, need)
+	}
+	r.run(first+int64(need-1)*60, 1)
+	ends := r.endsSeen()
+	if len(ends) != 1 || ends[0].Event != FloorProbePassed || ends[0].Clean != need || ends[0].Rounds != need {
+		t.Fatalf("ends %+v, want one passed on %d clean rounds", ends, need)
 	}
 }
 
@@ -394,6 +417,7 @@ func TestAProbeEndsWhenWhatItReadsMoves(t *testing.T) {
 		{"floor not to probe", func(r *probeRun) { r.set(func() { r.probing = false }) }, FloorProbeHoldMoved, false},
 		{"search open", func(r *probeRun) { r.set(func() { r.candidate = true }) }, FloorProbeHoldMoved, false},
 		{"floor moved", func(r *probeRun) { r.set(func() { r.floor = 10 * time.Second }) }, FloorProbeHoldMoved, true},
+		{"near a failed floor now", func(r *probeRun) { r.set(func() { r.edge = true }) }, FloorProbeHoldMoved, true},
 		{"owner lost", func(r *probeRun) { r.f.engine.Forget("qg") }, FloorProbeOwnerLost, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {

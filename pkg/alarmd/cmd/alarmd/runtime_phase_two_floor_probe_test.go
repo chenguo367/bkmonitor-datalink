@@ -193,7 +193,7 @@ func descent(t *testing.T, f *cutoverStallFixture, span time.Duration) (holds []
 			}
 			holds, passed, settled = append(holds, now), events[lookback.FloorProbePassed], elapsed
 		}
-		_, probing := controller.FloorProbe(f.queryGroup)
+		_, _, probing := controller.FloorProbe(f.queryGroup)
 		groups := uint64(0)
 		for _, source := range engine.Stats().Sources {
 			groups += source.FloorProbeGroups
@@ -262,7 +262,10 @@ func TestAStuckGroupsFloorIsProbedAndItsHoldComesDownWithNoRoundReadEarly(t *tes
 // under a second past the window: a half under 25 s is read before the series is there and fails on that round - the
 // point the formal read had and the probe's read did not (points_added) - and is the floor; a half from 25 s is read
 // after it, passes, and is the hold. 24 s fails; 36, 30 and 27 s pass; 27 s is within readhold.MidpointResolution of
-// 24 s. The hold comes down through 48, 36, 30 and 27 s, every lowering a verified one, over a floor of 24 s.
+// 24 s. The hold comes down through 48, 36, 30 and 27 s, every lowering a verified one, over a floor of 24 s. A probe
+// failed at that floor, so the halves within readhold.EdgeProbeReach above it, 30 and 27 s, each read
+// lookback.EdgeProbeFactor times lookback.ProbationRounds clean before they pass, and 36 s, further up, the rounds
+// alone.
 func TestAProbeComesDownToWhereItsDataIsWholeAndNoFurther(t *testing.T) {
 	t.Parallel()
 	f := startCutoverFixture(t, leasesOutliveTheRun)
@@ -282,7 +285,7 @@ func TestAProbeComesDownToWhereItsDataIsWholeAndNoFurther(t *testing.T) {
 	hold := stuckUnderFloor(t, f, 96500*time.Millisecond)
 	ageFloor(t, f, readhold.FloorStanding)
 	lateFrom.Store(f.now().Unix())
-	came, skipped, _ := descent(t, f, 16*time.Hour)
+	came, skipped, _ := descent(t, f, 24*time.Hour)
 	events, rounds := probeCounts(engine)
 	changes := map[string]uint64{}
 	for _, source := range engine.Stats().Sources {
@@ -307,6 +310,10 @@ func TestAProbeComesDownToWhereItsDataIsWholeAndNoFurther(t *testing.T) {
 		events[lookback.FloorProbePassed] != 3 || changes[lookback.ChangePointsAdded] != 1 {
 		t.Fatalf("controller %v, probe events %v, changes %v; want the half at 24 s failed on the late series' point, raising the floor, and the three above it passed",
 			holds.controller.Stats().FloorProbes, events, changes)
+	}
+	if near := uint64(lookback.ProbationRounds + 2*lookback.EdgeProbeFactor*lookback.ProbationRounds); rounds[lookback.FloorProbeClean] < near {
+		t.Fatalf("%d clean probe rounds, want at least %d: 36 s on the rounds alone, 30 and 27 s on four times them",
+			rounds[lookback.FloorProbeClean], near)
 	}
 	if skipped != 0 || !holds.controller.LoweringVerified(f.queryGroup) {
 		t.Fatalf("%d Slots skipped, verified %v", skipped, holds.controller.LoweringVerified(f.queryGroup))

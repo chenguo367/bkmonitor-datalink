@@ -66,6 +66,11 @@ var FloorProbeOutcomes = []string{FloorProbeLowered, FloorProbeFloorRaised, Floo
 // before the hold comes down to it.
 const MidpointResolution = 5 * time.Second
 
+// EdgeProbeReach is how far above a floor a probe has failed at a midpoint
+// is near it (Record.EarlierFloorProbed): two resolutions, so the halves a
+// probe tries after a failed one, down to the floor itself, all are.
+const EdgeProbeReach = 2 * MidpointResolution
+
 // maxFloorRetests caps the failed probes counted: from the third on the
 // standing is past RecordTTL already.
 const maxFloorRetests = 8
@@ -111,48 +116,61 @@ func undatedFloorAt(qg execution.QueryGroupIdentity, record Record, now int64) i
 }
 
 // probeCandidate is the hold a shadow probe of record reads its rounds at
-// now, whether that is the floor itself, and false when there is none to
-// probe. A probe needs the group held, not held at its limit, and its search
-// below the hold run out at a floor under it. While the floor is more than
-// MidpointResolution below the hold the probe reads the midpoint between
-// them, which no read has tried, at once; nearer, it reads the floor, once
-// the floor has stood floorStanding of its failed probes.
-func probeCandidate(record Record, step time.Duration, now int64) (candidate int64, atFloor, ok bool) {
+// now, whether that is the floor itself, whether it is near a floor a probe
+// has failed at (edge), and false when there is none to probe. A probe needs
+// the group held, not held at its limit, and its search below the hold run
+// out at a floor under it. While the floor is more than MidpointResolution
+// below the hold the probe reads the midpoint between them, which no read
+// has tried, at once; nearer, it reads the floor, once the floor has stood
+// floorStanding of its failed probes.
+//
+// A floor a probe failed at is where the group's data was seen arriving
+// after the read, and a candidate near it is read near that line: in one
+// deployment ten of the groups probed 5 s above such a floor failed only
+// after 5 to 51 clean rounds. Of such groups some pass ProbationRounds by
+// chance and then read a round in a few hundred early, which only a sample
+// sees - one round an hour, so about sixty early rounds before one is
+// caught, whatever the rate. Such a probe needs lookback.EdgeProbeFactor times the rounds:
+// the floor itself, or a midpoint within EdgeProbeReach above it.
+func probeCandidate(record Record, step time.Duration, now int64) (candidate int64, atFloor, edge, ok bool) {
 	hold := current(record)
 	if hold <= 0 || record.EarlierFloorMillis == nil || *record.EarlierFloorMillis >= hold || atLimitHeld(record, now) {
-		return 0, false, false
+		return 0, false, false, false
 	}
 	if _, tries := nextCandidate(record, step, now); tries {
-		return 0, false, false
+		return 0, false, false, false
 	}
 	floor := *record.EarlierFloorMillis
 	if hold-floor > MidpointResolution.Milliseconds() {
-		return floor + (hold-floor)/2, false, true
+		candidate = floor + (hold-floor)/2
+		return candidate, false, record.EarlierFloorProbed && candidate-floor <= EdgeProbeReach.Milliseconds(), true
 	}
 	if now-record.EarlierFloorAtMillis < floorStanding(record.EarlierFloorRetests).Milliseconds() {
-		return 0, false, false
+		return 0, false, false, false
 	}
-	return floor, true, true
+	return floor, true, record.EarlierFloorProbed, true
 }
 
 // FloorProbe is the hold the group's shadow probe reads its rounds at - the
-// midpoint between its floor and its hold, or the floor itself - and false
-// when there is none to probe (probeCandidate). A floor written before
-// floors were dated is dated here, at its first reading (undatedFloorAt); the
-// date is kept in memory and written with the record's next change.
-func (controller *Controller) FloorProbe(qg execution.QueryGroupIdentity) (time.Duration, bool) {
+// midpoint between its floor and its hold, or the floor itself - whether it
+// is near a floor a probe failed at, which needs more clean rounds (edge),
+// and false when there is none to probe (probeCandidate). A floor written
+// before floors were dated is dated here, at its first reading
+// (undatedFloorAt); the date is kept in memory and written with the
+// record's next change.
+func (controller *Controller) FloorProbe(qg execution.QueryGroupIdentity) (candidate time.Duration, edge, ok bool) {
 	state := controller.group(qg)
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if !state.loaded {
-		return 0, false
+		return 0, false, false
 	}
 	now := controller.options.Now()
 	if state.record.EarlierFloorMillis != nil && state.record.EarlierFloorAtMillis == 0 {
 		state.record.EarlierFloorAtMillis = undatedFloorAt(qg, state.record, now.UnixMilli())
 	}
-	candidate, _, ok := probeCandidate(state.record, state.spec.Step, now.UnixMilli())
-	return time.Duration(candidate) * time.Millisecond, ok
+	at, _, edge, ok := probeCandidate(state.record, state.spec.Step, now.UnixMilli())
+	return time.Duration(at) * time.Millisecond, edge, ok
 }
 
 // LoweringVerified says the group's last lowering was to a floor a shadow
@@ -200,7 +218,7 @@ func (controller *Controller) FloorProbeResult(ctx context.Context, evidence Flo
 		return nil
 	}
 	now := controller.options.Now().UnixMilli()
-	candidate, atFloor, ok := probeCandidate(state.record, state.spec.Step, now)
+	candidate, atFloor, _, ok := probeCandidate(state.record, state.spec.Step, now)
 	if !ok || candidate != evidence.Floor.Milliseconds() || current(state.record) != evidence.Hold.Milliseconds() {
 		controller.counted(controller.floorProbes, FloorProbeStale)
 		return nil
@@ -223,6 +241,7 @@ func (controller *Controller) FloorProbeResult(ctx context.Context, evidence Flo
 		outcome = FloorProbeRelearned
 		next.EarlierFloorAtMillis = now
 		next.EarlierFloorRetests = min(next.EarlierFloorRetests+1, maxFloorRetests)
+		next.EarlierFloorProbed = true
 	default:
 		// Read differently at the midpoint: too early there too. The floor
 		// moves up to it, a value no probe has failed at, so it starts its
@@ -230,6 +249,7 @@ func (controller *Controller) FloorProbeResult(ctx context.Context, evidence Flo
 		// without standing first.
 		outcome = FloorProbeFloorRaised
 		setFloor(&next, candidate, now)
+		next.EarlierFloorProbed = true
 	}
 	if err := controller.persist(ctx, qg, state, next, nil); err != nil {
 		return err

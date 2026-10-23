@@ -512,15 +512,16 @@ func (record Record) AtLimitHeld(now int64) bool {
 // do the probes of it that failed.
 func clearFloor(record *Record) {
 	record.EarlierFloorMillis, record.EarlierFloorAtMillis, record.EarlierDifferents = nil, 0, 0
-	record.EarlierFloorRetests = 0
+	record.EarlierFloorRetests, record.EarlierFloorProbed = 0, false
 }
 
 // setFloor makes floor the search's floor, learned at now, and starts the
 // different trials in a row over: they count at the candidate above it. A
-// floor that takes another value starts its probes' standing over too.
+// floor that takes another value starts its probes' standing over too, and
+// no probe has failed at it yet.
 func setFloor(record *Record, floor, now int64) {
 	if record.EarlierFloorMillis == nil || *record.EarlierFloorMillis != floor {
-		record.EarlierFloorRetests = 0
+		record.EarlierFloorRetests, record.EarlierFloorProbed = 0, false
 	}
 	record.EarlierFloorMillis, record.EarlierFloorAtMillis, record.EarlierDifferents = &floor, now, 0
 }

@@ -580,7 +580,7 @@ func (engine *Engine) GroupReading(queryGroup execution.QueryGroupIdentity) (Gro
 	var probe *GroupFloorProbe
 	if current := state.floorProbe; current != nil {
 		probe = &GroupFloorProbe{FloorMillis: current.floor.Milliseconds(), HoldMillis: current.hold.Milliseconds(),
-			Clean: current.clean, Started: current.started, Reserved: len(current.reserved)}
+			Clean: current.clean, Rounds: engine.probeRounds(current), Started: current.started, Reserved: len(current.reserved)}
 	}
 	engine.mu.Unlock()
 	if !engine.options.Owns(queryGroup) {

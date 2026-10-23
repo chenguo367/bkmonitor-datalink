@@ -21,10 +21,11 @@ import (
 // FloorProbe), each of its rounds is read at the floor as well as at the
 // hold. The formal read stays at the hold, and the round is decided on it;
 // the read at the floor is compared with it, whole, as a trial is
-// (completeEarlier). ProbationRounds rounds in a row that read the same
-// lower the hold to the floor without a probation after it, the probe having
-// read those rounds already; one that reads differently ends the probe, and
-// the floor stands longer before the next. No round is decided on data read
+// (completeEarlier). ProbationRounds rounds in a row that read the same -
+// EdgeProbeFactor times that near a floor a probe has failed at - lower the
+// hold to the floor without a probation after it, the probe having read
+// those rounds already; one that reads differently ends the probe, and the
+// floor stands longer before the next. No round is decided on data read
 // early to find out.
 //
 // A probe read rides no sample: each round has its own, reserved at the
@@ -75,8 +76,11 @@ var FloorProbeEvents = []string{FloorProbeStarted, FloorProbePassed, FloorProbeF
 // Slot it started at and the latest whose first attempt it saw, and its
 // reservations by Slot.
 type floorProbeState struct {
-	floor    time.Duration
-	hold     time.Duration
+	floor time.Duration
+	hold  time.Duration
+	// edge: the floor is near one a probe has failed at, and the probe needs
+	// EdgeProbeFactor times the clean rounds.
+	edge     bool
 	clean    int
 	started  execution.EvaluationTime
 	prepared execution.EvaluationTime
@@ -98,8 +102,11 @@ type FloorProbeEnd struct {
 	Floor    time.Duration
 	Hold     time.Duration
 	Clean    int
-	Started  execution.EvaluationTime
-	Changes  map[string]int
+	// Rounds is the clean rounds it needed to pass: ProbationRounds, or
+	// EdgeProbeFactor times that.
+	Rounds  int
+	Started execution.EvaluationTime
+	Changes map[string]int
 }
 
 // GroupFloorProbe is a Query Group's probe now, for its group reading.
@@ -107,17 +114,40 @@ type GroupFloorProbe struct {
 	FloorMillis int64                    `json:"floor_ms"`
 	HoldMillis  int64                    `json:"hold_ms"`
 	Clean       int                      `json:"clean_rounds"`
+	Rounds      int                      `json:"rounds_required"`
 	Started     execution.EvaluationTime `json:"started_slot"`
 	Reserved    int                      `json:"reserved"`
 }
 
+// EdgeProbeFactor is how many times ProbationRounds a probe near a floor a
+// probe has failed at reads clean before it passes (readhold's
+// EarlierFloorProbed and EdgeProbeReach). A group lowered on a pass that came
+// by chance reads some rounds early, and only its sample sees one - a round
+// an hour, about sixty early rounds before it does, whatever the rate. Read
+// against one deployment's probes 5 s above such floors, ten of which failed
+// only after 5 to 51 clean rounds: a group reading a round in two hundred
+// early passes ProbationRounds about one probe in two, and four times them
+// one in eleven; one reading a round in a hundred early, three in ten and
+// one in a hundred and twenty. The cost is a lowering there taking eight
+// hours of a minute's period rather than two.
+const EdgeProbeFactor = 4
+
 // floorProbe asks the controller, outside the engine's lock, for the floor
-// the group's probe reads at; false with no controller to ask.
-func (engine *Engine) floorProbe(queryGroup execution.QueryGroupIdentity) (time.Duration, bool) {
+// the group's probe reads at and whether it is near a failed one; false with
+// no controller to ask.
+func (engine *Engine) floorProbe(queryGroup execution.QueryGroupIdentity) (time.Duration, bool, bool) {
 	if engine.options.FloorProbe == nil {
-		return 0, false
+		return 0, false, false
 	}
 	return engine.options.FloorProbe(queryGroup)
+}
+
+// probeRounds is how many clean rounds in a row pass a probe.
+func (engine *Engine) probeRounds(probe *floorProbeState) int {
+	if probe.edge {
+		return EdgeProbeFactor * engine.probationRounds()
+	}
+	return engine.probationRounds()
 }
 
 // prepareProbe is Prepare for a Slot of a group whose probe reads at floor:
@@ -125,17 +155,17 @@ func (engine *Engine) floorProbe(queryGroup execution.QueryGroupIdentity) (time.
 // attempt, it takes the reservation made for it ahead and reserves the read
 // of a round - its own while its point is still ahead, otherwise the first
 // Slot on whose point is.
-func (engine *Engine) prepareProbe(query Query, now time.Time, hold, base, floor time.Duration) {
+func (engine *Engine) prepareProbe(query Query, now time.Time, hold, base, floor time.Duration, edge bool) {
 	engine.mu.Lock()
 	state := engine.groupLocked(query, now)
 	slot := query.Contract.Slot.EvaluationTime
 	probe := state.floorProbe
-	if probe != nil && (probe.floor != floor || probe.hold != base) {
+	if probe != nil && (probe.floor != floor || probe.hold != base || probe.edge != edge) {
 		engine.endProbeLocked(state, FloorProbeHoldMoved, query.Contract)
 		probe = nil
 	}
 	if probe == nil {
-		probe = &floorProbeState{floor: floor, hold: base, started: slot, reserved: map[execution.EvaluationTime]*earlierSample{}}
+		probe = &floorProbeState{floor: floor, hold: base, edge: edge, started: slot, reserved: map[execution.EvaluationTime]*earlierSample{}}
 		state.floorProbe = probe
 		engine.counts.floorProbes[key2(state.source, FloorProbeStarted)]++
 	}
@@ -271,7 +301,7 @@ func (engine *Engine) endProbeLocked(state *group, event string, contract execut
 	}
 	engine.counts.floorProbes[key2(state.source, event)]++
 	engine.probeEnds = append(engine.probeEnds, FloorProbeEnd{Contract: contract, Source: state.source, Event: event,
-		Floor: probe.floor, Hold: probe.hold, Clean: probe.clean, Started: probe.started})
+		Floor: probe.floor, Hold: probe.hold, Clean: probe.clean, Rounds: engine.probeRounds(probe), Started: probe.started})
 }
 
 // publishProbeEnds hands the kept probe ends to OnFloorProbe, outside the
@@ -359,7 +389,7 @@ func (read *Read) completeFloorProbe(completion execution.ProviderCompletion, er
 	if state := engine.groups[qg]; state != nil && state.floorProbe == probe && round.query.Contract.ReadHoldMillis == probe.hold.Milliseconds() {
 		switch outcome {
 		case FloorProbeClean:
-			if probe.clean++; probe.clean >= engine.probationRounds() {
+			if probe.clean++; probe.clean >= engine.probeRounds(probe) {
 				engine.endProbeLocked(state, FloorProbePassed, round.query.Contract)
 			}
 		case FloorProbeDifferent:
