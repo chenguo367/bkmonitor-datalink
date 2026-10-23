@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -291,18 +292,40 @@ func shapeOf(value any, depth int) any {
 }
 
 // credentialFieldName says whether a key is named like what holds a
-// credential. Deliberately wide: a key it catches wrongly loses its shape, a
-// key it misses would show a credential's length.
+// credential. Wide in its words - a key it catches wrongly loses its shape,
+// a key it misses would show a credential's length - but matched on whole
+// segments of the name (split at _ . - and camelCase), never inside one: a
+// substring match takes bypass for a password, author for auth and
+// status_setter's neighbours for whatever they happen to contain.
 func credentialFieldName(key string) bool {
-	lower := strings.ToLower(key)
-	for _, word := range []string{"password", "passwd", "pwd", "pass", "secret", "token", "auth", "cookie", "header", "credential", "cert",
-		"private_key", "privatekey", "api_key", "apikey", "access_key", "accesskey", "signature", "session"} {
-		if strings.Contains(lower, word) {
+	segments := credentialNameSegment.FindAllString(key, -1)
+	for index, segment := range segments {
+		word := strings.ToLower(segment)
+		if credentialFieldWords[word] || strings.HasSuffix(word, "password") || strings.HasSuffix(word, "passwd") ||
+			strings.HasSuffix(word, "secret") || strings.HasSuffix(word, "token") {
+			return true
+		}
+		if (word == "key" || word == "keys") && index > 0 && credentialKeyQualifiers[strings.ToLower(segments[index-1])] {
 			return true
 		}
 	}
 	return false
 }
+
+var credentialNameSegment = regexp.MustCompile(`[A-Z]+[a-z0-9]*|[a-z0-9]+`)
+
+// credentialFieldWords are the segments that name what holds a credential,
+// wherever they stand in a key: db_passwd, basic_auth, session_id.
+var credentialFieldWords = map[string]bool{"password": true, "passwd": true, "pwd": true, "pass": true, "passphrase": true,
+	"requirepass": true, "masterauth": true, "secret": true, "token": true, "auth": true, "authorization": true, "cookie": true,
+	"header": true, "headers": true, "credential": true, "credentials": true, "cert": true, "certificate": true,
+	"signature": true, "session": true, "apikey": true, "privatekey": true, "accesskey": true}
+
+// credentialKeyQualifiers make the segment after them a credential when it is
+// key: api_key, apiKey, access_key_id, private_key, secret_key. Any other key
+// - a cache key, a routing key, a metric key - is configuration.
+var credentialKeyQualifiers = map[string]bool{"api": true, "access": true, "private": true, "secret": true, "signing": true,
+	"encryption": true, "client": true}
 
 // An allowed key/value-shaped condition or function parameter still does not
 // permit a caller to rename an Authorization header into {id, value}.
