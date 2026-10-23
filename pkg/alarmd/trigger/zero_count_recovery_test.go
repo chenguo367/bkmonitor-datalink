@@ -264,3 +264,23 @@ func TestNoDataEndsALevelWrittenSoOnceItsLastRealPointIsOldEnough(t *testing.T) 
 		t.Fatalf("last point unknown: round 6 = %s %+v, want NORMAL withheld as no_data_last_point_unknown", unknown[6], recovery(unknownEvaluated[6]))
 	}
 }
+
+// No data does not end a Level whose trigger window still holds an anomaly.
+// T = 3, N = 1, R = 1: an earlier zero was anomalous (as a ring ratio may
+// judge a zero against the recent average) and this round's is not, so the
+// window still triggers on round 5 though its last real point is long past
+// (R + T + 1). The round is decided as the window says - never a RECOVERY
+// the event contract refuses, which failed the series every round.
+func TestNoDataDoesNotEndALevelWhoseTriggerWindowStillHoldsAnAnomaly(t *testing.T) {
+	level := levelV2(5, 1, 3, 1, 1, nil)
+	level.RecoveryPlan.Config = mustJSONV2(map[string]any{"enabled": true, "consecutive_windows": 1, "missing_data": contract.RecoveryMissingDataEvaluateAsZero})
+	plan := compilePlanV2(t, []contract.LevelIRV2{level})
+	points := []countPoint{{"5.000000", true}, {"0.000000", false}, {"0.000000", false}, {"0.000000", false}, {"0.000000", true}, {"0.000000", false}}
+	got, evaluated := evaluateCountsFrom(t, plan, points, true, nil, int64(1000*60))
+	if got[5] == contract.LevelResultRecovery {
+		t.Fatalf("round 5 = RECOVERY beside a window holding an anomaly (all %v)", got)
+	}
+	if window := evaluated[5].LevelOutcomes[0].DecisionWindow; window != nil && window.Recovery.EndedBy != "" {
+		t.Fatalf("round 5 evidence says no data ended it: %+v", window.Recovery)
+	}
+}

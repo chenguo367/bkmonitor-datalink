@@ -559,7 +559,12 @@ func evaluateLevelV2(
 	// whose own value is a zero that is no observation, once the series'
 	// last real point is (R + T + 1) periods old, as Python's recovery check
 	// times it (recover.py:191-197). Not known, it ends nothing and says so.
-	if result == "" && inferredZero && recoveryPlan.MissingData == contract.RecoveryMissingDataEvaluateAsZero {
+	// Never beside a trigger window that still holds its anomalies: this
+	// round's detection may be NORMAL while an earlier zero was anomalous -
+	// a ring ratio judges a zero against the recent average - and the window
+	// is then still triggering, which is not an alert to end.
+	if result == "" && inferredZero && recoveryPlan.MissingData == contract.RecoveryMissingDataEvaluateAsZero &&
+		observedAnomalies < triggerPlan.RequiredAnomalies {
 		switch last := levelHistory.LastRealPoint; {
 		case last <= 0:
 			if withheld != "" {
