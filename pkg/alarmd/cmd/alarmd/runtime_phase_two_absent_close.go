@@ -123,6 +123,9 @@ type absentRoundSizes struct {
 type absentCloseControl interface {
 	ObservedSnapshot() (controlplane.ObservedSnapshot, bool)
 	DepartedStrategies() ([]controlplane.DepartedStrategy, uint64)
+	// CapabilityRefused is the strategies the last publication refused for a
+	// capability and runs no Plan of (controlplane.CapabilityRefused).
+	CapabilityRefused() map[string]string
 }
 
 // absentCloseLink is what the loop asks the alert link: its roster, one
@@ -275,6 +278,7 @@ func (loop *absentStrategyClose) step(ctx context.Context) {
 	round := absentalerts.Round{
 		Identities:         identitiesByKey(departed),
 		SnapshotStrategies: snapshotKeys(observed), SnapshotUsable: haveSnapshot,
+		Refused:             loop.control.CapabilityRefused(),
 		SnapshotObservation: observed.Observation,
 		After:               loop.lastDecided, Now: now,
 	}
@@ -480,6 +484,10 @@ func (loop *absentStrategyClose) closeStrategy(ctx context.Context, absent absen
 	// anywhere else. Every other strategy's alerts are filed under the
 	// strategy's business and nothing is read.
 	perAlert := identity.GlobalBusiness || absent.Identity.BusinessID == 0
+	reason := linkdoutput.CloseReasonAbsent
+	if absent.Refused != "" {
+		reason = linkdoutput.CloseReasonUnsupported
+	}
 	for start := 0; start < len(own); start += absentCloseAlertBatch {
 		batch := make([]linkdoutput.CloseRequest, 0, min(len(own)-start, absentCloseAlertBatch))
 		unknown := 0
@@ -501,7 +509,7 @@ func (loop *absentStrategyClose) closeStrategy(ctx context.Context, absent absen
 			batch = append(batch, linkdoutput.CloseRequest{TenantID: key.TenantID, Fingerprint: alert.Fingerprint,
 				AlertInstanceID: alert.AlertID, StrategyID: strategyID,
 				StrategyRevision: identity.Revision, BusinessID: business,
-				OccurredAt: now, Reason: linkdoutput.CloseReasonAbsent})
+				OccurredAt: now, Reason: reason, Detail: absent.Refused})
 		}
 		if unknown > 0 {
 			loop.observe(ctx, absentalerts.OutcomeBusinessUnknown, errors.New("an alert's record names no business for a global business strategy"), unknown)

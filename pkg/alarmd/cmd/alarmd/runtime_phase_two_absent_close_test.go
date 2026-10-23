@@ -15,6 +15,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/absentalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdoutput"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
@@ -27,6 +28,7 @@ type absentTestControl struct {
 	haveSnaphot bool
 	departed    []controlplane.DepartedStrategy
 	refused     uint64
+	capability  map[string]string
 }
 
 func (control *absentTestControl) ObservedSnapshot() (controlplane.ObservedSnapshot, bool) {
@@ -34,6 +36,9 @@ func (control *absentTestControl) ObservedSnapshot() (controlplane.ObservedSnaps
 }
 func (control *absentTestControl) DepartedStrategies() ([]controlplane.DepartedStrategy, uint64) {
 	return control.departed, control.refused
+}
+func (control *absentTestControl) CapabilityRefused() map[string]string {
+	return control.capability
 }
 
 // absentTestLink is the alert link: a roster in pages, one strategy's
@@ -264,6 +269,90 @@ func TestTheAlertsOfAStrategyDeletedBeforeThisProcessSawItAreClosed(t *testing.T
 	if difference := fixture.loop.Difference(); difference["roster_strategies"] != 2 ||
 		difference["roster_pages"] != 2 || difference["roster_complete"] != 1 || difference["candidates"] != 1 {
 		t.Fatalf("the round's sizes are not what it read: %+v", difference)
+	}
+}
+
+// A strategy that still exists and that its publication refused for a
+// capability: its alert is closed as no longer detected by alarmd - closed,
+// naming the capability - after the grace under two observations, as an
+// absent strategy's is. The same strategy refused for nothing keeps its
+// alert, and one refused for a round and supported the next starts its
+// grace again when it is refused once more.
+func TestTheAlertsOfAStrategyRefusedForACapabilityAreClosedAsNoLongerDetected(t *testing.T) {
+	listed := func(observation string, at time.Time) controlplane.ObservedSnapshot {
+		snapshot := liveSnapshot(observation, at, 100)
+		snapshot.Strategies = append(snapshot.Strategies, controlplane.DepartedStrategy{TenantID: "system", StrategyID: "10", BusinessID: 2})
+		return snapshot
+	}
+	newRefusedFixture := func(capability map[string]string) *absentTestFixture {
+		fixture := newAbsentFixture(t, []openalerts.Alert{nativeAlert("alert-1", "0123456789abcdef0123456789abcdef")})
+		fixture.control.snapshot = listed("observation-one", fixture.now)
+		fixture.control.capability = capability
+		return fixture
+	}
+	advance := func(fixture *absentTestFixture, observation string) {
+		fixture.now = fixture.now.Add(absentCloseGrace + time.Minute)
+		fixture.control.snapshot = listed(observation, fixture.now)
+		for i := range fixture.link.pages {
+			fixture.link.pages[i].Health.LastSuccess = fixture.now.Add(-time.Minute)
+		}
+	}
+	ctx := context.Background()
+
+	refused := newRefusedFixture(map[string]string{"10": "QUERY_SOURCE_RETIRED"})
+	refused.loop.step(ctx)
+	if len(refused.writer.batches) != 0 {
+		t.Fatalf("the first round closed: %+v", refused.writer.batches)
+	}
+	advance(refused, "observation-two")
+	refused.loop.step(ctx)
+	if len(refused.writer.batches) != 1 || len(refused.writer.batches[0]) != 1 {
+		t.Fatalf("the alert of a refused strategy was not closed: %+v (stats %+v)", refused.writer.batches, refused.loop.Stats())
+	}
+	request := refused.writer.batches[0][0]
+	if request.Reason != linkdoutput.CloseReasonUnsupported || request.Detail != "QUERY_SOURCE_RETIRED" || request.StrategyID != 10 {
+		t.Fatalf("close = %+v, want strategy_unsupported naming the capability", request)
+	}
+	event, err := linkdoutput.ConvertClose(request)
+	if err != nil {
+		t.Fatalf("the close is not one the contract accepts: %v", err)
+	}
+	var wire struct {
+		Content     string `json:"content"`
+		Evaluations []struct {
+			Action       string `json:"action"`
+			ActionReason string `json:"action_reason"`
+		} `json:"evaluations"`
+	}
+	if err := json.Unmarshal(event.Payload, &wire); err != nil || len(wire.Evaluations) != 1 ||
+		wire.Evaluations[0].Action != linkdoutput.ActionClosed || wire.Evaluations[0].ActionReason != linkdoutput.CloseReasonUnsupported ||
+		!strings.Contains(wire.Content, "QUERY_SOURCE_RETIRED") {
+		t.Fatalf("event = %s, want closed as strategy_unsupported with the capability in the content", event.Payload)
+	}
+
+	page, ok := refused.loop.Page(ctx, fleet.AbsentCandidateQuery{Limit: 10})
+	if !ok || len(page.Rows) != 1 || page.Rows[0].StrategyID != "10" || page.Rows[0].RefusedFor != "QUERY_SOURCE_RETIRED" {
+		t.Fatalf("absent.list rows = %+v, want strategy 10 naming the capability it was refused for", page.Rows)
+	}
+
+	supported := newRefusedFixture(nil)
+	supported.loop.step(ctx)
+	advance(supported, "observation-two")
+	supported.loop.step(ctx)
+	if len(supported.writer.batches) != 0 {
+		t.Fatalf("a listed strategy refused for nothing was closed: %+v", supported.writer.batches)
+	}
+
+	flapping := newRefusedFixture(map[string]string{"10": "QUERY_SOURCE_RETIRED"})
+	flapping.loop.step(ctx)
+	advance(flapping, "observation-two")
+	flapping.control.capability = nil
+	flapping.loop.step(ctx)
+	advance(flapping, "observation-three")
+	flapping.control.capability = map[string]string{"10": "QUERY_SOURCE_RETIRED"}
+	flapping.loop.step(ctx)
+	if len(flapping.writer.batches) != 0 {
+		t.Fatalf("a strategy supported in between was closed on its earlier refusal: %+v", flapping.writer.batches)
 	}
 }
 

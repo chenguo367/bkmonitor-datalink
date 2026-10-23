@@ -92,6 +92,13 @@ type Round struct {
 	// one failed if it did.
 	LinkLastSuccess time.Time
 	LinkError       string
+	// Refused is, by strategy id, every strategy the source lists that alarmd
+	// does not run because its publication refused it for a capability this
+	// build lacks, with that refusal's reason. Its unrecovered alerts have
+	// nothing left to judge them either, so it is a candidate as an absent
+	// strategy is, under the same grace and the same two observations, and
+	// its close says it is no longer detected rather than gone.
+	Refused map[string]string
 	// SnapshotStrategies is every strategy the source says exists right now.
 	// SnapshotUsable says it was observed rather than assumed, and
 	// SnapshotObservation identifies which observation it is.
@@ -126,6 +133,9 @@ type Decision struct {
 	Key         Key
 	Outcome     string
 	AbsentSince time.Time
+	// Refused is the capability the strategy was refused for, empty for a
+	// strategy absent from the snapshot.
+	Refused string
 }
 
 // Absent is one strategy the round decided to close.
@@ -136,6 +146,10 @@ type Absent struct {
 	Identity Identity
 	// AbsentSince is when this loop first found the strategy missing.
 	AbsentSince time.Time
+	// Refused is the capability the strategy was refused for (Round.Refused):
+	// its close says alarmd no longer detects it. Empty for a strategy absent
+	// from the snapshot.
+	Refused string
 }
 
 // The refusals of a whole round. Each names the fact that was not good
@@ -330,7 +344,8 @@ func Candidates(round Round, bounds Bounds) ([]Key, Counts, string) {
 	existing := strategyIDs(round.SnapshotStrategies)
 	candidates := make([]Key, 0)
 	for key := range round.Roster {
-		if _, present := existing[key.StrategyID]; present {
+		_, present := existing[key.StrategyID]
+		if _, refused := round.Refused[key.StrategyID]; present && !refused {
 			continue
 		}
 		candidates = append(candidates, key)
@@ -357,12 +372,21 @@ func Compute(round Round, bounds Bounds) Result {
 		return Result{Counts: counts, Refusal: refusal}
 	}
 	result := Result{Counts: counts, Refusal: RefusalNone, Decisions: make([]Decision, len(candidates))}
+	var listed map[string]struct{}
+	if len(round.Refused) > 0 {
+		listed = strategyIDs(round.SnapshotStrategies)
+	}
 	start := rotation(candidates, round.After)
 	for step := range candidates {
 		at := (start + step) % len(candidates)
 		key := candidates[at]
 		absence, tracked := round.FirstAbsent[key]
 		decision := Decision{Key: key}
+		if _, present := listed[key.StrategyID]; present {
+			// A refused strategy the snapshot no longer lists is gone, and
+			// closes as gone.
+			decision.Refused = round.Refused[key.StrategyID]
+		}
 		if tracked {
 			decision.AbsentSince = absence.Since
 		}
@@ -378,7 +402,8 @@ func Compute(round Round, bounds Bounds) Result {
 			result.Counts.Deferred++
 		default:
 			decision.Outcome = OutcomeCloseDecided
-			result.Close = append(result.Close, Absent{Key: key, Identity: round.Identities[key], AbsentSince: absence.Since})
+			result.Close = append(result.Close, Absent{Key: key, Identity: round.Identities[key], AbsentSince: absence.Since,
+				Refused: decision.Refused})
 			result.Counts.CloseDecided++
 		}
 		result.Decisions[at] = decision
