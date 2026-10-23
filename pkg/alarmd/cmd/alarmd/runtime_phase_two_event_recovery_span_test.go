@@ -101,6 +101,8 @@ type eventSpanRounds struct {
 	quiet map[int]bool
 	// evaluated is the rounds that evaluated a record of the group.
 	evaluated map[int]bool
+	// outcomes is each round's Level outcomes as "KIND" or "KIND:REASON".
+	outcomes map[int][]string
 	// tracker read the run's observations, as the replica's own does.
 	tracker *fleet.Tracker
 	gates   map[int][]observability.OpenAlertGateFact
@@ -200,11 +202,16 @@ func runGroupedEventCount(t *testing.T, run eventSpanCase) eventSpanRounds {
 	base := controlledG4Base(t)
 	var clock atomic.Int64
 	clock.Store(base)
+	// The one event is in round 0's accepted period, the minute before base:
+	// round 0 runs at base and its primary window ends there. Fixed before
+	// any request, so every request of a round - the primary and a Level's
+	// previous point alike, in whatever order they come - sees it in the
+	// same bucket.
+	eventBucket := base - period
 	var (
-		mu          sync.Mutex
-		round       int
-		eventBucket int64 // the bucket the one event falls in: round 0's accepted period
-		result      = eventSpanRounds{sent: map[int][]string{}, quiet: map[int]bool{}, evaluated: map[int]bool{},
+		mu     sync.Mutex
+		round  int
+		result = eventSpanRounds{sent: map[int][]string{}, quiet: map[int]bool{}, evaluated: map[int]bool{}, outcomes: map[int][]string{},
 			gates: map[int][]observability.OpenAlertGateFact{}, withheld: map[int]uint64{}}
 	)
 	// The query service as Elasticsearch answers a grouped count: a group
@@ -225,12 +232,6 @@ func runGroupedEventCount(t *testing.T, run eventSpanCase) eventSpanRounds {
 			return nil, err
 		}
 		mu.Lock()
-		// The event is in round 0's accepted period: the end of the latest
-		// window round 0 asks for. A Level reading a previous point asks a
-		// second window ending a period earlier, in either order.
-		if round == 0 && end-period > eventBucket {
-			eventBucket = end - period
-		}
 		result.ranges = append(result.ranges, [2]int64{start, end})
 		event := eventBucket
 		if round < run.oneWindowUntil {
@@ -396,6 +397,11 @@ func runGroupedEventCount(t *testing.T, run eventSpanCase) eventSpanRounds {
 					if level.Count > 0 {
 						result.evaluated[current] = true
 					}
+					outcome := level.Outcome
+					if level.Reason != "" {
+						outcome += ":" + level.Reason
+					}
+					result.outcomes[current] = append(result.outcomes[current], outcome)
 				}
 			}
 		}
@@ -534,6 +540,46 @@ func TestATemplateBoundEventCountsQuietZeroFeedsItsTrigger(t *testing.T) {
 	}
 	if widest != 2*60 {
 		t.Fatalf("the widest range asked was %d s, want the primary's N + R = 2 periods (ranges %v)", widest, run.ranges)
+	}
+}
+
+// The same template family's quiet rounds never end its alert at R = 3. A
+// ring-ratio increase (ceil 50) fires on the event itself, round 0 (1
+// against the 0 before it); N = 1 and R = 3, so the recovery windows are met
+// on round 3, while the lead still keeps the group in the primary's answer.
+// Rounds 1 to 3 are evaluated and none sends a RECOVERY; from round 4 the
+// event is out of the range and the group with it.
+//
+// Those rounds are UNKNOWN (QUERY_EMPTY), not NORMAL with the recovery
+// withheld: the ring ratio's previous point is a dependency requirement
+// without the event count's lead, so it answers nothing once the event has
+// left its window, and the Level cannot decide. Python skips the point the
+// same way (no history point, HistoryDataNotExists). Giving dependency
+// requirements the lead is listed for after 0.4.x in the 004 milestone plan
+// ("event counts' template ring ratios: the dependency window has no lead");
+// when it lands these rounds become NORMAL with the recovery withheld, and
+// this case changes with it.
+func TestATemplateBoundEventCountsQuietRoundsNeverRecover(t *testing.T) {
+	run := runGroupedEventCount(t, eventSpanCase{rounds: 6, levels: [][2]int{{1, 3}}, openAlert: true,
+		algorithm: "SimpleRingRatio", algorithmConfig: map[string]any{"floor": nil, "ceil": 50}})
+	if !containsKind(run.sent[0], contract.TriggerEventAbnormal) {
+		t.Fatalf("round 0 decided %v, want the increase's ABNORMAL", run.sent[0])
+	}
+	for round := 1; round < 6; round++ {
+		if containsKind(run.sent[round], contract.TriggerEventRecovery) {
+			t.Fatalf("round %d decided %v: a RECOVERY on a quiet round (rounds %v)", round, run.sent[round], run.sent)
+		}
+		if want := round <= 3; run.evaluated[round] != want {
+			t.Fatalf("round %d evaluated %v, want %v: the group is in the answer through round 3 (rounds %v)",
+				round, run.evaluated[round], want, run.evaluated)
+		}
+		if round <= 3 && !reflect.DeepEqual(run.outcomes[round], []string{"UNKNOWN:QUERY_EMPTY"}) {
+			t.Fatalf("round %d outcomes %v, want UNKNOWN:QUERY_EMPTY: the previous point reads nothing (rounds %v)",
+				round, run.outcomes[round], run.outcomes)
+		}
+	}
+	if kinds := controlledEventKinds(run.written); len(kinds) != 1 || kinds[0] != contract.TriggerEventAbnormal {
+		t.Fatalf("the sink took %v, want the ABNORMAL alone: the alert stays open", kinds)
 	}
 }
 
