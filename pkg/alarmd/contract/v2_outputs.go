@@ -389,8 +389,10 @@ func validateSuccessfulLevelResultsV1(results []LevelResultV1) error {
 			return invalid("trigger_event.level_results.decision_window.recovery.end", "names no closed ending, or is not on a RECOVERY")
 		}
 		endedByNoData := window.Recovery.EndedBy == RecoveryEndedByNoData
-		if endedBy := window.Recovery.EndedBy; endedBy != "" && (!endedByNoData || triggerSatisfied || window.Recovery.Withheld != "") {
-			return invalid("trigger_event.level_results.decision_window.recovery.ended_by", "names no closed cause, or ends a Level whose trigger is satisfied")
+		// A satisfied trigger beside it is refused below, by the result it
+		// expects: ABNORMAL or NORMAL, never this RECOVERY.
+		if endedBy := window.Recovery.EndedBy; endedBy != "" && (!endedByNoData || window.Recovery.Withheld != "") {
+			return invalid("trigger_event.level_results.decision_window.recovery.ended_by", "names no closed cause, or a recovery also withheld")
 		}
 		expectedResult := LevelResultNormal
 		if detect.DetectionResult == "ANOMALOUS" && triggerSatisfied {
