@@ -601,7 +601,7 @@ func evaluateLevelV2(
 	outcome.DetectEvidence = &detectEvidence
 	levelResult := contract.LevelResultV1{
 		LevelID: definition.LevelID, LevelCode: definition.LevelCode, Priority: definition.Priority, Result: result,
-		DecisionWindow: decisionWindow, DetectEvidence: detectEvidence, LevelTriggerFingerprint: level.Fingerprints().Trigger,
+		DecisionWindow: decisionWindow, DetectEvidence: &detectEvidence, LevelTriggerFingerprint: level.Fingerprints().Trigger,
 	}
 	return outcome, levelResult, nil
 }

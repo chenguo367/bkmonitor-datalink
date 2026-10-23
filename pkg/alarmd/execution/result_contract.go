@@ -1397,7 +1397,10 @@ func validateEventOutcomes(input InternalExecution, result PlanEvaluationResult,
 				effective, effectiveFound := findEffectiveTimeFact(
 					input, result.Plan, level.LevelID, state.Mutation.Identity.SeriesIdentityDigest,
 				)
-				if !ok || !effectiveFound || string(outcome.Outcome) != level.Result ||
+				// An event the Slot built is about a record and carries the
+				// detect evidence; one about an absent series is not this
+				// contract's to see and contradicts it here.
+				if !ok || !effectiveFound || string(outcome.Outcome) != level.Result || level.DetectEvidence == nil ||
 					level.DetectEvidence.EffectiveTimeStatus != string(effective.Fact.Status()) {
 					return resultContractViolation(codeEventLevelResultContradicts, "TriggerEvent Level result contradicts Level outcome decomposition")
 				}

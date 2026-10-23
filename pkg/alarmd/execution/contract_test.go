@@ -1683,7 +1683,7 @@ func triggerEventForOutcome(input execution.InternalExecution, outcomeKind execu
 				HistoryCompleteness: "FULL",
 				WindowEvidence:      contract.WindowEvidenceV1{AnomalyTimestampsDigest: strings.Repeat("9", 64)},
 			},
-			DetectEvidence: contract.DetectEvidenceV1{
+			DetectEvidence: &contract.DetectEvidenceV1{
 				DetectionResult: "ANOMALOUS", PredicateDigest: strings.Repeat("8", 64),
 				NormalizedValue: json.RawMessage(`50.1`), EffectiveTimeStatus: "ACTIVE",
 			},

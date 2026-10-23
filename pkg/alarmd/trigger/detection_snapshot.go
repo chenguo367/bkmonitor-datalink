@@ -139,10 +139,11 @@ func snapshotLevel(plan *strategy.CompiledPlan, result contract.LevelResultV1) c
 			break
 		}
 	}
-	if compiled == nil {
+	// A level about an absent series detected nothing, and has no facts.
+	if compiled == nil || result.DetectEvidence == nil {
 		return level
 	}
-	evidence := result.DetectEvidence
+	evidence := *result.DetectEvidence
 	// The algorithm whose facts are given: the one that decided, or for a
 	// level no algorithm matched - a recovery - its first.
 	decided := 0

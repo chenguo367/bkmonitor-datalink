@@ -895,6 +895,12 @@ type TriggerRecordRefV1 struct {
 	SourceTime              int64                      `json:"source_time"`
 	DimensionIdentityDigest string                     `json:"dimension_identity_digest"`
 	Dimensions              map[string]json.RawMessage `json:"dimensions"`
+	// Absent says the series had no record this round: the event is about
+	// its absence, and its record is the series' identity at the round's
+	// time, not a point. Only a RECOVERY no data ended (RecoveryEndedByNoData)
+	// is about an absent series, and its levels carry no detect evidence -
+	// there was nothing to detect. Omitted on every event about a record.
+	Absent bool `json:"absent,omitempty"`
 }
 
 type TriggerObservedV1 struct {
@@ -1015,13 +1021,17 @@ type DetectEvidenceV1 struct {
 }
 
 type LevelResultV1 struct {
-	LevelID                 uint32           `json:"level_id"`
-	LevelCode               string           `json:"level_code,omitempty"`
-	Priority                uint32           `json:"priority"`
-	Result                  string           `json:"result"`
-	DecisionWindow          DecisionWindowV1 `json:"decision_window"`
-	DetectEvidence          DetectEvidenceV1 `json:"detect_evidence"`
-	LevelTriggerFingerprint string           `json:"level_trigger_fingerprint"`
+	LevelID        uint32           `json:"level_id"`
+	LevelCode      string           `json:"level_code,omitempty"`
+	Priority       uint32           `json:"priority"`
+	Result         string           `json:"result"`
+	DecisionWindow DecisionWindowV1 `json:"decision_window"`
+	// DetectEvidence is required on every level result but the one about an
+	// absent series (TriggerRecordRefV1.Absent), which has no point to have
+	// detected anything on. A pointer only so that one can be left out; every
+	// event about a record encodes it exactly as before.
+	DetectEvidence          *DetectEvidenceV1 `json:"detect_evidence,omitempty"`
+	LevelTriggerFingerprint string            `json:"level_trigger_fingerprint"`
 }
 
 type TriggerEventTraceV1 struct {

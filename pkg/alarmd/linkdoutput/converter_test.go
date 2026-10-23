@@ -233,6 +233,26 @@ func TestARecoveryNoDataEndedSaysSo(t *testing.T) {
 	}
 }
 
+// An absent series' RECOVERY no data ended: the platform's no-data words, no
+// value, resolved as it was written.
+func TestAnAbsentSeriesNoDataEndIsWrittenWithNoValue(t *testing.T) {
+	message := convert(t, decision(func(event *contract.TriggerEventV1) {
+		event.EventKind = contract.TriggerEventRecovery
+		event.RecordRef.Absent = true
+		event.Observed.Values = map[string]json.RawMessage{}
+		event.LevelResults[0].Result = contract.LevelResultRecovery
+		event.LevelResults[0].DetectEvidence = nil
+		event.LevelResults[0].DecisionWindow.Recovery.EndedBy = contract.RecoveryEndedByNoData
+	}))
+	assertFields(t, message, map[string]string{
+		"evaluations": `[{"severity":"warning","action":"resolved","action_reason":""}]`,
+		"content":     `"在恢复检测周期内无数据上报，告警已恢复"`,
+	})
+	if _, valued := message["values"]; valued {
+		t.Fatalf("an absent series' end carries values: %s", message["values"])
+	}
+}
+
 // Every decided level is written and every undecided one is left out. The
 // consumer keeps a lifecycle per severity and reads an absent level as
 // "nothing said": writing resolved for a level that stayed normal would close

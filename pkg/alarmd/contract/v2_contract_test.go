@@ -175,7 +175,7 @@ func TestGoV2InvalidVectors(t *testing.T) {
 		result.DecisionWindow.Trigger.WindowSize = vector.WindowSize
 		result.DecisionWindow.Trigger.RequiredAnomalies = vector.RequiredAnomalies
 		result.DecisionWindow.Trigger.ObservedAnomalies = vector.ObservedAnomalies
-		err := validateSuccessfulLevelResultsV1([]LevelResultV1{result})
+		err := validateSuccessfulLevelResultsV1([]LevelResultV1{result}, false)
 		if (err == nil) != vector.Valid {
 			t.Fatalf("level result %s error = %v, valid=%t", vector.Name, err, vector.Valid)
 		}
@@ -696,7 +696,7 @@ func TestLevelResultV1RequiresConsistentWindowDecision(t *testing.T) {
 			if test.mutate != nil {
 				test.mutate(&result)
 			}
-			err := validateSuccessfulLevelResultsV1([]LevelResultV1{result})
+			err := validateSuccessfulLevelResultsV1([]LevelResultV1{result}, false)
 			if (err != nil) != test.wantErr {
 				t.Fatalf("validateSuccessfulLevelResultsV1() error = %v, wantErr=%t", err, test.wantErr)
 			}
@@ -738,9 +738,45 @@ func levelResultV1ForTest(levelID, priority uint32, result, fingerprint string) 
 			},
 			HistoryCompleteness: "FULL", WindowEvidence: WindowEvidenceV1{AnomalyTimestampsDigest: strings.Repeat("9", 64)},
 		},
-		DetectEvidence: DetectEvidenceV1{
+		DetectEvidence: &DetectEvidenceV1{
 			DetectionResult: "ANOMALOUS", PredicateDigest: strings.Repeat("8", 64),
 			NormalizedValue: json.RawMessage(`50.1`), EffectiveTimeStatus: "ACTIVE",
 		},
+	}
+}
+
+// The detect evidence extension, both ways: an absent series' level is a
+// RECOVERY no data ended with no detect evidence, and anything else there -
+// detect evidence, another result, a recovery its windows decided - is
+// refused; a level about a record without detect evidence is refused.
+func TestOnlyAnAbsentSeriesLevelLeavesDetectEvidenceOut(t *testing.T) {
+	absent := func(mutate func(*LevelResultV1)) LevelResultV1 {
+		result := levelResultV1ForTest(5, 1, LevelResultRecovery, strings.Repeat("e", 64))
+		result.DetectEvidence = nil
+		result.DecisionWindow.Trigger.ObservedAnomalies = 0
+		result.DecisionWindow.Recovery.EndedBy = RecoveryEndedByNoData
+		if mutate != nil {
+			mutate(&result)
+		}
+		return result
+	}
+	if err := validateSuccessfulLevelResultsV1([]LevelResultV1{absent(nil)}, true); err != nil {
+		t.Fatalf("an absent series' no-data RECOVERY refused: %v", err)
+	}
+	for name, mutate := range map[string]func(*LevelResultV1){
+		"detect evidence": func(r *LevelResultV1) {
+			r.DetectEvidence = levelResultV1ForTest(5, 1, LevelResultNormal, strings.Repeat("e", 64)).DetectEvidence
+		},
+		"a NORMAL":                   func(r *LevelResultV1) { r.Result = LevelResultNormal },
+		"not ended by no data":       func(r *LevelResultV1) { r.DecisionWindow.Recovery.EndedBy = "" },
+		"withheld beside it":         func(r *LevelResultV1) { r.DecisionWindow.Recovery.Withheld = RecoveryWithheldZeroCount },
+		"an ending outside the list": func(r *LevelResultV1) { r.DecisionWindow.Recovery.End = "resolve" },
+	} {
+		if err := validateSuccessfulLevelResultsV1([]LevelResultV1{absent(mutate)}, true); err == nil {
+			t.Errorf("an absent series' level with %s accepted", name)
+		}
+	}
+	if err := validateSuccessfulLevelResultsV1([]LevelResultV1{absent(nil)}, false); err == nil {
+		t.Fatal("a level about a record accepted without detect evidence")
 	}
 }
