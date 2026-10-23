@@ -541,8 +541,12 @@ func evaluateLevelV2(
 			rangeObserved = settledThrough >= from && history.CountObserved(from, min(settledThrough, request.Record.SourceTime)) > 0
 		}
 	}
+	withheld := ""
 	if result == "" && recoveryPlan.Enabled && observedMisses >= recoveryPlan.ConsecutiveWindows && rangeObserved {
 		result = contract.LevelResultRecovery
+		if request.ZeroCountIsNoObservation && zeroCountV2(detectEvidence.NormalizedValue) {
+			result, withheld = contract.LevelResultNormal, contract.RecoveryWithheldZeroCount
+		}
 	} else if result == "" {
 		if summary.Completeness != HistoryFull {
 			outcome.UnavailableReason = historyReasonV2(summary.Completeness)
@@ -562,7 +566,7 @@ func evaluateLevelV2(
 		Recovery: contract.RecoveryWindowEvidenceV1{
 			Enabled: recoveryPlan.Enabled, RequiredConsecutiveWindows: recoveryPlan.ConsecutiveWindows,
 			ObservedConsecutiveMisses: observedMisses, OldestWindowStart: oldestWindowStart,
-			SkippedWindows: skippedWindows,
+			SkippedWindows: skippedWindows, Withheld: withheld,
 		},
 		HistoryCompleteness: summary.Completeness,
 		WindowEvidence: contract.WindowEvidenceV1{
@@ -578,6 +582,12 @@ func evaluateLevelV2(
 		DecisionWindow: decisionWindow, DetectEvidence: detectEvidence, LevelTriggerFingerprint: level.Fingerprints().Trigger,
 	}
 	return outcome, levelResult, nil
+}
+
+// zeroCountV2 says a Level's normalized value is a count of zero.
+func zeroCountV2(value json.RawMessage) bool {
+	number, err := strconv.ParseFloat(string(value), 64)
+	return err == nil && number == 0
 }
 
 func buildDetectEvidenceV2(record DetectionRecord, fact DetectionFact, effectiveStatus string) (contract.DetectEvidenceV1, error) {

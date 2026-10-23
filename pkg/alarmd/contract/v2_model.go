@@ -944,7 +944,21 @@ type RecoveryWindowEvidenceV1 struct {
 	// without it, a run of five misses spanning an hour and one spanning a
 	// week look the same on the evidence.
 	SkippedWindows uint32 `json:"skipped_windows,omitempty"`
+	// Withheld says the recovery windows were met and the Level still did
+	// not recover, and why (RecoveryWithheldReasons): the result is NORMAL,
+	// not RECOVERY. Empty for every recovery that was decided as the windows
+	// say.
+	Withheld string `json:"withheld,omitempty"`
 }
+
+// RecoveryWithheldZeroCount: this round's own value is a count of zero from
+// a source whose zero is no observation - an event count, or a log count
+// with no grouping - so it does not end an alert, though the trigger reads
+// it as any value. The alert recovers on a round with a count above zero.
+const RecoveryWithheldZeroCount = "zero_count"
+
+// RecoveryWithheldReasons is the closed list.
+var RecoveryWithheldReasons = []string{RecoveryWithheldZeroCount}
 
 type WindowEvidenceV1 struct {
 	AnomalyTimestampsDigest string `json:"anomaly_timestamps_digest"`

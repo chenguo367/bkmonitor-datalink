@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -306,7 +307,7 @@ func DecodeTriggerEventV1WithLimits(payload []byte, limits TriggerEventReaderLim
 		if _, err := validateJSONObjectFields(window["trigger"], path+".decision_window.trigger", []string{"window_start", "window_end", "window_size", "required_anomalies", "observed_anomalies"}, []string{"anomaly_begin_time"}, false); err != nil {
 			return nil, err
 		}
-		if _, err := validateJSONObjectFields(window["recovery"], path+".decision_window.recovery", []string{"enabled", "required_consecutive_windows", "observed_consecutive_misses", "oldest_window_start"}, nil, false); err != nil {
+		if _, err := validateJSONObjectFields(window["recovery"], path+".decision_window.recovery", []string{"enabled", "required_consecutive_windows", "observed_consecutive_misses", "oldest_window_start"}, []string{"skipped_windows", "withheld"}, false); err != nil {
 			return nil, err
 		}
 		if _, err := validateJSONObjectFields(window["window_evidence"], path+".decision_window.window_evidence", []string{"anomaly_timestamps_digest", "late_accepted"}, nil, false); err != nil {
@@ -381,10 +382,13 @@ func validateSuccessfulLevelResultsV1(results []LevelResultV1) error {
 		if triggerSatisfied && recoverySatisfied {
 			return invalid("trigger_event.level_results.decision_window", "trigger and recovery cannot both be satisfied")
 		}
+		if withheld := window.Recovery.Withheld; withheld != "" && (!recoverySatisfied || !slices.Contains(RecoveryWithheldReasons, withheld)) {
+			return invalid("trigger_event.level_results.decision_window.recovery.withheld", "names no closed reason, or a recovery the windows did not meet")
+		}
 		expectedResult := LevelResultNormal
 		if detect.DetectionResult == "ANOMALOUS" && triggerSatisfied {
 			expectedResult = LevelResultAbnormal
-		} else if !triggerSatisfied && recoverySatisfied {
+		} else if !triggerSatisfied && recoverySatisfied && window.Recovery.Withheld == "" {
 			expectedResult = LevelResultRecovery
 		}
 		if result.Result != expectedResult {

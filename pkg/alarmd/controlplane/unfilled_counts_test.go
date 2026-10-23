@@ -53,20 +53,22 @@ func TestUnfilledCountsAreLogCountsAndCountedLogSeries(t *testing.T) {
 	}
 }
 
-// The primary requirement carries the word, for a log count and only for one.
+// The primary requirement carries the words: unfilled for a log count and
+// only for one, event counts for an event count and only for one.
 func TestThePrimaryRequirementSaysALogCountIsUnfilled(t *testing.T) {
 	runtime := &RedisCatalogRuntime{downstreamReserve: time.Second}
 	due := []execution.DuePlan{{Identity: execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "101"},
 		ScheduleSpec: execution.ScheduleSpec{EvaluationIntervalSeconds: 60}}}
-	for source, want := range map[string]bool{"bk_log_search/log": true, "bk_monitor/time_series": false} {
+	type words struct{ unfilled, events bool }
+	for source, want := range map[string]words{"bk_log_search/log": {unfilled: true}, "custom/event": {events: true}, "bk_monitor/time_series": {}} {
 		group := QueryGroup{QueryPlan: execution.QueryPlanFacts{SourceSemantics: []string{source}, StepMillis: 60000, AlignmentMillis: 60000,
 			QueryList: []execution.QueryClause{{TimeAggregation: execution.QueryFunction{Method: "count_over_time"}}}}}
 		requirements, err := runtime.primaryRequirements(group, due, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(requirements) != 1 || requirements[0].UnfilledCounts != want {
-			t.Fatalf("%s: requirements %+v, want one with UnfilledCounts %t", source, requirements, want)
+		if len(requirements) != 1 || requirements[0].UnfilledCounts != want.unfilled || requirements[0].EventCounts != want.events {
+			t.Fatalf("%s: requirements %+v, want one with UnfilledCounts %t and EventCounts %t", source, requirements, want.unfilled, want.events)
 		}
 	}
 }

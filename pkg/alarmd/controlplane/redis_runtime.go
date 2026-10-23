@@ -2881,6 +2881,7 @@ func (runtime *RedisCatalogRuntime) primaryRequirements(
 			}
 			requirement = &execution.DataRequirement{RequirementID: execution.RequirementID(identity), ProviderLeadSeconds: lead,
 				UnfilledCounts: readsUnfilledCounts(group.QueryPlan),
+				EventCounts:    readsEventCountOnly(group.QueryPlan),
 				DatasetName:    execution.DatasetName("primary:" + identity), Role: execution.InputRolePrimary,
 				LogicalQueryRef: execution.LogicalQueryRef(group.QueryPlan.QueryRevision),
 				RelativeWindow:  execution.RelativeQueryWindow{StartOffsetSeconds: -group.QueryPlan.QueryDelaySeconds - window, EndOffsetSeconds: -group.QueryPlan.QueryDelaySeconds, HalfOpen: true},

@@ -1,0 +1,135 @@
+// Tencent is pleased to support the open source community by making
+// 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
+// Copyright (C) 2017-2025 Tencent. All rights reserved.
+// Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at http://opensource.org/licenses/MIT
+// Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
+// an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
+// specific language governing permissions and limitations under the License.
+
+package trigger
+
+import (
+	"testing"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
+)
+
+// countPoint is one round of a count: its value and whether the detector
+// found it anomalous.
+type countPoint struct {
+	value     string
+	anomalous bool
+}
+
+// evaluateCounts evaluates every round of points, a minute apart, each in the
+// Slot a minute after it, and returns each round's record result.
+func evaluateCounts(t *testing.T, plan *strategy.CompiledPlan, points []countPoint, zeroIsNoObservation bool) ([]string, []EvaluationResultV2) {
+	t.Helper()
+	level := plan.Levels().At(0)
+	base := int64(1000 * 60)
+	results, evaluated := make([]string, len(points)), make([]EvaluationResultV2, len(points))
+	for index := range points {
+		history := pointHistory{step: 60, points: make(map[int64]bool, index+1)}
+		for earlier := 0; earlier <= index; earlier++ {
+			history.points[base+int64(earlier)*60] = points[earlier].anomalous
+		}
+		source := base + int64(index)*60
+		result := DetectionNormal
+		if points[index].anomalous {
+			result = DetectionAnomalous
+		}
+		request := requestV2(t, plan, source, []DetectionFact{factV2(level, result)},
+			[]LevelHistory{{LevelID: level.Definition().LevelID, View: history}}, activeFactsV2(t, plan, source+60))
+		request.Record.ProjectedValues[0].CanonicalDecimal = points[index].value
+		request.SeriesSeenBefore = index > 0
+		request.ZeroCountIsNoObservation = zeroIsNoObservation
+		readInTheNextSlot(t, &request)
+		got, err := EvaluateV2(request)
+		if err != nil {
+			t.Fatalf("round %d: EvaluateV2 error = %v", index, err)
+		}
+		results[index], evaluated[index] = got.RecordResult, got
+	}
+	return results, evaluated
+}
+
+// An event count that triggered and then went quiet: its zeros still count
+// as windows that did not trigger, but a round whose own count is zero does
+// not end the alert. It recovers on the first round with a count above zero.
+func TestAZeroCountDoesNotEndAnAlertAndTheFirstCountAboveZeroDoes(t *testing.T) {
+	plan := compilePlanV2(t, []contract.LevelIRV2{levelV2(5, 1, 1, 1, 4, nil)})
+	points := []countPoint{{"5.000000", true}, {"0.000000", false}, {"0.000000", false}, {"0.000000", false}, {"0.000000", false}, {"1.000000", false}}
+
+	got, evaluated := evaluateCounts(t, plan, points, true)
+	// The first rounds may still be warming; what matters is that no zero
+	// round recovers and the round with the count above zero does.
+	if got[0] != contract.LevelResultAbnormal || got[4] != contract.LevelResultNormal || got[5] != contract.LevelResultRecovery {
+		t.Fatalf("rounds = %v, want ABNORMAL first, NORMAL on the fourth zero, RECOVERY on the count of one", got)
+	}
+	for index := 1; index < 5; index++ {
+		if got[index] == contract.LevelResultRecovery {
+			t.Fatalf("round %d recovered on a zero count (all %v)", index, got)
+		}
+	}
+	// The round that met the recovery windows on a zero says it was withheld.
+	window := evaluated[4].LevelOutcomes[0].DecisionWindow
+	if window == nil || window.Recovery.Withheld != contract.RecoveryWithheldZeroCount ||
+		window.Recovery.ObservedConsecutiveMisses < window.Recovery.RequiredConsecutiveWindows {
+		t.Fatalf("round 4 recovery evidence = %+v, want the windows met and withheld as zero_count", window)
+	}
+
+	// Without the flag - a time series - the same zeros recover on the fourth.
+	plain, _ := evaluateCounts(t, plan, points, false)
+	if plain[4] != contract.LevelResultRecovery {
+		t.Fatalf("a time series' zeros: round 4 = %s, want RECOVERY (all %v)", plain[4], plain)
+	}
+}
+
+// Only zeros: the alert never ends, however many there are.
+func TestOnlyZeroCountsNeverEndAnAlert(t *testing.T) {
+	plan := compilePlanV2(t, []contract.LevelIRV2{levelV2(5, 1, 1, 1, 4, nil)})
+	points := []countPoint{{"5.000000", true}}
+	for range 12 {
+		points = append(points, countPoint{"0.000000", false})
+	}
+	got, _ := evaluateCounts(t, plan, points, true)
+	for index, result := range got {
+		if result == contract.LevelResultRecovery {
+			t.Fatalf("round %d recovered on a zero count (all %v)", index, got)
+		}
+	}
+}
+
+// The flag changes recovery and nothing the trigger decides: over shapes that
+// fire on counts above a threshold, on counts below one (a zero is
+// anomalous), and M of N, every round that is not a recovery reads the same
+// with and without it.
+func TestAZeroCountChangesNoTriggerDecision(t *testing.T) {
+	type shape struct {
+		name           string
+		window, needed uint32
+		points         []countPoint
+	}
+	above := []countPoint{{"0.000000", false}, {"3.000000", true}, {"0.000000", false}, {"0.000000", false}, {"4.000000", true}, {"4.000000", true}, {"0.000000", false}, {"0.000000", false}, {"0.000000", false}, {"0.000000", false}, {"2.000000", true}}
+	below := []countPoint{{"2.000000", false}, {"0.000000", true}, {"0.000000", true}, {"1.000000", false}, {"0.000000", true}, {"3.000000", false}, {"3.000000", false}, {"3.000000", false}, {"3.000000", false}, {"0.000000", true}}
+	for _, item := range []shape{
+		{"count above a threshold", 1, 1, above},
+		{"count below one", 1, 1, below},
+		{"two of three", 3, 2, above},
+		{"two of three below one", 3, 2, below},
+	} {
+		plan := compilePlanV2(t, []contract.LevelIRV2{levelV2(5, 1, item.window, item.needed, 4, nil)})
+		with, _ := evaluateCounts(t, plan, item.points, true)
+		without, _ := evaluateCounts(t, plan, item.points, false)
+		for index := range with {
+			if without[index] == contract.LevelResultRecovery {
+				continue
+			}
+			if with[index] != without[index] {
+				t.Fatalf("%s round %d: %s with the flag, %s without", item.name, index, with[index], without[index])
+			}
+		}
+	}
+}

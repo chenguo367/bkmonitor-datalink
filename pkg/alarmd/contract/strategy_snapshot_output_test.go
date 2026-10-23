@@ -139,3 +139,44 @@ func testTriggerEventSnapshotReference(t *testing.T, kind string) {
 		t.Fatal("accepted mismatched business")
 	}
 }
+
+// The reader takes back the recovery evidence the writer puts on a level:
+// the windows the walk stepped over and a recovery withheld.
+func TestTriggerEventRecoveryEvidenceRoundTrips(t *testing.T) {
+	payload, err := os.ReadFile("testdata/go-v2/trigger_event_v1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := DecodeTriggerEventV1(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quiet := &legacy.LevelResults[0]
+	if quiet.Result != LevelResultNormal {
+		t.Fatalf("fixture level 0 = %s, want NORMAL", quiet.Result)
+	}
+	quiet.DecisionWindow.Recovery.ObservedConsecutiveMisses = quiet.DecisionWindow.Recovery.RequiredConsecutiveWindows
+	quiet.DecisionWindow.Recovery.SkippedWindows = 2
+	quiet.DecisionWindow.Recovery.Withheld = RecoveryWithheldZeroCount
+	event, err := BuildTriggerEventV1(TriggerEventBuildInputV1{
+		EventKind: legacy.EventKind, TenantID: legacy.TenantID, BusinessID: legacy.BusinessID,
+		PlanRef: legacy.PlanRef, RecordRef: legacy.RecordRef, Observed: legacy.Observed,
+		LevelResults: legacy.LevelResults, EvaluationTime: legacy.EvaluationTime,
+		DetectPlanFingerprint: legacy.DetectPlanFingerprint, TriggerStateFingerprint: legacy.TriggerStateFingerprint,
+		ExecutionID: legacy.Trace.ExecutionID, MaxEvidenceBytes: len(payload) * 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := EncodeTriggerEventV1(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeTriggerEventV1(encoded)
+	if err != nil {
+		t.Fatalf("reader refused the writer's recovery evidence: %v", err)
+	}
+	if got := decoded.LevelResults[0].DecisionWindow.Recovery; got.SkippedWindows != 2 || got.Withheld != RecoveryWithheldZeroCount {
+		t.Fatalf("recovery evidence = %+v, want skipped_windows 2 and withheld zero_count", got)
+	}
+}

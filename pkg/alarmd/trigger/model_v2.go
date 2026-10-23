@@ -236,6 +236,15 @@ type EvaluationRequestV2 struct {
 	// recover, so a round that recovers nothing costs nothing. Nil holds
 	// nothing.
 	HoldRecovery func(levelID uint32) (reason string, held bool)
+	// ZeroCountIsNoObservation says this record's value, when it is a count
+	// of zero, is no observation: an event count, or a log count with no
+	// grouping. Such a round does not end an alert - its Level is NORMAL with
+	// the recovery evidence saying why (contract.RecoveryWithheldZeroCount) -
+	// while the trigger reads the zero as it reads any value. The recovery
+	// walk is unchanged: earlier zero rounds still count as windows that did
+	// not trigger, so the alert recovers on the first round with a count
+	// above zero.
+	ZeroCountIsNoObservation bool
 }
 
 type LevelOutcomeV2 struct {

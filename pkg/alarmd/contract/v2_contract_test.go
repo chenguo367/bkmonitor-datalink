@@ -505,6 +505,39 @@ func TestLevelResultV1RequiresConsistentWindowDecision(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			// A count of zero from a source whose zero is no observation met
+			// the recovery windows and did not end the alert.
+			name: "normal while recovery is satisfied and withheld",
+			mutate: func(result *LevelResultV1) {
+				result.DecisionWindow.Recovery.ObservedConsecutiveMisses = 1
+				result.DecisionWindow.Recovery.Withheld = RecoveryWithheldZeroCount
+			},
+		},
+		{
+			name: "recovery while withheld",
+			mutate: func(result *LevelResultV1) {
+				result.Result = LevelResultRecovery
+				result.DecisionWindow.Recovery.ObservedConsecutiveMisses = 1
+				result.DecisionWindow.Recovery.Withheld = RecoveryWithheldZeroCount
+			},
+			wantErr: true,
+		},
+		{
+			name: "withheld names a recovery the windows did not meet",
+			mutate: func(result *LevelResultV1) {
+				result.DecisionWindow.Recovery.Withheld = RecoveryWithheldZeroCount
+			},
+			wantErr: true,
+		},
+		{
+			name: "withheld outside the closed list",
+			mutate: func(result *LevelResultV1) {
+				result.DecisionWindow.Recovery.ObservedConsecutiveMisses = 1
+				result.DecisionWindow.Recovery.Withheld = "quiet"
+			},
+			wantErr: true,
+		},
+		{
 			name: "recovery while trigger is satisfied",
 			mutate: func(result *LevelResultV1) {
 				result.Result = LevelResultRecovery
