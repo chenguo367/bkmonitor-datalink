@@ -2797,6 +2797,24 @@ func providerLeads(stepMillis int64, histories []levelHistory) map[int64]int64 {
 	return leads
 }
 
+// readsZeroAsNoObservation is whether a query's count of zero is no
+// observation (DataRequirement.ZeroIsNoObservation): an event count, grouped
+// or not, or a log count whose clauses group by nothing.
+func readsZeroAsNoObservation(query execution.QueryPlanFacts) bool {
+	if readsEventCountOnly(query) {
+		return true
+	}
+	if !readsUnfilledCounts(query) {
+		return false
+	}
+	for _, clause := range query.QueryList {
+		if len(clause.Dimensions) > 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // readsUnfilledCounts is whether a query's one source answers counts its
 // provider does not zero-fill: a log count (bk_log_search/log, bk_monitor/log)
 // or a log time series aggregated by count or a count-like distinct
@@ -2880,9 +2898,9 @@ func (runtime *RedisCatalogRuntime) primaryRequirements(
 				return nil, err
 			}
 			requirement = &execution.DataRequirement{RequirementID: execution.RequirementID(identity), ProviderLeadSeconds: lead,
-				UnfilledCounts: readsUnfilledCounts(group.QueryPlan),
-				EventCounts:    readsEventCountOnly(group.QueryPlan),
-				DatasetName:    execution.DatasetName("primary:" + identity), Role: execution.InputRolePrimary,
+				UnfilledCounts:      readsUnfilledCounts(group.QueryPlan),
+				ZeroIsNoObservation: readsZeroAsNoObservation(group.QueryPlan),
+				DatasetName:         execution.DatasetName("primary:" + identity), Role: execution.InputRolePrimary,
 				LogicalQueryRef: execution.LogicalQueryRef(group.QueryPlan.QueryRevision),
 				RelativeWindow:  execution.RelativeQueryWindow{StartOffsetSeconds: -group.QueryPlan.QueryDelaySeconds - window, EndOffsetSeconds: -group.QueryPlan.QueryDelaySeconds, HalfOpen: true},
 				StepMillis:      group.QueryPlan.StepMillis, AlignmentMillis: group.QueryPlan.AlignmentMillis,

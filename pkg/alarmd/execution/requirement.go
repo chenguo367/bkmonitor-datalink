@@ -223,12 +223,16 @@ type DataRequirement struct {
 	// The controlplane derives it from the query each time it builds the
 	// primary requirement; nothing persists it.
 	UnfilledCounts bool `json:"-"`
-	// EventCounts says the primary answers event counts (custom/event): a
-	// count of zero there is no event, which is no observation - it does not
-	// end an alert (contract.RecoveryWithheldZeroCount) though the trigger
-	// reads it. Derived from the query each time, like UnfilledCounts, and
-	// never part of the requirement's identity.
-	EventCounts bool `json:"-"`
+	// ZeroIsNoObservation says a count of zero from the primary is no
+	// observation: an event count (custom/event), whose zero is no event, or
+	// a log count that groups by nothing, whose zero is no matching document
+	// or no document at all. It does not end an alert
+	// (contract.RecoveryWithheldZeroCount) though the trigger reads it. Read
+	// off the Plan's query - its source and its group-by - not off a record,
+	// so a grouped Plan's record without dimensions is still grouped.
+	// Derived from the query each time, like UnfilledCounts, and never part
+	// of the requirement's identity.
+	ZeroIsNoObservation bool `json:"-"`
 }
 
 func (requirement DataRequirement) Validate(plans map[PlanIdentity]DuePlan) error {
@@ -246,7 +250,7 @@ func (requirement DataRequirement) Validate(plans map[PlanIdentity]DuePlan) erro
 	}
 	if requirement.ProviderLeadSeconds < 0 || requirement.ProviderLeadSeconds*1000%requirement.StepMillis != 0 ||
 		requirement.ProviderLeadSeconds > 0 && requirement.Role != InputRolePrimary ||
-		(requirement.UnfilledCounts || requirement.EventCounts) && requirement.Role != InputRolePrimary {
+		(requirement.UnfilledCounts || requirement.ZeroIsNoObservation) && requirement.Role != InputRolePrimary {
 		return errors.New("alarmd execution: a provider lead is a whole number of steps, on a primary requirement")
 	}
 	if requirement.ReadinessClass != ReadinessEager && requirement.ReadinessClass != ReadinessFinalizedRequired {

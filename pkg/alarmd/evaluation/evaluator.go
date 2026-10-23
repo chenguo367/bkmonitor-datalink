@@ -427,7 +427,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 		return string(folded), proposed
 	}
 	tr, err := trigger.EvaluateV2(trigger.EvaluationRequestV2{TenantID: due.Identity.TenantID, BusinessID: due.Identity.BusinessID, Plan: due.CompiledPlan, Record: trigger.DetectionRecord{RecordID: record.RecordID(), SourceTime: record.SourceTime(), ProjectedValues: tvalues, LevelFacts: tfacts}, RecordRef: contract.TriggerRecordRefV1{RecordID: record.RecordID(), SourceTime: record.SourceTime(), DimensionIdentityDigest: string(series), Dimensions: alertDimensions(record.Dimensions(), request.HostOverlay)}, Observed: contract.TriggerObservedV1{Values: record.Values()}, Histories: histories, EffectiveTimeFacts: effective, EvaluationTime: int64(request.Header.Contract.Slot.EvaluationTime), DecisionTime: request.Header.DecisionTime, ReadHoldMillis: request.Header.Contract.ReadHoldMillis, ReadEnd: primaryReadEnd(request.Header, due.Identity), SeriesSeenBefore: !fresh, ExecutionID: request.Header.ExecutionID, Limits: e.limits.Trigger, OpenAlerts: request.OpenAlerts, HoldRecovery: holdRecovery, NamedOutputs: request.NamedOutputs,
-		ZeroCountIsNoObservation: zeroCountIsNoObservation(request.Header.Requirements, due.Identity, record)})
+		ZeroCountIsNoObservation: zeroCountIsNoObservation(request.Header.Requirements, due.Identity)})
 	if err != nil {
 		return recordResult{}, err
 	}
@@ -1017,19 +1017,19 @@ func guardConvergenceAllowed(view execution.RuntimeStateView, plan *strategy.Com
 	return allowed, window, nil
 }
 
-// zeroCountIsNoObservation says a zero in this record is no observation
-// (trigger.EvaluationRequestV2.ZeroCountIsNoObservation): the plan's primary
-// reads event counts, or log counts and the record carries no grouping. A
-// grouped log count's zero is a group whose source had documents and none
-// matched, which is an observation, and recovers as before.
-func zeroCountIsNoObservation(requirements []execution.DataRequirement, plan execution.PlanIdentity, record execution.RecordView) bool {
+// zeroCountIsNoObservation says a zero in this plan's records is no
+// observation (trigger.EvaluationRequestV2.ZeroCountIsNoObservation): the
+// plan's primary says so (DataRequirement.ZeroIsNoObservation). A grouped
+// log count's zero is a group whose source had documents and none matched,
+// which is an observation, and recovers as before.
+func zeroCountIsNoObservation(requirements []execution.DataRequirement, plan execution.PlanIdentity) bool {
 	for _, requirement := range requirements {
-		if requirement.Role != execution.InputRolePrimary || !requirement.EventCounts && !requirement.UnfilledCounts {
+		if requirement.Role != execution.InputRolePrimary || !requirement.ZeroIsNoObservation {
 			continue
 		}
 		for _, consumer := range requirement.Consumers {
 			if consumer.Consumer.Plan == plan {
-				return requirement.EventCounts || len(record.Dimensions()) == 0
+				return true
 			}
 		}
 	}
