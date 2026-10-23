@@ -27,12 +27,22 @@ type countPoint struct {
 // Slot a minute after it, and returns each round's record result.
 func evaluateCounts(t *testing.T, plan *strategy.CompiledPlan, points []countPoint, zeroIsNoObservation bool) ([]string, []EvaluationResultV2) {
 	t.Helper()
+	return evaluateCountsWithHoles(t, plan, points, zeroIsNoObservation, nil)
+}
+
+// evaluateCountsWithHoles is evaluateCounts with the rounds in holes left out
+// of every later round's history, as a round no record was kept for.
+func evaluateCountsWithHoles(t *testing.T, plan *strategy.CompiledPlan, points []countPoint, zeroIsNoObservation bool, holes map[int]bool) ([]string, []EvaluationResultV2) {
+	t.Helper()
 	level := plan.Levels().At(0)
 	base := int64(1000 * 60)
 	results, evaluated := make([]string, len(points)), make([]EvaluationResultV2, len(points))
 	for index := range points {
 		history := pointHistory{step: 60, points: make(map[int64]bool, index+1)}
 		for earlier := 0; earlier <= index; earlier++ {
+			if holes[earlier] && earlier != index {
+				continue
+			}
 			history.points[base+int64(earlier)*60] = points[earlier].anomalous
 		}
 		source := base + int64(index)*60
@@ -131,5 +141,25 @@ func TestAZeroCountChangesNoTriggerDecision(t *testing.T) {
 				t.Fatalf("%s round %d: %s with the flag, %s without", item.name, index, with[index], without[index])
 			}
 		}
+	}
+}
+
+// On a window with a hole a recovery may be decided (decision-022) but
+// NORMAL may not. So a recovery a zero withholds there is what any round
+// that did not recover is: unavailable, with the history reason - not
+// NORMAL, which the contract refuses on a window that is not whole, and not
+// RECOVERY. Without the flag the same round recovers.
+func TestAZeroWithheldOnAWindowWithAHoleIsUnavailableNotNormal(t *testing.T) {
+	plan := compilePlanV2(t, []contract.LevelIRV2{levelV2(5, 1, 2, 1, 3, nil)})
+	points := []countPoint{{"5.000000", true}, {"0.000000", false}, {"0.000000", false}, {"0.000000", false}, {"0.000000", false}}
+	holes := map[int]bool{1: true}
+
+	plain, _ := evaluateCountsWithHoles(t, plan, points, false, holes)
+	if plain[4] != contract.LevelResultRecovery {
+		t.Fatalf("without the flag round 4 = %q, want RECOVERY across the hole (all %v)", plain[4], plain)
+	}
+	got, evaluated := evaluateCountsWithHoles(t, plan, points, true, holes)
+	if got[4] != "" || evaluated[4].LevelOutcomes[0].UnavailableReason == "" {
+		t.Fatalf("round 4 = %q with outcome %+v, want unavailable with the history reason (all %v)", got[4], evaluated[4].LevelOutcomes[0], got)
 	}
 }

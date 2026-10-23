@@ -541,13 +541,19 @@ func evaluateLevelV2(
 			rangeObserved = settledThrough >= from && history.CountObserved(from, min(settledThrough, request.Record.SourceTime)) > 0
 		}
 	}
+	// A recovery withheld on a zero is decided as any round that did not
+	// recover: NORMAL on a whole window, saying it was withheld, and on an
+	// incomplete one the history reason, since only a RECOVERY may be
+	// decided on a window that is not FULL (decision-022).
 	withheld := ""
 	if result == "" && recoveryPlan.Enabled && observedMisses >= recoveryPlan.ConsecutiveWindows && rangeObserved {
-		result = contract.LevelResultRecovery
 		if request.ZeroCountIsNoObservation && zeroCountV2(detectEvidence.NormalizedValue) {
-			result, withheld = contract.LevelResultNormal, contract.RecoveryWithheldZeroCount
+			withheld = contract.RecoveryWithheldZeroCount
+		} else {
+			result = contract.LevelResultRecovery
 		}
-	} else if result == "" {
+	}
+	if result == "" {
 		if summary.Completeness != HistoryFull {
 			outcome.UnavailableReason = historyReasonV2(summary.Completeness)
 			outcome.HistoryCompleteness = summary.Completeness
