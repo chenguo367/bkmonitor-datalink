@@ -88,9 +88,10 @@ var algorithmPolicy = fields("type version level unit_prefix", map[string]*polic
 var triggerPolicy = fields("type version count check_window window_size required_anomalies required_normals", map[string]*policy{"uptime": uptimePolicy, "config": algorithmConfigPolicy})
 
 // recoveryPolicy is a detect's recovery_config: the trigger's keys, which the
-// frozen recovery plan carries, and status_setter, which the recovery checker
-// reads beside check_window.
-var recoveryPolicy = fields("type version count check_window window_size required_anomalies required_normals status_setter", map[string]*policy{"uptime": uptimePolicy, "config": algorithmConfigPolicy})
+// frozen recovery plan carries, status_setter, which the recovery checker
+// reads beside check_window, and disable_recovery, the owner's switch that
+// turns the level's recovery off.
+var recoveryPolicy = fields("type version count check_window window_size required_anomalies required_normals status_setter disable_recovery", map[string]*policy{"uptime": uptimePolicy, "config": algorithmConfigPolicy})
 var functionPolicy = fields("id method window dimensions without position field", map[string]*policy{"params": namedValues(fields("id value", nil))})
 var sourceQueryPolicy = fields("alert_name index_set_id promql custom_event_name data_source_label data_type_label metric_id metric_field alias values agg_dimension agg_method agg_interval result_table_id time_field query_string data_label unit time_delay offset expression_mode", map[string]*policy{
 	"agg_condition": conditionPolicy, "functions": functionPolicy,
