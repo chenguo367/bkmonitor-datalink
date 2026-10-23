@@ -188,6 +188,22 @@ func TestTheSinksOwnRefusalIsCarriedAsFactsAndDecidesTheKind(t *testing.T) {
 	}
 }
 
+// The kind alone says whose an output failure was: a refusal code under no
+// kind is read as unknown, not as the client's - the coordinator puts
+// client_rejected on every refusal, so a row without it claims nothing.
+func TestARefusalCodeUnderNoKindReadsUnknown(t *testing.T) {
+	for _, code := range []string{contract.ReasonOutputClientRejected, contract.ReasonOutputConversionRejected} {
+		_, kind, isOutput := outputFailureOf(Anomaly{Failure: &FailureRef{Stage: "output", Code: code}})
+		if !isOutput || kind != observability.OutputFailureUnknown {
+			t.Fatalf("%s under no kind: output %v kind %q, want unknown", code, isOutput, kind)
+		}
+		_, kind, _ = outputFailureOf(Anomaly{Failure: &FailureRef{Stage: "output", Code: code, Kind: observability.OutputFailureClientRejected}})
+		if kind != observability.OutputFailureClientRejected {
+			t.Fatalf("%s under client_rejected: kind %q", code, kind)
+		}
+	}
+}
+
 // A lease too short to start a batch is the sink's own named code and
 // carries no kind: its row keeps the code's reading - commit, unavailable -
 // and no evidence word, rather than an "unknown" that would claim more than
