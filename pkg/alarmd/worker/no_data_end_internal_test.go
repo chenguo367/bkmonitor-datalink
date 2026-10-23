@@ -98,3 +98,44 @@ func TestDecideNoDataEnds(t *testing.T) {
 		t.Fatalf("an update under a new identity put %+v, want the entry replaced by it", decided.write.Puts)
 	}
 }
+
+// A round with a read gap of the Plan open cannot say a group is absent,
+// however whole its answer: the gap is a round nobody read, and the group
+// may have reported in it. An absent series already past due is not ended
+// while the gap is open, and is ended on the first whole round after it
+// closes. A gap found with no scope open, or not found, closes nothing.
+func TestAnOpenReadGapHoldsAnEndPastDueUntilTheGapCloses(t *testing.T) {
+	plan := internalCompiledPlanRecovering(t, "302", 1, 60, json.RawMessage(`{"enabled":true,"consecutive_windows":2,"missing_data":"evaluate_as_zero"}`))
+	due := execution.DuePlan{Identity: execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "302"}, CompiledPlan: plan, StateGeneration: "generation-3"}
+	const now = int64(1_788_000_000)
+	overdue := noDataEndEntryFor("c", "fc", now-600)
+	held := fakeOpenAlertJudge{held: map[string]bool{"fc": true}, judged: true}
+	identity := execution.PlanGapIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration}
+	round := func(gaps ...execution.GapGuardSnapshot) noDataEndPlan {
+		stream := &streamedExecution{
+			header:     execution.InternalExecutionHeader{DuePlans: []execution.DuePlan{due}},
+			noDataEnds: map[execution.PlanIdentity]execution.NoDataEndLoaded{due.Identity: {Entries: []execution.NoDataEndEntry{overdue}}},
+			gaps:       execution.GapLoadResult{Items: gaps},
+		}
+		return stream.noDataEndRound()[due.Identity]
+	}
+	open := execution.GapGuardSnapshot{Identity: identity, Status: execution.GapFound, Scopes: []execution.GapScopeState{{}}}
+	if gapped := round(open); gapped.complete {
+		t.Fatal("a round with the Plan's read gap open read as complete")
+	} else if decided := decideNoDataEnds(due, gapped, nil, held, now, 10); len(decided.ends) != 0 || len(decided.write.Deletes) != 0 {
+		t.Fatalf("a round with the read gap open decided %+v, want nothing", decided)
+	}
+	for name, gaps := range map[string][]execution.GapGuardSnapshot{
+		"closed":          nil,
+		"found, no scope": {{Identity: identity, Status: execution.GapFound}},
+		"another Plan's":  {{Identity: execution.PlanGapIdentity{Plan: execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "303"}}, Status: execution.GapFound, Scopes: []execution.GapScopeState{{}}}},
+	} {
+		whole := round(gaps...)
+		if !whole.complete {
+			t.Fatalf("%s: a whole round read as incomplete", name)
+		}
+		if decided := decideNoDataEnds(due, whole, nil, held, now, 10); len(decided.ends) != 1 || decided.ends[overdue.Series] == nil {
+			t.Fatalf("%s: the first whole round decided %+v, want the overdue series ended", name, decided)
+		}
+	}
+}
