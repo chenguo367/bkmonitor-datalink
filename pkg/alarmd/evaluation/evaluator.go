@@ -158,6 +158,12 @@ type recordResult struct {
 	coverage execution.HistoryCoverage
 }
 
+// withheldOnZeroCount is whether a Level met its recovery windows and stayed
+// NORMAL on a count of zero (contract.RecoveryWithheldZeroCount).
+func withheldOnZeroCount(outcome trigger.LevelOutcomeV2) bool {
+	return outcome.DecisionWindow != nil && outcome.DecisionWindow.Recovery.Withheld == contract.RecoveryWithheldZeroCount
+}
+
 // countRecoveryGate adds one RECOVERY record to the Plan's counts under the
 // state of the other Level it was decided beside; a record decided beside
 // none, and every other record, adds nothing.
@@ -505,7 +511,8 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 			// business outcome. A record the recovery gate held has RECOVERY
 			// outcomes and no envelope, and says so on each of them.
 			EnvelopeHeld: tr.RecoveryGate.Held && kind == execution.LevelOutcomeRecovery,
-			GuardTail:    guardTail, ReasonCarried: carried}.WithReasonOrigin(origin)
+			GuardTail:    guardTail, ReasonCarried: carried,
+			RecoveryWithheld: kind == execution.LevelOutcomeNormal && withheldOnZeroCount(o)}.WithReasonOrigin(origin)
 	}
 	// A Level the trigger would advance while its outcome is UNKNOWN records
 	// a business fact into a history the guard has not yet released. The

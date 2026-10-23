@@ -2207,6 +2207,26 @@ type RecoveryGateFact struct {
 	Records uint64            `json:"records"`
 }
 
+// RecoveryWithheldReason is why a Level outcome that met its recovery
+// windows was not recovered. The set is closed, the contract's
+// (contract.RecoveryWithheldReasons): it is a metric label.
+type RecoveryWithheldReason string
+
+// RecoveryWithheldZeroCount: the round's own value was a count of zero from
+// a source whose zero is no observation.
+const RecoveryWithheldZeroCount RecoveryWithheldReason = contract.RecoveryWithheldZeroCount
+
+// RecoveryWithheldReasons lists every reason, for the metric that
+// pre-creates them all.
+var RecoveryWithheldReasons = []RecoveryWithheldReason{RecoveryWithheldZeroCount}
+
+// RecoveryWithheldFact counts, for one evaluation, the Level outcomes whose
+// recovery was withheld for one reason.
+type RecoveryWithheldFact struct {
+	Reason RecoveryWithheldReason `json:"reason"`
+	Levels uint64                 `json:"levels"`
+}
+
 // LevelOutcomeFact is one cell of an evaluation's Level outcomes: the
 // outcome kind, the reason for an UNKNOWN or TERMINAL one (empty for the
 // business outcomes, which carry none), and how many Level outcomes fell in
@@ -2632,6 +2652,7 @@ type Observation struct {
 	AlgorithmEvaluations []AlgorithmEvaluationFact
 	AlgorithmInputs      []AlgorithmInputFact
 	RecoveryGates        []RecoveryGateFact
+	RecoveryWithheld     []RecoveryWithheldFact
 	OpenAlertGates       []OpenAlertGateFact
 	// LevelOutcomes is what the evaluation concluded per Level outcome and
 	// reason, on an evaluation_completed line: how many Level outcomes were
@@ -2774,6 +2795,7 @@ func NormalizeObservation(observation Observation) Observation {
 	)
 	observation.AlgorithmEvaluations, observation.AlgorithmInputs = normalizeAlgorithmFacts(observation)
 	observation.RecoveryGates = normalizeRecoveryGateFacts(observation)
+	observation.RecoveryWithheld = normalizeRecoveryWithheldFacts(observation)
 	observation.LevelOutcomes = normalizeLevelOutcomeFacts(observation)
 	observation.OpenAlertGates = normalizeOpenAlertGateFacts(observation)
 	observation.ControlSourceRound = normalizeControlSourceRoundFacts(observation)
@@ -2940,6 +2962,24 @@ func normalizeRecoveryGateFacts(observation Observation) []RecoveryGateFact {
 		}
 		switch fact.Cause {
 		case RecoveryGateLevelUnavailable, RecoveryGateLevelRecovering, RecoveryGateLevelWithoutRecovery:
+			facts = append(facts, fact)
+		}
+	}
+	if len(facts) == 0 {
+		return nil
+	}
+	return facts
+}
+
+// normalizeRecoveryWithheldFacts is normalizeRecoveryGateFacts for withheld
+// recoveries: same stage, the contract's closed set, zero counts dropped.
+func normalizeRecoveryWithheldFacts(observation Observation) []RecoveryWithheldFact {
+	if observation.Component != ComponentEvaluation || observation.Stage != StageEvaluationCompleted {
+		return nil
+	}
+	facts := make([]RecoveryWithheldFact, 0, len(observation.RecoveryWithheld))
+	for _, fact := range observation.RecoveryWithheld {
+		if fact.Levels > 0 && slices.Contains(RecoveryWithheldReasons, fact.Reason) {
 			facts = append(facts, fact)
 		}
 	}

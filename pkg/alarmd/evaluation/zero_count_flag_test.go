@@ -10,12 +10,14 @@
 package evaluation
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/trigger"
 )
 
 // A zero is no observation for the plan's own primary when it reads event
@@ -66,4 +68,77 @@ func zeroCountRecord(t *testing.T, dimensions map[string]json.RawMessage) execut
 		t.Fatal("no record")
 	}
 	return record
+}
+
+// A Level outcome is withheld on a zero when its decision window says so;
+// one withheld for nothing and one with no window are not.
+func TestWithheldOnZeroCountReadsTheDecisionWindow(t *testing.T) {
+	window := func(withheld string) *contract.DecisionWindowV1 {
+		return &contract.DecisionWindowV1{Recovery: contract.RecoveryWindowEvidenceV1{Withheld: withheld}}
+	}
+	for _, test := range []struct {
+		outcome trigger.LevelOutcomeV2
+		want    bool
+	}{
+		{trigger.LevelOutcomeV2{DecisionWindow: window(contract.RecoveryWithheldZeroCount)}, true},
+		{trigger.LevelOutcomeV2{DecisionWindow: window("")}, false},
+		{trigger.LevelOutcomeV2{}, false},
+	} {
+		if got := withheldOnZeroCount(test.outcome); got != test.want {
+			t.Errorf("withheldOnZeroCount(%+v) = %t, want %t", test.outcome.DecisionWindow, got, test.want)
+		}
+	}
+}
+
+// Through the evaluator: a Plan whose primary reads event counts, whose two
+// Levels triggered on the round before, reads a zero. Each Level met its
+// recovery window and stays NORMAL, counted as withheld, and no envelope
+// goes; the result contract accepts it. Without the word the same zero
+// recovers both and counts nothing.
+func TestTheEvaluatorWithholdsAndCountsARecoveryOnAZeroEventCount(t *testing.T) {
+	for _, arm := range []struct {
+		name         string
+		eventCounts  bool
+		wantOutcome  execution.LevelOutcomeKind
+		wantWithheld uint64
+		wantEvents   int
+	}{
+		{"event count", true, execution.LevelOutcomeNormal, 2, 0},
+		{"time series", false, execution.LevelOutcomeRecovery, 0, 1},
+	} {
+		t.Run(arm.name, func(t *testing.T) {
+			plan := compiledTwoLevels(t)
+			history := []execution.StateHistoryPoint{{RecordID: strings.Repeat("a", 64), SourceTime: 40, Levels: []execution.StateLevelFact{
+				{LevelID: 5, DetectFingerprint: plan.Levels().At(0).Fingerprints().Detect, Result: execution.LevelFactAnomalous},
+				{LevelID: 6, DetectFingerprint: plan.Levels().At(1).Fingerprints().Detect, Result: execution.LevelFactAnomalous},
+			}}}
+			req := requestFixtureTwoLevels(t, plan, json.RawMessage(`0`), history)
+			req.Header.Requirements[0].EventCounts = arm.eventCounts
+			result, err := newEvaluator(t).Evaluate(context.Background(), req)
+			if err != nil {
+				t.Fatalf("Evaluate()=%v", err)
+			}
+			plan0 := result.Plans[0]
+			for _, outcome := range plan0.LevelOutcomes {
+				if outcome.Outcome != arm.wantOutcome {
+					t.Fatalf("outcomes=%+v want every Level %s", plan0.LevelOutcomes, arm.wantOutcome)
+				}
+			}
+			var withheld uint64
+			for _, outcome := range plan0.LevelOutcomes {
+				if outcome.RecoveryWithheld {
+					withheld++
+				}
+			}
+			if withheld != arm.wantWithheld {
+				t.Fatalf("withheld=%d want %d", withheld, arm.wantWithheld)
+			}
+			if len(plan0.StateResults) != 1 || len(plan0.StateResults[0].Events) != arm.wantEvents {
+				t.Fatalf("state results=%+v want one with %d envelopes", plan0.StateResults, arm.wantEvents)
+			}
+			if err := result.Validate(req); err != nil {
+				t.Fatalf("the result contract refused the evaluator's own result: %v", err)
+			}
+		})
+	}
 }

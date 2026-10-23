@@ -1934,6 +1934,7 @@ func (stream *streamedExecution) observeEvaluationCompleted(
 		Trace:                observability.TraceFields{StrategyID: due.Identity.StrategyID, BusinessID: due.Identity.BusinessID, DimensionIdentityDigest: string(series)},
 		AlgorithmEvaluations: evaluations, AlgorithmInputs: namedInputs,
 		RecoveryGates: recoveryGateFacts(due, evaluated), OpenAlertGates: openAlertGateFacts(due, evaluated),
+		RecoveryWithheld: recoveryWithheldFacts(due, evaluated),
 		LevelOutcomes:    levelOutcomeFacts(due, evaluated),
 		OutputWireFormat: planWireFormat(due), PlanSeriesMatched: stream.planSeriesMatched(due),
 		// The series' reason was a stored guard's, and where it came from.
@@ -2051,6 +2052,25 @@ func openAlertGateFacts(due execution.DuePlan, evaluated execution.EvaluationRes
 		}
 	}
 	return facts
+}
+
+// recoveryWithheldFacts carries the Plan's Level outcomes whose recovery was
+// withheld (LevelOutcome.RecoveryWithheld), for the Plan the observation is
+// about; none when nothing was withheld.
+func recoveryWithheldFacts(due execution.DuePlan, evaluated execution.EvaluationResult) []observability.RecoveryWithheldFact {
+	if len(evaluated.Plans) != 1 || evaluated.Plans[0].Plan != due.Identity {
+		return nil
+	}
+	var withheld uint64
+	for _, outcome := range evaluated.Plans[0].LevelOutcomes {
+		if outcome.RecoveryWithheld {
+			withheld++
+		}
+	}
+	if withheld == 0 {
+		return nil
+	}
+	return []observability.RecoveryWithheldFact{{Reason: observability.RecoveryWithheldZeroCount, Levels: withheld}}
 }
 
 // recoveryGateFacts carries the Plan's RECOVERY records by the state of the

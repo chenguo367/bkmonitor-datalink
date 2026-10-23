@@ -2061,6 +2061,12 @@ Labels: `beside`
 
 RECOVERY records decided while another Level of the same record was in the named state: level_unavailable (its state could not be established this round), level_recovering (it read NORMAL with a triggering window still inside its recovery span), level_without_recovery (it read NORMAL with recovery disabled). Counted by the first such Level in Level order, unavailable and recovering before without-recovery. None of these holds the envelope: a RECOVERY is written as its own Level's evaluation, and the alert consumer ends only an alert of that severity, recording any other as orphaned. The first two are the records that used to wait for that Level; read them against the consumer's orphaned count, which they bound together with the open alert set.
 
+## alarmd_trigger_recovery_withheld_total
+
+Labels: `reason`
+
+Level outcomes that met their recovery windows and stayed NORMAL, by why: zero_count (the round's own value was a count of zero from an event count, or a log count with no grouping, whose zero is no observation; the alert recovers on a round with a count above zero, or ends by -nodata or close). Counted per Level per evaluation, so one quiet alert adds one each round it stays open; the decision window of each such outcome carries recovery.withheld. A zero here is a reading: the reason exists from start.
+
 ## alarmd_undrained_draining_query_groups
 
 Replicated per-Pod view of retired Query Groups still requiring ownership until their retirement boundary is drained; aggregate replicas with max, not sum.

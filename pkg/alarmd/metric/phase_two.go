@@ -148,6 +148,7 @@ type phaseTwoMetrics struct {
 	activationHeldAgeSecondsMax     *loadedGauge
 	algorithmEvaluations            *prometheus.CounterVec
 	recoveryBeside                  *prometheus.CounterVec
+	recoveryWithheld                *prometheus.CounterVec
 	levelAbnormal                   *prometheus.CounterVec
 	historyCoverageRejected         *prometheus.CounterVec
 	historyCoverageUnsummarised     *prometheus.CounterVec
@@ -1274,6 +1275,18 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, cause := range []observability.RecoveryGateCause{observability.RecoveryGateLevelUnavailable, observability.RecoveryGateLevelRecovering, observability.RecoveryGateLevelWithoutRecovery} {
 		metrics.recoveryBeside.WithLabelValues(string(cause))
 	}
+	metrics.recoveryWithheld = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: metricSubsystem, Name: "trigger_recovery_withheld_total",
+		Help: "Level outcomes that met their recovery windows and stayed NORMAL, by why: zero_count (the " +
+			"round's own value was a count of zero from an event count, or a log count with no grouping, " +
+			"whose zero is no observation; the alert recovers on a round with a count above zero, or ends by " +
+			"-nodata or close). Counted per Level per evaluation, so one quiet alert adds one each round it " +
+			"stays open; the decision window of each such outcome carries recovery.withheld. A zero here is a " +
+			"reading: the reason exists from start.",
+	}, []string{"reason"})
+	for _, reason := range observability.RecoveryWithheldReasons {
+		metrics.recoveryWithheld.WithLabelValues(string(reason))
+	}
 	// The recovery gate: does the consumer hold an open alert on the series
 	// at all. Every outcome is pre-created so
 	// a zero reads as "never happened", and not_configured in particular has
@@ -1893,7 +1906,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.queryFailures,
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectCatalogWrittenBytes, m.objectReads, m.stateGenerationSkew, m.stateCarry,
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
-		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.openAlertGate,
+		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.recoveryWithheld, m.openAlertGate,
 	}...), append(append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), append(m.handover.collectors(), m.sreActions.actions, m.sreActions.rollouts, m.sreActions.watched, m.sreActions.receipts, m.cliAuth.total, m.cliAuth.rosterApplied)...), append(m.controlFacts.collectors(), m.traceExport.collectors()...)...),
 		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.fleetTracker, m.effectiveTimeRefresh, m.activationRebuild, m.timelineRepair, m.activationSkippedTimelines, m.timelineUnreadableReports, m.activationHeader, m.activationBlocked, m.liveReserve, m.roundMemory, m.targetGroup, m.effectiveClose, m.logLines, m.observerPanics, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.apmCarried, m.apmCarriedBytes, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.controlFactsWrites, m.queryCooldownLoads, m.eventBusinessAttribution, m.detectionSnapshots, m.detectionSnapshotStates, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
 		m.controlSourceRetainedStale, m.controlSourceLastGoodIdentity, m.platformSettings,
@@ -2145,6 +2158,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	}
 	for _, fact := range observation.RecoveryGates {
 		m.recoveryBeside.WithLabelValues(string(fact.Cause)).Add(float64(fact.Records))
+	}
+	for _, fact := range observation.RecoveryWithheld {
+		m.recoveryWithheld.WithLabelValues(string(fact.Reason)).Add(float64(fact.Levels))
 	}
 	for _, fact := range observation.OpenAlertGates {
 		m.openAlertGate.WithLabelValues(string(fact.Outcome)).Add(float64(fact.Records))

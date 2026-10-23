@@ -70,7 +70,14 @@ type LevelOutcome struct {
 	// after the flags, so it costs an outcome no bytes. Observation only:
 	// set by the evaluator, read by the lines and counters that must not
 	// file a carried reason as this round's failure.
-	ReasonCarried    bool
+	ReasonCarried bool
+	// RecoveryWithheld marks a NORMAL outcome whose Level met its recovery
+	// windows and did not recover, because the round's own value was a count
+	// of zero from a source whose zero is no observation
+	// (contract.RecoveryWithheldZeroCount). In the same alignment gap, so it
+	// costs an outcome no bytes. Observation only, like ReasonCarried: read
+	// by the withheld recovery counter, nothing decides anything from it.
+	RecoveryWithheld bool
 	ReasonOriginSlot uint32
 }
 

@@ -79,3 +79,25 @@ func TestRecoveryBesideLevelCounterStartsAtZeroAndAddsByState(t *testing.T) {
 		}
 	}
 }
+
+// A withheld recovery is counted by its reason, which exists at zero before
+// anything is observed; a reason outside the contract's list adds nothing.
+func TestRecoveryWithheldCounterStartsAtZeroAndAddsByReason(t *testing.T) {
+	const withheld = "alarmd_trigger_recovery_withheld_total"
+	r := NewRecorder(BuildInfo{})
+	initial := gatherFamily(t, r, withheld)
+	if len(initial) != 1 || initial[0].GetCounter().GetValue() != 0 || initial[0].Label[0].GetValue() != "zero_count" {
+		t.Fatalf("before any observation = %v, want reason=zero_count at 0", initial)
+	}
+	r.Observe(context.Background(), observability.Observation{
+		Component: observability.ComponentEvaluation, Stage: observability.StageEvaluationCompleted,
+		RecoveryWithheld: []observability.RecoveryWithheldFact{
+			{Reason: observability.RecoveryWithheldZeroCount, Levels: 3},
+			{Reason: observability.RecoveryWithheldReason("quiet"), Levels: 9},
+		},
+	})
+	got := gatherFamily(t, r, withheld)
+	if len(got) != 1 || got[0].GetCounter().GetValue() != 3 {
+		t.Fatalf("after one observation = %v, want only reason=zero_count at 3", got)
+	}
+}
