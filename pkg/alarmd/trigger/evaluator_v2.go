@@ -533,8 +533,9 @@ func evaluateLevelV2(
 	// The same range, read at the settled boundary, when a settled hole was
 	// counted: a quiet minute is a fact only beside a point that was read
 	// whole, and a range whose only points are past the settled boundary
-	// has none. No RECOVERY then; the alert stays as it is, since the no-data
-	// close Python takes elsewhere (recover.py:309-321) is not ported.
+	// has none. No RECOVERY then; the alert stays as it is. Python's no-data
+	// end (recover.py:191-197) is a Level written to end on no data, decided
+	// below and, for an absent series, by the worker's no-data end index.
 	rangeObserved := true
 	if observedMisses >= recoveryPlan.ConsecutiveWindows {
 		from := pythonRecoveryRangeStartV2(request.Record.SourceTime, triggerPlan, recoveryPlan)

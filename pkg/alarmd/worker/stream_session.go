@@ -2076,7 +2076,7 @@ func recoveryWithheldFacts(due execution.DuePlan, evaluated execution.Evaluation
 		}
 	}
 	var facts []observability.RecoveryWithheldFact
-	for _, code := range []execution.RecoveryWithheldCode{execution.RecoveryWithheldZeroCount, execution.RecoveryWithheldNoDataLastPointUnknown} {
+	for _, code := range execution.RecoveryWithheldCodes {
 		if counts[code] > 0 {
 			facts = append(facts, observability.RecoveryWithheldFact{Reason: observability.RecoveryWithheldReason(code.Reason()), Levels: counts[code]})
 		}

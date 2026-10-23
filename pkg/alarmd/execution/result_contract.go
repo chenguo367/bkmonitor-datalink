@@ -93,6 +93,9 @@ const (
 	RecoveryWithheldNoDataLastPointUnknown
 )
 
+// RecoveryWithheldCodes is every code but None, in the contract's order.
+var RecoveryWithheldCodes = []RecoveryWithheldCode{RecoveryWithheldZeroCount, RecoveryWithheldNoDataLastPointUnknown}
+
 // RecoveryWithheldCodeOf is the code of a contract reason; a reason outside
 // the list is None.
 func RecoveryWithheldCodeOf(reason string) RecoveryWithheldCode {

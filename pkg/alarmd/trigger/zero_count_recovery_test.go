@@ -284,3 +284,25 @@ func TestNoDataDoesNotEndALevelWhoseTriggerWindowStillHoldsAnAnomaly(t *testing.
 		t.Fatalf("round 5 evidence says no data ended it: %+v", window.Recovery)
 	}
 }
+
+// No data ends only a round whose own value is a zero that is no
+// observation: a count above zero, however old the last real point, is a
+// real point and recovers as its windows say, never as no data.
+func TestNoDataNeverEndsARoundWithACountAboveZero(t *testing.T) {
+	level := levelV2(5, 1, 1, 1, 1, nil)
+	level.RecoveryPlan.Config = mustJSONV2(map[string]any{"enabled": true, "consecutive_windows": 1, "missing_data": contract.RecoveryMissingDataEvaluateAsZero})
+	plan := compilePlanV2(t, []contract.LevelIRV2{level})
+	points := []countPoint{{"5.000000", true}, {"0.000000", false}, {"0.000000", false}, {"0.000000", false}, {"1.000000", false}}
+	got, evaluated := evaluateCountsFrom(t, plan, points, true, nil, int64(1000*60))
+	if got[4] != contract.LevelResultRecovery || evaluated[4].LevelOutcomes[0].DecisionWindow.Recovery.EndedBy != "" {
+		t.Fatalf("round 4 = %s %+v, want a RECOVERY its windows decided", got[4], evaluated[4].LevelOutcomes[0].DecisionWindow.Recovery)
+	}
+	// Its windows not met, a count of one beside a last real point long past
+	// is still a real point: nothing ends it.
+	slow := levelV2(5, 1, 1, 1, 3, nil)
+	slow.RecoveryPlan.Config = mustJSONV2(map[string]any{"enabled": true, "consecutive_windows": 3, "missing_data": contract.RecoveryMissingDataEvaluateAsZero})
+	one, _ := evaluateCountsFrom(t, compilePlanV2(t, []contract.LevelIRV2{slow}), []countPoint{{"1.000000", false}}, true, nil, int64(1000*60)-3600)
+	if one[0] == contract.LevelResultRecovery {
+		t.Fatalf("a count of one was ended as no data: %v", one)
+	}
+}

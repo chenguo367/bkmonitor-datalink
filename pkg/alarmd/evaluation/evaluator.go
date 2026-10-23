@@ -161,11 +161,50 @@ type recordResult struct {
 }
 
 // normalWithheld is withheldCode on a NORMAL outcome and None on any other.
-func normalWithheld(kind execution.LevelOutcomeKind, outcome trigger.LevelOutcomeV2) execution.RecoveryWithheldCode {
+func normalWithheld(kind execution.LevelOutcomeKind, outcome trigger.LevelOutcomeV2, alertOpen func() bool) execution.RecoveryWithheldCode {
 	if kind != execution.LevelOutcomeNormal {
 		return execution.RecoveryWithheldNone
 	}
-	return withheldCode(outcome)
+	code := withheldCode(outcome)
+	if code == execution.RecoveryWithheldNone || !alertOpen() {
+		// Counted only where a zero holds an alert open: a quiet series that
+		// never triggered meets its windows on every zero too, and counting
+		// it would make the count the population of quiet series.
+		return execution.RecoveryWithheldNone
+	}
+	return code
+}
+
+// seriesAlertOpen answers, once and only when asked, whether the consumer
+// holds an open alert on this record's series: the alert's fingerprint from
+// the Plan's output identity, asked of the open set (judged, where the set
+// can say so). False without an identity or a set: nothing then holds an
+// alert open that this process could know of.
+func seriesAlertOpen(request execution.EvaluationRequest, due execution.DuePlan, record execution.RecordView) func() bool {
+	asked, open := false, false
+	return func() bool {
+		if asked {
+			return open
+		}
+		asked = true
+		plan := due.CompiledPlan
+		identity, ref := plan.OutputIdentity(), plan.StrategyRef()
+		if identity == nil || ref.SnapshotRevision <= 0 || request.OpenAlerts == nil {
+			return false
+		}
+		fingerprint, err := contract.MonitorDedupeMD5(ref.StrategyID, due.Identity.BusinessID,
+			alertDimensions(record.Dimensions(), request.HostOverlay), *identity)
+		if err != nil {
+			return false
+		}
+		if judge, ok := request.OpenAlerts.(execution.OpenAlertJudge); ok {
+			held, judged := judge.Holds(due.Identity.TenantID, ref.StrategyID, fingerprint)
+			open = held || !judged && request.OpenAlerts.Contains(due.Identity.TenantID, ref.StrategyID, fingerprint)
+			return open
+		}
+		open = request.OpenAlerts.Contains(due.Identity.TenantID, ref.StrategyID, fingerprint)
+		return open
+	}
 }
 
 // withheldCode is why a Level met its recovery windows and stayed NORMAL
@@ -469,6 +508,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 			}
 		}
 	}
+	alertOpen := seriesAlertOpen(request, due, record)
 	for i, o := range tr.LevelOutcomes {
 		kind := execution.LevelOutcomeKind(o.Result)
 		reason := execution.ReasonCode(observability.ReasonNone)
@@ -530,7 +570,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 			// outcomes and no envelope, and says so on each of them.
 			EnvelopeHeld: tr.RecoveryGate.Held && kind == execution.LevelOutcomeRecovery,
 			GuardTail:    guardTail, ReasonCarried: carried,
-			RecoveryWithheld: normalWithheld(kind, o)}.WithReasonOrigin(origin)
+			RecoveryWithheld: normalWithheld(kind, o, alertOpen)}.WithReasonOrigin(origin)
 	}
 	// A Level the trigger would advance while its outcome is UNKNOWN records
 	// a business fact into a history the guard has not yet released. The
@@ -1098,23 +1138,30 @@ func (h historyView) summarizeHoles(ctx context.Context, t int64, n uint32, limi
 
 // lastRealPointAfter is a Level's last real point once this record is
 // applied: the record's own source time when its outcome says the value is a
-// real point (trigger.LevelOutcomeV2.RealPoint), the stored one otherwise.
-// Kept only for a Level written to end on no data, which is the one reader;
+// real point (trigger.LevelOutcomeV2.RealPoint), the stored one otherwise,
+// and never earlier than the stored one. While a read gap of the Level is
+// open the record counts as a real point whatever its value: a round nobody
+// read may have held one - an event inside the widened range is answered
+// only as the accepted window's record - and a clock run from the point
+// before it would end the alert early. That can only delay an end. Kept
+// only for a Level written to end on no data, which is the one reader;
 // every other Level writes zero, so its state stays the bytes it was.
-func lastRealPointAfter(plan *strategy.CompiledPlan, view execution.RuntimeStateView, record execution.RecordView,
-	outcomes []trigger.LevelOutcomeV2, levelID uint32) int64 {
-	if !endsOnNoData(plan, levelID) {
+func lastRealPointAfter(due execution.DuePlan, gaps execution.GapLoadResult, view execution.RuntimeStateView,
+	record execution.RecordView, outcomes []trigger.LevelOutcomeV2, levelID uint32) int64 {
+	if !endsOnNoData(due.CompiledPlan, levelID) {
 		return 0
 	}
+	stored := int64(0)
+	if level, found := levelState(view, levelID); found {
+		stored = level.LastRealPointTime
+	}
+	_, _, _, gapOpen := gapCompleteness(gaps, due, levelID)
 	for _, outcome := range outcomes {
-		if outcome.LevelID == levelID && outcome.RealPoint {
-			return record.SourceTime()
+		if outcome.LevelID == levelID && (outcome.RealPoint || gapOpen) {
+			return max(stored, record.SourceTime())
 		}
 	}
-	if stored, found := levelState(view, levelID); found {
-		return stored.LastRealPointTime
-	}
-	return 0
+	return stored
 }
 
 // noDataEndUpdates is what one record says about the no-data end index: for
@@ -1148,7 +1195,7 @@ func noDataEndUpdates(request execution.EvaluationRequest, due execution.DuePlan
 			}
 			fingerprint = computed
 		}
-		last := lastRealPointAfter(plan, view, record, outcomes, outcome.LevelID)
+		last := lastRealPointAfter(due, request.Gaps, view, record, outcomes, outcome.LevelID)
 		if last <= 0 {
 			continue
 		}
@@ -1380,7 +1427,7 @@ func buildMutation(request execution.EvaluationRequest, due execution.DuePlan, r
 	slot := request.Header.Contract.Slot.EvaluationTime
 	levels := make([]execution.RuntimeLevelStateMutation, len(refs))
 	lastReal := func(levelID uint32) int64 {
-		return lastRealPointAfter(due.CompiledPlan, view, record, outcomes, levelID)
+		return lastRealPointAfter(due, request.Gaps, view, record, outcomes, levelID)
 	}
 	for i, r := range refs {
 		if reason, missing := missingInputGuards[r.LevelID]; missing {

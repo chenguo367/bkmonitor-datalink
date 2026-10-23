@@ -473,7 +473,7 @@ func (loop *absentStrategyClose) closeStrategy(ctx context.Context, absent absen
 	execution.identity, execution.business, execution.revision, execution.recordsRead =
 		found.source, identity.BusinessID, identity.Revision, found.recordsRead
 	if found.outcome != "" {
-		loop.observe(ctx, found.outcome, errors.New("no business or revision for a strategy that no longer exists"), 1)
+		loop.observe(ctx, found.outcome, errors.New("no business or revision for a strategy whose alerts are to close"), 1)
 		execution.word = found.outcome
 		return execution
 	}
