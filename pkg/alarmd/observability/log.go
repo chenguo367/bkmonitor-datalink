@@ -744,9 +744,12 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			}
 			// Only the selectors with something to say are on the line: an
 			// unavailable or incomplete one, an empty one, a dangling node.
-			attributes = append(attributes, slog.String("target_selector",
-				selector.Kind+" "+selector.ID+" "+selector.State+" "+selector.Reason+
-					" kept="+strconv.Itoa(selector.Kept)+" dropped="+strconv.Itoa(selector.Dropped)))
+			line := selector.Kind + " " + selector.ID + " " + selector.State + " " + selector.Reason +
+				" kept=" + strconv.Itoa(selector.Kept) + " dropped=" + strconv.Itoa(selector.Dropped)
+			if len(selector.DroppedMembers) > 0 {
+				line += " dropped_members=" + strings.Join(selector.DroppedMembers, ",")
+			}
+			attributes = append(attributes, slog.String("target_selector", line))
 		}
 	}
 	if observation.GapApplySite != "" {

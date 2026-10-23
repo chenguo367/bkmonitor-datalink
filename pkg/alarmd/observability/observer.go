@@ -437,6 +437,9 @@ type TargetSelectorFacts struct {
 	// business only. Both are carried to the object row as they are.
 	NodeMissing bool
 	NodeForeign bool
+	// DroppedMembers names the first dropped members as "<id>:<reason>"
+	// (targetplan.MaxNamedDroppedMembers at most): which members to look at.
+	DroppedMembers []string
 }
 
 // NoDataSlotFacts is what happened to one Plan's no-data detection in one Slot.
