@@ -145,9 +145,19 @@ func TestALoweredHoldPutsEveryRoundOnProbation(t *testing.T) {
 
 // A round of a probation whose reread finds its whole window read early
 // raises the hold as a sample would, at once, and its probation counts
-// again from none.
+// again from none. What it caught is counted by the lowering it followed: a
+// verified one is a probe that passed by chance.
 func TestAProbationRereadThatFindsTheWindowReadEarlyRaisesTheHold(t *testing.T) {
+	for _, verified := range []bool{false, true} {
+		t.Run(map[bool]string{false: "after a trial's lowering", true: "after a verified lowering"}[verified], func(t *testing.T) {
+			probationCatchesARoundReadEarly(t, verified)
+		})
+	}
+}
+
+func probationCatchesARoundReadEarly(t *testing.T, verified bool) {
 	f := newProbationFixture(t, 3)
+	f.engine.options.LoweringVerified = func(execution.QueryGroupIdentity) bool { return verified }
 	f.round(2*time.Minute, "3")
 	f.cleanRound(time.Minute)
 	slot, readAt := f.round(time.Minute, "3")
@@ -166,6 +176,13 @@ func TestAProbationRereadThatFindsTheWindowReadEarlyRaisesTheHold(t *testing.T) 
 	}
 	if clean, in := f.engine.InProbation("qg"); !in || clean != 0 {
 		t.Fatalf("after a round read early: in probation %v with %d clean, want none", in, clean)
+	}
+	want := map[string]uint64{ProbationAfterTrial: 1, ProbationAfterVerified: 0}
+	if verified {
+		want = map[string]uint64{ProbationAfterTrial: 0, ProbationAfterVerified: 1}
+	}
+	if got := f.engine.Stats().Sources[sourceTimeSeries].ProbationCaught; !equalCounts(got, want) {
+		t.Fatalf("caught %v, want %v", got, want)
 	}
 	// The raise reaches the next round's hold, and ends the probation.
 	f.round(2*time.Minute, "3")
@@ -278,5 +295,33 @@ func TestAProbationContinuesOnTheNextOwner(t *testing.T) {
 	f.round(time.Minute, "3")
 	if _, in := f.engine.InProbation("qg"); in {
 		t.Fatal("a group never lowered resumed a probation")
+	}
+}
+
+// A probation resumed on the next owner keeps which lowering it follows: the first round there asks, and a round it
+// catches read early after a verified lowering is counted as one.
+func TestAResumedProbationCountsWhatItCatchesByTheLoweringItFollows(t *testing.T) {
+	for _, verified := range []bool{false, true} {
+		t.Run(map[bool]string{false: "after a trial's lowering", true: "after a verified lowering"}[verified], func(t *testing.T) {
+			lowering := time.Unix(1_700_000_100, 0).Unix() + 120 - 2*120
+			f := newResumingFixture(t, 3, &lowering)
+			f.engine.options.LoweringVerified = func(execution.QueryGroupIdentity) bool { return verified }
+			slot, readAt := f.round(time.Minute, "3")
+			if _, in := f.engine.InProbation("qg"); !in {
+				t.Fatal("fixture: the probation did not resume")
+			}
+			f.reread(slot, readAt, 0, "5")
+			f.reread(slot, readAt, 1, "5")
+			f.waitFor(func(stats Stats) bool {
+				return stats.Sources[sourceTimeSeries].ProbationRereads[ProbationWindowReadEarly] == 1
+			})
+			want := map[string]uint64{ProbationAfterTrial: 1, ProbationAfterVerified: 0}
+			if verified {
+				want = map[string]uint64{ProbationAfterTrial: 0, ProbationAfterVerified: 1}
+			}
+			if got := f.engine.Stats().Sources[sourceTimeSeries].ProbationCaught; !equalCounts(got, want) {
+				t.Fatalf("caught %v, want %v", got, want)
+			}
+		})
 	}
 }

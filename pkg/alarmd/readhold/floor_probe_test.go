@@ -79,9 +79,10 @@ func TestAFloorStandsADayAndEachFailedProbeDoublesIt(t *testing.T) {
 }
 
 // A probe that passes lowers the hold to the floor - pending, frozen a step
-// a Slot as any lowering is - marked verified, so no probation follows it and
-// a process that takes the group over resumes none: LastLowering has none.
-// The floor is the hold now, and the search goes on below it from half.
+// a Slot as any lowering is - marked verified. A probation follows it as it
+// follows every lowering, and a process that takes the group over resumes it:
+// LastLowering has it. The floor is the hold now, and the search goes on
+// below it from half.
 func TestAProbeThatPassesLowersTheHoldToItsFloorVerified(t *testing.T) {
 	c, store, now := stuckGroup(t, "")
 	*now = now.Add(FloorStanding)
@@ -110,8 +111,8 @@ func TestAProbeThatPassesLowersTheHoldToItsFloorVerified(t *testing.T) {
 	if _, err := c.SlotReadHold(context.Background(), scheduleEvery(t, "qg", 60, 60), 660, holdFence("qg")); err != nil {
 		t.Fatal(err)
 	}
-	if slot, lowered := c.LastLowering("qg"); lowered {
-		t.Fatalf("a verified lowering reads as one to resume probation from, at %d", slot)
+	if slot, lowered := c.LastLowering("qg"); !lowered || slot != 660 {
+		t.Fatalf("last lowering %d %v, want the verified one at 660 for the next owner to resume probation from", slot, lowered)
 	}
 	// A raise undoes it as it does any lowering, and the next is not verified.
 	observeEarly(t, c, "qg", 200*time.Second, 117_000)

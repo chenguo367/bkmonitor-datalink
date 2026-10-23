@@ -925,8 +925,8 @@ func (holds *productionReadHolds) bindLookback(options *lookback.Options) {
 	// the group over, from the lowering its record names.
 	options.LastLowering = holds.controller.LastLowering
 	// A group whose search has run out has its floor probed once it has
-	// stood long enough; a probe that passes lowers the hold with no
-	// probation after it, one that fails relearns the floor. One line per
+	// stood long enough; a probe that passes lowers the hold, a probation
+	// after it as after every lowering, one that fails relearns the floor. One line per
 	// probe end, a probe being two hours of rounds at least.
 	options.FloorProbe, options.LoweringVerified = holds.controller.FloorProbe, holds.controller.LoweringVerified
 	options.OnFloorProbe = func(e lookback.FloorProbeEnd) {

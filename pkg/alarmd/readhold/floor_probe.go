@@ -174,9 +174,9 @@ func (controller *Controller) FloorProbe(qg execution.QueryGroupIdentity) (candi
 	return time.Duration(at) * time.Millisecond, edge, ok
 }
 
-// LoweringVerified says the group's last lowering was to a floor a shadow
-// probe read clean first (Record.LoweredVerified): the rounds it frozen
-// lower are not read again in probation.
+// LoweringVerified says the group's last lowering was to a hold a shadow
+// probe read clean first (Record.LoweredVerified): the probation after it
+// counts what it catches apart, a pass that came by chance.
 func (controller *Controller) LoweringVerified(qg execution.QueryGroupIdentity) bool {
 	state := controller.group(qg)
 	state.mu.Lock()
@@ -198,7 +198,8 @@ type FloorProbeEvidence struct {
 
 // FloorProbeResult takes a shadow probe's end. One that passed lowers the
 // hold to the hold it read at, as a trial's lowering does but marked
-// verified - no probation follows it. At a midpoint the floor stays and the
+// verified; a probation follows it as it follows every lowering. At a
+// midpoint the floor stays and the
 // next probe reads the midpoint below; at the floor the floor is the hold
 // now, and the search goes on below it from half. One that failed at a
 // midpoint makes the midpoint the floor, dated now; at the floor it relearns

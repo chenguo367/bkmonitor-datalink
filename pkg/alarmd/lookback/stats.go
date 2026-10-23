@@ -67,8 +67,10 @@ type counters struct {
 	earlierSkipped map[string]uint64
 	earlierBytes   map[string]uint64
 	// probations is source|outcome: probation rereads by what they came to
-	// (ProbationOutcomes).
-	probations map[string]uint64
+	// (ProbationOutcomes); probationCaught source|after: the rounds read
+	// early it caught, by the lowering it followed (ProbationAfters).
+	probations      map[string]uint64
+	probationCaught map[string]uint64
 	// floorProbeRounds is source|outcome: shadow probe rounds by what they
 	// came to (FloorProbeRoundOutcomes); floorProbes source|event: probes
 	// started and ended (FloorProbeEvents).
@@ -108,7 +110,7 @@ func newCounters(sources, refusals []string) counters {
 		early: map[string]uint64{}, earlyUndecided: map[string]uint64{}, earlyBytes: map[string]uint64{},
 		earlierReads: map[string]uint64{}, earlierBytes: map[string]uint64{}, holdIgnored: map[string]uint64{},
 		earlierOvertaken: map[string]uint64{}, earlierPreparedLateMax: map[string]time.Duration{}, earlierAhead: map[string]uint64{},
-		earlierSkipped: map[string]uint64{}, probations: map[string]uint64{},
+		earlierSkipped: map[string]uint64{}, probations: map[string]uint64{}, probationCaught: map[string]uint64{},
 		floorProbeRounds: map[string]uint64{}, floorProbes: map[string]uint64{}, floorProbeChanges: map[string]uint64{},
 		emptyCompletion: map[string]uint64{}, refusals: map[string]uint64{RefusedOther: 0}, faults: map[string]uint64{}, plans: map[string]uint64{},
 		maxCompletion: map[string]time.Duration{}, recheckBytes: map[string]uint64{}, unknownLookback: map[string]uint64{},
@@ -168,6 +170,9 @@ func newCounters(sources, refusals []string) counters {
 		}
 		for _, outcome := range ProbationOutcomes {
 			c.probations[key2(source, outcome)] = 0
+		}
+		for _, after := range ProbationAfters {
+			c.probationCaught[key2(source, after)] = 0
 		}
 		for _, outcome := range FloorProbeRoundOutcomes {
 			c.floorProbeRounds[key2(source, outcome)] = 0
@@ -411,6 +416,10 @@ type SourceStats struct {
 	// it catches.
 	ProbationRereads map[string]uint64 `json:"probation_rereads"`
 	ProbationGroups  uint64            `json:"probation_groups"`
+	// ProbationCaught is the rounds read early probation caught, by the
+	// lowering it followed (ProbationAfters): after verified, a shadow probe
+	// that passed by chance.
+	ProbationCaught map[string]uint64 `json:"probation_caught"`
 	// FloorProbeRounds is the rounds of Query Groups whose floor is probed,
 	// read at the floor beside the formal read, by what they came to
 	// (FloorProbeRoundOutcomes); FloorProbes the probes started and ended
@@ -762,6 +771,10 @@ func (engine *Engine) Stats() Stats {
 		entry.ProbationRereads, entry.ProbationGroups = map[string]uint64{}, probationGroups[source]
 		for _, outcome := range ProbationOutcomes {
 			entry.ProbationRereads[outcome] = engine.counts.probations[key2(source, outcome)]
+		}
+		entry.ProbationCaught = map[string]uint64{}
+		for _, after := range ProbationAfters {
+			entry.ProbationCaught[after] = engine.counts.probationCaught[key2(source, after)]
 		}
 		entry.FloorProbeRounds, entry.FloorProbes, entry.FloorProbeGroups = map[string]uint64{}, map[string]uint64{}, floorProbeGroups[source]
 		for _, outcome := range FloorProbeRoundOutcomes {

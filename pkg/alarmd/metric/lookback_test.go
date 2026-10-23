@@ -68,6 +68,7 @@ func lookbackSeriesUpperBounds() map[string]int {
 		"lookback_earlier_ahead_total":               sources * len(lookback.EarlierAheadSlots),
 		"lookback_earlier_skipped_total":             sources * len(lookback.EarlierSkipReasons),
 		"lookback_probation_rereads_total":           sources * len(lookback.ProbationOutcomes),
+		"lookback_probation_caught_total":            sources * len(lookback.ProbationAfters),
 		"lookback_probation_groups":                  sources,
 		"lookback_floor_probe_rounds_total":          sources * len(lookback.FloorProbeRoundOutcomes),
 		"lookback_floor_probes_total":                sources * len(lookback.FloorProbeEvents),

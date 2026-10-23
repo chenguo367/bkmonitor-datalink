@@ -480,13 +480,14 @@ func TestAProbeEndsWhenWhatItReadsMoves(t *testing.T) {
 	}
 }
 
-// A round frozen lower than the one before starts probation, unless that lowering was verified by a probe: the
-// probe read those rounds already, and a probation still running for the hold before watches a hold no round has.
-func TestAVerifiedLoweringStartsNoProbation(t *testing.T) {
+// A round frozen lower than the one before starts probation, the lowering verified by a probe or not: a probe that
+// passed by chance is read early until a sample sees it, and probation sees the first such round. A probation of the
+// hold before it is replaced by the lowering's own.
+func TestEveryLoweringStartsProbation(t *testing.T) {
 	for _, verified := range []bool{false, true} {
 		t.Run(map[bool]string{false: "a trial's lowering", true: "a verified lowering"}[verified], func(t *testing.T) {
 			f := newFixture(t)
-			f.engine.options.LoweringVerified = func(execution.QueryGroupIdentity) bool { return verified }
+			f.engine.options.LoweringVerified = func(execution.QueryGroupIdentity) bool { return false }
 			slot := f.clock.now().Unix() / 60 * 60
 			read := func(at int64, hold time.Duration) {
 				q := scheduledQuery(t, at)
@@ -494,16 +495,14 @@ func TestAVerifiedLoweringStartsNoProbation(t *testing.T) {
 				f.engine.Begin(q).Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
 			}
 			read(slot, 3*time.Minute)
-			// A trial's lowering first, whose probation runs.
-			f.engine.options.LoweringVerified = func(execution.QueryGroupIdentity) bool { return false }
 			read(slot+60, 2*time.Minute)
 			if _, probation := f.engine.InProbation("qg"); !probation {
 				t.Fatal("fixture: a trial's lowering started no probation")
 			}
 			f.engine.options.LoweringVerified = func(execution.QueryGroupIdentity) bool { return verified }
 			read(slot+120, time.Minute)
-			if _, probation := f.engine.InProbation("qg"); probation == verified {
-				t.Fatalf("in probation %v after a lowering verified %v", probation, verified)
+			if clean, probation := f.engine.InProbation("qg"); !probation || clean != 0 {
+				t.Fatalf("after a lowering verified %v: in probation %v with %d clean, want a new one", verified, probation, clean)
 			}
 		})
 	}

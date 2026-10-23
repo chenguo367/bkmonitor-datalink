@@ -246,9 +246,10 @@ type Options struct {
 	// A group this process has not seen a round of resumes the probation of
 	// a lowering that recent; nil resumes none.
 	LastLowering func(execution.QueryGroupIdentity) (execution.EvaluationTime, bool)
-	// LoweringVerified says a Query Group's last lowering was to a floor its
+	// LoweringVerified says a Query Group's last lowering was to a hold its
 	// shadow probe read clean first (readhold.Controller.LoweringVerified):
-	// the rounds frozen lower start no probation. Nil verifies none.
+	// the probation that follows it is counted apart when it catches a round
+	// read early (probation_caught after=verified). Nil verifies none.
 	LoweringVerified func(execution.QueryGroupIdentity) bool
 	// FloorProbe is the floor a Query Group whose search below its hold has
 	// run out has its rounds read at as well, whether it is near a floor a

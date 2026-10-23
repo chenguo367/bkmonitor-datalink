@@ -23,10 +23,11 @@ import (
 // the read at the floor is compared with it, whole, as a trial is
 // (completeEarlier). ProbationRounds rounds in a row that read the same -
 // EdgeProbeSpan of them, if more, near a floor a probe has failed at - lower the
-// hold to the floor without a probation after it, the probe having read
-// those rounds already; one that reads differently ends the probe, and the
-// floor stands longer before the next. No round is decided on data read
-// early to find out.
+// hold to the floor, and a probation follows as it follows every lowering:
+// a probe that passed by chance would otherwise be read early until a sample
+// saw it. One that reads differently ends the probe, and the floor stands
+// longer before the next. No round is decided on data read early to find
+// out.
 //
 // A probe read rides no sample: each round has its own, reserved at the
 // Slot's first attempt (Prepare) - for a hold past the period less the reread

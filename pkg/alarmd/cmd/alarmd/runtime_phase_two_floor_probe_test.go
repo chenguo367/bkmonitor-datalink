@@ -207,9 +207,9 @@ func descent(t *testing.T, f *cutoverStallFixture, span time.Duration) (holds []
 // between its floor and its hold, each read beside the formal read at the hold for lookback.ProbationRounds rounds
 // before the hold comes down to it: 48 s comes down to 24, 12, 6 and 3 s, and then, the floor near enough, to the
 // floor itself. Until each probe passed every round was frozen at the hold before it - none decided on a read at the
-// probe's hold - and no probation follows a lowering, the probe having read those rounds. A hold past the period less
-// the reread bound has each Slot's round reserved at the Slot before it, and comes down the same way. No Slot is
-// skipped on the way.
+// probe's hold - and the probation that follows each lowering, as it follows every one, reads none of its rounds
+// early. A hold past the period less the reread bound has each Slot's round reserved at the Slot before it, and comes
+// down the same way. No Slot is skipped on the way.
 func TestAStuckGroupsFloorIsProbedAndItsHoldComesDownWithNoRoundReadEarly(t *testing.T) {
 	t.Parallel()
 	for _, c := range []struct {
@@ -245,9 +245,17 @@ func TestAStuckGroupsFloorIsProbedAndItsHoldComesDownWithNoRoundReadEarly(t *tes
 			if rounds[lookback.FloorProbeClean] < lowerings*uint64(lookback.ProbationRounds) || rounds[lookback.FloorProbeDifferent] != 0 {
 				t.Fatalf("probe rounds %v, want at least %d clean and none different", rounds, lowerings*uint64(lookback.ProbationRounds))
 			}
-			if _, probation := engine.InProbation(f.queryGroup); probation || probationRereads(engine) != reread || !holds.controller.LoweringVerified(f.queryGroup) {
-				t.Fatalf("in probation %v, %d rounds reread since the hold first came down, verified %v; want none, verified",
-					probation, probationRereads(engine)-reread, holds.controller.LoweringVerified(f.queryGroup))
+			early, caught := uint64(0), uint64(0)
+			for _, source := range engine.Stats().Sources {
+				early += source.ProbationRereads[lookback.ProbationWindowReadEarly]
+				for _, count := range source.ProbationCaught {
+					caught += count
+				}
+			}
+			if probationRereads(engine) == reread || early != 0 || caught != 0 || !holds.controller.LoweringVerified(f.queryGroup) {
+				t.Fatalf("%d rounds reread in probation since the hold first came down, %d read early, %d caught, verified %v; "+
+					"want each lowering's probation reading none early, verified", probationRereads(engine)-reread, early, caught,
+					holds.controller.LoweringVerified(f.queryGroup))
 			}
 			if skipped != 0 {
 				t.Fatalf("%d Slots skipped unevaluated as the hold came down from %v", skipped, hold)

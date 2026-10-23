@@ -61,10 +61,23 @@ var ProbationOutcomes = []string{ProbationClean, ProbationWindowReadEarly, Proba
 	ProbationUnclassified}
 
 // probationState is a Query Group in probation: the rounds read clean since
-// its hold was last lowered.
+// its hold was last lowered, and whether a shadow probe verified that
+// lowering.
 type probationState struct {
-	clean int
+	clean    int
+	verified bool
 }
+
+// What a probation that caught a round read early followed, closed: verified,
+// a lowering a shadow probe read clean first - one that passed by chance;
+// trial, a lowering on earlier-read trials alone.
+const (
+	ProbationAfterVerified = "verified"
+	ProbationAfterTrial    = "trial"
+)
+
+// ProbationAfters is every lowering a probation follows.
+var ProbationAfters = []string{ProbationAfterVerified, ProbationAfterTrial}
 
 // probationRounds is how many clean rounds end a probation.
 func (engine *Engine) probationRounds() int {
@@ -97,8 +110,9 @@ func (engine *Engine) lastLowering(query Query) *execution.EvaluationTime {
 
 // loweringVerified asks, outside the engine's lock, whether the lowering a
 // Query Group's round is frozen under was verified by a shadow probe: only
-// for a round frozen lower than the one before it here, the only round it
-// decides anything for.
+// for a round frozen lower than the one before it here, or the first round
+// here, which may resume a lowering's probation - the only rounds it decides
+// anything for.
 func (engine *Engine) loweringVerified(query Query) bool {
 	if engine.options.LoweringVerified == nil || query.Secondary {
 		return false
@@ -106,18 +120,19 @@ func (engine *Engine) loweringVerified(query Query) bool {
 	qg := query.Contract.Slot.QueryGroup
 	engine.mu.Lock()
 	state := engine.groups[qg]
-	lower := state != nil && state.holdSeen && query.Contract.ReadHoldMillis < state.lastHold
+	ask := state == nil || !state.holdSeen || query.Contract.ReadHoldMillis < state.lastHold
 	engine.mu.Unlock()
-	return lower && engine.options.LoweringVerified(qg)
+	return ask && engine.options.LoweringVerified(qg)
 }
 
 // noteRoundHoldLocked takes the hold a Query Group's round was frozen with. A
 // hold lower than the round before's starts its probation again, a lowering
-// a step at a time among them, unless the lowering was verified - its floor
-// read clean round by round by a shadow probe before it was made
-// (floor_probe.go), which read the rounds probation would - which ends any
-// probation of the hold before; a higher one ends it: the hold went back past
-// the data, which is what probation watches for.
+// a step at a time among them, and a verified one too - read clean round by
+// round by a shadow probe before it was made (floor_probe.go): a probe that
+// passed by chance would be read early until a sample saw it, about sixty
+// rounds, and probation sees the first. The probation keeps which it follows,
+// to count what it catches apart. A higher hold ends it: the hold went back
+// past the data, which is what probation watches for.
 //
 // The first round a process sees of a group - after a restart, or taken over
 // from another process - has no round before it here, and resumes the
@@ -140,14 +155,10 @@ func (engine *Engine) noteRoundHoldLocked(state *group, query Query, lowering *e
 			since = int(int64(slot-*lowering) / period)
 		}
 		if since < engine.probationRounds() {
-			state.probation = &probationState{}
+			state.probation = &probationState{verified: verified}
 		}
-	case hold < state.lastHold && verified:
-		// Read round by round at this hold before it was lowered to: a
-		// probation of the hold before it watches a hold no round has now.
-		state.probation = nil
 	case hold < state.lastHold:
-		state.probation = &probationState{}
+		state.probation = &probationState{verified: verified}
 	case hold > state.lastHold:
 		state.probation = nil
 	}
@@ -204,6 +215,11 @@ func (engine *Engine) finishProbationLocked(state *group, candidate *sample) {
 		}
 	case ProbationWindowReadEarly:
 		state.probation.clean = 0
+		after := ProbationAfterTrial
+		if state.probation.verified {
+			after = ProbationAfterVerified
+		}
+		engine.counts.probationCaught[key2(candidate.source, after)]++
 	}
 }
 

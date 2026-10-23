@@ -92,10 +92,11 @@ type Record struct {
 	LoweredFromMillis   int64  `json:"lowered_from_ms,omitempty"`
 	RaisedAfterLowering uint64 `json:"raised_after_lowering,omitempty"`
 	Lowered             bool   `json:"lowered,omitempty"`
-	// LoweredVerified marks a lowering to the floor a shadow probe read
-	// clean round by round before it was made (FloorProbeResult): its rounds
-	// are not read again in probation, the probe having read the same rounds
-	// before. Cleared by any other lowering and by a raise.
+	// LoweredVerified marks a lowering to a hold a shadow probe read clean
+	// round by round before it was made (FloorProbeResult). Its probation
+	// counts a round read early apart, and the raise that follows makes the
+	// lowered hold a floor a probe failed at (EarlierFloorProbed). Cleared by
+	// any other lowering and by a raise.
 	LoweredVerified bool   `json:"lowered_verified,omitempty"`
 	Noise           uint64 `json:"noise,omitempty"`
 	// AtLimit says the latest arrival reading (an observed arrival, or the

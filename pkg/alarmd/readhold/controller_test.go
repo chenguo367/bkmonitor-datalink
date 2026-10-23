@@ -1235,4 +1235,37 @@ func TestAProbationFindingPutsTheHoldBackWhereItCameFrom(t *testing.T) {
 	}
 }
 
+// A round read early after a verified lowering - by probation or by a sample - shows the probe that verified it
+// passed by chance: the lowered hold is a floor a probe failed at, so the next probe near it reads its eight hours.
+// After a trial's lowering the floor is an ordinary one.
+func TestAReadEarlyAfterAVerifiedLoweringIsAFloorAProbeFailedAt(t *testing.T) {
+	for _, verified := range []bool{false, true} {
+		for _, probation := range []bool{false, true} {
+			name := map[bool]string{false: "trial", true: "verified"}[verified] + "/" +
+				map[bool]string{false: "sample", true: "probation"}[probation]
+			t.Run(name, func(t *testing.T) {
+				ctl, store, now := controllerFixture(t)
+				store.values["qg"] = []byte(fmt.Sprintf(`{"hold_ms":107164,"since_slot":60,"lowered":true,`+
+					`"lowered_verified":%t,"lowered_from_ms":214329}`, verified))
+				prepare(t, ctl, groupSpec("qg", 0))
+				evidence := Evidence{Contract: holdContract("qg", 120, 107_164), ArrivalAge: 150 * time.Second, Rung: "x1.5",
+					Probation: probation}
+				if err := ctl.Observe(context.Background(), evidence); err != nil {
+					t.Fatal(err)
+				}
+				record, _ := ctl.Reading("qg")
+				if record.EarlierFloorMillis == nil || *record.EarlierFloorMillis != 107_164 ||
+					record.EarlierFloorAtMillis != now.UnixMilli() {
+					t.Fatalf("floor %v since %d, want the lowered hold 107164 ms dated now (%d)", record.EarlierFloorMillis,
+						record.EarlierFloorAtMillis, now.UnixMilli())
+				}
+				if record.EarlierFloorProbed != verified || record.LoweredVerified || record.Lowered {
+					t.Fatalf("probed %v, lowered %v verified %v; want probed %v and the lowering gone", record.EarlierFloorProbed,
+						record.Lowered, record.LoweredVerified, verified)
+				}
+			})
+		}
+	}
+}
+
 func ptr[T any](v T) *T { return &v }

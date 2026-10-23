@@ -62,6 +62,7 @@ type lookbackCollector struct {
 	earlierAhead        *prometheus.Desc
 	earlierSkipped      *prometheus.Desc
 	probationRereads    *prometheus.Desc
+	probationCaught     *prometheus.Desc
 	probationGroups     *prometheus.Desc
 	floorProbeRounds    *prometheus.Desc
 	floorProbes         *prometheus.Desc
@@ -128,7 +129,7 @@ func newLookbackCollector() *lookbackCollector {
 		readHoldFloorProbes: desc("read_hold_floor_probes_total",
 			"Shadow probes of a floor whose end the read-hold controller took, by what it made of it: lowered (the "+
 				"probe read lookback.ProbationRounds rounds in a row the same at the floor as at the hold, and the hold "+
-				"comes down to the floor with no probation after it), relearned (a round read differently: the floor "+
+				"comes down to the floor, a probation after it as after every lowering), relearned (a round read differently: the floor "+
 				"stays, dated now, and stands twice as long as before before the next probe), floor_raised (a round read "+
 				"differently at a hold between the floor and the hold: that hold is the floor now, and the next probe "+
 				"reads the midpoint above it), stale (the record had "+
@@ -273,6 +274,13 @@ func newLookbackCollector() *lookbackCollector {
 				"read again at their first rung, by source and what they came to: clean, window_read_early (raises the hold when "+
 				"the whole window came later), skipped_for_permits, read_failed, unclassified. Only clean counts towards the end "+
 				"of a probation. Reader: what probation costs and what it catches.", "source", "outcome"),
+		probationCaught: desc("lookback_probation_caught_total",
+			"Rounds read early that probation caught - a reread at the first rung that found the whole window came "+
+				"later, raising the hold - by source and the lowering the probation followed: verified (a hold a shadow "+
+				"probe read clean round by round first, passed by chance; the lowered hold becomes a floor a probe failed "+
+				"at) and trial (a lowering on earlier-read trials alone). Each is one round decided on data not yet "+
+				"whole. Reader: how often a verified lowering was wrong, against how many there were "+
+				"(read_hold_floor_probes_total{outcome=\"lowered\"}). Every value exists from the start.", "source", "after"),
 		probationGroups: desc("lookback_probation_groups",
 			"The source's Query Groups in probation now: their hold lowered, each of their rounds read again until "+
 				"lookback.ProbationRounds of them read clean.", "source"),
@@ -342,7 +350,7 @@ func newLookbackCollector() *lookbackCollector {
 
 func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, desc := range []*prometheus.Desc{c.firstReads, c.checks, c.changed, c.changes, c.classes, c.readEarly, c.seriesLate, c.supplementWindows, c.supplementUnobserved, c.supplementSeries,
-		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.earlierBytes, c.earlierReads, c.earlierOvertaken, c.earlierPreparedLate, c.earlierAhead, c.earlierSkipped, c.probationRereads, c.probationGroups, c.floorProbeRounds, c.floorProbes, c.floorProbeGroups, c.floorProbeChanges, c.holdIgnored, c.readBytes, c.checkBytes, c.unknown, c.coverage,
+		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.earlierBytes, c.earlierReads, c.earlierOvertaken, c.earlierPreparedLate, c.earlierAhead, c.earlierSkipped, c.probationRereads, c.probationCaught, c.probationGroups, c.floorProbeRounds, c.floorProbes, c.floorProbeGroups, c.floorProbeChanges, c.holdIgnored, c.readBytes, c.checkBytes, c.unknown, c.coverage,
 		c.pending, c.yields, c.refused, c.faults, c.plans, c.planHeld, c.readHoldTransition, c.readHoldOvertaken,
 		c.readHoldPredecessor, c.readHoldSeed, c.readHoldDuration, c.readHoldEarlierSkip, c.readHoldFloorProbes, c.readHoldFindings, c.roundsReadAtLimit, c.readHoldClamped, c.readHoldCorrupt, c.readHoldRetireClose, c.readHoldCloseSkip, c.readHoldDegraded,
 		c.readHoldGroups, c.readHoldMax} {
@@ -452,6 +460,9 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		for _, outcome := range lookback.ProbationOutcomes {
 			counter(c.probationRereads, source.ProbationRereads[outcome], name, outcome)
+		}
+		for _, after := range lookback.ProbationAfters {
+			counter(c.probationCaught, source.ProbationCaught[after], name, after)
 		}
 		gauge(c.probationGroups, float64(source.ProbationGroups), name)
 		for _, outcome := range lookback.FloorProbeRoundOutcomes {

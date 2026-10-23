@@ -518,6 +518,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["alarmd_lookback_earlier_ahead_total"] = "variableLabels: {source,slots}"
 	expected["alarmd_lookback_earlier_skipped_total"] = "variableLabels: {source,reason}"
 	expected["alarmd_lookback_probation_rereads_total"] = "variableLabels: {source,outcome}"
+	expected["alarmd_lookback_probation_caught_total"] = "variableLabels: {source,after}"
 	expected["alarmd_lookback_probation_groups"] = "variableLabels: {source}"
 	expected["alarmd_lookback_floor_probe_rounds_total"] = "variableLabels: {source,outcome}"
 	expected["alarmd_lookback_floor_probes_total"] = "variableLabels: {source,event}"
