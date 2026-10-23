@@ -244,3 +244,48 @@ func TestADeploymentWithoutTheLinkKeepsNoNoDataEndIndex(t *testing.T) {
 		})
 	}
 }
+
+// An item whose recovery is disabled keeps its no-data alert open when the
+// group's data comes back: the alert ends only by a close, by hand or the
+// control plane's. Host B stays away two rounds, which raises its no-data
+// alert (continuous 2); the consumer takes it; B reports again for two
+// rounds. With recovery enabled they end the alert (the consumer still
+// listing it, each round's NORMAL is said again); with it disabled neither
+// does, and B is remembered as present all the same.
+func TestANoDataAlertOfAnItemWithRecoveryDisabledStaysOpenWhenDataReturns(t *testing.T) {
+	for name, test := range map[string]struct {
+		disable bool
+		recover bool
+	}{
+		"recovery enabled":  {recover: true},
+		"recovery disabled": {disable: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := startLifecycleFixture(t, lifecycleStrategy{revision: 7, continuous: 2,
+				targets: []string{lifecycleHostA, lifecycleHostB}, dimensions: lifecycleHostPair, disableRecovery: test.disable}, nil)
+			fixture.serve(false, 5, lifecycleHostA)
+			fixture.mustAttempt(1)
+			fixture.mustAttempt(2)
+			raised := fixture.noDataEventsFor(lifecycleHostB)
+			if len(raised) != 1 || raised[0].EventKind != contract.TriggerEventAbnormal {
+				t.Fatalf("rounds 1-2 sent host B's no-data events %+v, want one ABNORMAL", raised)
+			}
+			fixture.publishOpenAlert(raised[0].DedupeMD5)
+			fixture.waitOpenAlertSetRead(2)
+			fixture.serve(false, 5, lifecycleHostA, lifecycleHostB)
+			fixture.mustAttempt(3)
+			fixture.mustAttempt(4)
+			recoveries := recoveriesOf(fixture.noDataEventsFor(lifecycleHostB))
+			if recovered := len(recoveries) > 0; recovered != test.recover {
+				t.Fatalf("after B reported again: %d no-data RECOVERY, want recovered %v", len(recoveries), test.recover)
+			}
+			if test.recover && (recoveries[0].DedupeMD5 != raised[0].DedupeMD5 || recoveries[0].EvaluationTime != fixture.evaluationAt(3)) {
+				t.Fatalf("the first RECOVERY is alert %s at %d, want the raised alert %s on round 3",
+					recoveries[0].DedupeMD5, recoveries[0].EvaluationTime, raised[0].DedupeMD5)
+			}
+			if firstAbsent, _, held := fixture.absenceOf(lifecycleHostB); !held || firstAbsent != 0 {
+				t.Fatalf("after B reported, its memory holds an absence from %d (held %t); want it present", firstAbsent, held)
+			}
+		})
+	}
+}

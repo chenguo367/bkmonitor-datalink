@@ -296,6 +296,7 @@ func EvaluateSlot(input SlotInput) (AbsenceResult, SlotOutcome, error) {
 		OutOfBusiness:          input.OutOfBusiness,
 		TrackingHorizonSeconds: input.TrackingHorizonSeconds,
 		TrackingExhaustedAt:    input.TrackingExhaustedAt,
+		RecoveryDisabled:       config.RecoveryDisabled,
 	})
 	result.Facts.ManualClosed = manualClosed
 	return result, outcome, nil

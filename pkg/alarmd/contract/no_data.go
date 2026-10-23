@@ -159,6 +159,14 @@ type NoDataConfigV1 struct {
 	// the name carries no second "no_data": token for the reason the horizon's
 	// does not.
 	MaxGroups uint32 `json:"no_data_max_groups,omitempty"`
+	// RecoveryDisabled says the item's owner turned automatic recovery off
+	// (recovery_config.disable_recovery): a group whose data comes back does
+	// not end its no-data alert, which then ends only by a close - by hand,
+	// or the control plane's: the strategy deleted or disabled, the group
+	// gone from the target or the business, a capability refusal, the
+	// effective time. omitempty, so an item that does not state it is
+	// byte-identical to before; the name carries no second "no_data": token.
+	RecoveryDisabled bool `json:"no_data_recovery_disabled,omitempty"`
 }
 
 // NoDataHorizonSource is where a Plan's effective no-data horizon came from.

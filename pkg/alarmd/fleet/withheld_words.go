@@ -128,7 +128,7 @@ var withheldReasonWords = map[string]WithheldReasonWords{
 	// recovery off as its owner chose. Nobody is asked to act; an owner who
 	// did not mean it reads Next.
 	"RECOVERY_DISABLED_BY_CONFIG": {Kind: WithheldStrategyDefinition,
-		What:   "这一级别的恢复配置关闭了自动恢复（disable_recovery），alarmd 按写的执行：告警不按恢复周期恢复，也不因无数据结束，只在策略删除或停用、监控目标移除、能力不支持、生效时间外这些关闭时结束——策略在检测，不是被扣住",
+		What:   "这一级别的恢复配置关闭了自动恢复（disable_recovery），alarmd 按写的执行：告警不按恢复周期恢复，也不因无数据结束；这一项的无数据告警在数据重新上报后也不自动恢复。告警只在人工关闭，或策略删除或停用、监控目标移除、能力不支持、生效时间外这些关闭时结束——策略在检测，不是被扣住",
 		Next:   "这是策略负责人有意关闭的就不需要处理；要自动恢复时在策略的检测配置里打开自动恢复，下一轮刷新按恢复周期恢复，这一行消失",
 		Action: ActionNone},
 	// Under CONFIG_NOTED too: the Plan runs with the bound its owner raised,

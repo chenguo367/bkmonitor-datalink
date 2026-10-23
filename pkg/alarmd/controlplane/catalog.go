@@ -2208,6 +2208,25 @@ func legacyTriggerNumber(field string, raw json.RawMessage) (uint32, string) {
 	return uint32(value), ""
 }
 
+// noDataRecoveryDisabled is whether an item's no-data alert is written not to
+// recover: as the detect at its level says (legacyRecoveryDisabled), or, with
+// no detect at that level, as every detect says - the strategy page writes
+// one switch onto every detect of an item, and an alert at a level the item
+// declares nothing for follows that switch only where it is unanimous.
+func noDataRecoveryDisabled(detects []legacyDetect, level uint32) bool {
+	for _, detect := range detects {
+		if detect.Level == level {
+			return legacyRecoveryDisabled(detect.Recovery)
+		}
+	}
+	for _, detect := range detects {
+		if !legacyRecoveryDisabled(detect.Recovery) {
+			return false
+		}
+	}
+	return len(detects) > 0
+}
+
 // legacyRecoveryWindow is one detect's recovery check_window as
 // get_recovery_configs reads it: int(detect["recovery_config"]["check_window"])
 // (strategy.py:379-392). Not readable when that raises - the section absent,
@@ -2676,6 +2695,9 @@ func compilePlan(
 	noData, err := frozenNoDataConfig(item, policy)
 	if err != nil {
 		suspended, noData = contract.ReasonNoDataConfigInvalid, nil
+	}
+	if noData != nil {
+		noData.RecoveryDisabled = noDataRecoveryDisabled(source.Detects, noData.Level)
 	}
 	plan.NoData = noData
 	if reason := noDataRosterUnsupported(targetScope, targetPlan, noData); suspended == "" && reason != "" {
