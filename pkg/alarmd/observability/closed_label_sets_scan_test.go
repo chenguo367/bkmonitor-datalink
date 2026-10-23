@@ -446,6 +446,29 @@ func TestLevelOutcomeReasonIsExactOnTheLineAndFoldedOnTheMetric(t *testing.T) {
 	}
 }
 
+// The evaluation line names the recoveries zeros withheld on its strategy's
+// open alerts: the counter has only the reason, and this is where a reader
+// finds which strategy it is.
+func TestTheEvaluationLineCarriesTheWithheldRecoveries(t *testing.T) {
+	var output bytes.Buffer
+	renderTo(&output, Observation{
+		Component: ComponentEvaluation, Stage: StageEvaluationCompleted, Result: ResultSuccess,
+		Trace:            TraceFields{StrategyID: "1001", BusinessID: "2"},
+		RecoveryWithheld: []RecoveryWithheldFact{{Reason: RecoveryWithheldZeroCount, Levels: 2}},
+	})
+	var event map[string]any
+	if err := json.Unmarshal(output.Bytes(), &event); err != nil {
+		t.Fatalf("decode evaluation line: %v; log=%s", err, output.String())
+	}
+	withheld, ok := event["recovery_withheld"].([]any)
+	if !ok || len(withheld) != 1 || withheld[0].(map[string]any)["reason"] != string(RecoveryWithheldZeroCount) {
+		t.Fatalf("recovery_withheld = %#v; log=%s", event["recovery_withheld"], output.String())
+	}
+	if event["strategy_id"] != "1001" {
+		t.Fatalf("the line does not name its strategy: %s", output.String())
+	}
+}
+
 // The lines that wrote result=skipped and were read as _other - the
 // supplement whose kept read was absent, the Slot held for a supplement or
 // for maintenance - keep their word; so does the control plane's recovery,

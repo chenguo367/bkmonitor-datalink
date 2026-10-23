@@ -1091,6 +1091,11 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if len(observation.LevelOutcomes) > 0 {
 		attributes = append(attributes, slog.Any("level_outcomes", observation.LevelOutcomes))
 	}
+	// Which strategy zeros hold open: the line carries its strategy, and
+	// these are its Levels counted withheld this round, one fact a reason.
+	if len(observation.RecoveryWithheld) > 0 {
+		attributes = append(attributes, slog.Any("recovery_withheld", observation.RecoveryWithheld))
+	}
 	if observation.Err != nil {
 		attributes = append(attributes,
 			slog.String("error_type", fmt.Sprintf("%T", observation.Err)),
