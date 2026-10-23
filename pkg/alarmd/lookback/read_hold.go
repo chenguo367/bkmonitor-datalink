@@ -730,10 +730,27 @@ func (engine *Engine) earlyQueueLocked(now time.Time, free int) time.Time {
 	return wake
 }
 
-func (engine *Engine) earlierRead(ctx context.Context, trial *earlierSample, release func(), yield <-chan struct{}) {
+// earlierReadOf is what a trial's or probe round's read reads, copied under
+// the engine's lock when the read starts: the read runs without the lock, and
+// the round's query is the Slot's frozen one once the Slot's first attempt
+// takes a round reserved ahead (prepareProbe, Prepare), written under the lock
+// while the read may be running.
+type earlierReadOf struct {
+	queryGroup execution.QueryGroupIdentity
+	spec       execution.PhysicalQuerySpec
+	readyAt    time.Time
+	keptFrom   int64
+}
+
+func (trial *earlierSample) readOfLocked() earlierReadOf {
+	return earlierReadOf{queryGroup: trial.query.Contract.Slot.QueryGroup, spec: trial.query.Spec, readyAt: trial.readyAt,
+		keptFrom: trial.keptFrom}
+}
+
+func (engine *Engine) earlierRead(ctx context.Context, trial *earlierSample, read earlierReadOf, release func(), yield <-chan struct{}) {
 	// As long as a read of the group's query takes, never past the candidate
 	// readiness point: the trial can never delay the formal read.
-	budget := min(engine.rereadTimeout(trial.query.Contract.Slot.QueryGroup), max(trial.readyAt.Sub(engine.options.Now()), 0))
+	budget := min(engine.rereadTimeout(read.queryGroup), max(read.readyAt.Sub(engine.options.Now()), 0))
 	readCtx, cancel := context.WithTimeout(ctx, budget)
 	engine.mu.Lock()
 	trial.cancel = cancel
@@ -755,19 +772,19 @@ func (engine *Engine) earlierRead(ctx context.Context, trial *earlierSample, rel
 			}
 		}()
 	}
-	sink := &earlierSink{summary: newSummarizer(trial.query.Spec.PlanFacts.Normalization.CanonicalValueField),
-		admit: engine.options.Memory, keptFrom: trial.keptFrom}
+	sink := &earlierSink{summary: newSummarizer(read.spec.PlanFacts.Normalization.CanonicalValueField),
+		admit: engine.options.Memory, keptFrom: read.keptFrom}
 	// Even an empty summary must have passed the memory line.
 	sink.reserve(64)
-	lookback, known := queryLookback(trial.query.Spec.PlanFacts)
+	lookback, known := queryLookback(read.spec.PlanFacts)
 	if !known {
-		lookback = time.Duration(trial.query.Spec.PlanFacts.StepMillis) * time.Millisecond
+		lookback = time.Duration(read.spec.PlanFacts.StepMillis) * time.Millisecond
 	}
-	from := max(trial.query.Spec.LogicalWindow.Start, trial.keptFrom-int64(lookback/time.Second))
+	from := max(read.spec.LogicalWindow.Start, read.keptFrom-int64(lookback/time.Second))
 	var completion execution.ProviderCompletion
 	var err error
 	if !sink.refused && !skipped {
-		completion, err = engine.options.Recheck(readCtx, tailSpec(trial.query.Spec, from), sink)
+		completion, err = engine.options.Recheck(readCtx, tailSpec(read.spec, from), sink)
 	}
 	finished := engine.options.Now()
 	close(back)

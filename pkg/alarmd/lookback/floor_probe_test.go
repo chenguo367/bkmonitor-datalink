@@ -580,3 +580,51 @@ func TestAFailedProbeSaysHowItsRoundDiffered(t *testing.T) {
 		})
 	}
 }
+
+// A round reserved Slots ahead is read before its Slot's first attempt, which takes the round for the Slot's frozen
+// query while the read may still be running: the read reads the query it started with, copied under the lock, never
+// the round as it is moved. The test waits until the read has passed its one locked step - only what came before it
+// is ordered before the move - and holds the read on a channel of its own, so under -race this fails if the read
+// reads the round itself after that step.
+func TestARoundsReadReadsTheQueryItStartedWith(t *testing.T) {
+	r := newProbeRun(t, 2*time.Minute, 0, 3)
+	first := r.f.clock.now().Unix() / 60 * 60
+	held := first + 2*60
+	release := make(chan struct{})
+	r.f.engine.options.Recheck = func(ctx context.Context, spec execution.PhysicalQuerySpec, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
+		if spec.LogicalWindow.End == held {
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return execution.ProviderCompletion{}, ctx.Err()
+			}
+		}
+		return full(point(spec.LogicalWindow.End, "1"))(sink)
+	}
+	at := func(second int64) { r.f.clock.set(time.Unix(second, 0)) }
+	// first's first attempt reserves the round of held, two Slots ahead.
+	at(first + 120)
+	r.f.engine.Prepare(r.slotQuery(first))
+	if r.note(); r.reservedAhead[held] != 2 {
+		t.Fatalf("fixture: held's round reserved %d Slots ahead, want 2", r.reservedAhead[held])
+	}
+	// Its read starts, its point ahead of held's first attempt, and is held there.
+	at(held + probeDelay - 5)
+	r.f.engine.StepEarly(context.Background())
+	testwait.Until(t, "held's round read past its locked step", func() bool {
+		r.f.engine.mu.Lock()
+		defer r.f.engine.mu.Unlock()
+		round := r.f.engine.groups["qg"].floorProbe.reserved[execution.EvaluationTime(held)]
+		return round != nil && round.running && round.cancel != nil
+	})
+	// The Slots before it and held's own first attempt, which takes the round while it is read.
+	at(first + 180)
+	r.f.engine.Prepare(r.slotQuery(first + 60))
+	at(held + 120)
+	r.f.engine.Prepare(r.slotQuery(held))
+	close(release)
+	testwait.Until(t, "held's round read", func() bool {
+		busy, _ := r.f.engine.Busy("qg")
+		return busy.ReadsInFlight == 0
+	})
+}

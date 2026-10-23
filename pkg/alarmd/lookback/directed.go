@@ -504,7 +504,7 @@ func (sink *keptSink) kept(spec execution.PhysicalQuerySpec, completion executio
 // series to the supplement. The permit is given back before the supplement
 // runs: a supplement reads nothing, and it waits for nothing but its own
 // Query Group's flight.
-func (engine *Engine) directedRead(ctx context.Context, slot *directedSlot, release func(), yield <-chan struct{}) {
+func (engine *Engine) directedRead(ctx context.Context, slot *directedSlot, captured *directedQuery, release func(), yield <-chan struct{}) {
 	readCtx, cancel := context.WithTimeout(ctx, engine.rereadTimeout(slot.queryGroup))
 	back := make(chan struct{})
 	if yield != nil {
@@ -516,7 +516,6 @@ func (engine *Engine) directedRead(ctx context.Context, slot *directedSlot, rele
 			}
 		}()
 	}
-	captured := slot.queries[0]
 	engine.mu.Lock()
 	first := captured.first.set
 	engine.mu.Unlock()

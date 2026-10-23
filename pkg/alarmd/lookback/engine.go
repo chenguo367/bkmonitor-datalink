@@ -1037,8 +1037,11 @@ func (engine *Engine) Step(ctx context.Context) {
 			continue
 		}
 		slot.running = true
+		// The Slot's first query, taken under the lock: a later physical query
+		// of the Slot appends to its queries while the read runs.
+		captured := slot.queries[0]
 		engine.mu.Unlock()
-		go engine.directedRead(ctx, slot, release, yield)
+		go engine.directedRead(ctx, slot, captured, release, yield)
 	}
 	for _, candidate := range due {
 		if !engine.options.Owns(candidate.queryGroup) {

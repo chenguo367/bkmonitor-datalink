@@ -447,8 +447,9 @@ func (engine *Engine) StepEarly(ctx context.Context) {
 				continue
 			}
 			trial.running = true
+			read := trial.readOfLocked()
 			engine.mu.Unlock()
-			go engine.earlierRead(ctx, trial, release, yield)
+			go engine.earlierRead(ctx, trial, read, release, yield)
 			continue
 		}
 		slot := work.slot
@@ -458,8 +459,11 @@ func (engine *Engine) StepEarly(ctx context.Context) {
 			continue
 		}
 		slot.early.tried, slot.early.running, slot.running = true, true, true
+		// The Slot's first query, taken under the lock: a later physical query
+		// of the Slot appends to its queries while the read runs.
+		captured := slot.queries[0]
 		engine.mu.Unlock()
-		go engine.earlyRead(ctx, slot, release, yield)
+		go engine.earlyRead(ctx, slot, captured, release, yield)
 	}
 }
 
@@ -488,7 +492,7 @@ func (engine *Engine) NextEarlyWake() time.Time {
 // and supplements the series its first read did not have, guarded under the
 // flight against a next Slot that has begun. The permit is given back
 // before the supplement, as a directed read's is.
-func (engine *Engine) earlyRead(ctx context.Context, slot *directedSlot, release func(), yield <-chan struct{}) {
+func (engine *Engine) earlyRead(ctx context.Context, slot *directedSlot, captured *directedQuery, release func(), yield <-chan struct{}) {
 	readCtx, cancel := context.WithTimeout(ctx, engine.rereadTimeout(slot.queryGroup))
 	back := make(chan struct{})
 	if yield != nil {
@@ -500,7 +504,6 @@ func (engine *Engine) earlyRead(ctx context.Context, slot *directedSlot, release
 			}
 		}()
 	}
-	captured := slot.queries[0]
 	engine.mu.Lock()
 	first := captured.first.set
 	engine.mu.Unlock()
