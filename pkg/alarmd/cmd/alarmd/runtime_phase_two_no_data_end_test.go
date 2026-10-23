@@ -289,3 +289,69 @@ func TestANoDataAlertOfAnItemWithRecoveryDisabledStaysOpenWhenDataReturns(t *tes
 		})
 	}
 }
+
+// Turning recovery back on lets the data that came back end the no-data
+// alert the switch kept open. The switch is in the state-compatible hash, so
+// a toggle starts the item's state over, the no-data level included: the
+// no-data memory and the series' state move to a new generation, whose first
+// round warms that state up, and the alert ends on the round after it. B
+// stays away two rounds (continuous 2), the consumer takes its
+// alert, and B reports again: two rounds with recovery disabled end nothing;
+// with it turned off the alert ends under its own identity.
+func TestANoDataAlertKeptOpenByDisabledRecoveryEndsOnceTheSwitchIsOff(t *testing.T) {
+	strategy := lifecycleStrategy{revision: 7, continuous: 2,
+		targets: []string{lifecycleHostA, lifecycleHostB}, dimensions: lifecycleHostPair, disableRecovery: true}
+	fixture := startLifecycleFixture(t, strategy, nil)
+	fixture.serve(false, 5, lifecycleHostA)
+	fixture.mustAttempt(1)
+	fixture.mustAttempt(2)
+	raised := fixture.noDataEventsFor(lifecycleHostB)
+	if len(raised) != 1 || raised[0].EventKind != contract.TriggerEventAbnormal {
+		t.Fatalf("rounds 1-2 sent host B's no-data events %+v, want one ABNORMAL", raised)
+	}
+	fixture.publishOpenAlert(raised[0].DedupeMD5)
+	fixture.waitOpenAlertSetRead(2)
+	fixture.serve(false, 5, lifecycleHostA, lifecycleHostB)
+	fixture.mustAttempt(3)
+	fixture.mustAttempt(4)
+	if got := recoveriesOf(fixture.noDataEventsFor(lifecycleHostB)); len(got) != 0 {
+		t.Fatalf("with recovery disabled, B's return ended its no-data alert: %+v", got)
+	}
+	memoryBefore, runtimeBefore := fixture.memoryKeys(), fixture.runtimeStateKeys()
+
+	strategy.revision, strategy.disableRecovery = 8, false
+	first := fixture.change(strategy, 4)
+	for round := int64(5); round <= first+1; round++ {
+		fixture.mustAttempt(round)
+	}
+	recoveries := recoveriesOf(fixture.noDataEventsFor(lifecycleHostB))
+	if len(recoveries) == 0 || recoveries[0].DedupeMD5 != raised[0].DedupeMD5 ||
+		recoveries[0].EvaluationTime != fixture.evaluationAt(first+1) {
+		t.Fatalf("recovery on from round %d: B's no-data RECOVERY %+v, want the first under alert %s on round %d (%d)",
+			first, recoveries, raised[0].DedupeMD5, first+1, fixture.evaluationAt(first+1))
+	}
+	for name, keys := range map[string][2][]string{
+		"no-data memory":       {memoryBefore, fixture.memoryKeys()},
+		"series runtime state": {runtimeBefore, fixture.runtimeStateKeys()},
+	} {
+		before, added := generationsOf(t, keys[0]), generationsOf(t, keysNotIn(keys[0], keys[1]))
+		if len(before) != 1 || len(added) != 1 || added[0] == before[0] {
+			t.Fatalf("%s generations %v before the toggle and %v of the keys after it; want it under a new one", name, before, added)
+		}
+	}
+}
+
+// keysNotIn is the keys of after that before does not have.
+func keysNotIn(before, after []string) []string {
+	had := make(map[string]bool, len(before))
+	for _, key := range before {
+		had[key] = true
+	}
+	var added []string
+	for _, key := range after {
+		if !had[key] {
+			added = append(added, key)
+		}
+	}
+	return added
+}
