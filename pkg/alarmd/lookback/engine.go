@@ -274,6 +274,11 @@ type Options struct {
 	OnFloorProbeProgress func(FloorProbeProgress)
 	// OnFloorProbeStart sees every probe start, outside the engine's lock.
 	OnFloorProbeStart func(FloorProbeStart)
+	// OnWindowReadEarly sees every round found read early, a sample's or a
+	// probation reread's, with what it decided when its group kept that
+	// (read_early_line.go), outside the engine's lock: one line each, not
+	// sampled.
+	OnWindowReadEarly func(WindowReadEarly)
 }
 
 // Query is what the access layer knows about a physical query before it is
@@ -329,6 +334,7 @@ type Engine struct {
 	ignoredEvidence []ignoredReadHold
 	trialEnds       []EarlierTrialEnd
 	probeEnds       []FloorProbeEnd
+	readEarlyLines  []WindowReadEarly
 	probeStarts     []FloorProbeStart
 	probeProgress   []FloorProbeProgress
 	// plans is the control plane's plan set for this Worker (plan.go).
@@ -425,6 +431,10 @@ type group struct {
 	holdSeen   bool
 	probation  *probationState
 	probations []*sample
+	// decisions is what its rounds decided, kept by Slot while it is in
+	// probation until each round's reread ends, maxKeptDecisions at most
+	// (NoteSlotDecision): what a round found read early is written with.
+	decisions map[execution.EvaluationTime]*SlotDecision
 }
 
 type sample struct {
@@ -457,9 +467,12 @@ type sample struct {
 	lastChange    int
 	lastChangeAge time.Duration
 	lastBuckets   []int64
-	unread        bool
-	running       bool
-	dropped       bool
+	// changes is its rungs' buckets that changed, by class (Changes), summed
+	// over the rungs that did: how its data came, on a round read early.
+	changes map[string]int
+	unread  bool
+	running bool
+	dropped bool
 	// yieldAt is when a waiting formal query asked the read in flight to
 	// yield, zero while none has; overdue is set once the read held its
 	// permit past RecheckTimeout after that and was counted as a fault.
@@ -1342,6 +1355,14 @@ func (engine *Engine) recheck(ctx context.Context, candidate *sample, release fu
 		engine.faultLocked(FaultBucketsExceeded, candidate.source, candidate.queryGroup)
 	}
 	candidate.seriesUnknown = candidate.seriesUnknown || seriesUnknown
+	if len(changes) > 0 {
+		if candidate.changes == nil {
+			candidate.changes = map[string]int{}
+		}
+		for class, count := range changes {
+			candidate.changes[class] += count
+		}
+	}
 	engine.counts.rechecks[key3(candidate.source, rung, outcome)]++
 	if state := engine.groups[candidate.queryGroup]; state != nil && outcome == RecheckCompared {
 		hold := groupHoldClass(candidate.contract.ReadHoldMillis)

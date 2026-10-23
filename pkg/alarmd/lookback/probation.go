@@ -209,7 +209,10 @@ func (engine *Engine) finishProbationLocked(state *group, candidate *sample) {
 		outcome = ProbationWindowReadEarly
 		candidate.completion = max(candidate.lastChangeAge, 0)
 		engine.recordProbationCaughtLocked(candidate)
+		engine.noteReadEarlyLineLocked(state, candidate, ReadEarlyPathProbation)
 	}
+	// The round's reread ended: what it decided is kept no longer.
+	delete(state.decisions, candidate.evaluation)
 	engine.counts.probations[key2(candidate.source, outcome)]++
 	if state.probation == nil || candidate.contract.ReadHoldMillis != state.lastHold {
 		// Read under another hold than the group's now: no evidence for it.

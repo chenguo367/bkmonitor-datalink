@@ -211,6 +211,9 @@ func (engine *Engine) noteClassLocked(state *group, candidate *sample, now time.
 		engine.recordIgnoredLocked(candidate, IgnoredNoWholeWindowArrival)
 		state.reading.ignored[wordIndex(ReadHoldIgnoredReasons, IgnoredNoWholeWindowArrival)]++
 	}
+	if class == ClassWindowReadEarly {
+		engine.noteReadEarlyLineLocked(state, candidate, ReadEarlyPathSample)
+	}
 	if class == ClassUnclassified {
 		// Not known either way: it is not one of the window's samples.
 		engine.counts.unclassified[key2(candidate.source, reason)]++

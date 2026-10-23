@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"reflect"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -939,6 +940,17 @@ func (holds *productionReadHolds) bindLookback(options *lookback.Options) {
 				Kind: e.Kind, Hold: e.Hold, Clean: e.Clean, Started: e.Started})
 		})
 	}
+	// One line per round found read early, not sampled: what it was read at
+	// and after which lowering, how its data came, and what it decided - kept
+	// for a group in probation (lookbackDecisionTap) - or why that is not
+	// known. Its strategies are the decided Plans', or the Query Group's from
+	// its frozen schedule when the decision is not known.
+	options.OnWindowReadEarly = func(e lookback.WindowReadEarly) {
+		if holds.logger == nil {
+			return
+		}
+		holds.logger.Info("lookback", "window_read_early", 0, 0, holds.readEarlyAttrs(e)...)
+	}
 	// One line per probe start: resumed_from is the clean rounds it went on
 	// from, kept by the process that ran it before, 0 for a fresh one.
 	options.OnFloorProbeStart = func(e lookback.FloorProbeStart) {
@@ -1052,4 +1064,58 @@ func (holds *productionReadHolds) observeOvertaken(ref execution.FrozenExecution
 		(record.Closed || record.SegmentStart > ref.ScheduleSegmentStart) {
 		holds.overtaken.Add(1)
 	}
+}
+
+// readEarlyAttrs is a round found read early's line.
+func (holds *productionReadHolds) readEarlyAttrs(e lookback.WindowReadEarly) []slog.Attr {
+	// The hold the group's lowering came from, as the controller has it when
+	// the line is written - before the finding it carries raises the hold -
+	// and -1 while the group is not lowered.
+	loweredFrom := int64(-1)
+	if record, loaded := holds.controller.Reading(e.Contract.Slot.QueryGroup); loaded && record.Lowered {
+		loweredFrom = record.LoweredFromMillis
+	}
+	attrs := []slog.Attr{slog.String("query_group", string(e.Contract.Slot.QueryGroup)),
+		slog.Int64("slot", int64(e.Contract.Slot.EvaluationTime)), slog.String("source", e.Source), slog.String("path", e.Path),
+		slog.Int64("read_hold_ms", e.Hold.Milliseconds()), slog.Int64("lowered_from_ms", loweredFrom),
+		slog.String("rung", e.Rung), slog.Int64("completion_age_ms", e.CompletionAge.Milliseconds())}
+	for _, change := range lookback.Changes {
+		attrs = append(attrs, slog.Int(change, e.Changes[change]))
+	}
+	strategies, count, from := []string(nil), 0, "decision"
+	if decision := e.Decision; decision != nil {
+		attrs = append(attrs, slog.String("decision_summary", "kept"), slog.Bool("completed", decision.Completed),
+			slog.Uint64("events", decision.Events), slog.Uint64("state_mutations", decision.StateMutations))
+		for _, kind := range observability.LevelOutcomeKinds {
+			attrs = append(attrs, slog.Uint64("levels_"+strings.ToLower(kind), decision.Levels[kind]))
+		}
+		strategies, count = decision.Strategies, decision.StrategyCount
+	} else {
+		attrs = append(attrs, slog.String("decision_summary", "unavailable"), slog.String("decision_missing", e.DecisionMissing))
+		strategies, count, from = holds.scheduledStrategies(e.Contract.Slot.QueryGroup, e.Contract.Slot.EvaluationTime)
+	}
+	return append(attrs, slog.String("strategies", strings.Join(strategies, ",")), slog.Int("strategy_count", count),
+		slog.String("strategies_from", from))
+}
+
+// scheduledStrategies is the first four strategies of the Query Group's frozen schedule at slot and how many it has,
+// "schedule"; or none, "unavailable", when the schedule cannot be read.
+func (holds *productionReadHolds) scheduledStrategies(qg execution.QueryGroupIdentity, slot execution.EvaluationTime) ([]string, int, string) {
+	if holds.catalog == nil {
+		return nil, 0, "unavailable"
+	}
+	schedule, err := holds.catalog.ReadFrozenSchedule(context.Background(), qg, slot)
+	if err != nil {
+		return nil, 0, "unavailable"
+	}
+	seen := map[string]bool{}
+	var strategies []string
+	for _, plan := range schedule.Plans {
+		if id := plan.Identity.StrategyID; id != "" && !seen[id] {
+			seen[id] = true
+			strategies = append(strategies, id)
+		}
+	}
+	sort.Strings(strategies)
+	return strategies[:min(len(strategies), 4)], len(strategies), "schedule"
 }

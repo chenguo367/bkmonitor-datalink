@@ -335,6 +335,9 @@ func openProductionPhaseTwoBundleAssembly(
 	// Whose burst of writes to warming series an hour's busiest minute was:
 	// one line an hour, through the observer it is a member of.
 	warmingPeak := observability.NewWarmingPeak(external.Now)
+	// What each round decided, for the lookback to write beside a round it
+	// later finds read early; the lookback is built below and set then.
+	decisions := &lookbackDecisionTap{}
 	// Each member named, so that a panic in one is counted under it while the
 	// others still receive the observation.
 	observer = observability.Multi(observability.Named(observability.ObserverTracker, observer),
@@ -343,7 +346,8 @@ func openProductionPhaseTwoBundleAssembly(
 		observability.Named(observability.ObserverRejectionTally, rejectionTally),
 		observability.Named(observability.ObserverCostSummary, costSummary),
 		observability.Named(observability.ObserverRetainedPeaks, retainedPeaks),
-		observability.Named(observability.ObserverWarmingPeak, warmingPeak))
+		observability.Named(observability.ObserverWarmingPeak, warmingPeak),
+		observability.Named(observability.ObserverLookbackDecisions, decisions))
 	observer = phaseTwoRuntimeObserver(observer)
 	warmingPeak.SetEmit(observer)
 
@@ -596,6 +600,7 @@ func openProductionPhaseTwoBundleAssembly(
 	if err != nil {
 		return nil, err
 	}
+	decisions.engine.Store(lookbackEngine)
 	// The latest records whose address is not their host's, for fleet.get to
 	// name beside the count.
 	addressDiffers := &fleet.AddressDiffersSamples{}

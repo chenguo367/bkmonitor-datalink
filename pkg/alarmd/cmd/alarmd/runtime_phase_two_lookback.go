@@ -503,3 +503,52 @@ func newRuntimeLiveReserve(flights *scheduler.FlightCoordinator, recorder *metri
 func slotSourceLiveReserve(flights *scheduler.FlightCoordinator) *execution.LiveReserve {
 	return flights.LiveReserve()
 }
+
+// lookbackDecisionTap hands the lookback what each round decided, as the worker reports it on its own observations -
+// a round's completion with its events and state mutations, each Plan's evaluation with its strategy and its Levels'
+// outcomes - so a round the lookback later finds read early is written with its decision
+// (lookback.Engine.NoteSlotDecision). The lookback keeps it only for a group in probation. The observer chain is built
+// before the lookback; the engine is set once it is, and a round before that hands nothing on.
+type lookbackDecisionTap struct {
+	engine atomic.Pointer[lookback.Engine]
+}
+
+func (tap *lookbackDecisionTap) Observe(ctx context.Context, observation observability.Observation) {
+	engine := tap.engine.Load()
+	if engine == nil {
+		return
+	}
+	// The worker puts the Slot's identity on the context, a Plan's evaluation
+	// line only its own strategy and series.
+	trace, slot := observation.Trace, observability.TraceFieldsFromContext(ctx)
+	if trace.QueryGroupKey == "" {
+		trace.QueryGroupKey = slot.QueryGroupKey
+	}
+	if trace.EvaluationTime <= 0 {
+		trace.EvaluationTime = slot.EvaluationTime
+	}
+	if trace.StrategyID == "" {
+		trace.StrategyID = slot.StrategyID
+	}
+	if trace.QueryGroupKey == "" || trace.EvaluationTime <= 0 {
+		return
+	}
+	report := lookback.SlotDecisionReport{QueryGroup: execution.QueryGroupIdentity(trace.QueryGroupKey),
+		Slot: execution.EvaluationTime(trace.EvaluationTime)}
+	switch {
+	case observation.Stage == observability.StageSlotCompleted:
+		report.Completed = true
+		if usage := observation.SlotBudgetUsage; usage != nil {
+			report.Events, report.StateMutations = usage.Events, usage.StateMutations
+		}
+	case observation.Component == observability.ComponentEvaluation && observation.Stage == observability.StageEvaluationCompleted:
+		report.Strategy = trace.StrategyID
+		report.Levels = map[string]uint64{}
+		for _, level := range observation.LevelOutcomes {
+			report.Levels[level.Outcome] += level.Count
+		}
+	default:
+		return
+	}
+	engine.NoteSlotDecision(report)
+}

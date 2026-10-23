@@ -655,6 +655,17 @@ func (read *Read) completeEarlier(completion execution.ProviderCompletion, err e
 func (engine *Engine) publishReadHold() {
 	engine.publishTrialEnds()
 	engine.publishProbeEnds()
+	engine.mu.Lock()
+	lines := engine.readEarlyLines
+	engine.readEarlyLines = nil
+	engine.mu.Unlock()
+	if engine.options.OnWindowReadEarly != nil {
+		for _, line := range lines {
+			if engine.options.Owns(line.Contract.Slot.QueryGroup) {
+				engine.options.OnWindowReadEarly(line)
+			}
+		}
+	}
 	if engine.options.OnWholeWindowReadEarly == nil && engine.options.OnReadHoldIgnored == nil {
 		return
 	}

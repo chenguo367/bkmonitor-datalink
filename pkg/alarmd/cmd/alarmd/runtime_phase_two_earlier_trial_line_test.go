@@ -118,6 +118,46 @@ func TestTheFloorProbeLineNamesItsKind(t *testing.T) {
 	}
 }
 
+// A round found read early is a line with what it decided - its events, state mutations, its Levels' outcomes and
+// the strategies it evaluated - or, not kept, why, with the Query Group's strategies from its schedule when that can
+// be read.
+func TestTheReadEarlyLineSaysWhatTheRoundDecided(t *testing.T) {
+	var out bytes.Buffer
+	holds := &productionReadHolds{logger: observability.New("alarmd", &out)}
+	var err error
+	holds.controller, err = readhold.NewController(readhold.Options{Control: unusedControl{}, Prefix: "schedule", MaxHold: 10 * time.Minute,
+		Owner: func(execution.QueryGroupIdentity) (readhold.Owner, error) { return readhold.Owner{}, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var options lookback.Options
+	holds.bindLookback(&options)
+	contract := execution.FrozenExecutionContractRef{Slot: execution.SlotIdentity{QueryGroup: "qg", EvaluationTime: 180}, ReadHoldMillis: 60_000}
+	options.OnWindowReadEarly(lookback.WindowReadEarly{Contract: contract, Source: "time_series", Path: lookback.ReadEarlyPathProbation,
+		Hold: time.Minute, Rung: "x1.5", Changes: map[string]int{lookback.ChangeSeriesChanged: 1},
+		Decision: &lookback.SlotDecision{Events: 2, StateMutations: 5, Levels: map[string]uint64{"ABNORMAL": 1}, Strategies: []string{"11", "12"},
+			StrategyCount: 2, Completed: true}})
+	options.OnWindowReadEarly(lookback.WindowReadEarly{Contract: contract, Source: "time_series", Path: lookback.ReadEarlyPathSample,
+		Hold: time.Minute, DecisionMissing: lookback.DecisionNotInProbation})
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("lines %q, want two", lines)
+	}
+	for index, fields := range [][]string{
+		{`"window_read_early"`, `"path":"probation"`, `"read_hold_ms":60000`, `"lowered_from_ms":-1`, `"series_changed":1`,
+			`"decision_summary":"kept"`, `"events":2`, `"state_mutations":5`, `"levels_abnormal":1`, `"strategies":"11,12"`,
+			`"strategy_count":2`, `"strategies_from":"decision"`},
+		{`"path":"sample"`, `"lowered_from_ms":-1`, `"decision_summary":"unavailable"`, `"decision_missing":"not_in_probation"`,
+			`"strategies_from":"unavailable"`},
+	} {
+		for _, field := range fields {
+			if !strings.Contains(lines[index], field) {
+				t.Errorf("line %d %s lacks %s", index, lines[index], field)
+			}
+		}
+	}
+}
+
 // A limit that cuts a group's hold by more Slots than a replay covers is
 // logged once, with the holds and the Slots it is expected to skip; a cut a
 // replay covers, or the same cut again, is not.

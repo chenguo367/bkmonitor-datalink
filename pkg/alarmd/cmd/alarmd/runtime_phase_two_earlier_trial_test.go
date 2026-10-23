@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
 )
 
@@ -460,12 +462,14 @@ func TestAProbationFindingUndoesALoweringFromTheProductionWiring(t *testing.T) {
 	for _, gone := range []bool{false, true} {
 		t.Run(map[bool]string{false: "the data as it was", true: "a series gone by the reread"}[gone], func(t *testing.T) {
 			t.Parallel()
-			f := startCutoverFixture(t, leasesOutliveTheRun)
+			var output lockedLogBuffer
+			f := startCutoverFixtureWith(t, leasesOutliveTheRun, observability.New(observability.ComponentRuntime, &output), nil)
 			holds := f.bundle.dependencies.ReadHolds
 			if lowest, raised, outcomes, overtaken, _ := heldTrialRun(t, f, 96500*time.Millisecond, 12*time.Hour, false,
 				func(_, lowest, _ time.Duration, _ map[string]uint64) bool { return lowest == 0 }); lowest != 0 {
 				t.Fatalf("fixture: the hold %v never came down to none: trials %v, overtaken by %v", raised, outcomes, overtaken)
 			}
+			before := len(readEarlyLines(output.String()))
 			lowered, _ := holds.controller.Reading(f.queryGroup)
 			if !lowered.Lowered || lowered.LoweredFromMillis <= 0 {
 				t.Fatalf("fixture: the record %+v is not lowered from a hold", lowered)
@@ -485,14 +489,29 @@ func TestAProbationFindingUndoesALoweringFromTheProductionWiring(t *testing.T) {
 			record, _ := holds.controller.Reading(f.queryGroup)
 			hold := holds.controller.ReadHold(f.queryGroup)
 			findings := holds.controller.Stats().ProbationFindings
+			lines := readEarlyLines(output.String())[before:]
 			if !gone {
-				if hold != 0 || findings[readhold.ProbationFindingUndone]+findings[readhold.ProbationFindingQuiet] != 0 {
-					t.Fatalf("the data as it was: hold %v, probation findings %v; want it left at none, and none", hold, findings)
+				if hold != 0 || findings[readhold.ProbationFindingUndone]+findings[readhold.ProbationFindingQuiet] != 0 || len(lines) != 0 {
+					t.Fatalf("the data as it was: hold %v, probation findings %v, read-early lines %q; want it left at none, and none",
+						hold, findings, lines)
 				}
 				return
 			}
 			if findings[readhold.ProbationFindingUndone] != 1 {
 				t.Fatalf("a series gone by the reread: probation findings %v, want the lowering undone once", findings)
+			}
+			// Every round it caught - each of the rereads in flight found the series gone - is a line of its own, with
+			// what that round decided as the worker reported it; the first was read under the lowering it undid.
+			if len(lines) == 0 || !strings.Contains(lines[0], fmt.Sprintf(`"lowered_from_ms":%d`, from.Milliseconds())) {
+				t.Fatalf("read-early lines %q, want the probation's, the first lowered from %v", lines, from)
+			}
+			for _, line := range lines {
+				for _, field := range []string{`"path":"probation"`, `"read_hold_ms":0`, `"points_removed":1`, `"decision_summary":"kept"`,
+					`"completed":true`, `"strategies_from":"decision"`, `"strategy_count":1`} {
+					if !strings.Contains(line, field) {
+						t.Errorf("the read-early line %s lacks %s", line, field)
+					}
+				}
 			}
 			if hold < from || record.EarlierFloorMillis == nil || *record.EarlierFloorMillis != 0 || record.Lowered {
 				t.Fatalf("a series gone by the reread: hold %v, floor %v, lowered %v; want back to %v at least over a floor of none",
@@ -500,4 +519,15 @@ func TestAProbationFindingUndoesALoweringFromTheProductionWiring(t *testing.T) {
 			}
 		})
 	}
+}
+
+// readEarlyLines is the window_read_early lines of a production log.
+func readEarlyLines(log string) []string {
+	var lines []string
+	for _, line := range strings.Split(log, "\n") {
+		if strings.Contains(line, `"window_read_early"`) {
+			lines = append(lines, line)
+		}
+	}
+	return lines
 }

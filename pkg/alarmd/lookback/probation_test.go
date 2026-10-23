@@ -11,6 +11,7 @@ package lookback
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -323,5 +324,91 @@ func TestAResumedProbationCountsWhatItCatchesByTheLoweringItFollows(t *testing.T
 				t.Fatalf("caught %v, want %v", got, want)
 			}
 		})
+	}
+}
+
+// Every round probation finds read early is a line of its own: the hold it was read at and the one the lowering came
+// from, how its data came, and what it decided as the worker reported it - kept by Slot while the group is in
+// probation, spent with the line. A round whose decision this process did not keep says so; a group not in probation
+// keeps none.
+func TestARoundReadEarlyIsALineWithWhatItDecided(t *testing.T) {
+	for _, reported := range []bool{true, false} {
+		t.Run(map[bool]string{true: "decision kept", false: "decision not kept"}[reported], func(t *testing.T) {
+			f := newProbationFixture(t, 3)
+			var lines []WindowReadEarly
+			f.engine.options.OnWindowReadEarly = func(line WindowReadEarly) {
+				f.raisesMu.Lock()
+				lines = append(lines, line)
+				f.raisesMu.Unlock()
+			}
+			// Not in probation: a decision reported is not kept.
+			f.round(2*time.Minute, "3")
+			f.engine.NoteSlotDecision(SlotDecisionReport{QueryGroup: "qg", Slot: execution.EvaluationTime(f.slot), Completed: true, Events: 9})
+			f.engine.mu.Lock()
+			kept := len(f.engine.groups["qg"].decisions)
+			f.engine.mu.Unlock()
+			if kept != 0 {
+				t.Fatalf("a group not in probation kept %d decisions", kept)
+			}
+			slot, readAt := f.round(time.Minute, "3")
+			if reported {
+				// Reported series by series: a strategy twice is one.
+				for _, strategy := range []string{"15", "11", "14", "12", "13", "11"} {
+					f.engine.NoteSlotDecision(SlotDecisionReport{QueryGroup: "qg", Slot: execution.EvaluationTime(slot), Strategy: strategy,
+						Levels: map[string]uint64{"ABNORMAL": 1, "NORMAL": 2}})
+				}
+				f.engine.NoteSlotDecision(SlotDecisionReport{QueryGroup: "qg", Slot: execution.EvaluationTime(slot), Completed: true,
+					Events: 2, StateMutations: 5})
+			}
+			f.reread(slot, readAt, 0, "5")
+			f.reread(slot, readAt, 1, "5")
+			f.waitFor(func(stats Stats) bool {
+				return stats.Sources[sourceTimeSeries].ProbationRereads[ProbationWindowReadEarly] == 1
+			})
+			f.raisesMu.Lock()
+			got := append([]WindowReadEarly(nil), lines...)
+			f.raisesMu.Unlock()
+			if len(got) != 1 {
+				t.Fatalf("lines %+v, want one", got)
+			}
+			line := got[0]
+			if line.Path != ReadEarlyPathProbation || line.Contract.Slot.EvaluationTime != execution.EvaluationTime(slot) ||
+				line.Hold != time.Minute || line.Changes[ChangeValuesChanged] == 0 {
+				t.Fatalf("line %+v, want the probation's round read at 1 minute, its values changed", line)
+			}
+			if !reported {
+				if line.Decision != nil || line.DecisionMissing != DecisionNotRecorded {
+					t.Fatalf("decision %+v, missing %q, want not_recorded", line.Decision, line.DecisionMissing)
+				}
+				return
+			}
+			want := SlotDecision{Events: 2, StateMutations: 5, Levels: map[string]uint64{"ABNORMAL": 6, "NORMAL": 12},
+				Strategies: []string{"11", "12", "14", "15"}, StrategyCount: 5, Completed: true}
+			if line.Decision == nil || fmt.Sprint(*line.Decision) != fmt.Sprint(want) {
+				t.Fatalf("decision %+v, want %+v", line.Decision, want)
+			}
+			f.engine.mu.Lock()
+			left := len(f.engine.groups["qg"].decisions)
+			f.engine.mu.Unlock()
+			if left != 0 {
+				t.Fatalf("%d decisions kept after the round's line, want it spent", left)
+			}
+		})
+	}
+}
+
+// A group in probation keeps the decisions of maxKeptDecisions Slots at most, the oldest going first.
+func TestTheDecisionsAGroupKeepsAreBounded(t *testing.T) {
+	f := newProbationFixture(t, 3)
+	f.round(2*time.Minute, "3")
+	f.round(time.Minute, "3")
+	for slot := range maxKeptDecisions + 3 {
+		f.engine.NoteSlotDecision(SlotDecisionReport{QueryGroup: "qg", Slot: execution.EvaluationTime(1_000 + slot), Completed: true})
+	}
+	f.engine.mu.Lock()
+	defer f.engine.mu.Unlock()
+	decisions := f.engine.groups["qg"].decisions
+	if len(decisions) != maxKeptDecisions || decisions[1_000] != nil || decisions[1_000+maxKeptDecisions+2] == nil {
+		t.Fatalf("%d decisions kept, want the latest %d", len(decisions), maxKeptDecisions)
 	}
 }
