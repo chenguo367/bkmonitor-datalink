@@ -193,6 +193,45 @@ func TestKeptRoundsADayOldAreNoEvidence(t *testing.T) {
 	}
 }
 
+// A probe of a long period runs past a day: ProbationRounds rounds take a day at twelve minutes, five at an hour, and
+// longer where rounds are overtaken. Its progress is written every ProbeProgressEvery clean rounds all the way and kept
+// each time, and a process that takes the group over past the probe's first day - half an hour after the latest
+// write - goes on from the rounds kept, from the Slot the probe started at.
+func TestAProbeOfALongPeriodGoesOnPastItsFirstDay(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		period time.Duration
+		// slotsPerWrite is the Slots between two writes: ProbeProgressEvery
+		// clean rounds and those overtaken between them.
+		slotsPerWrite, writes int
+	}{
+		{"twelve minutes, two rounds in ten overtaken", 12 * time.Minute, 12, 11},
+		{"an hour", time.Hour, ProbeProgressEvery, 3},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ctl, _, now := verifyingGroup(t, "")
+			started := execution.EvaluationTime(now.Unix())
+			kept := started
+			for write := 1; write <= c.writes; write++ {
+				kept = started + execution.EvaluationTime(int64(write*c.slotsPerWrite)*int64(c.period/time.Second))
+				*now = time.Unix(int64(kept), 0)
+				keepProgressAt(t, ctl, FloorProbeKindVerify, 5*time.Minute, write*ProbeProgressEvery, started, kept)
+				if record, _ := ctl.Reading("qg"); record.Probe == nil || record.Probe.Clean != write*ProbeProgressEvery {
+					t.Fatalf("write %d, %v into the probe, kept %+v", write, time.Duration(kept-started)*time.Second, record.Probe)
+				}
+			}
+			if elapsed := time.Duration(kept-started) * time.Second; elapsed <= FloorStanding {
+				t.Fatalf("fixture: the latest write is %v into the probe, want past its first day", elapsed)
+			}
+			*now = time.Unix(int64(kept), 0).Add(30 * time.Minute)
+			clean, from, ok := takenOver(t, ctl).FloorProbeResume("qg", FloorProbeKindVerify, 5*time.Minute)
+			if want := c.writes * ProbeProgressEvery; !ok || clean != want || from != started {
+				t.Fatalf("taken over resumed %d from %d (%v), want %d from %d", clean, from, ok, want, started)
+			}
+		})
+	}
+}
+
 // Progress whose latest round precedes its probe's start is no progress of that probe: refused, and nothing written.
 // One whose latest round is the Slot it started at is kept.
 func TestProgressWhoseLatestRoundPrecedesItsProbeIsRefused(t *testing.T) {
