@@ -2558,6 +2558,10 @@ func (runtime *RedisCatalogRuntime) slotRequirements(
 	planByID map[execution.PlanIdentity]FrozenPlan,
 ) ([]execution.DataRequirement, error) {
 	byID := make(map[execution.RequirementID]*execution.DataRequirement)
+	// templateFacts is the query each template-bound primary reads, for the
+	// count words and the event lead the threshold path sets on its own
+	// primary (countPrimary).
+	templateFacts := make(map[execution.RequirementID]execution.QueryPlanFacts)
 	legacyDuePlans := make([]execution.DuePlan, 0, len(duePlans))
 	legacyLevels := make(map[execution.PlanIdentity]map[uint32]struct{}, len(duePlans))
 
@@ -2649,6 +2653,9 @@ func (runtime *RedisCatalogRuntime) slotRequirements(
 				return nil, errors.New("alarmd controlplane: frozen QueryPlanFacts differ from logical query reference")
 			}
 			templates[originalID] = rebuilt
+			if rebuilt.Role == execution.InputRolePrimary {
+				templateFacts[originalID] = facts
+			}
 		}
 
 		for identity, levelID := range expected {
@@ -2667,6 +2674,12 @@ func (runtime *RedisCatalogRuntime) slotRequirements(
 				copy := bound
 				byID[identity] = &copy
 			}
+		}
+	}
+
+	for identity, facts := range templateFacts {
+		if requirement := byID[identity]; requirement != nil {
+			countPrimary(requirement, facts, duePlans)
 		}
 	}
 
@@ -2771,19 +2784,62 @@ func eventCountProviderLeads(query execution.QueryPlanFacts, duePlans []executio
 	for _, due := range duePlans {
 		window := int64(due.CompiledPlan.EvaluationSemantics().QueryWindow)
 		for _, level := range due.CompiledPlan.Levels().All() {
-			points := int64(level.RequiredDetectHistoryPoints())
-			if recovery := level.Recovery(); recovery.MissingData == contract.RecoveryMissingDataEvaluateAsZero {
-				points = max(points, int64(recovery.ConsecutiveWindows)+int64(level.Trigger().WindowSize)+1)
-			}
-			histories = append(histories, levelHistory{window: window, points: points})
+			histories = append(histories, levelHistory{window: window, points: eventLeadPoints(level)})
 		}
 	}
 	return providerLeads(query.StepMillis, histories)
 }
 
+// countPrimary gives a template-bound primary what the threshold path gives
+// its own (primaryRequirements): the count words, read off the query it
+// binds - UnfilledCounts, ZeroIsNoObservation - and, for an event count, the
+// provider lead its consumers' Levels need, from the template's own window.
+// Whichever algorithm a Level runs - a ring ratio, a comparison - a count is
+// read as a count: its zero ends no alert, and its quiet groups stay in the
+// answer until they can. The requirement's identity is the template's and is
+// not changed.
+func countPrimary(requirement *execution.DataRequirement, facts execution.QueryPlanFacts, duePlans []execution.DuePlan) {
+	requirement.UnfilledCounts = readsUnfilledCounts(facts)
+	requirement.ZeroIsNoObservation = readsZeroAsNoObservation(facts)
+	if !readsEventCountOnly(facts) || requirement.StepMillis <= 0 {
+		return
+	}
+	window := requirement.RelativeWindow.EndOffsetSeconds - requirement.RelativeWindow.StartOffsetSeconds
+	var histories []levelHistory
+	plans := make(map[execution.PlanIdentity]execution.DuePlan, len(duePlans))
+	for _, due := range duePlans {
+		plans[due.Identity] = due
+	}
+	for _, consumer := range requirement.Consumers {
+		due, found := plans[consumer.Consumer.Plan]
+		if !found {
+			continue
+		}
+		for _, level := range due.CompiledPlan.Levels().All() {
+			if level.Definition().LevelID != consumer.Consumer.LevelID {
+				continue
+			}
+			histories = append(histories, levelHistory{window: window, points: eventLeadPoints(level)})
+		}
+	}
+	requirement.ProviderLeadSeconds = providerLeads(requirement.StepMillis, histories)[window]
+}
+
 // levelHistory is one due Level's requirement window and the history points
 // its trigger reads back.
 type levelHistory struct{ window, points int64 }
+
+// eventLeadPoints is how many windows before the accepted one an event
+// count's range has to reach for one Level: the history its recovery reads
+// back, and for a Level written to end on no data, the R + T + 1 windows to
+// the group's last event on the round that ends it.
+func eventLeadPoints(level strategy.CompiledLevel) int64 {
+	points := int64(level.RequiredDetectHistoryPoints())
+	if recovery := level.Recovery(); recovery.MissingData == contract.RecoveryMissingDataEvaluateAsZero {
+		points = max(points, int64(recovery.ConsecutiveWindows)+int64(level.Trigger().WindowSize)+1)
+	}
+	return points
+}
 
 // readsEventCountOnly is whether a query reads custom/event and nothing else.
 func readsEventCountOnly(query execution.QueryPlanFacts) bool {
