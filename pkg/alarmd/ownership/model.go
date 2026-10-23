@@ -135,13 +135,8 @@ func (worker WorkerRegistration) Declines(queryGroup execution.QueryGroupIdentit
 }
 
 // MaxReportedUnreadableTimelines bounds the names a registration carries. A
-// fleet-wide decode failure - a rollout whose new timelines the old build
-// cannot read - would otherwise put every owned Query Group on every
-// heartbeat; the total still says how many.
-//
-// Retire when: the upstream snapshot after the one that adds this field is
-// merged, the rollout case above is gone; the bound stays for a decode
-// failure that spans a fleet for any other reason.
+// decode failure that spans a fleet would otherwise put every owned Query
+// Group on every heartbeat; the total still says how many.
 const MaxReportedUnreadableTimelines = 64
 
 // AppliedControlFacts says which version of each versioned control fact the

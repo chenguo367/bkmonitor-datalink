@@ -86,6 +86,14 @@ type persistedScheduleSegment struct {
 	Repair *execution.SegmentRepair `json:"repair,omitempty"`
 }
 
+// persistedScheduleTimeline is the stored shape every build of a deployment
+// reads: an unreadable timeline is read as corrupt bytes
+// (SCHEDULE_UNREADABLE) and rewritten by the Leader, never as another
+// build's. A change to this shape, its Segments, or the validation a decode
+// runs that an earlier build cannot read must bring its own rollout handling
+// - a new schema version an earlier Leader leaves alone (other_schema), or a
+// reading of the mixed fleet during the rollout - because nothing here tells
+// an earlier build's Worker from corrupt bytes.
 type persistedScheduleTimeline struct {
 	SchemaVersion  string                       `json:"schema_version"`
 	RecordRevision uint64                       `json:"record_revision"`

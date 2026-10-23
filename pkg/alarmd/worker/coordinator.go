@@ -2015,6 +2015,12 @@ func (coordinator *SlotExecutionCoordinator) writeEvents(
 	failureKind := ""
 	if err != nil {
 		failureKind = observability.OutputFailureKindOf(err)
+		// A refusal the sink named is the client's by what it is, whether or
+		// not its error states a kind: the fleet reads a refusal code under
+		// no kind as unknown.
+		if rejection != nil && failureKind == observability.OutputFailureUnknown {
+			failureKind = observability.OutputFailureClientRejected
+		}
 	}
 	coordinator.emitObservation(ctx, observability.Observation{
 		Component: observability.ComponentOutput, Stage: observability.StageEventACKed,

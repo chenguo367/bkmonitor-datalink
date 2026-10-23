@@ -2003,6 +2003,9 @@ func (ports *recordingPorts) WriteBatch(ctx context.Context, events []contract.T
 		if ports.eventRejection != nil {
 			// The sink refusing to write, as the sink states it: not a
 			// retryable dependency, and named by reason word and sentence.
+			if ports.eventRejection.kindless {
+				return &outputRejectedKindlessTestError{err: err, reason: ports.eventRejection.reason, detail: ports.eventRejection.detail}
+			}
 			return &outputRejectedTestError{err: err, reason: ports.eventRejection.reason, detail: ports.eventRejection.detail}
 		}
 		return &retryableOutputTestError{err: err, kind: ports.eventFailureKind}
@@ -2028,7 +2031,24 @@ func (err *outputRejectedTestError) OutputFailureKind() string {
 }
 func (err *outputRejectedTestError) OutputRejectionDetail() string { return err.detail }
 
-type eventRejectionShape struct{ reason, detail string }
+// eventRejectionShape is the refusal the test sink states; kindless leaves
+// out the kind a refusal's error carries.
+type eventRejectionShape struct {
+	reason, detail string
+	kindless       bool
+}
+
+// outputRejectedKindlessTestError is a refusal whose error names its reason
+// word and sentence and states no kind.
+type outputRejectedKindlessTestError struct {
+	err            error
+	reason, detail string
+}
+
+func (err *outputRejectedKindlessTestError) Error() string                 { return err.reason + ": " + err.detail }
+func (err *outputRejectedKindlessTestError) Unwrap() error                 { return err.err }
+func (err *outputRejectedKindlessTestError) OutputRejectionReason() string { return err.reason }
+func (err *outputRejectedKindlessTestError) OutputRejectionDetail() string { return err.detail }
 
 type retryableOutputTestError struct {
 	err  error

@@ -313,15 +313,11 @@ const (
 	ReasonSlotSourceRetry            = "SLOT_SOURCE_RETRY"
 	ReasonBlockedExactSetUnavailable = "BLOCKED_EXACT_SET_UNAVAILABLE"
 	// ReasonScheduleUnreadable names a round the Slot source could not take
-	// because the Query Group's schedule timeline does not decode: corrupt
-	// bytes, or a timeline written by a build this one cannot read (a rollout
-	// whose new content the previous build cannot run). Until the timeline is
-	// rewritten or the Query Group moves to a build that reads it, every round
-	// meets the same bytes.
-	//
-	// Retire when: the upstream snapshot after the one that adds this word is
-	// merged, the previous-build case is gone; the word stays for corrupt
-	// bytes.
+	// because the Query Group's schedule timeline does not decode: its bytes
+	// are corrupt. Every build a deployment can run reads every timeline
+	// another writes (the persisted shape's note in controlplane), so a
+	// timeline one replica cannot decode is not another build's. Until the
+	// timeline is rewritten, every round meets the same bytes.
 	ReasonScheduleUnreadable = "SCHEDULE_UNREADABLE"
 	// ReasonScheduleMissing names a round the Slot source could not take
 	// because the Query Group's schedule timeline key is not there at all -

@@ -854,9 +854,8 @@ var codeChecks = map[string]verdict{
 	// were still being retried every thirty seconds: the disposition was known
 	// inside the system and never reached the runner.
 	"BLOCKED_EXACT_SET_UNAVAILABLE": otherDown(),
-	// A timeline this build cannot decode is a defect - corrupt bytes, or a
-	// release whose content the previous build cannot read - not a dependency
-	// that is down.
+	// A timeline that does not decode is a defect - corrupt bytes - not a
+	// dependency that is down.
 	"SCHEDULE_UNREADABLE": lands(CheckDefect),
 	// A timeline whose key the store lost: the store did not have what the
 	// round needed, as the span the reopen records is filed under it.

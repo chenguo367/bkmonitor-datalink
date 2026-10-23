@@ -292,17 +292,15 @@ type FailureRef struct {
 	// is not the broker failing to answer, and on a live deployment the two
 	// read identically for an afternoon; they were then told apart by the
 	// error's words, which a Redis's EOF could pass as Kafka's. Empty on
-	// other stages and on rows from a publisher that predates it.
-	//
-	// Retire when: the upstream snapshot after the one that adds Kind and At
-	// is merged, every publisher an upgrade meets sets both, and the readings
-	// of a row from a publisher that predates them can go.
+	// other stages, and on an output failure whose error stated none (read
+	// as unknown).
 	Kind string `json:"kind,omitempty"`
 	// At is when this failure was observed. The reference is kept until a
 	// healthy completion, so on a row whose latest round ended some other
 	// way it describes an earlier round; the reading that names the current
-	// round's evidence uses this to tell the two apart. Absent on rows from
-	// a publisher that predates it.
+	// round's evidence uses this to tell the two apart. Absent on a
+	// reference rebuilt from the pool record (FailureFromPoolRecord), which
+	// keeps no time.
 	At *time.Time `json:"at,omitempty"`
 	// Slot is the Slot the failure was observed on, and the first thing the
 	// reading compares with the row's RoundSlot: a failure on the latest

@@ -51,12 +51,8 @@ func (err *SourceBlockedError) Unwrap() error { return err.Err }
 // SCHEDULE_MISSING when the timeline's key is not there at all, and
 // BLOCKED_EXACT_SET_UNAVAILABLE for the rest. The timeline case used to read
 // as the other word, which says the control plane handed nothing to run;
-// told apart, a rollout's old build that cannot read its new timelines is a
-// reading rather than an inference.
-//
-// Retire when: the upstream snapshot after the one that adds this word is
-// merged, its rollout reading is gone; the word stays for timelines whose
-// bytes are corrupt.
+// told apart, a timeline whose bytes are corrupt is a reading rather than an
+// inference.
 func (err *SourceBlockedError) ReasonCode() execution.ReasonCode {
 	var undecodable *controlplane.DeterministicScheduleError
 	if err != nil && errors.As(err.Err, &undecodable) {
