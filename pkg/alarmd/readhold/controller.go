@@ -113,8 +113,10 @@ type Stats struct {
 	// (EarlierSkipReasons).
 	EarlierSkipped map[string]uint64
 	// FloorProbes is the shadow probes whose end this controller took, by
-	// what it made of them (FloorProbeOutcomes).
-	FloorProbes map[string]uint64
+	// what it made of them (FloorProbeOutcomes), every kind together, and
+	// FloorProbesByKind by kind (FloorProbeKinds) and outcome.
+	FloorProbes       map[string]uint64
+	FloorProbesByKind map[string]map[string]uint64
 	// ProbationFindings is the probation findings this controller took, by
 	// what it made of them (ProbationFindingOutcomes).
 	ProbationFindings map[string]uint64
@@ -307,8 +309,8 @@ type Controller struct {
 	// earlierSkipped is the earlier-read trials not run, by why
 	// (EarlierSkipReasons).
 	earlierSkipped map[string]uint64
-	// floorProbes is the shadow probes taken, by outcome
-	// (FloorProbeOutcomes), and probationFindings the probation findings
+	// floorProbes is the shadow probes taken, by kind|outcome
+	// (floorProbeKey), and probationFindings the probation findings
 	// (ProbationFindingOutcomes).
 	floorProbes       map[string]uint64
 	probationFindings map[string]uint64
@@ -354,8 +356,14 @@ func (controller *Controller) Stats() Stats {
 		stats.EarlierSkipped[reason] = controller.earlierSkipped[reason]
 	}
 	stats.FloorProbes = make(map[string]uint64, len(FloorProbeOutcomes))
-	for _, outcome := range FloorProbeOutcomes {
-		stats.FloorProbes[outcome] = controller.floorProbes[outcome]
+	stats.FloorProbesByKind = make(map[string]map[string]uint64, len(FloorProbeKinds))
+	for _, kind := range FloorProbeKinds {
+		stats.FloorProbesByKind[kind] = make(map[string]uint64, len(FloorProbeOutcomes))
+		for _, outcome := range FloorProbeOutcomes {
+			count := controller.floorProbes[floorProbeKey(kind, outcome)]
+			stats.FloorProbesByKind[kind][outcome] = count
+			stats.FloorProbes[outcome] += count
+		}
 	}
 	stats.ProbationFindings = make(map[string]uint64, len(ProbationFindingOutcomes))
 	for _, outcome := range ProbationFindingOutcomes {
@@ -497,6 +505,11 @@ func nextCandidate(record Record, step time.Duration, now int64) (int64, bool) {
 	// data, so their agreeing says the two are equally incomplete, not that
 	// the data was there. No trial, and no evidence taken from one.
 	if atLimitHeld(record, now) {
+		return 0, false
+	}
+	// A candidate the trials chose is read by a probe before the hold moves,
+	// and no trial runs meanwhile: one trial would only choose it again.
+	if _, ok := verifying(record, now); ok {
 		return 0, false
 	}
 	floor, floored := time.Duration(0), record.EarlierFloorMillis != nil
@@ -689,6 +702,10 @@ func clone(record Record) Record {
 	if record.EarlierFloorMillis != nil {
 		floor := *record.EarlierFloorMillis
 		record.EarlierFloorMillis = &floor
+	}
+	if record.VerifyCandidateMillis != nil {
+		candidate := *record.VerifyCandidateMillis
+		record.VerifyCandidateMillis = &candidate
 	}
 	record.Buckets = append([]int64(nil), record.Buckets...)
 	record.EarlyGaps = append([]EarlyGap(nil), record.EarlyGaps...)
@@ -897,6 +914,7 @@ func (controller *Controller) seed(state *entry, predecessors map[execution.Quer
 			next.PendingHoldMillis = &hold
 			next.EarlierMatches, next.QuietSinceMillis = 0, controller.options.Now().UnixMilli()
 			clearFloor(&next)
+			next.VerifyCandidateMillis = nil
 		}
 		// A record holding something with no quiet on it starts its quiet
 		// here. A lowering waits for a quiet that has started, and a group
@@ -1381,6 +1399,9 @@ func (controller *Controller) Observe(ctx context.Context, evidence Evidence) er
 			// other raise starts the search afresh.
 			raisedFrom := current(next)
 			clearFloor(&next)
+			// The data came later than the hold: a candidate below it the
+			// trials chose is not one to lower to.
+			next.VerifyCandidateMillis = nil
 			if next.Lowered {
 				hold = min(max(hold, next.LoweredFromMillis), limit)
 				if raisedFrom < hold {
@@ -1409,6 +1430,15 @@ func (controller *Controller) Observe(ctx context.Context, evidence Evidence) er
 	return nil
 }
 
+// EarlierRead takes an earlier-read trial's evidence: one round of the group
+// read at the candidate below its hold and compared with the formal read.
+// FloorDifferentsRequired different trials in a row move the search's floor
+// up to the candidate; EarlierMatchesRequired matching ones in a row, once
+// the group has been quiet for its bar, choose the candidate, which a shadow
+// probe then reads round by round before the hold moves (Record.
+// VerifyCandidateMillis, FloorProbe): a trial reads one round a rest, and a
+// candidate inside the spread the data moves over passes three of them by
+// chance.
 func (controller *Controller) EarlierRead(ctx context.Context, evidence EarlierEvidence) error {
 	if evidence.Contract.Validate() != nil || evidence.CandidateHold < 0 {
 		return errors.New("alarmd readhold: invalid earlier-read evidence")
@@ -1444,14 +1474,22 @@ func (controller *Controller) EarlierRead(ctx context.Context, evidence EarlierE
 		next.EarlierMatches = min(next.EarlierMatches+1, EarlierMatchesRequired)
 		quiet := quietBar(next, now)
 		if next.QuietSinceMillis > 0 && now-next.QuietSinceMillis >= quiet && next.EarlierMatches >= EarlierMatchesRequired {
-			next.LoweredFromMillis = hold
-			next.PendingHoldMillis = &candidate
-			next.Lowered, next.LoweredVerified, next.EarlierMatches, next.QuietSinceMillis = true, false, 0, now
-			next.ArrivalAgeMillis = state.spec.Delay.Milliseconds() + state.spec.SettlingWait.Milliseconds() + candidate
-			next.ArrivalAgeSeed = ""
+			// The trials chose the candidate; the hold moves only once a shadow
+			// probe has read it clean round by round (FloorProbe, kind verify).
+			// A trial reads one round a rest, and a candidate inside the data's
+			// spread passes three of them by chance; the probe reads every round.
+			next.VerifyCandidateMillis = &candidate
+			next.EarlierMatches = 0
 		}
 	}
-	return controller.persist(ctx, evidence.Contract.Slot.QueryGroup, state, next, nil)
+	moot := settleVerify(&next, now)
+	if err := controller.persist(ctx, evidence.Contract.Slot.QueryGroup, state, next, nil); err != nil {
+		return err
+	}
+	if moot {
+		controller.counted(controller.floorProbes, floorProbeKey(FloorProbeKindVerify, FloorProbeMoot))
+	}
+	return nil
 }
 
 // RenewDue reuses CAS with the same value once a day; untouched records expire

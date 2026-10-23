@@ -13,11 +13,14 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
-// searchRun lowers a group held at hold by trials alone: each round asks the
-// controller for its candidate, the trial matches when the candidate is past
-// that round's arrival (the hold its data needs, arrival(round)), and the
-// controller takes the evidence, an hour on so the quiet holds. It returns the
-// lowest hold the group ever had and its hold once no candidate is left.
+// searchRun lowers a group held at hold by trials and the probes that verify
+// what they choose: each round asks the controller for its candidate, the
+// trial matches when the candidate is past that round's arrival (the hold its
+// data needs, arrival(round)), and the controller takes the evidence, an hour
+// on so the quiet holds. A candidate the trials chose is then read by a probe,
+// which passes when the candidate is past the arrival of every one of its
+// rounds. It returns the lowest hold the group ever had and its hold once no
+// candidate is left.
 func searchRun(t *testing.T, step, hold time.Duration, arrival func(round int) time.Duration) (lowest, final time.Duration, rounds int) {
 	t.Helper()
 	c, _, now := controllerFixture(t)
@@ -30,6 +33,16 @@ func searchRun(t *testing.T, step, hold time.Duration, arrival func(round int) t
 	}
 	lowest = hold
 	for rounds = 0; rounds < 400; rounds++ {
+		if candidate, kind, _, probing := c.FloorProbe("qg"); probing && kind == FloorProbeKindVerify {
+			*now = now.Add(time.Hour)
+			passed := true
+			for range verifyRounds {
+				passed = passed && candidate >= arrival(rounds)
+			}
+			verifyEnd(t, c, "qg", execution.EvaluationTime(180+rounds*60), passed)
+			lowest = min(lowest, c.ReadHold("qg"))
+			continue
+		}
 		candidate, tries := c.EarlierCandidate("qg")
 		if !tries {
 			break

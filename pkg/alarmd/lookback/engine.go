@@ -251,15 +251,17 @@ type Options struct {
 	// the probation that follows it is counted apart when it catches a round
 	// read early (probation_caught after=verified). Nil verifies none.
 	LoweringVerified func(execution.QueryGroupIdentity) bool
-	// FloorProbe is the floor a Query Group whose search below its hold has
-	// run out has its rounds read at as well, whether it is near a floor a
-	// probe has failed at, which needs EdgeProbeSpan of clean rounds to pass,
-	// and false when it has none to probe
+	// FloorProbe is the hold a Query Group with no trial to run has its rounds
+	// read at as well - the candidate its trials chose, read before the hold
+	// moves, or below a search that has run out the midpoint above its floor
+	// or the floor itself - the probe's kind (FloorProbeKinds), whether it is
+	// near a floor a probe has failed at, which needs EdgeProbeSpan of clean
+	// rounds to pass, and false when it has none to probe
 	// (readhold.Controller.FloorProbe; floor_probe.go). Nil probes none.
-	FloorProbe func(execution.QueryGroupIdentity) (floor time.Duration, edge, probing bool)
+	FloorProbe func(execution.QueryGroupIdentity) (floor time.Duration, kind string, edge, probing bool)
 	// OnFloorProbe sees every probe end, outside the engine's lock: one that
-	// passed lowers the hold to its floor, one that failed relearns the floor
-	// (readhold.Controller.FloorProbeResult).
+	// passed lowers the hold to the hold it read at, one that failed makes it
+	// the floor or relearns the floor (readhold.Controller.FloorProbeResult).
 	OnFloorProbe func(FloorProbeEnd)
 }
 

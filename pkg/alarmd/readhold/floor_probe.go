@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"hash/fnv"
+	"slices"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -35,20 +36,37 @@ const FloorStanding = 24 * time.Hour
 
 // How the controller took a shadow probe's end, closed: lowered the hold to
 // the hold the probe read clean; floor_raised, a round read differently at a
-// hold between the floor and the hold, which is the floor now; relearned the
-// floor itself a round read differently at, its standing doubled; stale, the
-// record no longer the one the probe began under - the hold or floor moved,
-// the search reopened, the group taken to its limit - so the probe says
-// nothing about it.
+// hold between the floor and the hold - a midpoint, or the candidate the
+// trials chose - which is the floor now; relearned the floor itself a round
+// read differently at, its standing doubled; stale, the record no longer the
+// one the probe began under - the hold or floor moved, the search reopened,
+// the group taken to its limit - so the probe says nothing about it; moot, a
+// candidate the trials chose that is no longer below the hold and above the
+// floor, cleared unread (verifying).
 const (
 	FloorProbeLowered     = "lowered"
 	FloorProbeFloorRaised = "floor_raised"
 	FloorProbeRelearned   = "relearned"
 	FloorProbeStale       = "stale"
+	FloorProbeMoot        = "moot"
 )
 
 // FloorProbeOutcomes is every way a probe's end is taken.
-var FloorProbeOutcomes = []string{FloorProbeLowered, FloorProbeFloorRaised, FloorProbeRelearned, FloorProbeStale}
+var FloorProbeOutcomes = []string{FloorProbeLowered, FloorProbeFloorRaised, FloorProbeRelearned, FloorProbeStale, FloorProbeMoot}
+
+// What a shadow probe reads, closed: verify, the candidate three trials in a
+// row chose to lower to, read before the hold moves (Record.
+// VerifyCandidateMillis); midpoint, halfway between a floor more than
+// MidpointResolution below the hold and the hold; floor, the floor itself
+// once it has stood.
+const (
+	FloorProbeKindVerify   = "verify"
+	FloorProbeKindMidpoint = "midpoint"
+	FloorProbeKindFloor    = "floor"
+)
+
+// FloorProbeKinds is every kind of probe.
+var FloorProbeKinds = []string{FloorProbeKindVerify, FloorProbeKindMidpoint, FloorProbeKindFloor}
 
 // MidpointResolution is how near the hold the floor has to be before a probe
 // reads the floor itself rather than the midpoint between them. A probe read
@@ -115,14 +133,45 @@ func undatedFloorAt(qg execution.QueryGroupIdentity, record Record, now int64) i
 	return max(utcDay(now)*dayMillis-undatedFloorAge(qg).Milliseconds(), int64(record.SinceSlot)*1000)
 }
 
+// verifying is the candidate the trials chose that a probe reads before the
+// hold moves (Record.VerifyCandidateMillis), and false when there is none to
+// read: none chosen, or one no longer below the hold and above the floor - a
+// limit that came down, a record another build wrote - or the group held at
+// its limit. Such a candidate is moot: the trials go on as if there were
+// none, and the next write clears it (settleVerify).
+func verifying(record Record, now int64) (int64, bool) {
+	if record.VerifyCandidateMillis == nil || atLimitHeld(record, now) {
+		return 0, false
+	}
+	candidate := *record.VerifyCandidateMillis
+	if candidate >= current(record) || (record.EarlierFloorMillis != nil && candidate <= *record.EarlierFloorMillis) {
+		return 0, false
+	}
+	return candidate, true
+}
+
+// settleVerify clears a moot candidate from a record about to be written, and
+// says it did, to be counted moot.
+func settleVerify(record *Record, now int64) bool {
+	if record.VerifyCandidateMillis == nil {
+		return false
+	}
+	if _, ok := verifying(*record, now); ok {
+		return false
+	}
+	record.VerifyCandidateMillis = nil
+	return true
+}
+
 // probeCandidate is the hold a shadow probe of record reads its rounds at
-// now, whether that is the floor itself, whether it is near a floor a probe
-// has failed at (edge), and false when there is none to probe. A probe needs
-// the group held, not held at its limit, and its search below the hold run
-// out at a floor under it. While the floor is more than MidpointResolution
-// below the hold the probe reads the midpoint between them, which no read
-// has tried, at once; nearer, it reads the floor, once the floor has stood
-// floorStanding of its failed probes.
+// now, what kind of probe it is (FloorProbeKinds), whether it is near a floor
+// a probe has failed at (edge), and false when there is none to probe. A
+// candidate the trials chose is read first, at once (verifying). Otherwise a
+// probe needs the group held, not held at its limit, and its search below the
+// hold run out at a floor under it. While the floor is more than
+// MidpointResolution below the hold the probe reads the midpoint between
+// them, which no read has tried, at once; nearer, it reads the floor, once
+// the floor has stood floorStanding of its failed probes.
 //
 // A floor a probe failed at is where the group's data was seen arriving
 // after the read, and a candidate near it is read near that line: in one
@@ -133,45 +182,53 @@ func undatedFloorAt(qg execution.QueryGroupIdentity, record Record, now int64) i
 // caught, whatever the rate. Such a probe reads lookback.EdgeProbeSpan of
 // rounds clean, ProbationRounds at least: the floor itself, or a midpoint
 // within EdgeProbeReach above it.
-func probeCandidate(record Record, step time.Duration, now int64) (candidate int64, atFloor, edge, ok bool) {
+func probeCandidate(record Record, step time.Duration, now int64) (candidate int64, kind string, edge, ok bool) {
 	hold := current(record)
-	if hold <= 0 || record.EarlierFloorMillis == nil || *record.EarlierFloorMillis >= hold || atLimitHeld(record, now) {
-		return 0, false, false, false
+	if hold <= 0 {
+		return 0, "", false, false
+	}
+	if candidate, ok := verifying(record, now); ok {
+		edge := record.EarlierFloorMillis != nil && record.EarlierFloorProbed &&
+			candidate-*record.EarlierFloorMillis <= EdgeProbeReach.Milliseconds()
+		return candidate, FloorProbeKindVerify, edge, true
+	}
+	if record.EarlierFloorMillis == nil || *record.EarlierFloorMillis >= hold || atLimitHeld(record, now) {
+		return 0, "", false, false
 	}
 	if _, tries := nextCandidate(record, step, now); tries {
-		return 0, false, false, false
+		return 0, "", false, false
 	}
 	floor := *record.EarlierFloorMillis
 	if hold-floor > MidpointResolution.Milliseconds() {
 		candidate = floor + (hold-floor)/2
-		return candidate, false, record.EarlierFloorProbed && candidate-floor <= EdgeProbeReach.Milliseconds(), true
+		return candidate, FloorProbeKindMidpoint, record.EarlierFloorProbed && candidate-floor <= EdgeProbeReach.Milliseconds(), true
 	}
 	if now-record.EarlierFloorAtMillis < floorStanding(record.EarlierFloorRetests).Milliseconds() {
-		return 0, false, false, false
+		return 0, "", false, false
 	}
-	return floor, true, record.EarlierFloorProbed, true
+	return floor, FloorProbeKindFloor, record.EarlierFloorProbed, true
 }
 
 // FloorProbe is the hold the group's shadow probe reads its rounds at - the
-// midpoint between its floor and its hold, or the floor itself - whether it
-// is near a floor a probe failed at, which needs more clean rounds (edge),
-// and false when there is none to probe (probeCandidate). A floor written
-// before floors were dated is dated here, at its first reading
-// (undatedFloorAt); the date is kept in memory and written with the
-// record's next change.
-func (controller *Controller) FloorProbe(qg execution.QueryGroupIdentity) (candidate time.Duration, edge, ok bool) {
+// candidate the trials chose, the midpoint between its floor and its hold, or
+// the floor itself - its kind (FloorProbeKinds), whether it is near a floor a
+// probe failed at, which needs more clean rounds (edge), and false when there
+// is none to probe (probeCandidate). A floor written before floors were
+// dated is dated here, at its first reading (undatedFloorAt); the date is
+// kept in memory and written with the record's next change.
+func (controller *Controller) FloorProbe(qg execution.QueryGroupIdentity) (candidate time.Duration, kind string, edge, ok bool) {
 	state := controller.group(qg)
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if !state.loaded {
-		return 0, false, false
+		return 0, "", false, false
 	}
 	now := controller.options.Now()
 	if state.record.EarlierFloorMillis != nil && state.record.EarlierFloorAtMillis == 0 {
 		state.record.EarlierFloorAtMillis = undatedFloorAt(qg, state.record, now.UnixMilli())
 	}
-	at, _, edge, ok := probeCandidate(state.record, state.spec.Step, now.UnixMilli())
-	return time.Duration(at) * time.Millisecond, edge, ok
+	at, kind, edge, ok := probeCandidate(state.record, state.spec.Step, now.UnixMilli())
+	return time.Duration(at) * time.Millisecond, kind, edge, ok
 }
 
 // LoweringVerified says the group's last lowering was to a hold a shadow
@@ -185,28 +242,30 @@ func (controller *Controller) LoweringVerified(qg execution.QueryGroupIdentity) 
 }
 
 // FloorProbeEvidence is a shadow probe's end: the hold its rounds were read
-// at (Floor: the candidate FloorProbe gave, the floor or a midpoint above
-// it) and the hold their formal reads were read at, and whether
-// lookback.ProbationRounds rounds in a row read the same at both (Passed) or
-// one read differently. Contract is the Slot of its last round.
+// at (Floor: the candidate FloorProbe gave - the trials' candidate, the floor
+// or a midpoint above it) and its Kind, the hold their formal reads were read
+// at, and whether lookback.ProbationRounds rounds in a row read the same at
+// both (Passed) or one read differently. Contract is the Slot of its last
+// round.
 type FloorProbeEvidence struct {
 	Contract execution.FrozenExecutionContractRef
 	Floor    time.Duration
+	Kind     string
 	Hold     time.Duration
 	Passed   bool
 }
 
 // FloorProbeResult takes a shadow probe's end. One that passed lowers the
-// hold to the hold it read at, as a trial's lowering does but marked
-// verified; a probation follows it as it follows every lowering. At a
-// midpoint the floor stays and the
-// next probe reads the midpoint below; at the floor the floor is the hold
-// now, and the search goes on below it from half. One that failed at a
-// midpoint makes the midpoint the floor, dated now; at the floor it relearns
-// the floor where it was, dated now, its standing doubled. One whose record
-// is no longer the one it read under changes nothing.
+// hold to the hold it read at, marked verified; a probation follows it as it
+// follows every lowering. At the trials' candidate or a midpoint the floor
+// stays and the next probe reads the midpoint below; at the floor the floor
+// is the hold now, and the search goes on below it from half. One that failed
+// at the trials' candidate or a midpoint makes it the floor, dated now, a
+// floor a probe failed at; at the floor it relearns the floor where it was,
+// dated now, its standing doubled. One whose record is no longer the one it
+// read under changes nothing but clear a candidate gone moot.
 func (controller *Controller) FloorProbeResult(ctx context.Context, evidence FloorProbeEvidence) error {
-	if evidence.Contract.Validate() != nil || evidence.Floor < 0 || evidence.Hold <= evidence.Floor {
+	if evidence.Contract.Validate() != nil || evidence.Floor < 0 || evidence.Hold <= evidence.Floor || !slices.Contains(FloorProbeKinds, evidence.Kind) {
 		return errors.New("alarmd readhold: invalid floor probe evidence")
 	}
 	qg := evidence.Contract.Slot.QueryGroup
@@ -220,9 +279,17 @@ func (controller *Controller) FloorProbeResult(ctx context.Context, evidence Flo
 		return nil
 	}
 	now := controller.options.Now().UnixMilli()
-	candidate, atFloor, _, ok := probeCandidate(state.record, state.spec.Step, now)
-	if !ok || candidate != evidence.Floor.Milliseconds() || current(state.record) != evidence.Hold.Milliseconds() {
-		controller.counted(controller.floorProbes, FloorProbeStale)
+	candidate, kind, _, ok := probeCandidate(state.record, state.spec.Step, now)
+	if !ok || kind != evidence.Kind || candidate != evidence.Floor.Milliseconds() || current(state.record) != evidence.Hold.Milliseconds() {
+		next := clone(state.record)
+		if settleVerify(&next, now) {
+			if err := controller.persist(ctx, qg, state, next, nil); err != nil {
+				return err
+			}
+			controller.counted(controller.floorProbes, floorProbeKey(FloorProbeKindVerify, FloorProbeMoot))
+			return nil
+		}
+		controller.counted(controller.floorProbes, floorProbeKey(evidence.Kind, FloorProbeStale))
 		return nil
 	}
 	next := clone(state.record)
@@ -235,27 +302,37 @@ func (controller *Controller) FloorProbeResult(ctx context.Context, evidence Flo
 		next.Lowered, next.LoweredVerified, next.EarlierMatches, next.QuietSinceMillis = true, true, 0, now
 		next.ArrivalAgeMillis = state.spec.Delay.Milliseconds() + state.spec.SettlingWait.Milliseconds() + candidate
 		next.ArrivalAgeSeed = ""
-		if atFloor {
+		next.VerifyCandidateMillis = nil
+		if kind == FloorProbeKindFloor {
 			// The floor is the hold now: the search below it starts from half.
 			clearFloor(&next)
 		}
-	case atFloor:
+	case kind == FloorProbeKindFloor:
 		outcome = FloorProbeRelearned
 		next.EarlierFloorAtMillis = now
 		next.EarlierFloorRetests = min(next.EarlierFloorRetests+1, maxFloorRetests)
 		next.EarlierFloorProbed = true
 	default:
-		// Read differently at the midpoint: too early there too. The floor
-		// moves up to it, a value no probe has failed at, so it starts its
-		// count over (setFloor), and the next probe reads the midpoint above
-		// without standing first.
+		// Read differently at the trials' candidate or the midpoint: too
+		// early there too. The floor moves up to it, a value no probe has
+		// failed at, so it starts its count over (setFloor), and the next
+		// probe reads the midpoint above without standing first. The data
+		// changed there, so the quiet a lowering waits for starts over.
 		outcome = FloorProbeFloorRaised
 		setFloor(&next, candidate, now)
 		next.EarlierFloorProbed = true
+		if kind == FloorProbeKindVerify {
+			next.VerifyCandidateMillis = nil
+			next.EarlierMatches, next.QuietSinceMillis = 0, now
+		}
 	}
 	if err := controller.persist(ctx, qg, state, next, nil); err != nil {
 		return err
 	}
-	controller.counted(controller.floorProbes, outcome)
+	controller.counted(controller.floorProbes, floorProbeKey(kind, outcome))
 	return nil
 }
+
+// floorProbeKey is the key a probe's end is counted under: its kind and
+// outcome.
+func floorProbeKey(kind, outcome string) string { return kind + "|" + outcome }

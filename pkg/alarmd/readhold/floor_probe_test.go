@@ -43,8 +43,14 @@ func stuckGroup(t *testing.T, record string) (*Controller, *memoryControl, *time
 
 func probeEnd(t *testing.T, c *Controller, slot execution.EvaluationTime, floor, hold time.Duration, passed bool) {
 	t.Helper()
+	// The kind of the probe the controller would run now; one that runs none
+	// ends a probe of the floor, the evidence a probe gone stale gives.
+	_, kind, _, probing := c.FloorProbe("qg")
+	if !probing {
+		kind = FloorProbeKindFloor
+	}
 	if err := c.FloorProbeResult(context.Background(), FloorProbeEvidence{Contract: holdContract("qg", slot, hold.Milliseconds()),
-		Floor: floor, Hold: hold, Passed: passed}); err != nil {
+		Floor: floor, Kind: kind, Hold: hold, Passed: passed}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -57,11 +63,11 @@ func TestAFloorStandsADayAndEachFailedProbeDoublesIt(t *testing.T) {
 	for index, standing := range []time.Duration{24 * time.Hour, 48 * time.Hour, 96 * time.Hour, 7 * 24 * time.Hour, 7 * 24 * time.Hour} {
 		learned := *now
 		*now = learned.Add(standing - time.Millisecond)
-		if floor, _, probing := c.FloorProbe("qg"); probing {
+		if floor, _, _, probing := c.FloorProbe("qg"); probing {
 			t.Fatalf("probe %d: probed at %v a millisecond before the floor stood %v", index, floor, standing)
 		}
 		*now = learned.Add(standing)
-		floor, _, probing := c.FloorProbe("qg")
+		floor, _, _, probing := c.FloorProbe("qg")
 		if !probing || floor != 117*time.Second {
 			t.Fatalf("probe %d: %v %v once the floor stood %v, want the floor at 117 s", index, floor, probing, standing)
 		}
@@ -86,7 +92,7 @@ func TestAFloorStandsADayAndEachFailedProbeDoublesIt(t *testing.T) {
 func TestAProbeThatPassesLowersTheHoldToItsFloorVerified(t *testing.T) {
 	c, store, now := stuckGroup(t, "")
 	*now = now.Add(FloorStanding)
-	if _, _, probing := c.FloorProbe("qg"); !probing {
+	if _, _, _, probing := c.FloorProbe("qg"); !probing {
 		t.Fatal("fixture: no probe once the floor stood")
 	}
 	writes := len(store.requests)
@@ -121,23 +127,59 @@ func TestAProbeThatPassesLowersTheHoldToItsFloorVerified(t *testing.T) {
 	}
 }
 
-// A trial's lowering is never verified: probation follows it as before, and
-// a process that takes the group over resumes that probation.
-func TestATrialsLoweringIsNotVerified(t *testing.T) {
-	c, _, now := controllerFixture(t)
-	spec := groupSpec("qg", 0)
-	spec.Step = time.Minute
-	prepare(t, c, spec)
-	observeEarly(t, c, "qg", 10*time.Minute+spec.SettlingWait, 0)
-	*now = now.Add(time.Hour)
-	for index := range EarlierMatchesRequired {
-		if err := c.EarlierRead(context.Background(), EarlierEvidence{Contract: holdContract("qg", execution.EvaluationTime(120+index), 600_000),
-			CandidateHold: 5 * time.Minute, Observed: true, Equal: true}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if c.ReadHold("qg") != 5*time.Minute || c.LoweringVerified("qg") {
-		t.Fatalf("a trial's lowering: hold %v verified %v, want 5 minutes, not verified", c.ReadHold("qg"), c.LoweringVerified("qg"))
+// Trials only choose: three in a row past the quiet bar leave the hold where it is and name the candidate, which a
+// probe reads before the hold moves - at once, with no standing, and no trial runs meanwhile. One that passes lowers
+// the hold to it, verified; one that fails makes it the floor, a floor a probe failed at, and the quiet starts over.
+func TestATrialsChoiceLowersTheHoldOnlyOnceAProbeVerifiesIt(t *testing.T) {
+	for _, passed := range []bool{true, false} {
+		t.Run(map[bool]string{true: "passed", false: "failed"}[passed], func(t *testing.T) {
+			c, _, now := controllerFixture(t)
+			spec := groupSpec("qg", 0)
+			spec.Step = time.Minute
+			prepare(t, c, spec)
+			observeEarly(t, c, "qg", 10*time.Minute+spec.SettlingWait, 0)
+			*now = now.Add(time.Hour)
+			for index := range EarlierMatchesRequired {
+				if err := c.EarlierRead(context.Background(), EarlierEvidence{Contract: holdContract("qg", execution.EvaluationTime(120+index), 600_000),
+					CandidateHold: 5 * time.Minute, Observed: true, Equal: true}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if c.ReadHold("qg") != 10*time.Minute {
+				t.Fatalf("the trials lowered the hold to %v themselves", c.ReadHold("qg"))
+			}
+			if candidate, kind, edge, probing := c.FloorProbe("qg"); !probing || kind != FloorProbeKindVerify || candidate != 5*time.Minute || edge {
+				t.Fatalf("probe %v %q edge %v probing %v, want the trials' 5 minutes verified at once", candidate, kind, edge, probing)
+			}
+			if _, tries := c.EarlierCandidate("qg"); tries {
+				t.Fatal("a trial runs while its candidate is verified")
+			}
+			verifyEnd(t, c, "qg", 300, passed)
+			record, _ := c.Reading("qg")
+			if record.VerifyCandidateMillis != nil {
+				t.Fatalf("the candidate %d is still to verify after its probe ended", *record.VerifyCandidateMillis)
+			}
+			if passed {
+				if c.ReadHold("qg") != 5*time.Minute || !c.LoweringVerified("qg") || c.Stats().FloorProbesByKind[FloorProbeKindVerify][FloorProbeLowered] != 1 {
+					t.Fatalf("a passed probe: hold %v verified %v counts %v, want lowered to 5 minutes, verified", c.ReadHold("qg"),
+						c.LoweringVerified("qg"), c.Stats().FloorProbesByKind[FloorProbeKindVerify])
+				}
+				return
+			}
+			if c.ReadHold("qg") != 10*time.Minute || record.EarlierFloorMillis == nil || *record.EarlierFloorMillis != 300_000 ||
+				!record.EarlierFloorProbed || record.QuietSinceMillis != now.UnixMilli() || record.EarlierMatches != 0 {
+				t.Fatalf("a failed probe: hold %v, floor %v probed %v, quiet since %d, %d matches; want the hold unmoved, the "+
+					"candidate a floor a probe failed at, the quiet started over", c.ReadHold("qg"), record.EarlierFloorMillis,
+					record.EarlierFloorProbed, record.QuietSinceMillis, record.EarlierMatches)
+			}
+			if c.Stats().FloorProbesByKind[FloorProbeKindVerify][FloorProbeFloorRaised] != 1 {
+				t.Fatalf("counts %v, want one floor_raised", c.Stats().FloorProbesByKind[FloorProbeKindVerify])
+			}
+			// The search goes on above the new floor.
+			if got, tries := c.EarlierCandidate("qg"); !tries || got <= 5*time.Minute || got >= 10*time.Minute {
+				t.Fatalf("after the failed probe the trials try %v %v, want between the floor and the hold", got, tries)
+			}
+		})
 	}
 }
 
@@ -216,7 +258,7 @@ func TestAnUndatedFloorIsDatedByItsDayAndGroup(t *testing.T) {
 		start := *now
 		for step := time.Duration(0); step <= 2*FloorStanding; step += 10 * time.Minute {
 			*now = start.Add(step)
-			if _, _, probing := c.FloorProbe(qg); probing {
+			if _, _, _, probing := c.FloorProbe(qg); probing {
 				return reading.EarlierFloorAtMillis, *now
 			}
 		}
@@ -305,7 +347,7 @@ func TestOnlyAFloorAProbeFailedAtMakesItsProbesNearIt(t *testing.T) {
 		store.values["qg"] = []byte(fmt.Sprintf(`{"hold_ms":%d,"since_slot":60,"lowered":true,"lowered_from_ms":%d,`+
 			`"earlier_floor_ms":10000,"earlier_floor_at_ms":%d%s}`, c.hold, 2*c.hold, now.UnixMilli(), c.probed))
 		prepare(t, ctl, spec)
-		if candidate, edge, probing := ctl.FloorProbe("qg"); !probing || candidate != c.candidate || edge != c.edge {
+		if candidate, _, edge, probing := ctl.FloorProbe("qg"); !probing || candidate != c.candidate || edge != c.edge {
 			t.Fatalf("hold %d ms over a floor of 10 s%s: probe %v near a failed floor %v %v, want %v, near %v",
 				c.hold, c.probed, candidate, edge, probing, c.candidate, c.edge)
 		}
@@ -342,7 +384,7 @@ func TestAFloorThatFailsItsOwnProbeIsOneAProbeFailedAt(t *testing.T) {
 			probed, outcomes, edges)
 	}
 	*now = now.Add(2 * FloorStanding)
-	if floor, edge, probing := c.FloorProbe("qg"); !probing || floor != 0 || !edge {
+	if floor, _, edge, probing := c.FloorProbe("qg"); !probing || floor != 0 || !edge {
 		t.Fatalf("two days on: probe %v near a failed floor %v %v, want the floor again, now one a probe failed at", floor, edge, probing)
 	}
 }
@@ -354,7 +396,7 @@ func TestAFloorThatFailsItsOwnProbeIsOneAProbeFailedAt(t *testing.T) {
 func bisect(t *testing.T, c *Controller, visible time.Duration) (probed []time.Duration, outcomes []string, edges []bool) {
 	t.Helper()
 	for slot := execution.EvaluationTime(600); ; slot += 60 {
-		candidate, edge, probing := c.FloorProbe("qg")
+		candidate, _, edge, probing := c.FloorProbe("qg")
 		if !probing {
 			return probed, outcomes, edges
 		}
@@ -403,7 +445,7 @@ func TestAProbeReadsMidpointsUntilTheFloorIsNearTheHold(t *testing.T) {
 			c.ReadHold("qg"), record.EarlierFloorMillis, c.LoweringVerified("qg"))
 	}
 	*now = now.Add(FloorStanding)
-	if floor, edge, probing := c.FloorProbe("qg"); !probing || floor != 18285*time.Millisecond || !edge {
+	if floor, _, edge, probing := c.FloorProbe("qg"); !probing || floor != 18285*time.Millisecond || !edge {
 		t.Fatalf("a day on: probe %v near a failed floor %v %v, want the floor itself, a probe having failed at it", floor, edge, probing)
 	}
 }
@@ -438,7 +480,7 @@ func TestAProbeOfAHoldAtItsDataBoundaryRaisesTheFloorAndLeavesTheHold(t *testing
 		t.Fatalf("relearned: probed %v, stored %s; want the floor kept as one a probe failed at", record.EarlierFloorProbed, store.values["qg"])
 	}
 	*now = now.Add(2*FloorStanding - time.Millisecond)
-	if _, _, probing := c.FloorProbe("qg"); probing {
+	if _, _, _, probing := c.FloorProbe("qg"); probing {
 		t.Fatal("the floor relearned once is read again before it stood two days")
 	}
 }

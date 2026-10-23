@@ -931,7 +931,9 @@ func (holds *productionReadHolds) bindLookback(options *lookback.Options) {
 	options.FloorProbe, options.LoweringVerified = holds.controller.FloorProbe, holds.controller.LoweringVerified
 	options.OnFloorProbe = func(e lookback.FloorProbeEnd) {
 		if holds.logger != nil {
-			// probe_ms is the hold the probe's rounds were read at; floor_ms the
+			// kind is what the probe read: verify, the candidate the trials chose
+			// before the hold moves; midpoint; floor. probe_ms is the hold the
+			// probe's rounds were read at; floor_ms the
 			// group's floor as the controller has it when the line is written
 			// (-1 while none): the two are one while the probe reads the floor
 			// itself, apart while it reads a midpoint above it. rounds_required
@@ -945,7 +947,7 @@ func (holds *productionReadHolds) bindLookback(options *lookback.Options) {
 			}
 			attrs := []slog.Attr{slog.String("query_group", string(e.Contract.Slot.QueryGroup)),
 				slog.Int64("slot", int64(e.Contract.Slot.EvaluationTime)), slog.String("source", e.Source), slog.String("event", e.Event),
-				slog.Int64("probe_ms", e.Floor.Milliseconds()), slog.Int64("floor_ms", floor), slog.Int64("read_hold_ms", e.Hold.Milliseconds()),
+				slog.String("kind", e.Kind), slog.Int64("probe_ms", e.Floor.Milliseconds()), slog.Int64("floor_ms", floor), slog.Int64("read_hold_ms", e.Hold.Milliseconds()),
 				slog.Int("clean_rounds", e.Clean), slog.Int("rounds_required", e.Rounds), slog.Int64("started_slot", int64(e.Started))}
 			if e.Event == lookback.FloorProbeFailed {
 				for _, change := range lookback.Changes {
@@ -959,7 +961,7 @@ func (holds *productionReadHolds) bindLookback(options *lookback.Options) {
 		}
 		holds.observation(e.Contract, func(ctx context.Context) error {
 			return holds.controller.FloorProbeResult(ctx, readhold.FloorProbeEvidence{Contract: e.Contract, Floor: e.Floor,
-				Hold: e.Hold, Passed: e.Event == lookback.FloorProbePassed})
+				Kind: e.Kind, Hold: e.Hold, Passed: e.Event == lookback.FloorProbePassed})
 		})
 	}
 	options.OnEarlierTrialEnd = func(e lookback.EarlierTrialEnd) {

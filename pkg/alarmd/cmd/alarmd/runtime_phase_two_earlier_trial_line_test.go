@@ -11,6 +11,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -62,6 +63,41 @@ func TestTheEarlierTrialLineOfAMovedHoldHasItsHolds(t *testing.T) {
 	}
 	if strings.Contains(lines[1], "reserved_hold_ms") || strings.Contains(lines[1], "frozen_hold_ms") {
 		t.Errorf("a matched trial's line %s has the moved hold's fields", lines[1])
+	}
+}
+
+// A probe's end line names what it read - the trials' candidate (verify), a midpoint or the floor - beside the hold
+// it read at and the clean rounds it needed, so a lowering's verification is read from the line alone.
+func TestTheFloorProbeLineNamesItsKind(t *testing.T) {
+	var out bytes.Buffer
+	holds := &productionReadHolds{logger: observability.New("alarmd", &out)}
+	var err error
+	holds.controller, err = readhold.NewController(readhold.Options{Control: unusedControl{}, Prefix: "schedule", MaxHold: 10 * time.Minute,
+		Owner: func(execution.QueryGroupIdentity) (readhold.Owner, error) { return readhold.Owner{}, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var options lookback.Options
+	holds.bindLookback(&options)
+	contract := execution.FrozenExecutionContractRef{Slot: execution.SlotIdentity{QueryGroup: "qg", EvaluationTime: 180}, ReadHoldMillis: 300_000}
+	for _, kind := range lookback.FloorProbeKinds {
+		options.OnFloorProbe(lookback.FloorProbeEnd{Contract: contract, Source: "time_series", Event: lookback.FloorProbeHoldMoved,
+			Floor: 150 * time.Second, Kind: kind, Hold: 5 * time.Minute, Clean: 7, Rounds: 120, Started: 120})
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != len(lookback.FloorProbeKinds) {
+		t.Fatalf("lines %q, want one per probe end", lines)
+	}
+	for index, kind := range lookback.FloorProbeKinds {
+		for _, field := range []string{`"kind":"` + kind + `"`, `"probe_ms":150000`, `"read_hold_ms":300000`, `"rounds_required":120`} {
+			if !strings.Contains(lines[index], field) {
+				t.Errorf("the %s probe's line %s lacks %s", kind, lines[index], field)
+			}
+		}
+	}
+	// The kinds the line names are the controller's.
+	if fmt.Sprint(lookback.FloorProbeKinds) != fmt.Sprint(readhold.FloorProbeKinds) {
+		t.Fatalf("lookback kinds %v, controller kinds %v", lookback.FloorProbeKinds, readhold.FloorProbeKinds)
 	}
 }
 

@@ -1069,9 +1069,9 @@ Rounds of Query Groups whose floor is being probed - their search below the hold
 
 ## alarmd_lookback_floor_probes_total
 
-Labels: `source`, `event`
+Labels: `source`, `kind`, `event`
 
-Shadow probes of a floor by source and what happened to them: started, passed (lookback.ProbationRounds rounds in a row clean), failed (a round different), hold_moved (the hold, the floor or the search under them moved before the probe ended), owner_lost (the group left this process). A probe whose process stops first ends with none of them: started rising while passed and failed do not is probes that never live to finish, as under rollouts more frequent than a probe's rounds.
+Shadow probes by source, kind - verify (the candidate a group's trials chose, read before its hold moves), midpoint (halfway between a floor and the hold), floor (the floor itself) - and what happened to them: started, passed (lookback.ProbationRounds rounds in a row clean, more near a floor a probe failed at), failed (a round different), hold_moved (the hold, the floor or the search under them moved before the probe ended), owner_lost (the group left this process). A probe whose process stops first ends with none of them: started rising while passed and failed do not is probes that never live to finish, as under rollouts more frequent than a probe's rounds. Every lowering starts as a verify probe, so verify started tracks the lowerings on their way.
 
 ## alarmd_lookback_pending
 
@@ -1105,7 +1105,7 @@ Recheck reads stopped because a formal query had to wait for a query permit, by 
 
 Labels: `source`, `after`
 
-Rounds read early that probation caught - a reread at the first rung that found the whole window came later, raising the hold - by source and the lowering the probation followed: verified (a hold a shadow probe read clean round by round first, passed by chance; the lowered hold becomes a floor a probe failed at) and trial (a lowering on earlier-read trials alone). Each is one round decided on data not yet whole. Reader: how often a verified lowering was wrong, against how many there were (read_hold_floor_probes_total{outcome="lowered"}). Every value exists from the start.
+Rounds read early that probation caught - a reread at the first rung that found the whole window came later, raising the hold - by source and the lowering the probation followed: verified (a hold a shadow probe read clean round by round first, passed by chance; the lowered hold becomes a floor a probe failed at) and trial (a lowering on earlier-read trials alone, as builds before every lowering was verified made). Each is one round decided on data not yet whole. Reader: how often a verified lowering was wrong, against how many there were (read_hold_floor_probes_total{outcome="lowered"}). Every value exists from the start.
 
 ## alarmd_lookback_probation_groups
 
@@ -1529,9 +1529,9 @@ Earlier-read trials not run, by why, one per Slot a trial would have been reserv
 
 ## alarmd_read_hold_floor_probes_total
 
-Labels: `outcome`
+Labels: `kind`, `outcome`
 
-Shadow probes of a floor whose end the read-hold controller took, by what it made of it: lowered (the probe read lookback.ProbationRounds rounds in a row the same at the floor as at the hold, and the hold comes down to the floor, a probation after it as after every lowering), relearned (a round read differently: the floor stays, dated now, and stands twice as long as before before the next probe), floor_raised (a round read differently at a hold between the floor and the hold: that hold is the floor now, and the next probe reads the midpoint above it), stale (the record had moved since the probe began - its hold, its floor or its search - and the probe changed nothing). Probes that did not end are on lookback_floor_probes_total. Every outcome exists from the start.
+Shadow probes whose end the read-hold controller took, by kind - verify (the candidate three trials in a row chose, read before the hold moves; every lowering now comes through one), midpoint (halfway between a floor and the hold), floor (the floor itself) - and what it made of it: lowered (the probe read lookback.ProbationRounds rounds in a row the same at its hold as at the group's, and the hold comes down to it, a probation after it as after every lowering), relearned (a round read differently at the floor: the floor stays, dated now, and stands twice as long as before before the next probe), floor_raised (a round read differently at the candidate or a midpoint: that hold is the floor now, and the next probe reads the midpoint above it), stale (the record had moved since the probe began - its hold, its floor or its search - and the probe changed nothing), moot (verify: the candidate was no longer below the hold and above the floor, and was cleared unread). Probes that did not end are on lookback_floor_probes_total. Every kind and outcome exists from the start.
 
 ## alarmd_read_hold_groups
 

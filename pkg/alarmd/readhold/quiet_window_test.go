@@ -37,7 +37,8 @@ func heldAtTheLimit(t *testing.T, c *Controller) GroupSpec {
 }
 
 // agreeingTrials runs the earlier reads a lowering needs, each at the
-// candidate the controller offers then, from slot on, and says whether one
+// candidate the controller offers then, from slot on, and the probe that
+// passes the candidate they chose if they chose one, and says whether one
 // was offered.
 func agreeingTrials(t *testing.T, c *Controller, slot execution.EvaluationTime) bool {
 	t.Helper()
@@ -52,6 +53,9 @@ func agreeingTrials(t *testing.T, c *Controller, slot execution.EvaluationTime) 
 			CandidateHold: candidate, Observed: true, Equal: true}); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if _, kind, _, probing := c.FloorProbe("qg"); probing && kind == FloorProbeKindVerify {
+		verifyEnd(t, c, "qg", slot+execution.EvaluationTime(EarlierMatchesRequired*60), true)
 	}
 	return offered
 }
@@ -170,6 +174,10 @@ func TestALongGapAgesOutOfTheQuietBar(t *testing.T) {
 	}
 	*now = now.Add(3 * time.Hour)
 	earlier()
+	if record, _ := c.Reading("qg"); record.VerifyCandidateMillis == nil || *record.VerifyCandidateMillis != 75_000 {
+		t.Fatalf("3 quiet hours past a 2 hour bar chose %v to verify, want 75 s", record.VerifyCandidateMillis)
+	}
+	verifyEnd(t, c, "qg", 100_000, true)
 	if c.ReadHold("qg") != 75*time.Second {
 		t.Fatalf("3 quiet hours past a 2 hour bar left the hold at %v, want lowered to 75 s", c.ReadHold("qg"))
 	}

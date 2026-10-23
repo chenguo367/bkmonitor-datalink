@@ -151,6 +151,13 @@ func productionLookbackStats(engine *lookback.Engine, holds *productionReadHolds
 		for _, outcome := range readhold.FloorProbeOutcomes {
 			stats.ReadHoldFloorProbes[outcome] = controller.FloorProbes[outcome]
 		}
+		stats.ReadHoldFloorProbesByKind = make(map[string]map[string]uint64, len(readhold.FloorProbeKinds))
+		for _, kind := range readhold.FloorProbeKinds {
+			stats.ReadHoldFloorProbesByKind[kind] = make(map[string]uint64, len(readhold.FloorProbeOutcomes))
+			for _, outcome := range readhold.FloorProbeOutcomes {
+				stats.ReadHoldFloorProbesByKind[kind][outcome] = controller.FloorProbesByKind[kind][outcome]
+			}
+		}
 		stats.ReadHoldProbationFindings = make(map[string]uint64, len(readhold.ProbationFindingOutcomes))
 		for _, outcome := range readhold.ProbationFindingOutcomes {
 			stats.ReadHoldProbationFindings[outcome] = controller.ProbationFindings[outcome]

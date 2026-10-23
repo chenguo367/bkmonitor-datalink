@@ -370,8 +370,9 @@ func TestAnIncompleteTrialFromThePreviousSlotLeavesTheHold(t *testing.T) {
 // A group lowered under its search floor - a raise right after a lowering makes the lowered hold the floor, and
 // halfway between it and the hold leaves a gap no wider than a step - is probed at halves between the floor and its
 // hold, none of those Slots refused, each passed half its hold, until the hold is within readhold.MidpointResolution
-// of the floor: 48 s comes down to 24, 12, 6 and 3 s over a floor of none. There, its floor not yet stood a day, it
-// has nothing left to try, and says so: the controller counts each trial it refuses search_done, the group's
+// of the floor: 48 s comes down to 24, 12, 6 and 3 s over a floor of none - a floor a probe failed at, the lowering
+// to it verified, so 6 and 3 s, within readhold.EdgeProbeReach of it, each read eight hours. There, its floor not yet
+// stood a day, it has nothing left to try, and says so: the controller counts each trial it refuses search_done, the group's
 // lookback reading counts the same Slots no_candidate, and its record says when the floor was learned. In one
 // deployment four groups lowered so sat at 46-58 s for 57 hours, and the only reason counted was at_limit, another
 // group's.
@@ -407,27 +408,42 @@ func TestAGroupStuckUnderItsSearchFloorSaysWhy(t *testing.T) {
 	if got := refused(); got[readhold.EarlierSkipSearchDone] != 0 {
 		t.Fatalf("Slots refused search_done while their group's half was probed: %v", got)
 	}
-	came, _, _ := descent(t, f, 16*time.Hour)
+	// The record says when the floor was learned: at the raise.
+	if record, _ := holds.controller.Reading(f.queryGroup); record.EarlierFloorMillis == nil || *record.EarlierFloorMillis != 0 ||
+		record.EarlierFloorAtMillis != learnedAt.UnixMilli() || !record.EarlierFloorProbed {
+		t.Fatalf("the record's floor %v learned at %d probed %v, want none, learned at the raise %d, a floor a probe failed at",
+			record.EarlierFloorMillis, record.EarlierFloorAtMillis, record.EarlierFloorProbed, learnedAt.UnixMilli())
+	}
+	// The probes near a floor a probe failed at read eight hours each, most of a day: the floor is dated afresh
+	// here, so it stands its day from the descent's start and the group sits stuck under it for what is left.
+	ageFloor(t, f, 0)
+	learnedAt = f.now()
+	came, _, _ := descent(t, f, 30*time.Hour)
 	want := []time.Duration{48 * time.Second, 24 * time.Second, 12 * time.Second, 6 * time.Second, 3 * time.Second}
 	if fmt.Sprint(came) != fmt.Sprint(want) {
 		t.Fatalf("from %v the hold came down through %v, want %v", lowest, came, want)
 	}
-	if skipped := heldRounds(t, f, 3*time.Hour+time.Minute, func(elapsed time.Duration) bool { return elapsed >= 3*time.Hour }); skipped != 0 {
+	// Stuck there until the floor has stood a day, which the probes near it took most of.
+	stuck := min(3*time.Hour, readhold.FloorStanding-f.now().Sub(learnedAt)-30*time.Minute)
+	if stuck < time.Hour {
+		t.Fatalf("fixture: the floor stands a day %v after the descent, want an hour at least", stuck+30*time.Minute)
+	}
+	if skipped := heldRounds(t, f, stuck+time.Minute, func(elapsed time.Duration) bool { return elapsed >= stuck }); skipped != 0 {
 		t.Fatalf("%d Slots skipped unevaluated under the floor", skipped)
 	}
 	if hold := holds.controller.ReadHold(f.queryGroup); hold != want[len(want)-1] || f.now().Sub(learnedAt) >= readhold.FloorStanding {
-		t.Fatalf("three hours on: hold %v, the floor learned %v before; want %v, the floor not yet stood %v",
-			hold, f.now().Sub(learnedAt), want[len(want)-1], readhold.FloorStanding)
+		t.Fatalf("%v on: hold %v, the floor learned %v before; want %v, the floor not yet stood %v",
+			stuck, hold, f.now().Sub(learnedAt), want[len(want)-1], readhold.FloorStanding)
 	}
 	record, _ := holds.controller.Reading(f.queryGroup)
 	if record.EarlierFloorMillis == nil || *record.EarlierFloorMillis != 0 || record.EarlierFloorAtMillis != learnedAt.UnixMilli() {
-		t.Fatalf("the record's floor %v learned at %d, want none, learned at the raise %d", record.EarlierFloorMillis,
+		t.Fatalf("the record's floor %v learned at %d, want none, dated at the descent's start %d", record.EarlierFloorMillis,
 			record.EarlierFloorAtMillis, learnedAt.UnixMilli())
 	}
 	reading, _ := engine.GroupReading(f.queryGroup)
 	got := refused()
 	if got[readhold.EarlierSkipSearchDone] == 0 || got[readhold.EarlierSkipAtLimit] != 0 {
-		t.Fatalf("three hours stuck under its floor: refusals counted %v, want search_done alone", got)
+		t.Fatalf("%v stuck under its floor: refusals counted %v, want search_done alone", stuck, got)
 	}
 	// One Slot, one count, on both sides: the controller hears exactly the Slots the lookback counts.
 	if noCandidate := reading.EarlierSkipped[lookback.EarlierSkipNoCandidate]; noCandidate != got[readhold.EarlierSkipSearchDone] {

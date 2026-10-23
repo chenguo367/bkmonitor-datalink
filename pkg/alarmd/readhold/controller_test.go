@@ -206,8 +206,20 @@ func TestLoweringNeedsQuietAndThreeObservedEarlierReads(t *testing.T) {
 		t.Fatal("fewer than three fresh matches lowered the hold")
 	}
 	earlier(600, true, true)
-	if c.ReadHold("qg") != 75*time.Second {
-		t.Fatal("three matches after quiet did not halve the hold")
+	// Three matches after quiet choose the half; the hold moves once a probe
+	// has read it round by round.
+	if record, _ := c.Reading("qg"); c.ReadHold("qg") != 150*time.Second || record.VerifyCandidateMillis == nil ||
+		*record.VerifyCandidateMillis != 75_000 {
+		t.Fatalf("three matches after quiet: hold %v, candidate %v; want the hold unmoved and 75 s to verify",
+			c.ReadHold("qg"), record.VerifyCandidateMillis)
+	}
+	if _, tries := c.EarlierCandidate("qg"); tries {
+		t.Fatal("a trial runs while the candidate is verified")
+	}
+	verifyEnd(t, c, "qg", 660, true)
+	if record, _ := c.Reading("qg"); c.ReadHold("qg") != 75*time.Second || record.VerifyCandidateMillis != nil || !record.LoweredVerified {
+		t.Fatalf("after the probe passed: hold %v, candidate %v, verified %v; want halved, verified, the candidate cleared",
+			c.ReadHold("qg"), record.VerifyCandidateMillis, record.LoweredVerified)
 	}
 	observeEarly(t, c, "qg", 180*time.Second, 75_000)
 	reading, _ := c.Reading("qg")
@@ -962,8 +974,8 @@ func TestALoweringBelowOneStepGoesToZero(t *testing.T) {
 	for index := range 3 {
 		earlier(execution.EvaluationTime(360+index*60), 0)
 	}
-	if c.ReadHold("qg") != 0 {
-		t.Fatalf("lowering below one step kept %s", c.ReadHold("qg"))
+	if got := verifyEnd(t, c, "qg", 540, true); got != 0 || c.ReadHold("qg") != 0 {
+		t.Fatalf("lowering below one step verified %s and kept %s, want zero", got, c.ReadHold("qg"))
 	}
 }
 
@@ -999,6 +1011,7 @@ func TestALoweredHoldStaysLoweredAfterRestore(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	verifyEnd(t, c, "qg", 360, true)
 	if c.ReadHold("qg") != 75*time.Second {
 		t.Fatalf("not lowered: %s", c.ReadHold("qg"))
 	}
@@ -1269,3 +1282,25 @@ func TestAReadEarlyAfterAVerifiedLoweringIsAFloorAProbeFailedAt(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// verifyEnd ends the shadow probe of the candidate the group's trials chose,
+// passed or not, at slot - every lowering comes through one (FloorProbe,
+// kind verify) - and returns the candidate.
+func verifyEnd(t *testing.T, c *Controller, qg execution.QueryGroupIdentity, slot execution.EvaluationTime, passed bool) time.Duration {
+	t.Helper()
+	candidate, kind, _, probing := c.FloorProbe(qg)
+	if !probing || kind != FloorProbeKindVerify {
+		t.Fatalf("no candidate to verify: %v, kind %q, probing %v", candidate, kind, probing)
+	}
+	record, _ := c.Reading(qg)
+	hold := current(record)
+	if err := c.FloorProbeResult(context.Background(), FloorProbeEvidence{Contract: holdContract(qg, slot, hold), Floor: candidate,
+		Kind: kind, Hold: time.Duration(hold) * time.Millisecond, Passed: passed}); err != nil {
+		t.Fatal(err)
+	}
+	return candidate
+}
+
+// verifyRounds is the rounds a probe of the trials' candidate reads clean
+// before it passes, lookback.ProbationRounds.
+const verifyRounds = 120

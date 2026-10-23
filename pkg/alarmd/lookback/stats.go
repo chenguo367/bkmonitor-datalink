@@ -72,8 +72,8 @@ type counters struct {
 	probations      map[string]uint64
 	probationCaught map[string]uint64
 	// floorProbeRounds is source|outcome: shadow probe rounds by what they
-	// came to (FloorProbeRoundOutcomes); floorProbes source|event: probes
-	// started and ended (FloorProbeEvents).
+	// came to (FloorProbeRoundOutcomes); floorProbes source|kind|event:
+	// probes started and ended (FloorProbeKinds, FloorProbeEvents).
 	floorProbeRounds map[string]uint64
 	floorProbes      map[string]uint64
 	// floorProbeChanges is source|change: the buckets the formal reads of
@@ -177,8 +177,10 @@ func newCounters(sources, refusals []string) counters {
 		for _, outcome := range FloorProbeRoundOutcomes {
 			c.floorProbeRounds[key2(source, outcome)] = 0
 		}
-		for _, event := range FloorProbeEvents {
-			c.floorProbes[key2(source, event)] = 0
+		for _, kind := range FloorProbeKinds {
+			for _, event := range FloorProbeEvents {
+				c.floorProbes[key3(source, kind, event)] = 0
+			}
 		}
 		for _, change := range Changes {
 			c.floorProbeChanges[key2(source, change)] = 0
@@ -231,9 +233,11 @@ type Stats struct {
 	// at_limit, a group held at its limit, whose data arrives past the
 	// longest hold it may have.
 	ReadHoldEarlierSkipped map[string]uint64 `json:"read_hold_earlier_skipped,omitempty"`
-	// ReadHoldFloorProbes is the shadow probes of a floor whose end the
-	// controller took, by what it made of them: lowered, relearned, stale.
-	ReadHoldFloorProbes map[string]uint64 `json:"read_hold_floor_probes,omitempty"`
+	// ReadHoldFloorProbes is the shadow probes whose end the controller took,
+	// by what it made of them (readhold.FloorProbeOutcomes), every kind
+	// together, and ReadHoldFloorProbesByKind by kind and outcome.
+	ReadHoldFloorProbes       map[string]uint64            `json:"read_hold_floor_probes,omitempty"`
+	ReadHoldFloorProbesByKind map[string]map[string]uint64 `json:"read_hold_floor_probes_by_kind,omitempty"`
 	// ReadHoldProbationFindings is the probation findings the controller
 	// took, by what it made of them: undone, quiet.
 	ReadHoldProbationFindings map[string]uint64 `json:"read_hold_probation_findings,omitempty"`
@@ -423,11 +427,13 @@ type SourceStats struct {
 	// FloorProbeRounds is the rounds of Query Groups whose floor is probed,
 	// read at the floor beside the formal read, by what they came to
 	// (FloorProbeRoundOutcomes); FloorProbes the probes started and ended
-	// (FloorProbeEvents); FloorProbeGroups the source's Query Groups with a
-	// probe now.
-	FloorProbeRounds map[string]uint64 `json:"floor_probe_rounds"`
-	FloorProbes      map[string]uint64 `json:"floor_probes"`
-	FloorProbeGroups uint64            `json:"floor_probe_groups"`
+	// (FloorProbeEvents), every kind together, and FloorProbesByKind by kind
+	// (FloorProbeKinds) and event; FloorProbeGroups the source's Query Groups
+	// with a probe now.
+	FloorProbeRounds  map[string]uint64            `json:"floor_probe_rounds"`
+	FloorProbes       map[string]uint64            `json:"floor_probes"`
+	FloorProbesByKind map[string]map[string]uint64 `json:"floor_probes_by_kind"`
+	FloorProbeGroups  uint64                       `json:"floor_probe_groups"`
 	// FloorProbeChanges is the buckets the formal reads of different probe
 	// rounds differed in from the read at the probe's hold, by change class
 	// (Changes): what a failed probe found not yet there.
@@ -591,7 +597,7 @@ func (engine *Engine) GroupReading(queryGroup execution.QueryGroupIdentity) (Gro
 	counts, source := state.reading, state.source
 	var probe *GroupFloorProbe
 	if current := state.floorProbe; current != nil {
-		probe = &GroupFloorProbe{FloorMillis: current.floor.Milliseconds(), HoldMillis: current.hold.Milliseconds(),
+		probe = &GroupFloorProbe{FloorMillis: current.floor.Milliseconds(), Kind: current.kind, HoldMillis: current.hold.Milliseconds(),
 			Clean: current.clean, Rounds: engine.probeRounds(current), Started: current.started, Reserved: len(current.reserved)}
 	}
 	engine.mu.Unlock()
@@ -780,8 +786,14 @@ func (engine *Engine) Stats() Stats {
 		for _, outcome := range FloorProbeRoundOutcomes {
 			entry.FloorProbeRounds[outcome] = engine.counts.floorProbeRounds[key2(source, outcome)]
 		}
-		for _, event := range FloorProbeEvents {
-			entry.FloorProbes[event] = engine.counts.floorProbes[key2(source, event)]
+		entry.FloorProbesByKind = make(map[string]map[string]uint64, len(FloorProbeKinds))
+		for _, kind := range FloorProbeKinds {
+			entry.FloorProbesByKind[kind] = make(map[string]uint64, len(FloorProbeEvents))
+			for _, event := range FloorProbeEvents {
+				count := engine.counts.floorProbes[key3(source, kind, event)]
+				entry.FloorProbesByKind[kind][event] = count
+				entry.FloorProbes[event] += count
+			}
 		}
 		entry.FloorProbeChanges = map[string]uint64{}
 		for _, change := range Changes {

@@ -60,6 +60,7 @@ func TestALoweredHoldComesDownAStepPerSlot(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			verifyEnd(t, c, "qg", first+execution.EvaluationTime(EarlierMatchesRequired), true)
 			if c.ReadHold("qg") != 5*time.Minute {
 				t.Fatalf("fixture: lowered to %v, want 5 minutes", c.ReadHold("qg"))
 			}
@@ -165,6 +166,7 @@ func TestTheLastLoweringIsReadFromTheRecordByTheNextOwner(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	verifyEnd(t, c, "qg", 123, true)
 	if _, err := c.SlotReadHold(ctx, schedule, 180, holdFence("qg")); err != nil {
 		t.Fatal(err)
 	}

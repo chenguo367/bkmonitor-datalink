@@ -87,6 +87,14 @@ type Record struct {
 	// raise right after a lowering, different trials in a row - and for a
 	// record written before the field: such a floor was not probed.
 	EarlierFloorProbed bool `json:"earlier_floor_probed,omitempty"`
+	// VerifyCandidateMillis is the hold the trials chose to lower to, which a
+	// shadow probe reads round by round before the hold moves (FloorProbe,
+	// kind verify): the trials stop while it is set, a probe that passes
+	// lowers the hold to it, and one that fails makes it the floor. Cleared
+	// when the hold is raised or seeded - the data came later than it -
+	// and by the probe's end; a renewal clearing the floor keeps it, a
+	// candidate the trials chose being no floor's. Nil while there is none.
+	VerifyCandidateMillis *int64 `json:"verify_candidate_ms,omitempty"`
 	// LoweredFromMillis is the hold the last lowering came from, while the
 	// group stays Lowered: a raise right after it goes back there at least.
 	LoweredFromMillis   int64  `json:"lowered_from_ms,omitempty"`
@@ -141,7 +149,7 @@ func Decode(raw []byte) (Record, error) {
 	if !inRange(record.HoldMillis) || !inRange(record.PreviousHoldMillis) || record.SinceSlot <= 0 ||
 		record.PreviousSinceSlot < 0 || record.PreviousSinceSlot > record.SinceSlot ||
 		(record.PendingHoldMillis != nil && !inRange(*record.PendingHoldMillis)) ||
-		(record.EarlierFloorMillis != nil && *record.EarlierFloorMillis < 0) || record.EarlierFloorAtMillis < 0 || record.EarlierDifferents < 0 || record.EarlierFloorRetests < 0 || record.LoweredFromMillis < 0 ||
+		(record.EarlierFloorMillis != nil && *record.EarlierFloorMillis < 0) || (record.VerifyCandidateMillis != nil && *record.VerifyCandidateMillis < 0) || record.EarlierFloorAtMillis < 0 || record.EarlierDifferents < 0 || record.EarlierFloorRetests < 0 || record.LoweredFromMillis < 0 ||
 		record.ArrivalAgeMillis < 0 || record.MaxEarlyIntervalMillis < 0 ||
 		record.EarlierMatches < 0 || record.EarlierMatches > EarlierMatchesRequired || !inRange(record.LimitMillis) ||
 		record.SegmentStart < 0 || record.QueryDurationMillis < 0 || record.QueryDurationAtMillis < 0 {

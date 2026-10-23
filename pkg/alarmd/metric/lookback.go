@@ -127,14 +127,17 @@ func newLookbackCollector() *lookbackCollector {
 				"lookback_probation_rereads_total{outcome=\"window_read_early\"}, every one of which should be here. "+
 				"Every outcome exists from the start.", "outcome"),
 		readHoldFloorProbes: desc("read_hold_floor_probes_total",
-			"Shadow probes of a floor whose end the read-hold controller took, by what it made of it: lowered (the "+
-				"probe read lookback.ProbationRounds rounds in a row the same at the floor as at the hold, and the hold "+
-				"comes down to the floor, a probation after it as after every lowering), relearned (a round read differently: the floor "+
-				"stays, dated now, and stands twice as long as before before the next probe), floor_raised (a round read "+
-				"differently at a hold between the floor and the hold: that hold is the floor now, and the next probe "+
-				"reads the midpoint above it), stale (the record had "+
-				"moved since the probe began - its hold, its floor or its search - and the probe changed nothing). "+
-				"Probes that did not end are on lookback_floor_probes_total. Every outcome exists from the start.", "outcome"),
+			"Shadow probes whose end the read-hold controller took, by kind - verify (the candidate three trials in a "+
+				"row chose, read before the hold moves; every lowering now comes through one), midpoint (halfway between "+
+				"a floor and the hold), floor (the floor itself) - and what it made of it: lowered (the probe read "+
+				"lookback.ProbationRounds rounds in a row the same at its hold as at the group's, and the hold comes down "+
+				"to it, a probation after it as after every lowering), relearned (a round read differently at the floor: "+
+				"the floor stays, dated now, and stands twice as long as before before the next probe), floor_raised (a "+
+				"round read differently at the candidate or a midpoint: that hold is the floor now, and the next probe "+
+				"reads the midpoint above it), stale (the record had moved since the probe began - its hold, its floor "+
+				"or its search - and the probe changed nothing), moot (verify: the candidate was no longer below the hold "+
+				"and above the floor, and was cleared unread). Probes that did not end are on "+
+				"lookback_floor_probes_total. Every kind and outcome exists from the start.", "kind", "outcome"),
 		readHoldDuration: desc("read_hold_query_duration_writes_total",
 			"Read-hold records written for the query duration they keep, by why: changed (the owner's measured "+
 				"duration moved by a second, a minute or more after the last write) or refreshed (the same reading "+
@@ -278,7 +281,8 @@ func newLookbackCollector() *lookbackCollector {
 			"Rounds read early that probation caught - a reread at the first rung that found the whole window came "+
 				"later, raising the hold - by source and the lowering the probation followed: verified (a hold a shadow "+
 				"probe read clean round by round first, passed by chance; the lowered hold becomes a floor a probe failed "+
-				"at) and trial (a lowering on earlier-read trials alone). Each is one round decided on data not yet "+
+				"at) and trial (a lowering on earlier-read trials alone, as builds before every lowering was verified "+
+				"made). Each is one round decided on data not yet "+
 				"whole. Reader: how often a verified lowering was wrong, against how many there were "+
 				"(read_hold_floor_probes_total{outcome=\"lowered\"}). Every value exists from the start.", "source", "after"),
 		probationGroups: desc("lookback_probation_groups",
@@ -293,11 +297,14 @@ func newLookbackCollector() *lookbackCollector {
 				"otherwise than it was reserved for). Reader: what the probes cost and how often their rounds count; "+
 				"their reads' bytes are in lookback_earlier_read_bytes_total.", "source", "outcome"),
 		floorProbes: desc("lookback_floor_probes_total",
-			"Shadow probes of a floor by source and what happened to them: started, passed (lookback.ProbationRounds "+
-				"rounds in a row clean), failed (a round different), hold_moved (the hold, the floor or the search under "+
-				"them moved before the probe ended), owner_lost (the group left this process). A probe whose process "+
-				"stops first ends with none of them: started rising while passed and failed do not is probes that "+
-				"never live to finish, as under rollouts more frequent than a probe's rounds.", "source", "event"),
+			"Shadow probes by source, kind - verify (the candidate a group's trials chose, read before its hold "+
+				"moves), midpoint (halfway between a floor and the hold), floor (the floor itself) - and what happened "+
+				"to them: started, passed (lookback.ProbationRounds rounds in a row clean, more near a floor a probe "+
+				"failed at), failed (a round different), hold_moved (the hold, the floor or the search under them moved "+
+				"before the probe ended), owner_lost (the group left this process). A probe whose process stops first "+
+				"ends with none of them: started rising while passed and failed do not is probes that never live to "+
+				"finish, as under rollouts more frequent than a probe's rounds. Every lowering starts as a verify probe, "+
+				"so verify started tracks the lowerings on their way.", "source", "kind", "event"),
 		floorProbeGroups: desc("lookback_floor_probe_groups",
 			"The source's Query Groups whose floor is being probed now.", "source"),
 		floorProbeChanges: desc("lookback_floor_probe_changes_total",
@@ -390,8 +397,10 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 	for _, reason := range readhold.EarlierSkipReasons {
 		counter(c.readHoldEarlierSkip, stats.ReadHoldEarlierSkipped[reason], reason)
 	}
-	for _, outcome := range readhold.FloorProbeOutcomes {
-		counter(c.readHoldFloorProbes, stats.ReadHoldFloorProbes[outcome], outcome)
+	for _, kind := range readhold.FloorProbeKinds {
+		for _, outcome := range readhold.FloorProbeOutcomes {
+			counter(c.readHoldFloorProbes, stats.ReadHoldFloorProbesByKind[kind][outcome], kind, outcome)
+		}
 	}
 	for _, outcome := range readhold.ProbationFindingOutcomes {
 		counter(c.readHoldFindings, stats.ReadHoldProbationFindings[outcome], outcome)
@@ -468,8 +477,10 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 		for _, outcome := range lookback.FloorProbeRoundOutcomes {
 			counter(c.floorProbeRounds, source.FloorProbeRounds[outcome], name, outcome)
 		}
-		for _, event := range lookback.FloorProbeEvents {
-			counter(c.floorProbes, source.FloorProbes[event], name, event)
+		for _, kind := range lookback.FloorProbeKinds {
+			for _, event := range lookback.FloorProbeEvents {
+				counter(c.floorProbes, source.FloorProbesByKind[kind][event], name, kind, event)
+			}
 		}
 		gauge(c.floorProbeGroups, float64(source.FloorProbeGroups), name)
 		for _, change := range lookback.Changes {

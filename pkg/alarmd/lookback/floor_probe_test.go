@@ -35,6 +35,7 @@ type probeRun struct {
 	// probing is what FloorProbe answers; candidate whether CurrentCandidate gives one.
 	probing   bool
 	edge      bool
+	kind      string
 	candidate bool
 	ends      []FloorProbeEnd
 	refused   int
@@ -71,10 +72,14 @@ func newProbeRun(t *testing.T, hold, floor time.Duration, rounds int) *probeRun 
 		defer r.mu.Unlock()
 		return hold / 2, r.candidate
 	}
-	options.FloorProbe = func(execution.QueryGroupIdentity) (time.Duration, bool, bool) {
+	options.FloorProbe = func(execution.QueryGroupIdentity) (time.Duration, string, bool, bool) {
 		r.mu.Lock()
 		defer r.mu.Unlock()
-		return r.floor, r.edge, r.probing
+		kind := r.kind
+		if kind == "" {
+			kind = "floor"
+		}
+		return r.floor, kind, r.edge, r.probing
 	}
 	options.EarlierRefused = func(execution.QueryGroupIdentity) {
 		r.mu.Lock()
@@ -440,7 +445,8 @@ func TestARoundThatIsNoEvidenceNeitherAdvancesNorEndsTheProbe(t *testing.T) {
 }
 
 // A probe ends hold_moved when its floor is no longer the one to probe, when the search below the hold opens again,
-// or when the floor it reads at moves; the group leaving the process ends it owner_lost. Its reservations are dropped
+// or when the floor it reads at or its kind moves - the trials chose a candidate to verify; the group leaving the
+// process ends it owner_lost. Each end and start is counted under the kind of its probe. Its reservations are dropped
 // with it, read by no one. A floor still to probe - moved, or the group back - starts another from none.
 func TestAProbeEndsWhenWhatItReadsMoves(t *testing.T) {
 	for _, c := range []struct {
@@ -453,6 +459,7 @@ func TestAProbeEndsWhenWhatItReadsMoves(t *testing.T) {
 		{"search open", func(r *probeRun) { r.set(func() { r.candidate = true }) }, FloorProbeHoldMoved, false},
 		{"floor moved", func(r *probeRun) { r.set(func() { r.floor = 10 * time.Second }) }, FloorProbeHoldMoved, true},
 		{"near a failed floor now", func(r *probeRun) { r.set(func() { r.edge = true }) }, FloorProbeHoldMoved, true},
+		{"another kind now", func(r *probeRun) { r.set(func() { r.kind = "verify" }) }, FloorProbeHoldMoved, true},
 		{"owner lost", func(r *probeRun) { r.f.engine.Forget("qg") }, FloorProbeOwnerLost, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -462,19 +469,26 @@ func TestAProbeEndsWhenWhatItReadsMoves(t *testing.T) {
 			c.move(r)
 			r.run(first+4*60, 1)
 			ends := r.endsSeen()
-			if len(ends) != 1 || ends[0].Event != c.event {
-				t.Fatalf("ends %+v, want one %s", ends, c.event)
+			if len(ends) != 1 || ends[0].Event != c.event || ends[0].Kind != "floor" {
+				t.Fatalf("ends %+v, want one %s of the floor", ends, c.event)
 			}
 			started := map[bool]uint64{false: 1, true: 2}[c.again]
 			if got := r.events()[FloorProbeStarted]; got != started {
 				t.Fatalf("%d probes started, want %d", got, started)
 			}
+			byKind := r.f.engine.Stats().Sources[sourceTimeSeries].FloorProbesByKind
+			again := map[bool]uint64{false: 0, true: 1}[c.again && r.kind == "verify"]
+			if byKind["floor"][c.event] != 1 || byKind["verify"][FloorProbeStarted] != again ||
+				byKind["floor"][FloorProbeStarted] != started-again {
+				t.Fatalf("by kind %v: want the floor's start and %s, and the probe after under its own kind", byKind, c.event)
+			}
 			reading, _ := r.f.engine.GroupReading("qg")
 			switch busy, _ := r.f.engine.Busy("qg"); {
 			case !c.again && (busy.FloorProbeRounds != 0 || reading.FloorProbe != nil):
 				t.Fatalf("%d rounds still reserved, probe %+v, after the probe ended", busy.FloorProbeRounds, reading.FloorProbe)
-			case c.again && (reading.FloorProbe == nil || reading.FloorProbe.Clean != 0 || reading.FloorProbe.FloorMillis != r.floor.Milliseconds()):
-				t.Fatalf("the probe after: %+v, want one at the floor %v with no round yet", reading.FloorProbe, r.floor)
+			case c.again && (reading.FloorProbe == nil || reading.FloorProbe.Clean != 0 || reading.FloorProbe.FloorMillis != r.floor.Milliseconds() ||
+				reading.FloorProbe.Kind != map[bool]string{false: "floor", true: "verify"}[r.kind == "verify"]):
+				t.Fatalf("the probe after: %+v, want one at the floor %v with no round yet, of its kind", reading.FloorProbe, r.floor)
 			}
 		})
 	}

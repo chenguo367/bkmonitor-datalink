@@ -38,6 +38,12 @@ import (
 // which are late seldom, and each late round is one evaluated on data not
 // yet whole. A round counts only when its reread was compared: one skipped
 // for want of a permit, or whose read failed, is no evidence the hold holds.
+//
+// The trials now only choose; a shadow probe reads the candidate for as many
+// rounds before the hold moves (readhold.Controller.FloorProbe, kind verify).
+// Run the same way with it, 805 lowerings, 5 of them into the spread - the
+// probes that passed by chance - and probation saw the first late round of
+// each, within 91 rounds.
 const ProbationRounds = 120
 
 // Probation reread outcomes, closed: clean read the window as the first read
@@ -70,7 +76,8 @@ type probationState struct {
 
 // What a probation that caught a round read early followed, closed: verified,
 // a lowering a shadow probe read clean first - one that passed by chance;
-// trial, a lowering on earlier-read trials alone.
+// trial, a lowering on earlier-read trials alone, as a build before every
+// lowering was verified made.
 const (
 	ProbationAfterVerified = "verified"
 	ProbationAfterTrial    = "trial"
