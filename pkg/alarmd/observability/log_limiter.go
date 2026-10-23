@@ -47,6 +47,11 @@ type LogAdmission struct {
 	// Unwritten is a workflow stage's routine success, or a Control Leader
 	// round that changed nothing: counted, never written.
 	Unwritten bool
+	// ReasonChanged marks the evaluation its Query Group's reason changed on
+	// from the group's previous Slot, written whatever its result, and
+	// PreviousReasons is what that Slot's evaluations ended with.
+	ReasonChanged   bool
+	PreviousReasons []ReasonCode
 }
 
 // RoutineLogSample is the budget of every result that is neither a success

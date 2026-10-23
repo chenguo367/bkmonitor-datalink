@@ -61,9 +61,12 @@ type Logger struct {
 // counted and not written: its facts are in the stage's metrics, and one
 // line per Slot of every Query Group was nearly the whole log. Every other
 // result goes through the scoped limiter, by reason, stage and Query Group,
-// with suppressed counts on the next admitted line.
+// with suppressed counts on the next admitted line. The evaluation on which
+// a Query Group's reason changed from its previous Slot is written whatever
+// its result (reasonTransitions).
 type BoundedLogPolicy struct {
-	repeated RepeatedLogLimiter
+	repeated    RepeatedLogLimiter
+	transitions *reasonTransitions
 }
 
 // NewScopedBoundedLogPolicy builds the phase-two policy that limits repeated
@@ -72,7 +75,7 @@ func NewScopedBoundedLogPolicy(limiter *ScopedLogLimiter) (*BoundedLogPolicy, er
 	if limiter == nil {
 		return nil, errors.New("observability: bounded log policy requires a scoped limiter")
 	}
-	return &BoundedLogPolicy{repeated: limiter}, nil
+	return &BoundedLogPolicy{repeated: limiter, transitions: newReasonTransitions(limiter.maxScopes)}, nil
 }
 
 func (p *BoundedLogPolicy) ShouldLog(observation Observation) bool {
@@ -83,6 +86,11 @@ func (p *BoundedLogPolicy) ShouldLog(observation Observation) bool {
 // and not written, and how many earlier lines of the same bucket were merged
 // into a logged one.
 func (p *BoundedLogPolicy) Admit(observation Observation) LogAdmission {
+	if p != nil && reasonTransitionCandidate(observation) {
+		if changed, previous := p.transitions.observe(observation.Trace.QueryGroupKey, observation.Trace.EvaluationTime, observation.ReasonCode); changed {
+			return LogAdmission{Allowed: true, Candidate: true, ReasonChanged: true, PreviousReasons: previous}
+		}
+	}
 	if routineResult(observation.Result) && !evaluationHeldQuery(observation) && !readAtLimitRound(observation) {
 		switch {
 		case roundStages[observation.Stage] && roundChanged(observation):
@@ -1102,6 +1110,12 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	}
 	if admission.SuppressedEvicted > 0 {
 		attributes = append(attributes, slog.Uint64("suppressed_logs_evicted", admission.SuppressedEvicted))
+	}
+	if admission.ReasonChanged {
+		// The line its Query Group's reason changed on, and what the Slot
+		// before it ended with: written outside the sample, so a reader of a
+		// boundary finds the round it fell between.
+		attributes = append(attributes, slog.Bool("reason_changed", true), slog.Any("previous_reasons", admission.PreviousReasons))
 	}
 	level := observationLevel(observation)
 	if ctx == nil {
