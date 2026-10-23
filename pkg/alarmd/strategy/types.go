@@ -147,6 +147,10 @@ type RecoveryPlan struct {
 	// End is contract.RecoveryEndClose for a Level whose recovery ends the
 	// alert closed, empty for one that ends it resolved.
 	End string
+	// MissingData is contract.RecoveryMissingDataEvaluateAsZero for a Level
+	// whose alert also ends when no real point arrives through the recovery
+	// span, empty for one that ends only as its windows say.
+	MissingData string
 }
 
 type StateRequirement struct {
@@ -970,6 +974,7 @@ type recoveryPlanConfigV1 struct {
 	Enabled            *bool  `json:"enabled"`
 	ConsecutiveWindows uint32 `json:"consecutive_windows"`
 	End                string `json:"end,omitempty"`
+	MissingData        string `json:"missing_data,omitempty"`
 }
 
 type detectorSemantic struct {

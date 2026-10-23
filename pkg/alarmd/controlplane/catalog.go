@@ -2599,6 +2599,9 @@ func compilePlan(
 			if setter.close && !setter.malformed {
 				recoveryFields["end"] = contract.RecoveryEndClose
 			}
+			if setter.noData && !setter.malformed {
+				recoveryFields["missing_data"] = contract.RecoveryMissingDataEvaluateAsZero
+			}
 			if setter.malformed {
 				recoveryWindows = uint32(legacyDefaultRecoveryWindows)
 				dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigNoted,

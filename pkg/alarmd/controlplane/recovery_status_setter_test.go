@@ -40,11 +40,12 @@ func TestAStatusSetterIsReadAsTheCheckerReadsItAndWhatDoesNotRunIsSaid(t *testin
 		detail  string
 		windows uint32
 		end     string
+		nodata  bool
 	}{
 		{setter: `"recovery"`, windows: 3},
 		{setter: `"close"`, windows: 3, end: "close"},
-		{setter: `"recovery-nodata"`, notes: []string{noData}, detail: `status_setter="recovery-nodata" recovers_on=points`, windows: 3},
-		{setter: `"close-nodata"`, notes: []string{noData}, windows: 3, end: "close"},
+		{setter: `"recovery-nodata"`, notes: []string{noData}, detail: `status_setter="recovery-nodata" recovers_on=points`, windows: 3, nodata: true},
+		{setter: `"close-nodata"`, notes: []string{noData}, windows: 3, end: "close", nodata: true},
 		{setter: `"recover"`, notes: []string{defaulted}, detail: `status_setter="recover" read_as=recovery`, windows: 3},
 		{setter: `""`, notes: []string{defaulted}, windows: 3},
 		{setter: `"close-later"`, notes: []string{defaulted}, detail: `status_setter="close-later" read_as=close`, windows: 3, end: "close"},
@@ -79,10 +80,14 @@ func TestAStatusSetterIsReadAsTheCheckerReadsItAndWhatDoesNotRunIsSaid(t *testin
 			if test.detail != "" && !slices.Contains(mapValues(details), test.detail) {
 				t.Fatalf("details = %v, want one to be %q", details, test.detail)
 			}
-			if got := legacyRecoveryOf(t, catalog)[1]; !got.Enabled || got.ConsecutiveWindows != test.windows || got.End != test.end {
-				t.Fatalf("recovery = %+v, want enabled with %d windows, end %q", got, test.windows, test.end)
+			wantMissing := ""
+			if test.nodata {
+				wantMissing = "evaluate_as_zero"
 			}
-			if test.windows == 3 && test.end == "" {
+			if got := legacyRecoveryOf(t, catalog)[1]; !got.Enabled || got.ConsecutiveWindows != test.windows || got.End != test.end || got.MissingData != wantMissing {
+				t.Fatalf("recovery = %+v, want enabled with %d windows, end %q, missing_data %q", got, test.windows, test.end, wantMissing)
+			}
+			if test.windows == 3 && test.end == "" && !test.nodata {
 				if got := catalog.QueryGroups[0].Plans[0].Plan.StrategyIR.Levels[0].RecoveryPlan.Config; !bytes.Equal(got, plainPlan) {
 					t.Fatalf("recovery Plan %s, want the unwritten status_setter's %s", got, plainPlan)
 				}

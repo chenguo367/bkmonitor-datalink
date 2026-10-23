@@ -959,6 +959,11 @@ type RecoveryWindowEvidenceV1 struct {
 // RecoveryEndClose: the Level's alert ends closed, not resolved.
 const RecoveryEndClose = "close"
 
+// RecoveryMissingDataEvaluateAsZero: no data through the recovery span ends
+// the Level's alert (status_setter recovery-nodata or close-nodata), timed
+// from the last real point.
+const RecoveryMissingDataEvaluateAsZero = "evaluate_as_zero"
+
 // RecoveryWithheldZeroCount: this round's own value is a count of zero from
 // a source whose zero is no observation - an event count, or a log count
 // with no grouping - so it does not end an alert, though the trigger reads
