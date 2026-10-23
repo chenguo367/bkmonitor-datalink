@@ -294,25 +294,50 @@ func shapeOf(value any, depth int) any {
 // credentialFieldName says whether a key is named like what holds a
 // credential. Wide in its words - a key it catches wrongly loses its shape,
 // a key it misses would show a credential's length - but matched on whole
-// segments of the name (split at _ . - and camelCase), never inside one: a
-// substring match takes bypass for a password, author for auth and
-// status_setter's neighbours for whatever they happen to contain.
+// segments of the name (split at _ . - and camelCase, an acronym its own
+// segment: SSLCert is SSL and Cert), never inside one: a substring match
+// takes bypass for a password, author for auth and status_setter's
+// neighbours for whatever they happen to contain. A run-together name is
+// caught when it ends in password, passwd, secret, token, auth or pwd
+// (dbpassword, oauth, redispwd); pass, cert and session are not suffixes,
+// since bypass, concert and sessionless are not credentials, so dbpass,
+// sslcert and sessionid are accepted misses.
 func credentialFieldName(key string) bool {
-	segments := credentialNameSegment.FindAllString(key, -1)
-	for index, segment := range segments {
-		word := strings.ToLower(segment)
+	segments := credentialNameSegments(key)
+	for index, word := range segments {
 		if credentialFieldWords[word] || strings.HasSuffix(word, "password") || strings.HasSuffix(word, "passwd") ||
-			strings.HasSuffix(word, "secret") || strings.HasSuffix(word, "token") {
+			strings.HasSuffix(word, "secret") || strings.HasSuffix(word, "token") || strings.HasSuffix(word, "auth") ||
+			strings.HasSuffix(word, "pwd") {
 			return true
 		}
-		if (word == "key" || word == "keys") && index > 0 && credentialKeyQualifiers[strings.ToLower(segments[index-1])] {
+		if (word == "key" || word == "keys") && index > 0 && credentialKeyQualifiers[segments[index-1]] {
 			return true
 		}
 	}
 	return false
 }
 
-var credentialNameSegment = regexp.MustCompile(`[A-Z]+[a-z0-9]*|[a-z0-9]+`)
+// credentialNameSegments is a key's segments, lower case: a separator goes
+// between a lower-case letter or digit and the capital after it (apiKey), and
+// between an acronym and the word that follows it (SSLCert, XApiKey), and
+// the name splits at every separator.
+func credentialNameSegments(key string) []string {
+	marked := credentialLowerUpper.ReplaceAllString(key, "${1}_${2}")
+	marked = credentialAcronymWord.ReplaceAllString(marked, "${1}_${2}")
+	var segments []string
+	for _, segment := range credentialNameSeparator.Split(marked, -1) {
+		if segment != "" {
+			segments = append(segments, strings.ToLower(segment))
+		}
+	}
+	return segments
+}
+
+var (
+	credentialLowerUpper    = regexp.MustCompile(`([a-z0-9])([A-Z])`)
+	credentialAcronymWord   = regexp.MustCompile(`([A-Z]+)([A-Z][a-z])`)
+	credentialNameSeparator = regexp.MustCompile(`[^A-Za-z0-9]+`)
+)
 
 // credentialFieldWords are the segments that name what holds a credential,
 // wherever they stand in a key: db_passwd, basic_auth, session_id.

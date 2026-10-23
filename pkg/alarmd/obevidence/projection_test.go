@@ -222,6 +222,9 @@ func TestACredentialNamedKeyIsKnownByItsName(t *testing.T) {
 		// And the credentials themselves, in the forms a writer uses.
 		"secret": true, "token": true, "secret_key": true, "client_secret": true, "authToken": true, "requirepass": true,
 		"dbpassword": true, "x_api_key": true,
+		// Acronym-led camelCase and run-together names.
+		"SSLCert": true, "HTTPHeader": true, "XApiKey": true, "APIKey": true, "JWTSecret": true, "DBPassword": true,
+		"basicauth": true, "oauth": true, "redispwd": true, "HTTPServerName": false, "URLPath": false,
 	} {
 		if got := credentialFieldName(key); got != want {
 			t.Errorf("credentialFieldName(%q) = %v, want %v", key, got, want)
