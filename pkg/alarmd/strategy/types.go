@@ -144,6 +144,9 @@ type TriggerPlan struct {
 type RecoveryPlan struct {
 	Enabled            bool
 	ConsecutiveWindows uint32
+	// End is contract.RecoveryEndClose for a Level whose recovery ends the
+	// alert closed, empty for one that ends it resolved.
+	End string
 }
 
 type StateRequirement struct {
@@ -966,6 +969,7 @@ type uptimeTimeRangeV1 struct {
 type recoveryPlanConfigV1 struct {
 	Enabled            *bool  `json:"enabled"`
 	ConsecutiveWindows uint32 `json:"consecutive_windows"`
+	End                string `json:"end,omitempty"`
 }
 
 type detectorSemantic struct {

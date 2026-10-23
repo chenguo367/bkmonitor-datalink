@@ -144,6 +144,33 @@ func TestAZeroCountChangesNoTriggerDecision(t *testing.T) {
 	}
 }
 
+// A Level written to end its alert closed says so on its RECOVERY, and only
+// there: not on the ABNORMAL before it, and not on a recovery a zero withheld.
+func TestARecoveryWrittenToCloseSaysSoOnlyOnItsRecovery(t *testing.T) {
+	level := levelV2(5, 1, 1, 1, 1, nil)
+	level.RecoveryPlan.Config = mustJSONV2(map[string]any{"enabled": true, "consecutive_windows": 1, "end": contract.RecoveryEndClose})
+	plan := compilePlanV2(t, []contract.LevelIRV2{level})
+	end := func(result EvaluationResultV2) string {
+		if window := result.LevelOutcomes[0].DecisionWindow; window != nil {
+			return window.Recovery.End
+		}
+		return ""
+	}
+
+	got, evaluated := evaluateCounts(t, plan, []countPoint{{"5.000000", true}, {"1.000000", false}}, false)
+	if got[0] != contract.LevelResultAbnormal || got[1] != contract.LevelResultRecovery {
+		t.Fatalf("rounds = %v, want ABNORMAL then RECOVERY", got)
+	}
+	if end(evaluated[0]) != "" || end(evaluated[1]) != contract.RecoveryEndClose {
+		t.Fatalf("ends = %q, %q, want none on the ABNORMAL and close on the RECOVERY", end(evaluated[0]), end(evaluated[1]))
+	}
+
+	got, evaluated = evaluateCounts(t, plan, []countPoint{{"5.000000", true}, {"0.000000", false}}, true)
+	if got[1] != contract.LevelResultNormal || end(evaluated[1]) != "" {
+		t.Fatalf("withheld round = %s with end %q, want NORMAL and no end", got[1], end(evaluated[1]))
+	}
+}
+
 // On a window with a hole a recovery may be decided (decision-022) but
 // NORMAL may not. So a recovery a zero withholds there is what any round
 // that did not recover is: unavailable, with the history reason - not

@@ -119,8 +119,10 @@ type Event struct {
 type wireEvaluation struct {
 	Severity string `json:"severity"`
 	Action   string `json:"action"`
-	// Empty on purpose: the reason an alert resolved is not a fact this
-	// process establishes, and a guess here would be read as one.
+	// Empty for triggered and resolved on purpose: the reason an alert
+	// resolved is not a fact this process establishes, and a guess here would
+	// be read as one. A level that recovered and ends closed says
+	// ActionReasonRecoveryClose: that it was written to end closed is a fact.
 	ActionReason string `json:"action_reason"`
 }
 
@@ -238,6 +240,11 @@ func (converter *Converter) Convert(event *contract.TriggerEventV1) (Event, erro
 	primary, err := primaryLevel(event)
 	if err != nil {
 		return Event{}, reject(RuleLevelsInvalid, err)
+	}
+	if action == ActionResolved {
+		// The primary Level's own ending: closed for a Level written to end
+		// its alert closed (LevelAction).
+		action = LevelAction(primary)
 	}
 	businessID, err := strconv.ParseInt(labelBusiness(event), 10, 64)
 	if err != nil {
@@ -357,7 +364,11 @@ func (converter *Converter) evaluations(event *contract.TriggerEventV1) ([]wireE
 			return nil, reject(RuleLevelsInvalid, fmt.Errorf("alarmd linkdoutput: two levels of one decision share the severity %q", severity))
 		}
 		seen[severity] = struct{}{}
-		evaluations = append(evaluations, wireEvaluation{Severity: severity, Action: action})
+		reason := ""
+		if action == ActionClosed {
+			reason = ActionReasonRecoveryClose
+		}
+		evaluations = append(evaluations, wireEvaluation{Severity: severity, Action: action, ActionReason: reason})
 	}
 	if len(evaluations) == 0 {
 		return nil, reject(RuleLevelsInvalid, errors.New("alarmd linkdoutput: a decision with no decided level has nothing to say"))
@@ -475,18 +486,29 @@ func soleObservedValue(observed contract.TriggerObservedV1) json.RawMessage {
 }
 
 // LevelAction is what the consumer is told about one level: triggered for
-// ABNORMAL, resolved for RECOVERY, and nothing ("") for a level that decided
-// nothing this round. See evaluations for why the last is left out; whoever
-// models what the consumer does with a message reads it through this too.
+// ABNORMAL, resolved for RECOVERY - closed, with ActionReasonRecoveryClose,
+// for a level written to end its alert closed (status_setter close) - and
+// nothing ("") for a level that decided nothing this round. See evaluations
+// for why the last is left out; whoever models what the consumer does with a
+// message reads it through this too.
 func LevelAction(level contract.LevelResultV1) string {
 	switch level.Result {
 	case contract.LevelResultAbnormal:
 		return ActionTriggered
 	case contract.LevelResultRecovery:
+		if level.DecisionWindow.Recovery.End == contract.RecoveryEndClose {
+			return ActionClosed
+		}
 		return ActionResolved
 	}
 	return ""
 }
+
+// ActionReasonRecoveryClose is the action_reason of a level that recovered
+// and ends its alert closed, as its owner wrote: the platform's close, not a
+// control-plane close (CloseReason*), and not a recovery the consumer would
+// count as one.
+const ActionReasonRecoveryClose = "recovery_close"
 
 // primaryLevel returns the level the event was aggregated to. The aggregation
 // already happened - lowest priority among the levels that agree with the

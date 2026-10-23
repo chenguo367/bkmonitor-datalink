@@ -538,6 +538,30 @@ func TestLevelResultV1RequiresConsistentWindowDecision(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "recovery that ends closed",
+			mutate: func(result *LevelResultV1) {
+				result.Result = LevelResultRecovery
+				result.DecisionWindow.Recovery.ObservedConsecutiveMisses = 1
+				result.DecisionWindow.Recovery.End = RecoveryEndClose
+			},
+		},
+		{
+			name: "an end on a result that is not a recovery",
+			mutate: func(result *LevelResultV1) {
+				result.DecisionWindow.Recovery.End = RecoveryEndClose
+			},
+			wantErr: true,
+		},
+		{
+			name: "an end outside the closed list",
+			mutate: func(result *LevelResultV1) {
+				result.Result = LevelResultRecovery
+				result.DecisionWindow.Recovery.ObservedConsecutiveMisses = 1
+				result.DecisionWindow.Recovery.End = "resolve"
+			},
+			wantErr: true,
+		},
+		{
 			name: "recovery while trigger is satisfied",
 			mutate: func(result *LevelResultV1) {
 				result.Result = LevelResultRecovery

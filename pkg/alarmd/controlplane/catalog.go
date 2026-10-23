@@ -351,12 +351,6 @@ const ReasonRecoveryConfigDefaulted = "RECOVERY_CONFIG_DEFAULTED"
 // the part before "-" is "close", recovered otherwise.
 const ReasonRecoveryStatusSetterDefaulted = "RECOVERY_STATUS_SETTER_DEFAULTED"
 
-// ReasonRecoveryCloseUnsupported names a Level written to end its alert
-// closed (status_setter close or close-nodata). This build ends it
-// recovered: a close is a message of its own on the alert link, and which
-// one the link takes for this is not settled.
-const ReasonRecoveryCloseUnsupported = "RECOVERY_CLOSE_UNSUPPORTED"
-
 // ReasonRecoveryNoDataUnsupported names a Level written to end its alert when
 // no data arrives through the recovery window (status_setter *-nodata). This
 // build ends it only on points, as without the suffix.
@@ -2599,8 +2593,12 @@ func compilePlan(
 		// The status_setter of a level the checker reads its own recovery
 		// for; a strategy-wide default and a borrowed trigger take
 		// "recovery" with the default window, as the checker does.
+		recoveryFields := map[string]any{"enabled": true}
 		if !recoveryDefaulted && !borrowed {
 			setter := readLegacyRecoveryStatusSetter(detect.Recovery)
+			if setter.close && !setter.malformed {
+				recoveryFields["end"] = contract.RecoveryEndClose
+			}
 			if setter.malformed {
 				recoveryWindows = uint32(legacyDefaultRecoveryWindows)
 				dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigNoted,
@@ -2622,7 +2620,8 @@ func compilePlan(
 			}
 		}
 		trigger, _ := json.Marshal(triggerFields)
-		recovery, _ := json.Marshal(map[string]any{"consecutive_windows": recoveryWindows, "enabled": true})
+		recoveryFields["consecutive_windows"] = recoveryWindows
+		recovery, _ := json.Marshal(recoveryFields)
 		connector := contract.LevelConnectorAND
 		if strings.EqualFold(detect.Connector, "or") {
 			connector = contract.LevelConnectorOR

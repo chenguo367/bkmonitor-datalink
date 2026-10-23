@@ -545,12 +545,12 @@ func evaluateLevelV2(
 	// recover: NORMAL on a whole window, saying it was withheld, and on an
 	// incomplete one the history reason, since only a RECOVERY may be
 	// decided on a window that is not FULL (decision-022).
-	withheld := ""
+	withheld, end := "", ""
 	if result == "" && recoveryPlan.Enabled && observedMisses >= recoveryPlan.ConsecutiveWindows && rangeObserved {
 		if request.ZeroCountIsNoObservation && zeroCountV2(detectEvidence.NormalizedValue) {
 			withheld = contract.RecoveryWithheldZeroCount
 		} else {
-			result = contract.LevelResultRecovery
+			result, end = contract.LevelResultRecovery, recoveryPlan.End
 		}
 	}
 	if result == "" {
@@ -572,7 +572,7 @@ func evaluateLevelV2(
 		Recovery: contract.RecoveryWindowEvidenceV1{
 			Enabled: recoveryPlan.Enabled, RequiredConsecutiveWindows: recoveryPlan.ConsecutiveWindows,
 			ObservedConsecutiveMisses: observedMisses, OldestWindowStart: oldestWindowStart,
-			SkippedWindows: skippedWindows, Withheld: withheld,
+			SkippedWindows: skippedWindows, Withheld: withheld, End: end,
 		},
 		HistoryCompleteness: summary.Completeness,
 		WindowEvidence: contract.WindowEvidenceV1{

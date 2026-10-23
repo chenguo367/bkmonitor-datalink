@@ -19,15 +19,16 @@ import (
 
 // A level's status_setter is read the way the recovery checker reads it
 // (recover.py:133-142, :396-403), and what this build does not execute is
-// said rather than dropped: a close ends recovered and a -nodata ends only
-// on points, each noted; a value outside the four is noted with how it was
-// read; one the checker cannot split takes the default window. Nothing
-// else about the level changes: its recovery Plan is the one an unwritten
-// status_setter compiles to, apart from the malformed value's window.
+// said rather than dropped: a -nodata ends only on points, noted; a close is
+// executed, frozen into the recovery Plan as end "close", and says nothing;
+// a value outside the four is noted with how it was read, and one read as a
+// close closes; one the checker cannot split takes the default window.
+// Nothing else about the level changes: its recovery Plan is the one an
+// unwritten status_setter compiles to, apart from the malformed value's
+// window and a close's end.
 func TestAStatusSetterIsReadAsTheCheckerReadsItAndWhatDoesNotRunIsSaid(t *testing.T) {
 	const (
 		defaulted = "RECOVERY_STATUS_SETTER_DEFAULTED"
-		closing   = "RECOVERY_CLOSE_UNSUPPORTED"
 		noData    = "RECOVERY_NODATA_UNSUPPORTED"
 		window    = "RECOVERY_CONFIG_DEFAULTED"
 	)
@@ -38,14 +39,15 @@ func TestAStatusSetterIsReadAsTheCheckerReadsItAndWhatDoesNotRunIsSaid(t *testin
 		notes   []string
 		detail  string
 		windows uint32
+		end     string
 	}{
 		{setter: `"recovery"`, windows: 3},
-		{setter: `"close"`, notes: []string{closing}, detail: `status_setter="close" ends_as=recovered`, windows: 3},
+		{setter: `"close"`, windows: 3, end: "close"},
 		{setter: `"recovery-nodata"`, notes: []string{noData}, detail: `status_setter="recovery-nodata" recovers_on=points`, windows: 3},
-		{setter: `"close-nodata"`, notes: []string{closing, noData}, windows: 3},
+		{setter: `"close-nodata"`, notes: []string{noData}, windows: 3, end: "close"},
 		{setter: `"recover"`, notes: []string{defaulted}, detail: `status_setter="recover" read_as=recovery`, windows: 3},
 		{setter: `""`, notes: []string{defaulted}, windows: 3},
-		{setter: `"close-later"`, notes: []string{defaulted, closing}, detail: `status_setter="close-later" read_as=close`, windows: 3},
+		{setter: `"close-later"`, notes: []string{defaulted}, detail: `status_setter="close-later" read_as=close`, windows: 3, end: "close"},
 		{setter: `"close-no-data"`, notes: []string{window}, detail: `recovery_windows=5; status_setter "close-no-data" is not read`, windows: 5},
 		{setter: `null`, notes: []string{window}, windows: 5},
 		{setter: `5`, notes: []string{window}, windows: 5},
@@ -77,10 +79,10 @@ func TestAStatusSetterIsReadAsTheCheckerReadsItAndWhatDoesNotRunIsSaid(t *testin
 			if test.detail != "" && !slices.Contains(mapValues(details), test.detail) {
 				t.Fatalf("details = %v, want one to be %q", details, test.detail)
 			}
-			if got := legacyRecoveryOf(t, catalog)[1]; !got.Enabled || got.ConsecutiveWindows != test.windows {
-				t.Fatalf("recovery = %+v, want enabled with %d windows", got, test.windows)
+			if got := legacyRecoveryOf(t, catalog)[1]; !got.Enabled || got.ConsecutiveWindows != test.windows || got.End != test.end {
+				t.Fatalf("recovery = %+v, want enabled with %d windows, end %q", got, test.windows, test.end)
 			}
-			if test.windows == 3 {
+			if test.windows == 3 && test.end == "" {
 				if got := catalog.QueryGroups[0].Plans[0].Plan.StrategyIR.Levels[0].RecoveryPlan.Config; !bytes.Equal(got, plainPlan) {
 					t.Fatalf("recovery Plan %s, want the unwritten status_setter's %s", got, plainPlan)
 				}

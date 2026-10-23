@@ -807,16 +807,20 @@ func compileRecoveryPlan(raw contract.TypedPlanV1) (RecoveryPlan, contract.Typed
 	if err := decodeStrict(raw.Config, &config); err != nil {
 		return RecoveryPlan{}, contract.TypedPlanV1{}, err
 	}
-	if config.Enabled == nil || (*config.Enabled && config.ConsecutiveWindows == 0) {
+	if config.Enabled == nil || (*config.Enabled && config.ConsecutiveWindows == 0) ||
+		config.End != "" && config.End != contract.RecoveryEndClose {
 		return RecoveryPlan{}, contract.TypedPlanV1{}, errors.New("invalid recovery plan")
 	}
 	if !*config.Enabled {
-		config.ConsecutiveWindows = 0
+		config.ConsecutiveWindows, config.End = 0, ""
 	}
+	// End is omitted when empty, so a Plan written to recover compiles to the
+	// bytes it had before the field existed.
 	normalized := struct {
 		Enabled            bool   `json:"enabled"`
 		ConsecutiveWindows uint32 `json:"consecutive_windows"`
-	}{Enabled: *config.Enabled, ConsecutiveWindows: config.ConsecutiveWindows}
+		End                string `json:"end,omitempty"`
+	}{Enabled: *config.Enabled, ConsecutiveWindows: config.ConsecutiveWindows, End: config.End}
 	canonical, err := canonicalTypedPlan(raw.Type, raw.Version, normalized)
 	return RecoveryPlan(normalized), canonical, err
 }

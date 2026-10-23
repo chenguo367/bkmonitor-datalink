@@ -177,6 +177,38 @@ func TestARecoveryDecisionIsWrittenAsAStandardEvent(t *testing.T) {
 	})
 }
 
+// A level written to end its alert closed recovers as closed, with the
+// platform's reason for it, in the evaluation, the title and the sink's
+// action; a level beside it written to recover still says resolved.
+func TestARecoveryWrittenToCloseIsWrittenClosed(t *testing.T) {
+	event := decision(func(event *contract.TriggerEventV1) {
+		event.EventKind = contract.TriggerEventRecovery
+		event.LevelResults[0].Result = contract.LevelResultRecovery
+		event.LevelResults[0].DecisionWindow.Recovery.End = contract.RecoveryEndClose
+		event.LevelResults = append(event.LevelResults, contract.LevelResultV1{LevelID: 1, Result: contract.LevelResultRecovery})
+	})
+	converter, err := NewConverter(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	converted, err := converter.Convert(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converted.Action != ActionClosed {
+		t.Fatalf("sink action = %q, want closed", converted.Action)
+	}
+	message := map[string]json.RawMessage{}
+	if err := json.Unmarshal(converted.Payload, &message); err != nil {
+		t.Fatal(err)
+	}
+	assertFields(t, message, map[string]string{
+		"evaluations": `[{"severity":"warning","action":"closed","action_reason":"recovery_close"},` +
+			`{"severity":"critical","action":"resolved","action_reason":""}]`,
+		"title": `"Strategy 123 level 2 closed"`,
+	})
+}
+
 // Every decided level is written and every undecided one is left out. The
 // consumer keeps a lifecycle per severity and reads an absent level as
 // "nothing said": writing resolved for a level that stayed normal would close

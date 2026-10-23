@@ -949,7 +949,15 @@ type RecoveryWindowEvidenceV1 struct {
 	// not RECOVERY. Empty for every recovery that was decided as the windows
 	// say.
 	Withheld string `json:"withheld,omitempty"`
+	// End is how a RECOVERY ends its alert when not as recovered:
+	// RecoveryEndClose for a Level written to end it closed (status_setter
+	// close or close-nodata). Empty on every other result and every Level
+	// written to recover.
+	End string `json:"end,omitempty"`
 }
+
+// RecoveryEndClose: the Level's alert ends closed, not resolved.
+const RecoveryEndClose = "close"
 
 // RecoveryWithheldZeroCount: this round's own value is a count of zero from
 // a source whose zero is no observation - an event count, or a log count

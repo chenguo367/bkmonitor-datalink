@@ -124,12 +124,6 @@ var withheldReasonWords = map[string]WithheldReasonWords{
 		What:   "这一级别恢复配置的 status_setter 不是 recovery、close、recovery-nodata、close-nodata 之一，已按平台的读法读：\"-\" 前是 close 就按关闭结束，否则按恢复结束（详情里写明原值与读法）——策略在检测，不是被扣住",
 		Next:   "策略负责人把 status_setter 改成四个取值之一；改好后下一轮刷新这一行消失",
 		Action: ActionStrategyEdit},
-	// Under CONFIG_NOTED too: the alert ends recovered where the owner wrote
-	// closed; how the alert link takes a close for this is not settled.
-	"RECOVERY_CLOSE_UNSUPPORTED": {Kind: WithheldStrategyDefinition,
-		What:   "这一级别写的是恢复时关闭告警（status_setter 为 close 或 close-nodata），本构建在同样的时刻按恢复结束告警，不是关闭（详情里写明原值）——策略在检测，阈值与恢复判定都照常，不是被扣住",
-		Next:   "不需要策略负责人处理：关闭的结束方式待平台与告警链路对齐后支持；在那之前要关闭的告警会显示为已恢复",
-		Action: ActionNone},
 	// Under CONFIG_NOTED too: the alert ends only on points where the owner
 	// wrote that no data through the recovery window ends it.
 	"RECOVERY_NODATA_UNSUPPORTED": {Kind: WithheldStrategyDefinition,
