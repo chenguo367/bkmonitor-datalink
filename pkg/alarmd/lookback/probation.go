@@ -190,7 +190,7 @@ func (engine *Engine) finishProbationLocked(state *group, candidate *sample) {
 	case class == ClassWindowReadEarly:
 		outcome = ProbationWindowReadEarly
 		candidate.completion = max(candidate.lastChangeAge, 0)
-		engine.recordReadHoldLocked(candidate)
+		engine.recordProbationCaughtLocked(candidate)
 	}
 	engine.counts.probations[key2(candidate.source, outcome)]++
 	if state.probation == nil || candidate.contract.ReadHoldMillis != state.lastHold {
@@ -228,4 +228,24 @@ func (engine *Engine) InProbation(queryGroup execution.QueryGroupIdentity) (int,
 		return 0, false
 	}
 	return state.probation.clean, true
+}
+
+// recordProbationCaughtLocked hands a probation reread that found its round
+// read early to the read-hold controller, whatever arrived. A sample's finding
+// goes only when a whole window arrived to read an age from; a probation's is
+// the lowering shown wrong either way - a round decided on data not yet whole,
+// or on data that went after it - and the controller undoes the lowering and
+// starts its quiet over (readhold.Controller.Observe). Kept, it went nowhere:
+// the hold stayed lowered, the probation ran on, and trials went on lowering.
+func (engine *Engine) recordProbationCaughtLocked(candidate *sample) {
+	if engine.options.OnWholeWindowReadEarly == nil || candidate.holdReported {
+		return
+	}
+	candidate.holdReported = true
+	rung := ""
+	if candidate.lastChange >= 0 {
+		rung = RungNames[candidate.lastChange]
+	}
+	engine.holdEvidence = append(engine.holdEvidence, ReadHoldEvidence{Contract: candidate.contract,
+		ArrivalAge: candidate.completion, Rung: rung, Buckets: append([]int64(nil), candidate.lastBuckets...), Probation: true})
 }

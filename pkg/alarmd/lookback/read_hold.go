@@ -25,6 +25,10 @@ type ReadHoldEvidence struct {
 	ArrivalAge time.Duration
 	Rung       string
 	Buckets    []int64
+	// Probation marks a probation reread that found its round read early: a
+	// lowered hold shown wrong, whether or not a whole window arrived to read
+	// an age from (ArrivalAge is when the reread saw it, at least).
+	Probation bool
 }
 
 // EarlierReadEvidence compares a candidate h/2 read with the formal first

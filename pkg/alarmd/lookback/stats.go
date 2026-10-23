@@ -229,6 +229,9 @@ type Stats struct {
 	// ReadHoldFloorProbes is the shadow probes of a floor whose end the
 	// controller took, by what it made of them: lowered, relearned, stale.
 	ReadHoldFloorProbes map[string]uint64 `json:"read_hold_floor_probes,omitempty"`
+	// ReadHoldProbationFindings is the probation findings the controller
+	// took, by what it made of them: undone, quiet.
+	ReadHoldProbationFindings map[string]uint64 `json:"read_hold_probation_findings,omitempty"`
 	// RoundsReadAtLimit is the decided rounds read at their group's hold
 	// limit while its data was measured landing past it, by the source the
 	// group reads (Sources): each a round decided before its data was all

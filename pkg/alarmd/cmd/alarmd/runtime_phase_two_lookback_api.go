@@ -151,6 +151,10 @@ func productionLookbackStats(engine *lookback.Engine, holds *productionReadHolds
 		for _, outcome := range readhold.FloorProbeOutcomes {
 			stats.ReadHoldFloorProbes[outcome] = controller.FloorProbes[outcome]
 		}
+		stats.ReadHoldProbationFindings = make(map[string]uint64, len(readhold.ProbationFindingOutcomes))
+		for _, outcome := range readhold.ProbationFindingOutcomes {
+			stats.ReadHoldProbationFindings[outcome] = controller.ProbationFindings[outcome]
+		}
 		stats.RoundsReadAtLimit = make(map[string]uint64, len(lookback.Sources))
 		holds.readAtLimitMu.Lock()
 		for _, source := range lookback.Sources {

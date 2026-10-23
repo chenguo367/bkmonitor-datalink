@@ -68,6 +68,7 @@ type lookbackCollector struct {
 	floorProbeGroups    *prometheus.Desc
 	floorProbeChanges   *prometheus.Desc
 	readHoldFloorProbes *prometheus.Desc
+	readHoldFindings    *prometheus.Desc
 	holdIgnored         *prometheus.Desc
 	readHoldTransition  *prometheus.Desc
 	readHoldOvertaken   *prometheus.Desc
@@ -117,6 +118,13 @@ func newLookbackCollector() *lookbackCollector {
 				"wider than a step; the group's read-hold record says when the floor was learned, earlier_floor_at_ms). "+
 				"A group whose floor is being probed is counted under neither: its Slots are "+
 				"lookback_earlier_skipped_total{reason=\"floor_probe\"}. Every reason exists from the start.", "reason"),
+		readHoldFindings: desc("read_hold_probation_findings_total",
+			"Probation findings the read-hold controller took - a lowered group's reread that found its round read "+
+				"early, whatever arrived - by what it made of them: undone (the lowering put back to the hold it came "+
+				"from, the lowered hold the floor, the quiet started over) and quiet (the group was not lowered: its quiet "+
+				"started over, no trial lowers it until it is quiet for its bar). Against "+
+				"lookback_probation_rereads_total{outcome=\"window_read_early\"}, every one of which should be here. "+
+				"Every outcome exists from the start.", "outcome"),
 		readHoldFloorProbes: desc("read_hold_floor_probes_total",
 			"Shadow probes of a floor whose end the read-hold controller took, by what it made of it: lowered (the "+
 				"probe read lookback.ProbationRounds rounds in a row the same at the floor as at the hold, and the hold "+
@@ -336,7 +344,7 @@ func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, desc := range []*prometheus.Desc{c.firstReads, c.checks, c.changed, c.changes, c.classes, c.readEarly, c.seriesLate, c.supplementWindows, c.supplementUnobserved, c.supplementSeries,
 		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.earlierBytes, c.earlierReads, c.earlierOvertaken, c.earlierPreparedLate, c.earlierAhead, c.earlierSkipped, c.probationRereads, c.probationGroups, c.floorProbeRounds, c.floorProbes, c.floorProbeGroups, c.floorProbeChanges, c.holdIgnored, c.readBytes, c.checkBytes, c.unknown, c.coverage,
 		c.pending, c.yields, c.refused, c.faults, c.plans, c.planHeld, c.readHoldTransition, c.readHoldOvertaken,
-		c.readHoldPredecessor, c.readHoldSeed, c.readHoldDuration, c.readHoldEarlierSkip, c.readHoldFloorProbes, c.roundsReadAtLimit, c.readHoldClamped, c.readHoldCorrupt, c.readHoldRetireClose, c.readHoldCloseSkip, c.readHoldDegraded,
+		c.readHoldPredecessor, c.readHoldSeed, c.readHoldDuration, c.readHoldEarlierSkip, c.readHoldFloorProbes, c.readHoldFindings, c.roundsReadAtLimit, c.readHoldClamped, c.readHoldCorrupt, c.readHoldRetireClose, c.readHoldCloseSkip, c.readHoldDegraded,
 		c.readHoldGroups, c.readHoldMax} {
 		ch <- desc
 	}
@@ -376,6 +384,9 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	for _, outcome := range readhold.FloorProbeOutcomes {
 		counter(c.readHoldFloorProbes, stats.ReadHoldFloorProbes[outcome], outcome)
+	}
+	for _, outcome := range readhold.ProbationFindingOutcomes {
+		counter(c.readHoldFindings, stats.ReadHoldProbationFindings[outcome], outcome)
 	}
 	for _, source := range lookback.Sources {
 		counter(c.roundsReadAtLimit, stats.RoundsReadAtLimit[source], source)

@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -1182,3 +1183,56 @@ func TestTheHoldReadersStateIsPendingFirstAndUnknownWhenUnread(t *testing.T) {
 		}
 	}
 }
+
+// A probation's finding undoes the lowering it watches whatever the round's
+// arrival age: a reread that saw the change before the lowered hold - a
+// series that went, or a change seen early - still puts the hold back where it
+// came from, makes the lowered hold the floor, and starts the quiet over, so
+// no trial lowers it again until the group is quiet for its bar. The same
+// age from a sample raises nothing, and starts the quiet over; noise - a
+// series that went, from a sample - starts it over too.
+func TestAProbationFindingPutsTheHoldBackWhereItCameFrom(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		evidence func(execution.FrozenExecutionContractRef) Evidence
+		hold     int64
+		floor    *int64
+	}{
+		{"probation", func(ref execution.FrozenExecutionContractRef) Evidence {
+			return Evidence{Contract: ref, ArrivalAge: 10 * time.Second, Rung: "x1.5", Probation: true}
+		}, 214_329, ptr(int64(107_164))},
+		{"sample", func(ref execution.FrozenExecutionContractRef) Evidence {
+			return Evidence{Contract: ref, ArrivalAge: 10 * time.Second, Rung: "x1.5"}
+		}, 107_164, nil},
+		{"noise", func(ref execution.FrozenExecutionContractRef) Evidence {
+			return Evidence{Contract: ref, Noise: true}
+		}, 107_164, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ctl, store, now := controllerFixture(t)
+			store.values["qg"] = []byte(fmt.Sprintf(`{"hold_ms":107164,"since_slot":60,"lowered":true,"lowered_from_ms":214329,`+
+				`"quiet_since_ms":%d,"earlier_matches":2}`, now.Add(-3*time.Hour).UnixMilli()))
+			prepare(t, ctl, groupSpec("qg", 0))
+			if err := ctl.Observe(context.Background(), c.evidence(holdContract("qg", 120, 107_164))); err != nil {
+				t.Fatal(err)
+			}
+			record, _ := ctl.Reading("qg")
+			floor, want := int64(-1), int64(-1)
+			if record.EarlierFloorMillis != nil {
+				floor = *record.EarlierFloorMillis
+			}
+			if c.floor != nil {
+				want = *c.floor
+			}
+			if got := ctl.ReadHold("qg").Milliseconds(); got != c.hold || floor != want {
+				t.Fatalf("hold %d ms, floor %d ms; want %d ms, floor %d ms (-1: none)", got, floor, c.hold, want)
+			}
+			if record.QuietSinceMillis != now.UnixMilli() || record.EarlierMatches != 0 {
+				t.Fatalf("quiet since %d, %d matches; want the quiet started over now (%d), no matches", record.QuietSinceMillis,
+					record.EarlierMatches, now.UnixMilli())
+			}
+		})
+	}
+}
+
+func ptr[T any](v T) *T { return &v }

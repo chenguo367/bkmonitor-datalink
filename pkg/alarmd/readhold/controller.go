@@ -115,7 +115,21 @@ type Stats struct {
 	// FloorProbes is the shadow probes whose end this controller took, by
 	// what it made of them (FloorProbeOutcomes).
 	FloorProbes map[string]uint64
+	// ProbationFindings is the probation findings this controller took, by
+	// what it made of them (ProbationFindingOutcomes).
+	ProbationFindings map[string]uint64
 }
+
+// What a probation's finding made of the group's record, closed: undone, a
+// lowering put back to the hold it came from; quiet, nothing to undo - the
+// group not lowered - and its quiet started over.
+const (
+	ProbationFindingUndone = "undone"
+	ProbationFindingQuiet  = "quiet"
+)
+
+// ProbationFindingOutcomes is every way a probation's finding is taken.
+var ProbationFindingOutcomes = []string{ProbationFindingUndone, ProbationFindingQuiet}
 
 // Why an earlier-read trial was not run, closed. at_limit: the group is held
 // at its limit (Record.HeldAtLimit) and has not been quiet for its bar since
@@ -251,6 +265,9 @@ type Evidence struct {
 	Rung       string
 	Buckets    []int64
 	Noise      bool
+	// Probation is a probation reread's finding: the group's lowering was
+	// wrong, and is undone whatever ArrivalAge says (Observe).
+	Probation bool
 }
 
 type EarlierEvidence struct {
@@ -291,8 +308,10 @@ type Controller struct {
 	// (EarlierSkipReasons).
 	earlierSkipped map[string]uint64
 	// floorProbes is the shadow probes taken, by outcome
-	// (FloorProbeOutcomes).
-	floorProbes map[string]uint64
+	// (FloorProbeOutcomes), and probationFindings the probation findings
+	// (ProbationFindingOutcomes).
+	floorProbes       map[string]uint64
+	probationFindings map[string]uint64
 	// durationWrites is the records written for a query duration, by why
 	// (QueryDurationWriteReasons).
 	durationWrites map[string]uint64
@@ -308,7 +327,8 @@ func NewController(options Options) (*Controller, error) {
 	}
 	return &Controller{options: options, groups: make(map[execution.QueryGroupIdentity]*entry),
 		predecessors: make(map[string]uint64), clamped: make(map[string]uint64), seeds: make(map[string]uint64),
-		durationWrites: make(map[string]uint64), earlierSkipped: make(map[string]uint64), floorProbes: make(map[string]uint64)}, nil
+		durationWrites: make(map[string]uint64), earlierSkipped: make(map[string]uint64), floorProbes: make(map[string]uint64),
+		probationFindings: make(map[string]uint64)}, nil
 }
 
 // Stats copies the counts.
@@ -336,6 +356,10 @@ func (controller *Controller) Stats() Stats {
 	stats.FloorProbes = make(map[string]uint64, len(FloorProbeOutcomes))
 	for _, outcome := range FloorProbeOutcomes {
 		stats.FloorProbes[outcome] = controller.floorProbes[outcome]
+	}
+	stats.ProbationFindings = make(map[string]uint64, len(ProbationFindingOutcomes))
+	for _, outcome := range ProbationFindingOutcomes {
+		stats.ProbationFindings[outcome] = controller.probationFindings[outcome]
 	}
 	stats.QueryDurationWrites = make(map[string]uint64, len(QueryDurationWriteReasons))
 	for _, reason := range QueryDurationWriteReasons {
@@ -1300,8 +1324,16 @@ func (controller *Controller) Observe(ctx context.Context, evidence Evidence) er
 	if next.SegmentStart == 0 {
 		next.SegmentStart = evidence.Contract.ScheduleSegmentStart
 	}
+	finding := ""
+	if evidence.Probation {
+		finding = ProbationFindingQuiet
+	}
 	if evidence.Noise {
+		// A series that went after its first read: no age to raise to, but
+		// the round was decided on data that changed after it, so no lowering
+		// until the group is quiet again.
 		next.Noise++
+		next.QuietSinceMillis, next.EarlierMatches = controller.options.Now().UnixMilli(), 0
 	} else {
 		now := controller.options.Now().UnixMilli()
 		if next.LastEarlyMillis > 0 && now > next.LastEarlyMillis {
@@ -1333,7 +1365,12 @@ func (controller *Controller) Observe(ctx context.Context, evidence Evidence) er
 		// hold, so the arrival age alone decides it.
 		target := max(0, evidence.ArrivalAge.Milliseconds()-state.spec.Delay.Milliseconds()-state.spec.SettlingWait.Milliseconds())
 		next.AtLimit, next.LimitMillis = target > limit, limit
-		if !next.Closed && min(target, limit) > current(next) {
+		// A probation's finding undoes the lowering it watches whatever the
+		// round's arrival age: the hold goes back at least to where it came
+		// from (below), even when the reread saw the change before the
+		// lowered hold - a series that went, or one seen early in its rung.
+		undo := evidence.Probation && next.Lowered && next.LoweredFromMillis > current(next)
+		if !next.Closed && (min(target, limit) > current(next) || undo) {
 			hold := min(target, limit)
 			// A raise right after a lowering shows the lowered hold too early:
 			// a whole window read there was still arriving. The lowering is
@@ -1355,10 +1392,19 @@ func (controller *Controller) Observe(ctx context.Context, evidence Evidence) er
 			if next.Lowered {
 				next.RaisedAfterLowering++
 				next.Lowered, next.LoweredVerified = false, false
+				if evidence.Probation {
+					finding = ProbationFindingUndone
+				}
 			}
 		}
 	}
-	return controller.persist(ctx, qg, state, next, nil)
+	if err := controller.persist(ctx, qg, state, next, nil); err != nil {
+		return err
+	}
+	if finding != "" {
+		controller.counted(controller.probationFindings, finding)
+	}
+	return nil
 }
 
 func (controller *Controller) EarlierRead(ctx context.Context, evidence EarlierEvidence) error {

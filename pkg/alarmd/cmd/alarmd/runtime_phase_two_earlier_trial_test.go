@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -431,5 +432,56 @@ func TestAGroupStuckUnderItsSearchFloorSaysWhy(t *testing.T) {
 	// One Slot, one count, on both sides: the controller hears exactly the Slots the lookback counts.
 	if noCandidate := reading.EarlierSkipped[lookback.EarlierSkipNoCandidate]; noCandidate != got[readhold.EarlierSkipSearchDone] {
 		t.Fatalf("the group's reading counts %d Slots no_candidate, the controller %d search_done", noCandidate, got[readhold.EarlierSkipSearchDone])
+	}
+}
+
+// A probation that finds a lowered group's round read early undoes the lowering, whatever arrived: here a series the
+// first read had is gone by the probation's reread - no whole window arriving to read an age from - and the hold goes
+// back where the trials lowered it from, the lowered hold the floor, and no trial lowers it again while the group is
+// not quiet for its bar. Left as the data was, the same rounds leave the hold where the trials put it. In one
+// deployment such a finding reached no one: the hold stayed lowered and the trials went on lowering it.
+func TestAProbationFindingUndoesALoweringFromTheProductionWiring(t *testing.T) {
+	for _, gone := range []bool{false, true} {
+		t.Run(map[bool]string{false: "the data as it was", true: "a series gone by the reread"}[gone], func(t *testing.T) {
+			t.Parallel()
+			f := startCutoverFixture(t, leasesOutliveTheRun)
+			holds := f.bundle.dependencies.ReadHolds
+			if lowest, raised, outcomes, overtaken, _ := heldTrialRun(t, f, 96500*time.Millisecond, 12*time.Hour, false,
+				func(_, lowest, _ time.Duration, _ map[string]uint64) bool { return lowest == 0 }); lowest != 0 {
+				t.Fatalf("fixture: the hold %v never came down to none: trials %v, overtaken by %v", raised, outcomes, overtaken)
+			}
+			lowered, _ := holds.controller.Reading(f.queryGroup)
+			if !lowered.Lowered || lowered.LoweredFromMillis <= 0 {
+				t.Fatalf("fixture: the record %+v is not lowered from a hold", lowered)
+			}
+			from := time.Duration(lowered.LoweredFromMillis) * time.Millisecond
+			if gone {
+				var since atomic.Int64
+				since.Store(f.now().Unix())
+				f.uqHosts = func(end int64) []string {
+					if end > since.Load() && f.now().Before(time.Unix(end, 0).Add(time.Minute)) {
+						return []string{"127.0.0.1", "127.0.0.2"}
+					}
+					return []string{"127.0.0.1"}
+				}
+			}
+			heldRounds(t, f, 51*time.Minute, func(elapsed time.Duration) bool { return elapsed >= 50*time.Minute })
+			record, _ := holds.controller.Reading(f.queryGroup)
+			hold := holds.controller.ReadHold(f.queryGroup)
+			findings := holds.controller.Stats().ProbationFindings
+			if !gone {
+				if hold != 0 || findings[readhold.ProbationFindingUndone]+findings[readhold.ProbationFindingQuiet] != 0 {
+					t.Fatalf("the data as it was: hold %v, probation findings %v; want it left at none, and none", hold, findings)
+				}
+				return
+			}
+			if findings[readhold.ProbationFindingUndone] != 1 {
+				t.Fatalf("a series gone by the reread: probation findings %v, want the lowering undone once", findings)
+			}
+			if hold < from || record.EarlierFloorMillis == nil || *record.EarlierFloorMillis != 0 || record.Lowered {
+				t.Fatalf("a series gone by the reread: hold %v, floor %v, lowered %v; want back to %v at least over a floor of none",
+					hold, record.EarlierFloorMillis, record.Lowered, from)
+			}
+		})
 	}
 }

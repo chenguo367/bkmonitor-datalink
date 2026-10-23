@@ -1539,6 +1539,12 @@ Labels: `reason`
 
 Moved Plans a successor Query Group seeded, by what it took the Plan's previous hold from: inherited (the old group's closed record, exactly), zero (no record: a group never held), or -- each read as the hold bound, which costs the successor's first Slots a later read and never a Slot -- record_open, record_corrupt, record_unreadable; and the links it skipped: self_link, invalid_link, expired.
 
+## alarmd_read_hold_probation_findings_total
+
+Labels: `outcome`
+
+Probation findings the read-hold controller took - a lowered group's reread that found its round read early, whatever arrived - by what it made of them: undone (the lowering put back to the hold it came from, the lowered hold the floor, the quiet started over) and quiet (the group was not lowered: its quiet started over, no trial lowers it until it is quiet for its bar). Against lookback_probation_rereads_total{outcome="window_read_early"}, every one of which should be here. Every outcome exists from the start.
+
 ## alarmd_read_hold_query_duration_writes_total
 
 Labels: `reason`

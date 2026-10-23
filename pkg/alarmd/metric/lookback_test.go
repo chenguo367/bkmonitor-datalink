@@ -41,6 +41,7 @@ func lookbackSeriesUpperBounds() map[string]int {
 		"read_hold_degraded_total":                   len(readhold.DegradedReasons),
 		"read_hold_earlier_skipped_total":            len(readhold.EarlierSkipReasons),
 		"read_hold_floor_probes_total":               len(readhold.FloorProbeOutcomes),
+		"read_hold_probation_findings_total":         len(readhold.ProbationFindingOutcomes),
 		"rounds_read_at_limit_total":                 len(lookback.Sources),
 		"read_hold_groups":                           len(lookback.Sources) * 3,
 		"read_hold_max_seconds":                      len(lookback.Sources),

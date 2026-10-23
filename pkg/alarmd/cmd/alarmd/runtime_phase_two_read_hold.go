@@ -908,7 +908,7 @@ func (holds *productionReadHolds) bindLookback(options *lookback.Options) {
 	options.OnWholeWindowReadEarly = func(e lookback.ReadHoldEvidence) {
 		holds.observation(e.Contract, func(ctx context.Context) error {
 			return holds.controller.Observe(ctx, readhold.Evidence{Contract: e.Contract, ArrivalAge: e.ArrivalAge,
-				Rung: e.Rung, Buckets: e.Buckets})
+				Rung: e.Rung, Buckets: e.Buckets, Probation: e.Probation})
 		})
 	}
 	options.OnEarlierRead = func(e lookback.EarlierReadEvidence) {

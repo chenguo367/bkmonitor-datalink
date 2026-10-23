@@ -160,8 +160,9 @@ func TestAProbationRereadThatFindsTheWindowReadEarlyRaisesTheHold(t *testing.T) 
 	f.raisesMu.Lock()
 	raises := append([]ReadHoldEvidence(nil), f.raises...)
 	f.raisesMu.Unlock()
-	if len(raises) != 1 || raises[0].Contract.Slot.EvaluationTime != execution.EvaluationTime(slot) || raises[0].ArrivalAge <= 0 {
-		t.Fatalf("raises %+v, want the round's once with its arrival", raises)
+	if len(raises) != 1 || raises[0].Contract.Slot.EvaluationTime != execution.EvaluationTime(slot) || raises[0].ArrivalAge <= 0 ||
+		!raises[0].Probation {
+		t.Fatalf("raises %+v, want the round's once with its arrival, a probation's", raises)
 	}
 	if clean, in := f.engine.InProbation("qg"); !in || clean != 0 {
 		t.Fatalf("after a round read early: in probation %v with %d clean, want none", in, clean)
@@ -170,6 +171,28 @@ func TestAProbationRereadThatFindsTheWindowReadEarlyRaisesTheHold(t *testing.T) 
 	f.round(2*time.Minute, "3")
 	if _, in := f.engine.InProbation("qg"); in || f.pending() != 0 {
 		t.Fatal("a raised hold is still on probation")
+	}
+}
+
+// A probation reread whose round lost a series it had - data that went after
+// the first read, no whole window arriving to read an age from - is a round
+// read early all the same: the controller hears of it, as a probation's
+// finding, and undoes the lowering. A sample's finding of the same shape is
+// noise; a probation's went nowhere, and the hold stayed lowered.
+func TestAProbationRereadWhoseSeriesWentStillReachesTheController(t *testing.T) {
+	f := newProbationFixture(t, 3)
+	f.round(2*time.Minute, "3")
+	slot, readAt := f.round(time.Minute, "3")
+	f.recheck(sourceTimeSeries, readAt, 0, minute, full(), RecheckCompared)
+	f.recheck(sourceTimeSeries, readAt, 1, minute, full(), RecheckCompared)
+	f.waitFor(func(stats Stats) bool {
+		return stats.Sources[sourceTimeSeries].ProbationRereads[ProbationWindowReadEarly] == 1
+	})
+	f.raisesMu.Lock()
+	raises := append([]ReadHoldEvidence(nil), f.raises...)
+	f.raisesMu.Unlock()
+	if len(raises) != 1 || raises[0].Contract.Slot.EvaluationTime != execution.EvaluationTime(slot) || !raises[0].Probation {
+		t.Fatalf("evidence %+v, want the round's once, a probation's finding", raises)
 	}
 }
 
