@@ -65,6 +65,11 @@ type eventSpanCase struct {
 	// native publishes the alert consumer's protocol, on which a RECOVERY
 	// asks the open-alert gate; the compatibility protocol is not gated.
 	native bool
+	// openAlert runs the consumer's protocol with its link Console and, once
+	// round 0 has sent the ABNORMAL, puts that alert in the consumer's open
+	// alert set and waits for each process's copy to read it: a zero's
+	// recovery is counted withheld only where an alert is open.
+	openAlert bool
 	// editAtTakeover widens every Level's recovery window by one while no
 	// process runs: the second process owns other content than the one the
 	// first wrote its record under, on the same Query Group.
@@ -81,7 +86,14 @@ type eventSpanCase struct {
 	readQueryRanges bool
 	// statusSetter, when set, is every Level's recovery_config.status_setter.
 	statusSetter string
+	// algorithm, when set, is every Level's algorithm type in place of the
+	// threshold, with algorithmConfig as its config: a template-bound count.
+	algorithm       string
+	algorithmConfig any
 }
+
+// eventSpanStrategyID is the strategy the runner writes and publishes.
+const eventSpanStrategyID = "7201"
 
 // eventSpanRounds is what each round of a run did.
 type eventSpanRounds struct {
@@ -160,10 +172,14 @@ func runGroupedEventCount(t *testing.T, run eventSpanCase) eventSpanRounds {
 			detects = append(detects, map[string]any{"level": index + 1, "priority": 1, "connector": "and",
 				"trigger_config":  map[string]any{"count": 1, "check_window": windows[0]},
 				"recovery_config": recovery})
-			algorithms = append(algorithms, map[string]any{"level": index + 1, "type": "Threshold", "config": threshold})
+			algorithm := map[string]any{"level": index + 1, "type": "Threshold", "config": threshold}
+			if run.algorithm != "" {
+				algorithm["type"], algorithm["config"] = run.algorithm, run.algorithmConfig
+			}
+			algorithms = append(algorithms, algorithm)
 		}
 		document["detects"], item["algorithms"] = detects, algorithms
-		if run.native {
+		if run.native || run.openAlert {
 			// The consumer's protocol names the alert by the frozen revision.
 			document["strategy_revision"] = 1 + recoveryWider
 		}
@@ -209,7 +225,10 @@ func runGroupedEventCount(t *testing.T, run eventSpanCase) eventSpanRounds {
 			return nil, err
 		}
 		mu.Lock()
-		if eventBucket == 0 {
+		// The event is in round 0's accepted period: the end of the latest
+		// window round 0 asks for. A Level reading a previous point asks a
+		// second window ending a period earlier, in either order.
+		if round == 0 && end-period > eventBucket {
 			eventBucket = end - period
 		}
 		result.ranges = append(result.ranges, [2]int64{start, end})
@@ -247,6 +266,52 @@ func runGroupedEventCount(t *testing.T, run eventSpanCase) eventSpanRounds {
 	})}
 
 	sink := &recordingPhaseTwoEventSink{}
+	var console *httptest.Server
+	if run.openAlert {
+		console = httptest.NewServer(lifecycleConsole(address, client))
+		t.Cleanup(console.Close)
+	}
+	published := false
+	// publishOpen puts the ABNORMAL's alert in the consumer's set and says
+	// so on the change channel, as the consumer does on taking it.
+	publishOpen := func() {
+		for _, event := range sink.snapshot() {
+			if event.EventKind != contract.TriggerEventAbnormal {
+				continue
+			}
+			if err := client.SAdd(ctx, lifecycleLinkPrefix+":tenant-a:"+eventSpanStrategyID, event.DedupeMD5).Err(); err != nil {
+				t.Fatal(err)
+			}
+			notice, _ := json.Marshal(map[string]string{"bk_tenant_id": "tenant-a", "strategy_id": eventSpanStrategyID})
+			if err := client.Publish(ctx, lifecycleLinkPrefix+":changes", notice).Err(); err != nil {
+				t.Fatal(err)
+			}
+			published = true
+			return
+		}
+		t.Fatal("round 0 sent no ABNORMAL to put in the consumer's set")
+	}
+	// waitHeld waits until the process's copy holds the published alert. The
+	// copy reads on its own loop, which the bundle's clock paces, so the wait
+	// moves the clock on a second at a time within the round's half period.
+	waitHeld := func(bundle *phaseTwoWorkerBundle, current int) {
+		port, ok := bundle.workerPorts.OpenAlerts.(*openAlertCopyPort)
+		if !ok {
+			t.Fatalf("the open alert port is %T", bundle.workerPorts.OpenAlerts)
+		}
+		for deadline, step := testwait.Deadline(t), int64(1); ; step++ {
+			if stats := port.cache.Stats(); stats.Loaded >= 1 && stats.Members >= 1 {
+				return
+			}
+			if step < period/2 {
+				clock.Store(base + int64(current)*period + 1 + step)
+			}
+			time.Sleep(20 * time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test deadline
+			if time.Now().After(deadline) {
+				t.Fatalf("round %d: the open alert copy has not read the strategy's set by the test's deadline: %+v", current, port.cache.Stats())
+			}
+		}
+	}
 	var observations []observability.Observation
 	result.tracker = fleet.NewTracker(nil, "event-span", func() time.Time { return time.Unix(clock.Load(), 0) })
 	open := func() *phaseTwoWorkerBundle {
@@ -256,8 +321,12 @@ func runGroupedEventCount(t *testing.T, run eventSpanCase) eventSpanRounds {
 		cfg.PhaseTwo.Worker.RegistrationTTL = config.Duration(6 * time.Hour)
 		cfg.PhaseTwo.Ownership.ControlLeaderTTL = config.Duration(6 * time.Hour)
 		cfg.PhaseTwo.Ownership.LeaseTTL = config.Duration(6 * time.Hour)
-		if run.native {
+		if run.native || run.openAlert {
 			cfg.PhaseTwo.Output.Protocol = config.OutputProtocolNative
+		}
+		if run.openAlert {
+			cfg.PhaseTwo.Linkd.ConsoleURL = console.URL + testLinkdAPIRoot
+			cfg.PhaseTwo.Linkd.Username, cfg.PhaseTwo.Linkd.Password = "user", "secret"
 		}
 		bundle, err := openProductionPhaseTwoBundleWithDependencies(ctx, cfg, metric.NewRecorder(metric.BuildInfo{}),
 			observability.Discard(observability.ComponentRuntime), newPhaseTwoApplicationHealth(),
@@ -305,6 +374,12 @@ func runGroupedEventCount(t *testing.T, run eventSpanCase) eventSpanRounds {
 		clock.Store(base + int64(current)*period + 1)
 		if err := runScheduledOnceSettled(ctx, bundle); err != nil {
 			t.Fatalf("round %d: %v", current, err)
+		}
+		if run.openAlert {
+			if !published {
+				publishOpen()
+			}
+			waitHeld(bundle, current)
 		}
 		mu.Lock()
 		result.sent[current] = decidedEventKinds(observations[seen:])
@@ -403,7 +478,7 @@ func diagnosedPlans(t *testing.T, bundle *phaseTwoWorkerBundle, strategyID strin
 // nothing is decided for it, an open alert is not closed by inference, and
 // the round's whole, empty primary says quiet.
 func TestAGroupedEventCountsZerosDoNotEndItsAlert(t *testing.T) {
-	run := runGroupedEventCount(t, eventSpanCase{takeover: 1, rounds: 7})
+	run := runGroupedEventCount(t, eventSpanCase{takeover: 1, rounds: 7, openAlert: true})
 	if !containsKind(run.sent[0], contract.TriggerEventAbnormal) {
 		t.Fatalf("round 0 decided %v, want the event's ABNORMAL", run.sent[0])
 	}
@@ -434,6 +509,34 @@ func TestAGroupedEventCountsZerosDoNotEndItsAlert(t *testing.T) {
 	}
 }
 
+// A template-bound event count - its Level detects with something other
+// than a threshold - reads a quiet group as every count family does: the
+// lead keeps the group in the answer, its zero is detected, and a ring-ratio
+// decrease fires on the first quiet round (0 <= 1 x (100 - floor)%). An
+// inferred zero feeds the trigger like any value; only recovery declines
+// it. Before the lead the group left the answer with its event and nothing
+// was detected that round.
+func TestATemplateBoundEventCountsQuietZeroFeedsItsTrigger(t *testing.T) {
+	run := runGroupedEventCount(t, eventSpanCase{rounds: 3, levels: [][2]int{{1, 1}},
+		algorithm: "SimpleRingRatio", algorithmConfig: map[string]any{"floor": 50, "ceil": nil}})
+	if containsKind(run.sent[0], contract.TriggerEventAbnormal) {
+		t.Fatalf("round 0 decided %v on the event's increase, want nothing: the ceiling is unset", run.sent[0])
+	}
+	if !run.evaluated[1] || !containsKind(run.sent[1], contract.TriggerEventAbnormal) {
+		t.Fatalf("round 1 evaluated %v and decided %v, want the quiet group's zero detected as a decrease (rounds %v)",
+			run.evaluated[1], run.sent[1], run.sent)
+	}
+	// The primary is asked N + R = 2 periods; the ring ratio's previous
+	// point is a query of its own, one period long.
+	widest := int64(0)
+	for _, asked := range run.ranges {
+		widest = max(widest, asked[1]-asked[0])
+	}
+	if widest != 2*60 {
+		t.Fatalf("the widest range asked was %d s, want the primary's N + R = 2 periods (ranges %v)", widest, run.ranges)
+	}
+}
+
 // An alert open when this build takes over from one that asked one period
 // at a time. That build lost the group the round after its event, so the
 // rounds between the event and the release left no record: holes in the
@@ -460,7 +563,7 @@ func TestAnEventCountAlertOpenAtTheReleaseMeetsItsWindowsWhetherOrNotItLeftAHole
 		{"event two rounds before the release", 2, false},
 	} {
 		t.Run(arm.name, func(t *testing.T) {
-			run := runGroupedEventCount(t, eventSpanCase{oneWindowUntil: arm.until, takeover: arm.until, rounds: 8})
+			run := runGroupedEventCount(t, eventSpanCase{oneWindowUntil: arm.until, takeover: arm.until, rounds: 8, openAlert: true})
 			if !containsKind(run.sent[0], contract.TriggerEventAbnormal) {
 				t.Fatalf("round 0 decided %v, want the event's ABNORMAL", run.sent[0])
 			}
@@ -490,7 +593,7 @@ func TestAnEventCountAlertOpenAtTheReleaseMeetsItsWindowsWhetherOrNotItLeftAHole
 // Past the range the group is not in the answer: nothing is decided, nothing
 // is sent, the alert is not closed by inference, and the rounds read quiet.
 func TestAnEventCountsZerosLeaveTheConsumersAlertOpen(t *testing.T) {
-	run := runGroupedEventCount(t, eventSpanCase{takeover: 1, rounds: 8, native: true})
+	run := runGroupedEventCount(t, eventSpanCase{takeover: 1, rounds: 8, native: true, openAlert: true})
 	if !containsKind(run.sent[0], contract.TriggerEventAbnormal) {
 		t.Fatalf("round 0 sent %v, want the event's ABNORMAL", run.sent[0])
 	}
@@ -605,7 +708,7 @@ func TestAnEventCountAnsweredOverMaxNRPlusOneDoesNotRecover(t *testing.T) {
 // Through the fleet's own reading of the run: the rounds after the answers
 // stop are never quiet, and an hour of them is listed as no data.
 func TestAnUngroupedEventCountAnsweredWithNothingIsNoDataNotQuiet(t *testing.T) {
-	run := runGroupedEventCount(t, eventSpanCase{ungrouped: true, emptyFrom: 6, rounds: 68})
+	run := runGroupedEventCount(t, eventSpanCase{ungrouped: true, emptyFrom: 6, rounds: 68, openAlert: true})
 	if containsKind(run.sent[4], contract.TriggerEventRecovery) || run.withheld[4] != 1 {
 		t.Fatalf("round 4 decided %v and withheld %d, want no RECOVERY and the zero's recovery withheld (all rounds: %v)", run.sent[4], run.withheld[4], run.sent)
 	}
