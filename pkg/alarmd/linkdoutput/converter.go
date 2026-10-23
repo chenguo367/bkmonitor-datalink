@@ -601,6 +601,12 @@ func title(event *contract.TriggerEventV1, primary contract.LevelResultV1, actio
 	return fmt.Sprintf("Strategy %d level %d %s", event.StrategyRef.StrategyID, primary.LevelID, action)
 }
 
+// The content of a level that no data ended, as the platform writes it.
+const (
+	noDataEndRecovered = "在恢复检测周期内无数据上报，告警已恢复"
+	noDataEndClosed    = "在恢复检测周期内无数据上报，告警已关闭"
+)
+
 func content(event *contract.TriggerEventV1, primary contract.LevelResultV1, noData bool) string {
 	window := primary.DecisionWindow.Trigger
 	if noData {
@@ -616,6 +622,16 @@ func content(event *contract.TriggerEventV1, primary contract.LevelResultV1, noD
 			"no data for %s periods, as of %s",
 			noDataPeriods(event.Observed), wireTime(event.RecordRef.SourceTime),
 		)
+	}
+	// A level that no data ended says so, in the words the platform's own
+	// recovery check uses (recover.py:191-197): the point it was decided on
+	// is the zero that is no observation, and the window line would read as
+	// an ordinary recovery.
+	if event.EventKind == contract.TriggerEventRecovery && primary.DecisionWindow.Recovery.EndedBy == contract.RecoveryEndedByNoData {
+		if primary.DecisionWindow.Recovery.End == contract.RecoveryEndClose {
+			return noDataEndClosed
+		}
+		return noDataEndRecovered
 	}
 	values := renderedValues(event.Observed)
 	if values == "" {

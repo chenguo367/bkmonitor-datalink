@@ -464,7 +464,8 @@ func decodeRuntimePacked(raw []byte, identity execution.StateKeyIdentity) (execu
 			HistoryCompleteness:     level.Mutation.HistoryCompleteness, GapReasonCode: level.Mutation.GapReasonCode,
 			WarmupRequirementRef:   level.Mutation.WarmupRequirementRef,
 			LastProcessedEventTime: level.Mutation.LastProcessedEventTime,
-			GapReasonOriginSlot:    level.Mutation.GapReasonOriginSlot}
+			GapReasonOriginSlot:    level.Mutation.GapReasonOriginSlot,
+			LastRealPointTime:      level.Mutation.LastRealPointTime}
 	}
 	history := make([]execution.StateHistoryPoint, 0, header.PointCount)
 	previous := int64(0)

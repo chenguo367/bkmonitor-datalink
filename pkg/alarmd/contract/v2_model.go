@@ -954,7 +954,17 @@ type RecoveryWindowEvidenceV1 struct {
 	// close or close-nodata). Empty on every other result and every Level
 	// written to recover.
 	End string `json:"end,omitempty"`
+	// EndedBy says a RECOVERY was decided by something other than its
+	// windows: RecoveryEndedByNoData, a Level written to end on no data
+	// whose last real point is (R + T + 1) periods old. Empty on every
+	// recovery the windows decided and every other result.
+	EndedBy string `json:"ended_by,omitempty"`
 }
+
+// RecoveryEndedByNoData: no real point arrived through the recovery span
+// (status_setter -nodata, RecoveryMissingDataEvaluateAsZero). The round's
+// own value is a count of zero that is no observation.
+const RecoveryEndedByNoData = "no_data"
 
 // RecoveryEndClose: the Level's alert ends closed, not resolved.
 const RecoveryEndClose = "close"
@@ -970,8 +980,14 @@ const RecoveryMissingDataEvaluateAsZero = "evaluate_as_zero"
 // it as any value. The alert recovers on a round with a count above zero.
 const RecoveryWithheldZeroCount = "zero_count"
 
+// RecoveryWithheldNoDataLastPointUnknown: as RecoveryWithheldZeroCount, on a
+// Level written to end on no data whose last real point is not known - the
+// alert was opened on a build that did not keep it - so no data cannot be
+// timed and ends nothing. The next real point starts the clock.
+const RecoveryWithheldNoDataLastPointUnknown = "no_data_last_point_unknown"
+
 // RecoveryWithheldReasons is the closed list.
-var RecoveryWithheldReasons = []string{RecoveryWithheldZeroCount}
+var RecoveryWithheldReasons = []string{RecoveryWithheldZeroCount, RecoveryWithheldNoDataLastPointUnknown}
 
 type WindowEvidenceV1 struct {
 	AnomalyTimestampsDigest string `json:"anomaly_timestamps_digest"`

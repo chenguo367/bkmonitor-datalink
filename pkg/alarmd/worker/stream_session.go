@@ -2061,16 +2061,19 @@ func recoveryWithheldFacts(due execution.DuePlan, evaluated execution.Evaluation
 	if len(evaluated.Plans) != 1 || evaluated.Plans[0].Plan != due.Identity {
 		return nil
 	}
-	var withheld uint64
+	counts := map[execution.RecoveryWithheldCode]uint64{}
 	for _, outcome := range evaluated.Plans[0].LevelOutcomes {
-		if outcome.RecoveryWithheld {
-			withheld++
+		if outcome.RecoveryWithheld != execution.RecoveryWithheldNone {
+			counts[outcome.RecoveryWithheld]++
 		}
 	}
-	if withheld == 0 {
-		return nil
+	var facts []observability.RecoveryWithheldFact
+	for _, code := range []execution.RecoveryWithheldCode{execution.RecoveryWithheldZeroCount, execution.RecoveryWithheldNoDataLastPointUnknown} {
+		if counts[code] > 0 {
+			facts = append(facts, observability.RecoveryWithheldFact{Reason: observability.RecoveryWithheldReason(code.Reason()), Levels: counts[code]})
+		}
 	}
-	return []observability.RecoveryWithheldFact{{Reason: observability.RecoveryWithheldZeroCount, Levels: withheld}}
+	return facts
 }
 
 // recoveryGateFacts carries the Plan's RECOVERY records by the state of the

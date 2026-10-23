@@ -209,6 +209,30 @@ func TestARecoveryWrittenToCloseIsWrittenClosed(t *testing.T) {
 	})
 }
 
+// A level that no data ended says so in the platform's own words, recovered
+// or closed as it was written, not with the window line of an ordinary
+// recovery.
+func TestARecoveryNoDataEndedSaysSo(t *testing.T) {
+	for end, want := range map[string]string{"": `"在恢复检测周期内无数据上报，告警已恢复"`, contract.RecoveryEndClose: `"在恢复检测周期内无数据上报，告警已关闭"`} {
+		message := convert(t, decision(func(event *contract.TriggerEventV1) {
+			event.EventKind = contract.TriggerEventRecovery
+			event.LevelResults[0].Result = contract.LevelResultRecovery
+			event.LevelResults[0].DecisionWindow.Recovery.EndedBy = contract.RecoveryEndedByNoData
+			event.LevelResults[0].DecisionWindow.Recovery.End = end
+		}))
+		if string(message["content"]) != want {
+			t.Fatalf("end %q: content = %s, want %s", end, message["content"], want)
+		}
+	}
+	ordinary := convert(t, decision(func(event *contract.TriggerEventV1) {
+		event.EventKind = contract.TriggerEventRecovery
+		event.LevelResults[0].Result = contract.LevelResultRecovery
+	}))
+	if strings.Contains(string(ordinary["content"]), "无数据上报") {
+		t.Fatalf("an ordinary recovery said no data ended it: %s", ordinary["content"])
+	}
+}
+
 // Every decided level is written and every undecided one is left out. The
 // consumer keeps a lifecycle per severity and reads an absent level as
 // "nothing said": writing resolved for a level that stayed normal would close

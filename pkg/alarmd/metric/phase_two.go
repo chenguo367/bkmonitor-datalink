@@ -1280,9 +1280,11 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		Help: "Level outcomes that met their recovery windows and stayed NORMAL, by why: zero_count (the " +
 			"round's own value was a count of zero from an event count, or a log count with no grouping, " +
 			"whose zero is no observation; the alert recovers on a round with a count above zero, or ends by " +
-			"-nodata or close). Counted per Level per evaluation, so one quiet alert adds one each round it " +
-			"stays open; the decision window of each such outcome carries recovery.withheld. A zero here is a " +
-			"reading: the reason exists from start.",
+			"-nodata or close), no_data_last_point_unknown (the same, on a Level written to end on no data " +
+			"whose last real point is not known - opened on a build that did not keep it - so no data ends " +
+			"nothing until the next real point). Counted per Level per evaluation, so one quiet alert adds one " +
+			"each round it stays open; the decision window of each such outcome carries recovery.withheld. A " +
+			"zero here is a reading: every reason exists from start.",
 	}, []string{"reason"})
 	for _, reason := range observability.RecoveryWithheldReasons {
 		metrics.recoveryWithheld.WithLabelValues(string(reason))

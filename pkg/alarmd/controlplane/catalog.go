@@ -353,7 +353,10 @@ const ReasonRecoveryStatusSetterDefaulted = "RECOVERY_STATUS_SETTER_DEFAULTED"
 
 // ReasonRecoveryNoDataUnsupported names a Level written to end its alert when
 // no data arrives through the recovery window (status_setter *-nodata). This
-// build ends it only on points, as without the suffix.
+// build ends it on no data only while its group is still in the answer with
+// a count of zero that is no observation - an event count, or a log count
+// with no grouping; a group absent from the answer ends only on points, as
+// without the suffix.
 const ReasonRecoveryNoDataUnsupported = "RECOVERY_NODATA_UNSUPPORTED"
 
 // The item fields a strategy cannot be compiled without, each refused under

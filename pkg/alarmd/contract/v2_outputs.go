@@ -307,7 +307,7 @@ func DecodeTriggerEventV1WithLimits(payload []byte, limits TriggerEventReaderLim
 		if _, err := validateJSONObjectFields(window["trigger"], path+".decision_window.trigger", []string{"window_start", "window_end", "window_size", "required_anomalies", "observed_anomalies"}, []string{"anomaly_begin_time"}, false); err != nil {
 			return nil, err
 		}
-		if _, err := validateJSONObjectFields(window["recovery"], path+".decision_window.recovery", []string{"enabled", "required_consecutive_windows", "observed_consecutive_misses", "oldest_window_start"}, []string{"skipped_windows", "withheld", "end"}, false); err != nil {
+		if _, err := validateJSONObjectFields(window["recovery"], path+".decision_window.recovery", []string{"enabled", "required_consecutive_windows", "observed_consecutive_misses", "oldest_window_start"}, []string{"skipped_windows", "withheld", "end", "ended_by"}, false); err != nil {
 			return nil, err
 		}
 		if _, err := validateJSONObjectFields(window["window_evidence"], path+".decision_window.window_evidence", []string{"anomaly_timestamps_digest", "late_accepted"}, nil, false); err != nil {
@@ -388,10 +388,14 @@ func validateSuccessfulLevelResultsV1(results []LevelResultV1) error {
 		if end := window.Recovery.End; end != "" && (end != RecoveryEndClose || result.Result != LevelResultRecovery) {
 			return invalid("trigger_event.level_results.decision_window.recovery.end", "names no closed ending, or is not on a RECOVERY")
 		}
+		endedByNoData := window.Recovery.EndedBy == RecoveryEndedByNoData
+		if endedBy := window.Recovery.EndedBy; endedBy != "" && (!endedByNoData || triggerSatisfied || window.Recovery.Withheld != "") {
+			return invalid("trigger_event.level_results.decision_window.recovery.ended_by", "names no closed cause, or ends a Level whose trigger is satisfied")
+		}
 		expectedResult := LevelResultNormal
 		if detect.DetectionResult == "ANOMALOUS" && triggerSatisfied {
 			expectedResult = LevelResultAbnormal
-		} else if !triggerSatisfied && recoverySatisfied && window.Recovery.Withheld == "" {
+		} else if !triggerSatisfied && (recoverySatisfied && window.Recovery.Withheld == "" || endedByNoData) {
 			expectedResult = LevelResultRecovery
 		}
 		if result.Result != expectedResult {
@@ -421,7 +425,7 @@ func validateSuccessfulLevelResultsV1(results []LevelResultV1) error {
 		if window.HistoryCompleteness != "FULL" {
 			switch {
 			case result.Result == LevelResultAbnormal:
-			case result.Result == LevelResultRecovery && recoverySatisfied:
+			case result.Result == LevelResultRecovery && (recoverySatisfied || endedByNoData):
 			default:
 				return invalid("trigger_event.level_results.result",
 					"WARMING and GAPPED history permit only ABNORMAL and evidenced RECOVERY")

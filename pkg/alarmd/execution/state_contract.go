@@ -116,6 +116,20 @@ type RuntimeLevelStateMutation struct {
 	GapReasonCode           ReasonCode
 	WarmupRequirementRef    string
 	LastProcessedEventTime  int64
+	// LastRealPointTime is the source time of the series' last real point:
+	// any point, except a count of zero from a source whose zero is no
+	// observation (contract.RecoveryWithheldZeroCount), which leaves it where
+	// it was. A Level whose recovery ends on no data
+	// (contract.RecoveryMissingDataEvaluateAsZero) times that end from it.
+	//
+	// Optional, like GapReasonOriginSlot: zero on a record written before it
+	// existed or by a build that does not write it, and zero is "not known",
+	// which ends nothing. omitempty keeps such a record byte-identical, and
+	// it is not in the State mutation digest (stateMutationDigestPayloadOf),
+	// so the two halves of a rolling update reach one digest for one Slot.
+	// Unlike the origin slot it has no alignment gap to sit in: it costs a
+	// Level eight bytes.
+	LastRealPointTime int64 `json:",omitempty"`
 }
 
 // StateRetentionRequirement is one Level's retention need. It is the single

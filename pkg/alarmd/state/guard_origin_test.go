@@ -201,6 +201,33 @@ func TestALevelOriginRoundTripsAndARecordWithoutOneIsUnchanged(t *testing.T) {
 	}
 }
 
+// A Level's last real point is written into the framed record and read back;
+// a record without one names no such key, so a Plan not written to end on no
+// data keeps the bytes it had, and reads back with zero - not known.
+func TestALastRealPointRoundTripsAndARecordWithoutOneIsUnchanged(t *testing.T) {
+	with := originStateMutation(t, execution.ReasonOrigin{})
+	with.Levels[0].LastRealPointTime = 1758399880
+	raw, err := encodeRuntimePacked(with, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := decodeRuntimePacked(raw, with.Identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Levels[0].LastRealPointTime != 1758399880 || view.Levels[1].LastRealPointTime != 0 {
+		t.Fatalf("decoded last real points %d and %d, want 1758399880 and none", view.Levels[0].LastRealPointTime, view.Levels[1].LastRealPointTime)
+	}
+	without := originStateMutation(t, execution.ReasonOrigin{})
+	plain, err := encodeRuntimePacked(without, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(plain, []byte("LastRealPointTime")) {
+		t.Fatalf("a record without a last real point names one: %s", plain)
+	}
+}
+
 // The shapes the previous release (d03b7a7b4, deployed as 0.4.4794) decodes
 // these records into, copied from that tree: its RuntimeLevelStateMutation,
 // GapScopeState, and the framed header and gap envelope that hold them. It

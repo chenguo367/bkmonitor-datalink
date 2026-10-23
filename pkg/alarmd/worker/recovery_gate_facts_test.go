@@ -62,12 +62,14 @@ func TestRecoveryWithheldFactsCarryTheZeroCount(t *testing.T) {
 	due := execution.DuePlan{Identity: identity}
 	evaluated := execution.EvaluationResult{Plans: []execution.PlanEvaluationResult{{
 		Plan: identity, LevelOutcomes: []execution.LevelOutcome{
-			{Outcome: execution.LevelOutcomeNormal, RecoveryWithheld: true},
+			{Outcome: execution.LevelOutcomeNormal, RecoveryWithheld: execution.RecoveryWithheldZeroCount},
 			{Outcome: execution.LevelOutcomeNormal},
-			{Outcome: execution.LevelOutcomeNormal, RecoveryWithheld: true},
+			{Outcome: execution.LevelOutcomeNormal, RecoveryWithheld: execution.RecoveryWithheldNoDataLastPointUnknown},
+			{Outcome: execution.LevelOutcomeNormal, RecoveryWithheld: execution.RecoveryWithheldZeroCount},
 		},
 	}}}
-	want := []observability.RecoveryWithheldFact{{Reason: observability.RecoveryWithheldZeroCount, Levels: 2}}
+	want := []observability.RecoveryWithheldFact{{Reason: observability.RecoveryWithheldZeroCount, Levels: 2},
+		{Reason: observability.RecoveryWithheldNoDataLastPointUnknown, Levels: 1}}
 	if got := recoveryWithheldFacts(due, evaluated); !reflect.DeepEqual(got, want) {
 		t.Fatalf("facts = %+v, want %+v", got, want)
 	}

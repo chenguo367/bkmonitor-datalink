@@ -86,8 +86,13 @@ func TestRecoveryWithheldCounterStartsAtZeroAndAddsByReason(t *testing.T) {
 	const withheld = "alarmd_trigger_recovery_withheld_total"
 	r := NewRecorder(BuildInfo{})
 	initial := gatherFamily(t, r, withheld)
-	if len(initial) != 1 || initial[0].GetCounter().GetValue() != 0 || initial[0].Label[0].GetValue() != "zero_count" {
-		t.Fatalf("before any observation = %v, want reason=zero_count at 0", initial)
+	if len(initial) != 2 {
+		t.Fatalf("before any observation = %v, want both reasons at 0", initial)
+	}
+	for _, m := range initial {
+		if m.GetCounter().GetValue() != 0 {
+			t.Fatalf("before any observation = %v, want every reason at 0", initial)
+		}
 	}
 	r.Observe(context.Background(), observability.Observation{
 		Component: observability.ComponentEvaluation, Stage: observability.StageEvaluationCompleted,
@@ -96,8 +101,11 @@ func TestRecoveryWithheldCounterStartsAtZeroAndAddsByReason(t *testing.T) {
 			{Reason: observability.RecoveryWithheldReason("quiet"), Levels: 9},
 		},
 	})
-	got := gatherFamily(t, r, withheld)
-	if len(got) != 1 || got[0].GetCounter().GetValue() != 3 {
-		t.Fatalf("after one observation = %v, want only reason=zero_count at 3", got)
+	byReason := map[string]float64{}
+	for _, m := range gatherFamily(t, r, withheld) {
+		byReason[m.Label[0].GetValue()] = m.GetCounter().GetValue()
+	}
+	if len(byReason) != 2 || byReason["zero_count"] != 3 || byReason["no_data_last_point_unknown"] != 0 {
+		t.Fatalf("after one observation = %v, want zero_count at 3 and nothing else moved", byReason)
 	}
 }

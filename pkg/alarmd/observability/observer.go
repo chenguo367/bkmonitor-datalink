@@ -2218,7 +2218,11 @@ const RecoveryWithheldZeroCount RecoveryWithheldReason = contract.RecoveryWithhe
 
 // RecoveryWithheldReasons lists every reason, for the metric that
 // pre-creates them all.
-var RecoveryWithheldReasons = []RecoveryWithheldReason{RecoveryWithheldZeroCount}
+var RecoveryWithheldReasons = []RecoveryWithheldReason{RecoveryWithheldZeroCount, RecoveryWithheldNoDataLastPointUnknown}
+
+// RecoveryWithheldNoDataLastPointUnknown: as zero_count, on a Level written to
+// end on no data whose last real point is not known, so no data ends nothing.
+const RecoveryWithheldNoDataLastPointUnknown RecoveryWithheldReason = contract.RecoveryWithheldNoDataLastPointUnknown
 
 // RecoveryWithheldFact counts, for one evaluation, the Level outcomes whose
 // recovery was withheld for one reason.

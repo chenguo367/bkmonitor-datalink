@@ -158,10 +158,22 @@ type recordResult struct {
 	coverage execution.HistoryCoverage
 }
 
-// withheldOnZeroCount is whether a Level met its recovery windows and stayed
-// NORMAL on a count of zero (contract.RecoveryWithheldZeroCount).
-func withheldOnZeroCount(outcome trigger.LevelOutcomeV2) bool {
-	return outcome.DecisionWindow != nil && outcome.DecisionWindow.Recovery.Withheld == contract.RecoveryWithheldZeroCount
+// normalWithheld is withheldCode on a NORMAL outcome and None on any other.
+func normalWithheld(kind execution.LevelOutcomeKind, outcome trigger.LevelOutcomeV2) execution.RecoveryWithheldCode {
+	if kind != execution.LevelOutcomeNormal {
+		return execution.RecoveryWithheldNone
+	}
+	return withheldCode(outcome)
+}
+
+// withheldCode is why a Level met its recovery windows and stayed NORMAL
+// (contract.RecoveryWithheldReasons), as its outcome carries it; None for a
+// Level nothing withheld.
+func withheldCode(outcome trigger.LevelOutcomeV2) execution.RecoveryWithheldCode {
+	if outcome.DecisionWindow == nil {
+		return execution.RecoveryWithheldNone
+	}
+	return execution.RecoveryWithheldCodeOf(outcome.DecisionWindow.Recovery.Withheld)
 }
 
 // countRecoveryGate adds one RECOVERY record to the Plan's counts under the
@@ -308,7 +320,11 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 			readGapOpen = true
 		}
 		held := historyView{HistoryView: h, completeness: completeness}
-		histories[i] = trigger.LevelHistory{LevelID: l.Definition().LevelID, View: held, ReadGapOpen: readGapOpen}
+		lastReal := int64(0)
+		if stored, found := levelState(view, l.Definition().LevelID); found {
+			lastReal = stored.LastRealPointTime
+		}
+		histories[i] = trigger.LevelHistory{LevelID: l.Definition().LevelID, View: held, ReadGapOpen: readGapOpen, LastRealPoint: lastReal}
 		// One walk for the counts and the holes: the summary visits every
 		// position and classifies it, and a second walk over a day-long
 		// window would double the dearest read on this path for exactly the
@@ -512,7 +528,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 			// outcomes and no envelope, and says so on each of them.
 			EnvelopeHeld: tr.RecoveryGate.Held && kind == execution.LevelOutcomeRecovery,
 			GuardTail:    guardTail, ReasonCarried: carried,
-			RecoveryWithheld: kind == execution.LevelOutcomeNormal && withheldOnZeroCount(o)}.WithReasonOrigin(origin)
+			RecoveryWithheld: normalWithheld(kind, o)}.WithReasonOrigin(origin)
 	}
 	// A Level the trigger would advance while its outcome is UNKNOWN records
 	// a business fact into a history the guard has not yet released. The
@@ -1075,6 +1091,42 @@ func (h historyView) summarizeHoles(ctx context.Context, t int64, n uint32, limi
 		ValidPositions: s.ValidPositions, RequiredPositions: s.RequiredPositions,
 		AnomalyCount: s.AnomalyCount, AnomalyDigest: s.AnomalyDigest}, holes
 }
+
+// lastRealPointAfter is a Level's last real point once this record is
+// applied: the record's own source time when its outcome says the value is a
+// real point (trigger.LevelOutcomeV2.RealPoint), the stored one otherwise.
+// Kept only for a Level written to end on no data, which is the one reader;
+// every other Level writes zero, so its state stays the bytes it was.
+func lastRealPointAfter(plan *strategy.CompiledPlan, view execution.RuntimeStateView, record execution.RecordView,
+	outcomes []trigger.LevelOutcomeV2, levelID uint32) int64 {
+	if !endsOnNoData(plan, levelID) {
+		return 0
+	}
+	for _, outcome := range outcomes {
+		if outcome.LevelID == levelID && outcome.RealPoint {
+			return record.SourceTime()
+		}
+	}
+	if stored, found := levelState(view, levelID); found {
+		return stored.LastRealPointTime
+	}
+	return 0
+}
+
+// endsOnNoData is whether a Plan's Level is written to end its alert on no
+// data (contract.RecoveryMissingDataEvaluateAsZero).
+func endsOnNoData(plan *strategy.CompiledPlan, levelID uint32) bool {
+	if plan == nil {
+		return false
+	}
+	for _, level := range plan.Levels().All() {
+		if level.Definition().LevelID == levelID {
+			return level.Recovery().MissingData == contract.RecoveryMissingDataEvaluateAsZero
+		}
+	}
+	return false
+}
+
 func levelState(v execution.RuntimeStateView, id uint32) (execution.RuntimeLevelStateView, bool) {
 	for _, l := range v.Levels {
 		if l.LevelID == id {
@@ -1116,7 +1168,7 @@ func applyProvisional(view execution.RuntimeStateView, mutation execution.StateM
 	view.Levels = make([]execution.RuntimeLevelStateView, len(mutation.Levels))
 	for i, l := range mutation.Levels {
 		view.Levels[i] = execution.RuntimeLevelStateView{LevelID: l.LevelID, LevelStateCompatibility: l.LevelStateCompatibility, HistoryCompleteness: l.HistoryCompleteness, GapReasonCode: l.GapReasonCode, WarmupRequirementRef: l.WarmupRequirementRef, LastProcessedEventTime: l.LastProcessedEventTime,
-			GapReasonOriginSlot: l.GapReasonOriginSlot}
+			GapReasonOriginSlot: l.GapReasonOriginSlot, LastRealPointTime: l.LastRealPointTime}
 	}
 	view.SeriesGuard = mutation.SeriesGuard
 	return view, nil
@@ -1270,9 +1322,12 @@ func buildMutation(request execution.EvaluationRequest, due execution.DuePlan, r
 	durableGuardReasons := guards.reasons
 	slot := request.Header.Contract.Slot.EvaluationTime
 	levels := make([]execution.RuntimeLevelStateMutation, len(refs))
+	lastReal := func(levelID uint32) int64 {
+		return lastRealPointAfter(due.CompiledPlan, view, record, outcomes, levelID)
+	}
 	for i, r := range refs {
 		if reason, missing := missingInputGuards[r.LevelID]; missing {
-			levels[i] = execution.RuntimeLevelStateMutation{LevelID: r.LevelID, LevelStateCompatibility: r.LevelStateCompatibility, HistoryCompleteness: execution.HistoryGapped, GapReasonCode: reason, WarmupRequirementRef: r.WarmupRequirementRef, LastProcessedEventTime: record.SourceTime()}.
+			levels[i] = execution.RuntimeLevelStateMutation{LevelID: r.LevelID, LevelStateCompatibility: r.LevelStateCompatibility, HistoryCompleteness: execution.HistoryGapped, GapReasonCode: reason, WarmupRequirementRef: r.WarmupRequirementRef, LastProcessedEventTime: record.SourceTime(), LastRealPointTime: lastReal(r.LevelID)}.
 				WithReasonOrigin(guards.originFor(view, slot, r.LevelID, execution.HistoryGapped, reason))
 			continue
 		}
@@ -1286,13 +1341,13 @@ func buildMutation(request execution.EvaluationRequest, due execution.DuePlan, r
 		if !advances {
 			if current, found := levelState(view, r.LevelID); found {
 				// Carried as it is, origin and all.
-				levels[i] = execution.RuntimeLevelStateMutation{LevelID: r.LevelID, LevelStateCompatibility: r.LevelStateCompatibility, HistoryCompleteness: current.HistoryCompleteness, GapReasonCode: current.GapReasonCode, WarmupRequirementRef: r.WarmupRequirementRef, LastProcessedEventTime: current.LastProcessedEventTime}
+				levels[i] = execution.RuntimeLevelStateMutation{LevelID: r.LevelID, LevelStateCompatibility: r.LevelStateCompatibility, HistoryCompleteness: current.HistoryCompleteness, GapReasonCode: current.GapReasonCode, WarmupRequirementRef: r.WarmupRequirementRef, LastProcessedEventTime: current.LastProcessedEventTime, LastRealPointTime: lastReal(r.LevelID)}
 				if current.HistoryCompleteness == execution.HistoryWarming || current.HistoryCompleteness == execution.HistoryGapped {
 					levels[i] = levels[i].WithReasonOrigin(current.ReasonOrigin())
 				}
 				continue
 			}
-			levels[i] = execution.RuntimeLevelStateMutation{LevelID: r.LevelID, LevelStateCompatibility: r.LevelStateCompatibility, HistoryCompleteness: execution.HistoryWarming, GapReasonCode: execution.ReasonCode(contract.ReasonHistoryWarming), WarmupRequirementRef: r.WarmupRequirementRef}.
+			levels[i] = execution.RuntimeLevelStateMutation{LevelID: r.LevelID, LevelStateCompatibility: r.LevelStateCompatibility, HistoryCompleteness: execution.HistoryWarming, GapReasonCode: execution.ReasonCode(contract.ReasonHistoryWarming), WarmupRequirementRef: r.WarmupRequirementRef, LastRealPointTime: lastReal(r.LevelID)}.
 				WithReasonOrigin(execution.StampReasonOrigin(slot, execution.ReasonCode(contract.ReasonHistoryWarming)))
 			continue
 		}
@@ -1324,7 +1379,7 @@ func buildMutation(request execution.EvaluationRequest, due execution.DuePlan, r
 			(completeness == execution.HistoryWarming || completeness == execution.HistoryGapped) {
 			reason = guarded
 		}
-		levels[i] = execution.RuntimeLevelStateMutation{LevelID: r.LevelID, LevelStateCompatibility: r.LevelStateCompatibility, HistoryCompleteness: completeness, GapReasonCode: reason, WarmupRequirementRef: r.WarmupRequirementRef, LastProcessedEventTime: record.SourceTime()}.
+		levels[i] = execution.RuntimeLevelStateMutation{LevelID: r.LevelID, LevelStateCompatibility: r.LevelStateCompatibility, HistoryCompleteness: completeness, GapReasonCode: reason, WarmupRequirementRef: r.WarmupRequirementRef, LastProcessedEventTime: record.SourceTime(), LastRealPointTime: lastReal(r.LevelID)}.
 			WithReasonOrigin(guards.originFor(view, slot, r.LevelID, completeness, reason))
 	}
 	advancing := make(map[uint32]bool, len(outcomes))

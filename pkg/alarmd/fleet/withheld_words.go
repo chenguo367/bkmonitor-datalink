@@ -127,8 +127,8 @@ var withheldReasonWords = map[string]WithheldReasonWords{
 	// Under CONFIG_NOTED too: the alert ends only on points where the owner
 	// wrote that no data through the recovery window ends it.
 	"RECOVERY_NODATA_UNSUPPORTED": {Kind: WithheldStrategyDefinition,
-		What:   "这一级别写了恢复检测周期内无数据也结束告警（status_setter 带 -nodata），本构建只在有数据点、且连续若干周期不满足触发条件时结束告警；这一组一直没有数据时告警保持打开（详情里写明原值）——策略在检测，不是被扣住",
-		Next:   "不需要策略负责人处理：无数据结束待产品裁定后支持；在那之前没有数据的组的告警要等数据回来或人工处理",
+		What:   "这一级别写了恢复检测周期内无数据也结束告警（status_setter 带 -nodata）。本构建对事件计数、不分组的日志计数已按无数据结束；这一组从查询结果里整组消失时（时序、分组日志）仍只在有数据点时结束，告警保持打开（详情里写明原值）——策略在检测，不是被扣住",
+		Next:   "不需要策略负责人处理：整组缺席时的无数据结束在后续版本支持；在那之前这类组的告警要等数据回来或人工处理",
 		Action: ActionNone},
 	// Under CONFIG_NOTED too: the Plan runs with the bound its owner raised,
 	// and the words state the one-off cost that was chosen with it. Nobody is

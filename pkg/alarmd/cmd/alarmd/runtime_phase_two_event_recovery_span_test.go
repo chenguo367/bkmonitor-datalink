@@ -79,6 +79,8 @@ type eventSpanCase struct {
 	// readQueryRanges reads the object's latest asked ranges from the
 	// process's own object detail after the last round.
 	readQueryRanges bool
+	// statusSetter, when set, is every Level's recovery_config.status_setter.
+	statusSetter string
 }
 
 // eventSpanRounds is what each round of a run did.
@@ -151,9 +153,13 @@ func runGroupedEventCount(t *testing.T, run eventSpanCase) eventSpanRounds {
 	writeStrategy := func(recoveryWider int) {
 		detects, algorithms := []any{}, []any{}
 		for index, windows := range levels {
+			recovery := map[string]any{"check_window": windows[1] + recoveryWider}
+			if run.statusSetter != "" {
+				recovery["status_setter"] = run.statusSetter
+			}
 			detects = append(detects, map[string]any{"level": index + 1, "priority": 1, "connector": "and",
 				"trigger_config":  map[string]any{"count": 1, "check_window": windows[0]},
-				"recovery_config": map[string]any{"check_window": windows[1] + recoveryWider}})
+				"recovery_config": recovery})
 			algorithms = append(algorithms, map[string]any{"level": index + 1, "type": "Threshold", "config": threshold})
 		}
 		document["detects"], item["algorithms"] = detects, algorithms
@@ -501,6 +507,50 @@ func TestAnEventCountsZerosLeaveTheConsumersAlertOpen(t *testing.T) {
 	}
 	if kinds := controlledEventKinds(run.written); len(kinds) != 1 || kinds[0] != contract.TriggerEventAbnormal {
 		t.Fatalf("the sink took %v, want the ABNORMAL alone: the consumer's alert stays open", kinds)
+	}
+}
+
+// A grouped event count written to end on no data (recovery-nodata), N = 2
+// and R = 3: its zeros are withheld as any event count's are, and the round
+// (R + T + 1) periods after the event - round 6 - ends the alert, resolved,
+// saying no data ended it. To still have the group in the answer then, the
+// range asked reaches back R + T + 1 windows before the accepted one: 7
+// periods, not N + R = 5. The window accepted is the same, so every round
+// both evaluate the group decides what the same strategy without -nodata
+// decides; from round 5 that one's range no longer holds the event and its
+// group is not in the answer, while this one's still is, with its zero.
+func TestAGroupedEventCountWrittenToEndOnNoDataEndsOnItsZeros(t *testing.T) {
+	nodata := runGroupedEventCount(t, eventSpanCase{rounds: 8, native: true, statusSetter: "recovery-nodata"})
+	plain := runGroupedEventCount(t, eventSpanCase{rounds: 8, native: true})
+	if !plain.quiet[5] || nodata.quiet[5] || nodata.withheld[5] != 1 {
+		t.Fatalf("round 5: without -nodata quiet %v, with it quiet %v withheld %d; want the group gone from the one and withheld in the other",
+			plain.quiet[5], nodata.quiet[5], nodata.withheld[5])
+	}
+	for round := 0; round <= 4; round++ {
+		if !reflect.DeepEqual(nodata.sent[round], plain.sent[round]) || nodata.withheld[round] != plain.withheld[round] {
+			t.Fatalf("round %d: -nodata decided %v withheld %d, without %v withheld %d: the trigger read something else",
+				round, nodata.sent[round], nodata.withheld[round], plain.sent[round], plain.withheld[round])
+		}
+	}
+	if containsKind(plain.sent[6], contract.TriggerEventRecovery) {
+		t.Fatalf("without -nodata round 6 decided %v, want nothing", plain.sent[6])
+	}
+	if !containsKind(nodata.sent[6], contract.TriggerEventRecovery) {
+		t.Fatalf("round 6 decided %v, want the RECOVERY no data ended (all rounds: %v)", nodata.sent[6], nodata.sent)
+	}
+	var ended *contract.TriggerEventV1
+	for index := range nodata.written {
+		if nodata.written[index].EventKind == contract.TriggerEventRecovery {
+			ended = &nodata.written[index]
+		}
+	}
+	if ended == nil || ended.LevelResults[0].DecisionWindow.Recovery.EndedBy != contract.RecoveryEndedByNoData {
+		t.Fatalf("the sink took %v, want a RECOVERY ended by no data", controlledEventKinds(nodata.written))
+	}
+	for _, asked := range nodata.ranges {
+		if asked[1]-asked[0] != 7*60 {
+			t.Fatalf("the query service was asked for %d s, want R + T + 2 = 7 periods of 60 s (ranges %v)", asked[1]-asked[0], nodata.ranges)
+		}
 	}
 }
 

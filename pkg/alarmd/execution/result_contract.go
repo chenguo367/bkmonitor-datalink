@@ -72,13 +72,48 @@ type LevelOutcome struct {
 	// file a carried reason as this round's failure.
 	ReasonCarried bool
 	// RecoveryWithheld marks a NORMAL outcome whose Level met its recovery
-	// windows and did not recover, because the round's own value was a count
-	// of zero from a source whose zero is no observation
-	// (contract.RecoveryWithheldZeroCount). In the same alignment gap, so it
-	// costs an outcome no bytes. Observation only, like ReasonCarried: read
-	// by the withheld recovery counter, nothing decides anything from it.
-	RecoveryWithheld bool
+	// windows and did not recover, with which of the contract's reasons
+	// (contract.RecoveryWithheldReasons): the round's own value was a count
+	// of zero from a source whose zero is no observation, and on a Level
+	// written to end on no data, whether its last real point was unknown.
+	// One byte, in the same alignment gap, so it costs an outcome nothing.
+	// Observation only, like ReasonCarried: read by the withheld recovery
+	// counter, nothing decides anything from it.
+	RecoveryWithheld RecoveryWithheldCode
 	ReasonOriginSlot uint32
+}
+
+// RecoveryWithheldCode is LevelOutcome.RecoveryWithheld: a withheld reason of
+// the contract as one byte, None for an outcome nothing withheld.
+type RecoveryWithheldCode uint8
+
+const (
+	RecoveryWithheldNone RecoveryWithheldCode = iota
+	RecoveryWithheldZeroCount
+	RecoveryWithheldNoDataLastPointUnknown
+)
+
+// RecoveryWithheldCodeOf is the code of a contract reason; a reason outside
+// the list is None.
+func RecoveryWithheldCodeOf(reason string) RecoveryWithheldCode {
+	switch reason {
+	case contract.RecoveryWithheldZeroCount:
+		return RecoveryWithheldZeroCount
+	case contract.RecoveryWithheldNoDataLastPointUnknown:
+		return RecoveryWithheldNoDataLastPointUnknown
+	}
+	return RecoveryWithheldNone
+}
+
+// Reason is the contract reason of a code, empty for None.
+func (code RecoveryWithheldCode) Reason() string {
+	switch code {
+	case RecoveryWithheldZeroCount:
+		return contract.RecoveryWithheldZeroCount
+	case RecoveryWithheldNoDataLastPointUnknown:
+		return contract.RecoveryWithheldNoDataLastPointUnknown
+	}
+	return ""
 }
 
 // ReasonOrigin is where the outcome's carried reason came from.
@@ -1116,6 +1151,7 @@ func runtimeLevelsFromMutation(levels []RuntimeLevelStateMutation) []RuntimeLeve
 			GapReasonCode: level.GapReasonCode, WarmupRequirementRef: level.WarmupRequirementRef,
 			LevelStateCompatibility: level.LevelStateCompatibility,
 			GapReasonOriginSlot:     level.GapReasonOriginSlot,
+			LastRealPointTime:       level.LastRealPointTime,
 		}
 	}
 	return result

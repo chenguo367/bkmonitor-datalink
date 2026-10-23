@@ -17,6 +17,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/trigger"
 )
 
@@ -47,22 +48,23 @@ func TestAZeroCountIsNoObservationOnlyWhereThePlansPrimarySaysSo(t *testing.T) {
 	}
 }
 
-// A Level outcome is withheld on a zero when its decision window says so;
-// one withheld for nothing and one with no window are not.
-func TestWithheldOnZeroCountReadsTheDecisionWindow(t *testing.T) {
+// A Level outcome carries the withheld reason its decision window names; one
+// withheld for nothing and one with no window carry none.
+func TestWithheldCodeReadsTheDecisionWindow(t *testing.T) {
 	window := func(withheld string) *contract.DecisionWindowV1 {
 		return &contract.DecisionWindowV1{Recovery: contract.RecoveryWindowEvidenceV1{Withheld: withheld}}
 	}
 	for _, test := range []struct {
 		outcome trigger.LevelOutcomeV2
-		want    bool
+		want    execution.RecoveryWithheldCode
 	}{
-		{trigger.LevelOutcomeV2{DecisionWindow: window(contract.RecoveryWithheldZeroCount)}, true},
-		{trigger.LevelOutcomeV2{DecisionWindow: window("")}, false},
-		{trigger.LevelOutcomeV2{}, false},
+		{trigger.LevelOutcomeV2{DecisionWindow: window(contract.RecoveryWithheldZeroCount)}, execution.RecoveryWithheldZeroCount},
+		{trigger.LevelOutcomeV2{DecisionWindow: window(contract.RecoveryWithheldNoDataLastPointUnknown)}, execution.RecoveryWithheldNoDataLastPointUnknown},
+		{trigger.LevelOutcomeV2{DecisionWindow: window("")}, execution.RecoveryWithheldNone},
+		{trigger.LevelOutcomeV2{}, execution.RecoveryWithheldNone},
 	} {
-		if got := withheldOnZeroCount(test.outcome); got != test.want {
-			t.Errorf("withheldOnZeroCount(%+v) = %t, want %t", test.outcome.DecisionWindow, got, test.want)
+		if got := withheldCode(test.outcome); got != test.want {
+			t.Errorf("withheldCode(%+v) = %d, want %d", test.outcome.DecisionWindow, got, test.want)
 		}
 	}
 }
@@ -103,7 +105,7 @@ func TestTheEvaluatorWithholdsAndCountsARecoveryOnAZeroEventCount(t *testing.T) 
 			}
 			var withheld uint64
 			for _, outcome := range plan0.LevelOutcomes {
-				if outcome.RecoveryWithheld {
+				if outcome.RecoveryWithheld != execution.RecoveryWithheldNone {
 					withheld++
 				}
 			}
@@ -117,5 +119,78 @@ func TestTheEvaluatorWithholdsAndCountsARecoveryOnAZeroEventCount(t *testing.T) 
 				t.Fatalf("the result contract refused the evaluator's own result: %v", err)
 			}
 		})
+	}
+}
+
+// Through the evaluator, on a Plan written to end on no data whose primary
+// reads event counts: the Level state's last real point reaches the trigger
+// - stored, the zero's recovery is withheld as zero_count; not stored, as
+// no_data_last_point_unknown - and the state written keeps it where it was
+// on a zero and moves it to the record on a count above zero. A Plan not
+// written so writes none.
+func TestTheEvaluatorReadsAndKeepsTheLastRealPoint(t *testing.T) {
+	compile := func(missingData bool) *strategy.CompiledPlan {
+		return compiledTwoLevelsShaped(t, "50", "50", func(p *contract.EvaluationPlanV2) {
+			if !missingData {
+				return
+			}
+			for index := range p.StrategyIR.Levels {
+				p.StrategyIR.Levels[index].RecoveryPlan.Config = json.RawMessage(`{"enabled":true,"consecutive_windows":1,"missing_data":"evaluate_as_zero"}`)
+			}
+		})
+	}
+	run := func(plan *strategy.CompiledPlan, value string, stored int64) execution.PlanEvaluationResult {
+		t.Helper()
+		history := []execution.StateHistoryPoint{{RecordID: strings.Repeat("a", 64), SourceTime: 40, Levels: []execution.StateLevelFact{
+			{LevelID: 5, DetectFingerprint: plan.Levels().At(0).Fingerprints().Detect, Result: execution.LevelFactAnomalous},
+			{LevelID: 6, DetectFingerprint: plan.Levels().At(1).Fingerprints().Detect, Result: execution.LevelFactAnomalous},
+		}}}
+		req := requestFixtureTwoLevels(t, plan, json.RawMessage(value), history)
+		req.Header.Requirements[0].ZeroIsNoObservation = true
+		for index := range req.State.Items[0].Levels {
+			req.State.Items[0].Levels[index].LastRealPointTime = stored
+		}
+		result, err := newEvaluator(t).Evaluate(context.Background(), req)
+		if err != nil {
+			t.Fatalf("Evaluate()=%v", err)
+		}
+		if err := result.Validate(req); err != nil {
+			t.Fatalf("the result contract refused the evaluator's own result: %v", err)
+		}
+		return result.Plans[0]
+	}
+	written := func(plan execution.PlanEvaluationResult) []int64 {
+		var times []int64
+		for _, level := range plan.StateResults[0].Mutation.Levels {
+			times = append(times, level.LastRealPointTime)
+		}
+		return times
+	}
+	withheld := func(plan execution.PlanEvaluationResult) []execution.RecoveryWithheldCode {
+		var codes []execution.RecoveryWithheldCode
+		for _, outcome := range plan.LevelOutcomes {
+			codes = append(codes, outcome.RecoveryWithheld)
+		}
+		return codes
+	}
+
+	zero := run(compile(true), `0`, 40)
+	if got := withheld(zero); len(got) != 2 || got[0] != execution.RecoveryWithheldZeroCount || got[1] != execution.RecoveryWithheldZeroCount {
+		t.Fatalf("stored last point: withheld %v, want zero_count on both Levels", got)
+	}
+	if got := written(zero); len(got) != 2 || got[0] != 40 || got[1] != 40 {
+		t.Fatalf("a zero wrote last real points %v, want the stored 40 kept", got)
+	}
+	unknown := run(compile(true), `0`, 0)
+	if got := withheld(unknown); got[0] != execution.RecoveryWithheldNoDataLastPointUnknown || got[1] != execution.RecoveryWithheldNoDataLastPointUnknown {
+		t.Fatalf("no stored last point: withheld %v, want no_data_last_point_unknown on both Levels", got)
+	}
+	real := run(compile(true), `5`, 40)
+	if got := written(real); got[0] != 100 || got[1] != 100 {
+		t.Fatalf("a count above zero wrote last real points %v, want the record's 100", got)
+	}
+	plain := run(compile(false), `5`, 0)
+	if got := written(plain); got[0] != 0 || got[1] != 0 {
+		t.Fatalf("a Plan not written to end on no data wrote last real points %v, want none", got)
 	}
 }

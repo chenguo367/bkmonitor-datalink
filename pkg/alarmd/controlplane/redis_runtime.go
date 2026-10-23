@@ -2757,6 +2757,12 @@ func (runtime *RedisCatalogRuntime) readPersistedSegment(
 // custom/event and nothing else: a log count is read as a time series, whose
 // empty answer does not recover, and every other source answers without
 // zero-filled groups to keep. Rounded up to a whole number of steps.
+//
+// A level written to end on no data (strategy.RecoveryPlan.MissingData)
+// ends on the round (R + T + 1) periods after the group's last event, and
+// only while the group is in the answer to say its count is zero, so that
+// round's range has to reach back to the event: R + T + 1 windows before it.
+// The window accepted is the same, so the trigger reads what it read.
 func eventCountProviderLeads(query execution.QueryPlanFacts, duePlans []execution.DuePlan) map[int64]int64 {
 	if !readsEventCountOnly(query) {
 		return nil
@@ -2765,7 +2771,11 @@ func eventCountProviderLeads(query execution.QueryPlanFacts, duePlans []executio
 	for _, due := range duePlans {
 		window := int64(due.CompiledPlan.EvaluationSemantics().QueryWindow)
 		for _, level := range due.CompiledPlan.Levels().All() {
-			histories = append(histories, levelHistory{window: window, points: int64(level.RequiredDetectHistoryPoints())})
+			points := int64(level.RequiredDetectHistoryPoints())
+			if recovery := level.Recovery(); recovery.MissingData == contract.RecoveryMissingDataEvaluateAsZero {
+				points = max(points, int64(recovery.ConsecutiveWindows)+int64(level.Trigger().WindowSize)+1)
+			}
+			histories = append(histories, levelHistory{window: window, points: points})
 		}
 	}
 	return providerLeads(query.StepMillis, histories)

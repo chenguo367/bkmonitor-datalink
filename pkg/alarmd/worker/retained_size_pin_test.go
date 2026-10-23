@@ -51,8 +51,11 @@ func TestThePerSeriesRetainedStructsKeepTheirSize(t *testing.T) {
 		got, want uintptr
 	}{
 		{"LevelOutcome", unsafe.Sizeof(execution.LevelOutcome{}), 160},
-		{"RuntimeLevelStateMutation", unsafe.Sizeof(execution.RuntimeLevelStateMutation{}), 80},
-		{"RuntimeLevelStateView", unsafe.Sizeof(execution.RuntimeLevelStateView{}), 80},
+		// 80 until LastRealPointTime, which has no alignment gap to sit in:
+		// eight bytes a Level, a no-data end's clock (the recovery spec,
+		// section 2.2). The output charge below moves by twice that.
+		{"RuntimeLevelStateMutation", unsafe.Sizeof(execution.RuntimeLevelStateMutation{}), 88},
+		{"RuntimeLevelStateView", unsafe.Sizeof(execution.RuntimeLevelStateView{}), 88},
 		{"StateEvaluation", unsafe.Sizeof(execution.StateEvaluation{}), 304},
 		{"StateMutation", unsafe.Sizeof(execution.StateMutation{}), 256},
 		{"StateHistoryPoint", unsafe.Sizeof(execution.StateHistoryPoint{}), 48},
@@ -69,11 +72,12 @@ func TestThePerSeriesRetainedStructsKeepTheirSize(t *testing.T) {
 	}
 	// The same, as the output charge adds it up for a series after the
 	// Slot's first: 2528 bytes, what the release before the origin fields
-	// charged for this fixture.
+	// charged for this fixture, and 2544 since LastRealPointTime - 16 bytes,
+	// 0.6 percent, for its one Level.
 	current := execution.EvaluationResult{Plans: []execution.PlanEvaluationResult{pinnedSeriesResult()}}
 	next := execution.EvaluationResult{Plans: []execution.PlanEvaluationResult{pinnedSeriesResult()}}
-	if got := newEffectBytes(current, next); got != 2528 {
-		t.Errorf("one series charges %d output bytes, pinned at 2528", got)
+	if got := newEffectBytes(current, next); got != 2544 {
+		t.Errorf("one series charges %d output bytes, pinned at 2544", got)
 	}
 }
 

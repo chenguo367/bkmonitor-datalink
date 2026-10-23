@@ -44,7 +44,7 @@ func TestAStatusSetterIsReadAsTheCheckerReadsItAndWhatDoesNotRunIsSaid(t *testin
 	}{
 		{setter: `"recovery"`, windows: 3},
 		{setter: `"close"`, windows: 3, end: "close"},
-		{setter: `"recovery-nodata"`, notes: []string{noData}, detail: `status_setter="recovery-nodata" recovers_on=points`, windows: 3, nodata: true},
+		{setter: `"recovery-nodata"`, notes: []string{noData}, detail: `status_setter="recovery-nodata" absent_groups_end_on=points`, windows: 3, nodata: true},
 		{setter: `"close-nodata"`, notes: []string{noData}, windows: 3, end: "close", nodata: true},
 		{setter: `"recover"`, notes: []string{defaulted}, detail: `status_setter="recover" read_as=recovery`, windows: 3},
 		{setter: `""`, notes: []string{defaulted}, windows: 3},

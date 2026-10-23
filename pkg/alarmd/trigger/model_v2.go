@@ -157,6 +157,10 @@ type LevelHistory struct {
 	// there is a round nobody read rather than a minute with no point. The
 	// walk treats every window as unsettled until it clears.
 	ReadGapOpen bool
+	// LastRealPoint is the series' last real point for this Level
+	// (execution.RuntimeLevelStateView.LastRealPointTime), zero when not
+	// known. A Level written to end on no data times that end from it.
+	LastRealPoint int64
 }
 
 type LevelEffectiveTimeFact struct {
@@ -264,6 +268,11 @@ type LevelOutcomeV2 struct {
 	DecisionWindow      *contract.DecisionWindowV1
 	DetectEvidence      *contract.DetectEvidenceV1
 	TriggerFingerprint  string
+	// RealPoint says this round's value is a real point: the Level's fact is
+	// valid, and its value is not a count of zero the request says is no
+	// observation (EvaluationRequestV2.ZeroCountIsNoObservation). The
+	// series' last real point (LevelHistory.LastRealPoint) advances on it.
+	RealPoint bool
 }
 
 type EvaluationCountsV2 struct {

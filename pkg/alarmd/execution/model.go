@@ -865,6 +865,8 @@ type RuntimeLevelStateView struct {
 	GapReasonCode           ReasonCode
 	WarmupRequirementRef    string
 	LastProcessedEventTime  int64
+	// LastRealPointTime: see RuntimeLevelStateMutation. Zero when not known.
+	LastRealPointTime int64 `json:",omitempty"`
 }
 
 // StateRepresentation names the on-disk shape a Runtime State record was read

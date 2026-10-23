@@ -62,6 +62,26 @@ func TestAReasonOriginLeavesTheStateMutationDigestAlone(t *testing.T) {
 	}
 }
 
+// The last real point stays out of the State mutation digest too: a build
+// that does not write it - the old half of a rolling update, or the one
+// rolled back to - reaches the same digest for the same Slot, so a retry is
+// the same statement to the store and not a version conflict.
+func TestALastRealPointLeavesTheStateMutationDigestAlone(t *testing.T) {
+	without, err := execution.BuildStateMutation(originFixtureMutation(execution.ReasonOrigin{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	carrying := originFixtureMutation(execution.ReasonOrigin{})
+	carrying.Levels[0].LastRealPointTime = 1_787_999_880
+	with, err := execution.BuildStateMutation(carrying)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if with.MutationDigest != without.MutationDigest || string(with.MutationDigest) != previousReleaseOriginFixtureDigest {
+		t.Fatalf("digest with a last real point %s, without %s: it reached the digest", with.MutationDigest, without.MutationDigest)
+	}
+}
+
 // A write whose Level state differs from the stored one only in the guard's
 // origin is decision-stable for the reuse reading: the origin decides
 // nothing, as it reaches no digest.

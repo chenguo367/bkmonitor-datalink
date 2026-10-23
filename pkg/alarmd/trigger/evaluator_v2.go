@@ -342,6 +342,8 @@ func evaluateLevelV2(
 	if err != nil {
 		return LevelOutcomeV2{}, contract.LevelResultV1{}, invariantV2("build Detect evidence", definition.LevelID, err)
 	}
+	inferredZero := request.ZeroCountIsNoObservation && zeroCountV2(detectEvidence.NormalizedValue)
+	outcome.RealPoint = !inferredZero
 	switch effective.Status() {
 	case strategy.EffectiveTimeInactive:
 		outcome.SuppressedReason = contract.ReasonEffectiveTimeInactive
@@ -545,12 +547,26 @@ func evaluateLevelV2(
 	// recover: NORMAL on a whole window, saying it was withheld, and on an
 	// incomplete one the history reason, since only a RECOVERY may be
 	// decided on a window that is not FULL (decision-022).
-	withheld, end := "", ""
+	withheld, end, endedBy := "", "", ""
 	if result == "" && recoveryPlan.Enabled && observedMisses >= recoveryPlan.ConsecutiveWindows && rangeObserved {
-		if request.ZeroCountIsNoObservation && zeroCountV2(detectEvidence.NormalizedValue) {
+		if inferredZero {
 			withheld = contract.RecoveryWithheldZeroCount
 		} else {
 			result, end = contract.LevelResultRecovery, recoveryPlan.End
+		}
+	}
+	// No data ends a Level written so (status_setter -nodata) on a round
+	// whose own value is a zero that is no observation, once the series'
+	// last real point is (R + T + 1) periods old, as Python's recovery check
+	// times it (recover.py:191-197). Not known, it ends nothing and says so.
+	if result == "" && inferredZero && recoveryPlan.MissingData == contract.RecoveryMissingDataEvaluateAsZero {
+		switch last := levelHistory.LastRealPoint; {
+		case last <= 0:
+			if withheld != "" {
+				withheld = contract.RecoveryWithheldNoDataLastPointUnknown
+			}
+		case noDataEndDueV2(request.Record.SourceTime, last, triggerPlan, recoveryPlan):
+			result, end, endedBy, withheld = contract.LevelResultRecovery, recoveryPlan.End, contract.RecoveryEndedByNoData, ""
 		}
 	}
 	if result == "" {
@@ -572,7 +588,7 @@ func evaluateLevelV2(
 		Recovery: contract.RecoveryWindowEvidenceV1{
 			Enabled: recoveryPlan.Enabled, RequiredConsecutiveWindows: recoveryPlan.ConsecutiveWindows,
 			ObservedConsecutiveMisses: observedMisses, OldestWindowStart: oldestWindowStart,
-			SkippedWindows: skippedWindows, Withheld: withheld, End: end,
+			SkippedWindows: skippedWindows, Withheld: withheld, End: end, EndedBy: endedBy,
 		},
 		HistoryCompleteness: summary.Completeness,
 		WindowEvidence: contract.WindowEvidenceV1{
@@ -588,6 +604,14 @@ func evaluateLevelV2(
 		DecisionWindow: decisionWindow, DetectEvidence: detectEvidence, LevelTriggerFingerprint: level.Fingerprints().Trigger,
 	}
 	return outcome, levelResult, nil
+}
+
+// noDataEndDueV2 is whether a series whose last real point is last has had
+// no real point through (R + T + 1) periods at source time now: the recovery
+// windows, the trigger window and one period more.
+func noDataEndDueV2(now, last int64, triggerPlan strategy.TriggerPlan, recoveryPlan strategy.RecoveryPlan) bool {
+	periods := int64(recoveryPlan.ConsecutiveWindows) + int64(triggerPlan.WindowSize) + 1
+	return now-last >= periods*int64(triggerPlan.StepSeconds)
 }
 
 // zeroCountV2 says a Level's normalized value is a count of zero.

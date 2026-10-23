@@ -538,6 +538,55 @@ func TestLevelResultV1RequiresConsistentWindowDecision(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			// No data ended it: the recovery windows need not be met, on a
+			// whole window or not.
+			name: "recovery ended by no data",
+			mutate: func(result *LevelResultV1) {
+				result.Result = LevelResultRecovery
+				result.DecisionWindow.Recovery.EndedBy = RecoveryEndedByNoData
+			},
+		},
+		{
+			name: "recovery ended by no data on a gapped window",
+			mutate: func(result *LevelResultV1) {
+				result.Result = LevelResultRecovery
+				result.DecisionWindow.Recovery.EndedBy = RecoveryEndedByNoData
+				result.DecisionWindow.HistoryCompleteness = "GAPPED"
+			},
+		},
+		{
+			name: "normal where no data ended it",
+			mutate: func(result *LevelResultV1) {
+				result.DecisionWindow.Recovery.EndedBy = RecoveryEndedByNoData
+			},
+			wantErr: true,
+		},
+		{
+			name: "ended by no data while the trigger holds",
+			mutate: func(result *LevelResultV1) {
+				result.Result = LevelResultRecovery
+				result.DecisionWindow.Trigger.ObservedAnomalies = 2
+				result.DecisionWindow.Recovery.EndedBy = RecoveryEndedByNoData
+			},
+			wantErr: true,
+		},
+		{
+			name: "ended by a cause outside the closed list",
+			mutate: func(result *LevelResultV1) {
+				result.Result = LevelResultRecovery
+				result.DecisionWindow.Recovery.ObservedConsecutiveMisses = 1
+				result.DecisionWindow.Recovery.EndedBy = "timeout"
+			},
+			wantErr: true,
+		},
+		{
+			name: "normal withheld with the last point unknown",
+			mutate: func(result *LevelResultV1) {
+				result.DecisionWindow.Recovery.ObservedConsecutiveMisses = 1
+				result.DecisionWindow.Recovery.Withheld = RecoveryWithheldNoDataLastPointUnknown
+			},
+		},
+		{
 			name: "recovery that ends closed",
 			mutate: func(result *LevelResultV1) {
 				result.Result = LevelResultRecovery
