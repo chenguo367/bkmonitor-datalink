@@ -233,7 +233,7 @@ func TestLoweringNeedsQuietAndThreeObservedEarlierReads(t *testing.T) {
 	*now = now.Add(2 * time.Hour)
 	observeEarly(t, c, "qg", 180*time.Second, 150_000)
 	reading, _ = c.Reading("qg")
-	if reading.MaxEarlyIntervalMillis != 2*time.Hour.Milliseconds() || quietBar(reading, now.UnixMilli()) != 2*time.Hour.Milliseconds() {
+	if reading.MaxEarlyIntervalMillis != 2*time.Hour.Milliseconds() || quietBar("qg", reading, now.UnixMilli()) != 2*time.Hour.Milliseconds() {
 		t.Fatalf("event interval %+v", reading)
 	}
 	*now = now.Add(time.Hour)

@@ -509,17 +509,17 @@ func (controller *Controller) ReadHold(qg execution.QueryGroupIdentity) time.Dur
 // nextCandidate is the hold the next earlier-read trial of record tries
 // (execution.CandidateReadHold), in milliseconds, and false when none is,
 // at now.
-func nextCandidate(record Record, step time.Duration, now int64) (int64, bool) {
+func nextCandidate(qg execution.QueryGroupIdentity, record Record, step time.Duration, now int64) (int64, bool) {
 	// A group held at its limit has data arriving past the longest hold it
 	// may have: the earlier read and the formal read both come before the
 	// data, so their agreeing says the two are equally incomplete, not that
 	// the data was there. No trial, and no evidence taken from one.
-	if atLimitHeld(record, now) {
+	if atLimitHeld(qg, record, now) {
 		return 0, false
 	}
 	// A candidate the trials chose is read by a probe before the hold moves,
 	// and no trial runs meanwhile: one trial would only choose it again.
-	if _, ok := verifying(record, now); ok {
+	if _, ok := verifying(qg, record, now); ok {
 		return 0, false
 	}
 	floor, floored := time.Duration(0), record.EarlierFloorMillis != nil
@@ -537,8 +537,8 @@ func nextCandidate(record Record, step time.Duration, now int64) (int64, bool) {
 // again, and the lowering they lead to waits for the same quiet. A source
 // still landing past the limit is read early again within the bar, which
 // starts its quiet over: it is never tried while it does.
-func atLimitHeld(record Record, now int64) bool {
-	return record.AtLimitHeld(now)
+func atLimitHeld(qg execution.QueryGroupIdentity, record Record, now int64) bool {
+	return record.AtLimitHeld(qg, now)
 }
 
 // AtLimitHeld says the record is held at its limit with its data still
@@ -547,11 +547,11 @@ func atLimitHeld(record Record, now int64) bool {
 // its limit whose data has been quiet for its bar is being tried lower and
 // is not one; every reading of "its data lands past the limit" - the trial
 // gate, a round read at the limit, the strategy page - asks this.
-func (record Record) AtLimitHeld(now int64) bool {
+func (record Record) AtLimitHeld(qg execution.QueryGroupIdentity, now int64) bool {
 	if !record.HeldAtLimit() {
 		return false
 	}
-	return record.QuietSinceMillis <= 0 || now-record.QuietSinceMillis < quietBar(record, now)
+	return record.QuietSinceMillis <= 0 || now-record.QuietSinceMillis < quietBar(qg, record, now)
 }
 
 // clearFloor forgets the search below the hold: the hold moved up or was
@@ -580,7 +580,7 @@ func (controller *Controller) EarlierCandidate(qg execution.QueryGroupIdentity) 
 	state := controller.group(qg)
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	hold, ok := nextCandidate(state.record, state.spec.Step, controller.options.Now().UnixMilli())
+	hold, ok := nextCandidate(qg, state.record, state.spec.Step, controller.options.Now().UnixMilli())
 	return time.Duration(hold) * time.Millisecond, ok
 }
 
@@ -593,7 +593,7 @@ func (controller *Controller) EarlierRefused(qg execution.QueryGroupIdentity) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	switch now := controller.options.Now().UnixMilli(); {
-	case atLimitHeld(state.record, now):
+	case atLimitHeld(qg, state.record, now):
 		controller.counted(controller.earlierSkipped, EarlierSkipAtLimit)
 	case current(state.record) > 0:
 		// Held, and not at the limit: no candidate is left above the floor.
@@ -758,7 +758,7 @@ func (controller *Controller) persist(ctx context.Context, qg execution.QueryGro
 	prunePlans(&next, state.spec.Plans, controller.options.Now().Unix()-int64(RecordTTL/time.Second))
 	// A probe's progress kept only while it is of the probe the record has
 	// now: a write that moves what the probe reads clears it (ProbeProgress).
-	settleProgress(&next, state.spec.Step, controller.options.Now().UnixMilli())
+	settleProgress(qg, &next, state.spec.Step, controller.options.Now().UnixMilli())
 	next.RenewedAtMillis = controller.options.Now().UnixMilli()
 	raw, err := json.Marshal(next)
 	if err != nil {
@@ -1475,7 +1475,7 @@ func (controller *Controller) EarlierRead(ctx context.Context, evidence EarlierE
 	}
 	hold := current(state.record)
 	now := controller.options.Now().UnixMilli()
-	candidate, tries := nextCandidate(state.record, state.spec.Step, now)
+	candidate, tries := nextCandidate(evidence.Contract.Slot.QueryGroup, state.record, state.spec.Step, now)
 	if !evidence.Observed || hold == 0 || !tries || evidence.CandidateHold.Milliseconds() != candidate || evidence.Contract.Slot.EvaluationTime <= state.record.LastEarlierSlot {
 		return nil
 	}
@@ -1493,7 +1493,7 @@ func (controller *Controller) EarlierRead(ctx context.Context, evidence EarlierE
 	} else {
 		next.EarlierDifferents = 0
 		next.EarlierMatches = min(next.EarlierMatches+1, EarlierMatchesRequired)
-		quiet := quietBar(next, now)
+		quiet := quietBar(evidence.Contract.Slot.QueryGroup, next, now)
 		if next.QuietSinceMillis > 0 && now-next.QuietSinceMillis >= quiet && next.EarlierMatches >= EarlierMatchesRequired {
 			// The trials chose the candidate; the hold moves only once a shadow
 			// probe has read it clean round by round (FloorProbe, kind verify).
@@ -1503,7 +1503,7 @@ func (controller *Controller) EarlierRead(ctx context.Context, evidence EarlierE
 			next.EarlierMatches = 0
 		}
 	}
-	moot := settleVerify(&next, now)
+	moot := settleVerify(evidence.Contract.Slot.QueryGroup, &next, now)
 	if err := controller.persist(ctx, evidence.Contract.Slot.QueryGroup, state, next, nil); err != nil {
 		return err
 	}

@@ -777,7 +777,7 @@ func (holds *productionReadHolds) degradedHold(schedule execution.FrozenQueryGro
 // past its bar is being tried lower, not read at the limit.
 func (holds *productionReadHolds) roundReadAtLimit(ref execution.FrozenExecutionContractRef) bool {
 	record, known := holds.controller.Reading(ref.Slot.QueryGroup)
-	if !known || ref.ReadHoldMillis < record.LimitMillis || !record.AtLimitHeld(holds.now().UnixMilli()) {
+	if !known || ref.ReadHoldMillis < record.LimitMillis || !record.AtLimitHeld(ref.Slot.QueryGroup, holds.now().UnixMilli()) {
 		return false
 	}
 	holds.mu.Lock()

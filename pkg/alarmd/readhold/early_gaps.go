@@ -9,7 +9,11 @@
 
 package readhold
 
-import "time"
+import (
+	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+)
 
 // A lowering waits until the data has stayed on time for as long as the
 // longest gap seen between two of its read-early arrivals: a source late
@@ -78,9 +82,13 @@ func longestGap(gaps []EarlyGap) int64 {
 
 // quietBar is how long a group must stay without a read-early arrival before
 // matching earlier reads lower its hold, at now: the longest gap that ended
-// within earlyGapDays of today, or SingleEventQuiet when none did.
-func quietBar(record Record, now int64) int64 {
-	today, bar := utcDay(now), int64(0)
+// within earlyGapDays of the group's day, or SingleEventQuiet when none did.
+// The group's day turns groupDayOffset after the UTC day does: a gap ages out
+// of the window then, not at 00:00 UTC for every group at once, so the groups
+// whose long gap ended on the same day are not quiet for their bar together
+// and their trials' candidates are not verified in the same hour.
+func quietBar(qg execution.QueryGroupIdentity, record Record, now int64) int64 {
+	today, bar := utcDay(now-groupDayOffset(qg).Milliseconds()), int64(0)
 	for _, entry := range earlyGapsOf(record) {
 		if entry.Day > today-int64(earlyGapDays) {
 			bar = max(bar, entry.Millis)

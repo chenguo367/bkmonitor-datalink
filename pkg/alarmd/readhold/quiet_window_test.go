@@ -11,6 +11,7 @@ package readhold
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"testing"
 	"time"
@@ -158,15 +159,15 @@ func TestALongGapAgesOutOfTheQuietBar(t *testing.T) {
 	if c.ReadHold("qg") != 150*time.Second {
 		t.Fatalf("lowered to %v 3 hours after a 150 hour gap still within the window", c.ReadHold("qg"))
 	}
-	if reading, _ := c.Reading("qg"); quietBar(reading, now.UnixMilli()) != 150*time.Hour.Milliseconds() {
-		t.Fatalf("bar within the window %v, want 150 hours (record %+v)", time.Duration(quietBar(reading, now.UnixMilli()))*time.Millisecond, reading)
+	if reading, _ := c.Reading("qg"); quietBar("qg", reading, now.UnixMilli()) != 150*time.Hour.Milliseconds() {
+		t.Fatalf("bar within the window %v, want 150 hours (record %+v)", time.Duration(quietBar("qg", reading, now.UnixMilli()))*time.Millisecond, reading)
 	}
 	for range 8 * 12 {
 		*now = now.Add(2 * time.Hour)
 		observeEarly(t, c, "qg", 180*time.Second, 150_000)
 	}
 	reading, _ := c.Reading("qg")
-	if bar := quietBar(reading, now.UnixMilli()); bar != 2*time.Hour.Milliseconds() {
+	if bar := quietBar("qg", reading, now.UnixMilli()); bar != 2*time.Hour.Milliseconds() {
 		t.Fatalf("bar after the 150 hour gap left the window %v, want the recent 2 hours (record %+v)", time.Duration(bar)*time.Millisecond, reading)
 	}
 	if len(reading.EarlyGaps) > earlyGapDays {
@@ -185,7 +186,8 @@ func TestALongGapAgesOutOfTheQuietBar(t *testing.T) {
 
 // A record from a build that kept only the all-time longest gap is read as
 // that gap ended on the day of its last read-early arrival: it holds the bar
-// for the window from there and then ages out like any other.
+// for the window from there and then ages out like any other, when the
+// group's own day turns (groupDayOffset).
 func TestAnAllTimeGapFromAnEarlierBuildAgesOutFromItsLastArrival(t *testing.T) {
 	last := 10*dayMillis + 3_600_000
 	record, err := Decode([]byte(`{"hold_ms":150000,"since_slot":60,"last_early_ms":` + strconv.FormatInt(last, 10) + `,"max_early_interval_ms":540000000}`))
@@ -198,9 +200,10 @@ func TestAnAllTimeGapFromAnEarlierBuildAgesOutFromItsLastArrival(t *testing.T) {
 	}{
 		{last, 540_000_000},
 		{last + int64(earlyGapDays-1)*dayMillis, 540_000_000},
-		{last + int64(earlyGapDays)*dayMillis, SingleEventQuiet.Milliseconds()},
+		{int64(10+earlyGapDays)*dayMillis + groupDayOffset("qg").Milliseconds() - 1, 540_000_000},
+		{int64(10+earlyGapDays)*dayMillis + groupDayOffset("qg").Milliseconds(), SingleEventQuiet.Milliseconds()},
 	} {
-		if got := quietBar(record, test.at); got != test.want {
+		if got := quietBar("qg", record, test.at); got != test.want {
 			t.Errorf("bar at day %d = %d, want %d", utcDay(test.at), got, test.want)
 		}
 	}
@@ -305,5 +308,50 @@ func TestARecordWithNoQuietIsTriedOnceQuietForItsBar(t *testing.T) {
 				t.Fatalf("a record without a quiet stayed at %v past its bar", c.ReadHold("qg"))
 			}
 		})
+	}
+}
+
+// Two groups whose long gap ended on the same day are quiet for their bar at their own hours: each gap ages out when
+// the group's day turns, groupDayOffset after the UTC day does, not at 00:00 UTC for both.
+func TestTwoGroupsGapsAgeOutAtTheirOwnHour(t *testing.T) {
+	early, late := execution.QueryGroupIdentity(""), execution.QueryGroupIdentity("")
+	for i := 0; i < 64 && (early == "" || late == ""); i++ {
+		qg := execution.QueryGroupIdentity(fmt.Sprintf("qg-%d", i))
+		switch offset := groupDayOffset(qg); {
+		case early == "" && offset < 6*time.Hour:
+			early = qg
+		case late == "" && offset > 18*time.Hour:
+			late = qg
+		}
+	}
+	if early == "" || late == "" {
+		t.Fatal("fixture: no two groups six hours and eighteen into the day")
+	}
+	record, err := Decode([]byte(`{"hold_ms":150000,"since_slot":60,"early_gaps":[{"day":10,"ms":540000000}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	noon := int64(10+earlyGapDays)*dayMillis + 12*time.Hour.Milliseconds()
+	if got := quietBar(early, record, noon); got != SingleEventQuiet.Milliseconds() {
+		t.Fatalf("%s at noon of the day its gap ages out: bar %d, want aged out", early, got)
+	}
+	if got := quietBar(late, record, noon); got != 540_000_000 {
+		t.Fatalf("%s at noon of the day its gap ages out: bar %d, want still the gap, its day not yet turned", late, got)
+	}
+}
+
+// Groups whose identities differ only in their last characters - as Query Groups numbered in a row do - turn their
+// days spread over the day: 24 such groups fall in 12 hours of it at least. Their FNV hashes alone fell in two.
+func TestNearlyAlikeGroupsTurnTheirDaysSpreadOverTheDay(t *testing.T) {
+	hours := map[int]bool{}
+	for i := 1; i <= 24; i++ {
+		offset := groupDayOffset(execution.QueryGroupIdentity(fmt.Sprintf("query-group-%02d", i)))
+		if offset < 0 || offset >= 24*time.Hour {
+			t.Fatalf("offset %v outside the day", offset)
+		}
+		hours[int(offset/time.Hour)] = true
+	}
+	if len(hours) < 12 {
+		t.Fatalf("24 nearly alike groups fall in %d hours of the day, want 12 at least", len(hours))
 	}
 }

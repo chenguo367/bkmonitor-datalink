@@ -85,11 +85,11 @@ func progressOf(record Record, kind string, candidate, now int64) (ProbeProgress
 // settleProgress clears from a record about to be written a progress that is
 // not of the probe the record has now (probeCandidate): the write moved what
 // the probe reads, or ends it.
-func settleProgress(record *Record, step time.Duration, now int64) {
+func settleProgress(qg execution.QueryGroupIdentity, record *Record, step time.Duration, now int64) {
 	if record.Probe == nil {
 		return
 	}
-	candidate, kind, _, ok := probeCandidate(*record, step, now)
+	candidate, kind, _, ok := probeCandidate(qg, *record, step, now)
 	if _, kept := progressOf(*record, kind, candidate, now); !ok || !kept {
 		record.Probe = nil
 	}
@@ -129,7 +129,7 @@ func (controller *Controller) FloorProbeProgress(ctx context.Context, evidence F
 		return nil
 	}
 	now := controller.options.Now().UnixMilli()
-	candidate, kind, _, ok := probeCandidate(state.record, state.spec.Step, now)
+	candidate, kind, _, ok := probeCandidate(qg, state.record, state.spec.Step, now)
 	if !ok || kind != evidence.Kind || candidate != evidence.Floor.Milliseconds() || current(state.record) != evidence.Hold.Milliseconds() {
 		controller.counted(controller.probeProgress, ProbeProgressStale)
 		return nil

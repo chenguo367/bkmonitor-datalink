@@ -298,7 +298,7 @@ func (holds *productionReadHolds) fleetFacts() map[string]fleet.ReadHoldFacts {
 		millis := reading.millis
 		entry := fleet.ReadHoldFacts{Millis: millis, BaseMillis: base, TransitionMillis: reading.transition,
 			ArrivalAgeMillis: record.ArrivalAgeMillis, LimitMillis: record.LimitMillis,
-			AtLimit: record.AtLimitHeld(holds.now().UnixMilli()), RaisedAfterLowering: record.RaisedAfterLowering, NoWholeWindowArrival: record.Noise, Rung: record.Rung,
+			AtLimit: record.AtLimitHeld(qg, holds.now().UnixMilli()), RaisedAfterLowering: record.RaisedAfterLowering, NoWholeWindowArrival: record.Noise, Rung: record.Rung,
 			Buckets:    append([]int64(nil), record.Buckets[:min(len(record.Buckets), fleet.MaxReadEarlyBuckets)]...),
 			Annotation: reading.annotation}
 		if record.HoldMillis > 0 {

@@ -103,10 +103,18 @@ func floorStanding(retests int) time.Duration {
 	return min(standing, RecordTTL)
 }
 
-// undatedFloorAge is a share of a day the group's identity fixes: how far
-// before the day it is first read on a floor written before floors were dated
-// is taken as learned (undatedFloorAt).
+// undatedFloorAge is how far before the day it is first read on a floor
+// written before floors were dated is taken as learned (undatedFloorAt): the
+// group's share of a day.
 func undatedFloorAge(qg execution.QueryGroupIdentity) time.Duration {
+	return groupDayOffset(qg)
+}
+
+// groupDayOffset is a share of a day the group's identity fixes, spread over
+// the day whatever the identities: what spreads the groups' undated floors
+// (undatedFloorAge) and the turn of their quiet bar's days (quietBar) over
+// the day rather than into one moment of it.
+func groupDayOffset(qg execution.QueryGroupIdentity) time.Duration {
 	hash := fnv.New64a()
 	_, _ = hash.Write([]byte(qg))
 	// FNV's high bits barely move between identities that differ in their
@@ -118,7 +126,7 @@ func undatedFloorAge(qg execution.QueryGroupIdentity) time.Duration {
 	x ^= x >> 27
 	x *= 0x94d049bb133111eb
 	x ^= x >> 31
-	return time.Duration(float64(x>>11) / (1 << 53) * float64(FloorStanding))
+	return time.Duration(float64(x>>11) / (1 << 53) * float64(24*time.Hour))
 }
 
 // undatedFloorAt is when a floor written before floors were dated is taken
@@ -139,8 +147,8 @@ func undatedFloorAt(qg execution.QueryGroupIdentity, record Record, now int64) i
 // limit that came down, a record another build wrote - or the group held at
 // its limit. Such a candidate is moot: the trials go on as if there were
 // none, and the next write clears it (settleVerify).
-func verifying(record Record, now int64) (int64, bool) {
-	if record.VerifyCandidateMillis == nil || atLimitHeld(record, now) {
+func verifying(qg execution.QueryGroupIdentity, record Record, now int64) (int64, bool) {
+	if record.VerifyCandidateMillis == nil || atLimitHeld(qg, record, now) {
 		return 0, false
 	}
 	candidate := *record.VerifyCandidateMillis
@@ -152,11 +160,11 @@ func verifying(record Record, now int64) (int64, bool) {
 
 // settleVerify clears a moot candidate from a record about to be written, and
 // says it did, to be counted moot.
-func settleVerify(record *Record, now int64) bool {
+func settleVerify(qg execution.QueryGroupIdentity, record *Record, now int64) bool {
 	if record.VerifyCandidateMillis == nil {
 		return false
 	}
-	if _, ok := verifying(*record, now); ok {
+	if _, ok := verifying(qg, *record, now); ok {
 		return false
 	}
 	record.VerifyCandidateMillis = nil
@@ -182,20 +190,20 @@ func settleVerify(record *Record, now int64) bool {
 // caught, whatever the rate. Such a probe reads lookback.EdgeProbeSpan of
 // rounds clean, ProbationRounds at least: the floor itself, or a midpoint
 // within EdgeProbeReach above it.
-func probeCandidate(record Record, step time.Duration, now int64) (candidate int64, kind string, edge, ok bool) {
+func probeCandidate(qg execution.QueryGroupIdentity, record Record, step time.Duration, now int64) (candidate int64, kind string, edge, ok bool) {
 	hold := current(record)
 	if hold <= 0 {
 		return 0, "", false, false
 	}
-	if candidate, ok := verifying(record, now); ok {
+	if candidate, ok := verifying(qg, record, now); ok {
 		edge := record.EarlierFloorMillis != nil && record.EarlierFloorProbed &&
 			candidate-*record.EarlierFloorMillis <= EdgeProbeReach.Milliseconds()
 		return candidate, FloorProbeKindVerify, edge, true
 	}
-	if record.EarlierFloorMillis == nil || *record.EarlierFloorMillis >= hold || atLimitHeld(record, now) {
+	if record.EarlierFloorMillis == nil || *record.EarlierFloorMillis >= hold || atLimitHeld(qg, record, now) {
 		return 0, "", false, false
 	}
-	if _, tries := nextCandidate(record, step, now); tries {
+	if _, tries := nextCandidate(qg, record, step, now); tries {
 		return 0, "", false, false
 	}
 	floor := *record.EarlierFloorMillis
@@ -227,7 +235,7 @@ func (controller *Controller) FloorProbe(qg execution.QueryGroupIdentity) (candi
 	if state.record.EarlierFloorMillis != nil && state.record.EarlierFloorAtMillis == 0 {
 		state.record.EarlierFloorAtMillis = undatedFloorAt(qg, state.record, now.UnixMilli())
 	}
-	at, kind, edge, ok := probeCandidate(state.record, state.spec.Step, now.UnixMilli())
+	at, kind, edge, ok := probeCandidate(qg, state.record, state.spec.Step, now.UnixMilli())
 	return time.Duration(at) * time.Millisecond, kind, edge, ok
 }
 
@@ -279,10 +287,10 @@ func (controller *Controller) FloorProbeResult(ctx context.Context, evidence Flo
 		return nil
 	}
 	now := controller.options.Now().UnixMilli()
-	candidate, kind, _, ok := probeCandidate(state.record, state.spec.Step, now)
+	candidate, kind, _, ok := probeCandidate(qg, state.record, state.spec.Step, now)
 	if !ok || kind != evidence.Kind || candidate != evidence.Floor.Milliseconds() || current(state.record) != evidence.Hold.Milliseconds() {
 		next := clone(state.record)
-		if settleVerify(&next, now) {
+		if settleVerify(qg, &next, now) {
 			if err := controller.persist(ctx, qg, state, next, nil); err != nil {
 				return err
 			}
