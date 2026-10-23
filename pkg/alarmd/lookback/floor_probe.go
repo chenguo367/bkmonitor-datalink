@@ -22,7 +22,7 @@ import (
 // hold. The formal read stays at the hold, and the round is decided on it;
 // the read at the floor is compared with it, whole, as a trial is
 // (completeEarlier). ProbationRounds rounds in a row that read the same -
-// EdgeProbeFactor times that near a floor a probe has failed at - lower the
+// EdgeProbeSpan of them, if more, near a floor a probe has failed at - lower the
 // hold to the floor without a probation after it, the probe having read
 // those rounds already; one that reads differently ends the probe, and the
 // floor stands longer before the next. No round is decided on data read
@@ -78,9 +78,11 @@ var FloorProbeEvents = []string{FloorProbeStarted, FloorProbePassed, FloorProbeF
 type floorProbeState struct {
 	floor time.Duration
 	hold  time.Duration
-	// edge: the floor is near one a probe has failed at, and the probe needs
-	// EdgeProbeFactor times the clean rounds.
+	// edge: the floor is near one a probe has failed at, and the probe reads
+	// EdgeProbeSpan of its rounds clean, period apart, if that is more than
+	// ProbationRounds.
 	edge     bool
+	period   time.Duration
 	clean    int
 	started  execution.EvaluationTime
 	prepared execution.EvaluationTime
@@ -102,8 +104,8 @@ type FloorProbeEnd struct {
 	Floor    time.Duration
 	Hold     time.Duration
 	Clean    int
-	// Rounds is the clean rounds it needed to pass: ProbationRounds, or
-	// EdgeProbeFactor times that.
+	// Rounds is the clean rounds it needed to pass: ProbationRounds, or near a
+	// floor a probe failed at EdgeProbeSpan of rounds if that is more.
 	Rounds  int
 	Started execution.EvaluationTime
 	Changes map[string]int
@@ -119,18 +121,21 @@ type GroupFloorProbe struct {
 	Reserved    int                      `json:"reserved"`
 }
 
-// EdgeProbeFactor is how many times ProbationRounds a probe near a floor a
-// probe has failed at reads clean before it passes (readhold's
-// EarlierFloorProbed and EdgeProbeReach). A group lowered on a pass that came
-// by chance reads some rounds early, and only its sample sees one - a round
-// an hour, about sixty early rounds before it does, whatever the rate. Read
-// against one deployment's probes 5 s above such floors, ten of which failed
-// only after 5 to 51 clean rounds: a group reading a round in two hundred
-// early passes ProbationRounds about one probe in two, and four times them
-// one in eleven; one reading a round in a hundred early, three in ten and
-// one in a hundred and twenty. The cost is a lowering there taking eight
-// hours of a minute's period rather than two.
-const EdgeProbeFactor = 4
+// EdgeProbeSpan is how long a probe near a floor a probe has failed at reads
+// clean before it passes (readhold's EarlierFloorProbed and EdgeProbeReach):
+// its rounds over that long, ProbationRounds at least. A group lowered on a
+// pass that came by chance reads some rounds early, and only its sample sees
+// one - a round a rest, an hour at most - so about as many early rounds as
+// the rest holds rounds before it does, whatever the rate: sixty at a
+// minute's period, twelve at five minutes, three at twenty. The evidence it
+// needs scales with time for that reason, not by a fixed multiple of the
+// rounds. Read against one deployment's probes 5 s above such floors, ten of
+// which failed only after 5 to 51 clean rounds: at a minute's period, eight
+// hours is 480 rounds, and a group reading a round in a hundred early passes
+// one probe in a hundred and twenty rather than three in ten; from four
+// minutes on it is no more than ProbationRounds, whose early rounds after a
+// chance pass are a few already.
+const EdgeProbeSpan = 8 * time.Hour
 
 // floorProbe asks the controller, outside the engine's lock, for the floor
 // the group's probe reads at and whether it is near a failed one; false with
@@ -144,10 +149,11 @@ func (engine *Engine) floorProbe(queryGroup execution.QueryGroupIdentity) (time.
 
 // probeRounds is how many clean rounds in a row pass a probe.
 func (engine *Engine) probeRounds(probe *floorProbeState) int {
-	if probe.edge {
-		return EdgeProbeFactor * engine.probationRounds()
+	rounds := engine.probationRounds()
+	if probe.edge && probe.period > 0 {
+		rounds = max(rounds, int((EdgeProbeSpan+probe.period-1)/probe.period))
 	}
-	return engine.probationRounds()
+	return rounds
 }
 
 // prepareProbe is Prepare for a Slot of a group whose probe reads at floor:
@@ -165,7 +171,14 @@ func (engine *Engine) prepareProbe(query Query, now time.Time, hold, base, floor
 		probe = nil
 	}
 	if probe == nil {
-		probe = &floorProbeState{floor: floor, hold: base, edge: edge, started: slot, reserved: map[execution.EvaluationTime]*earlierSample{}}
+		// Its rounds are its Slots, a period apart: the next Slot's distance, or
+		// the group's step where no next Slot is known.
+		period := state.step
+		if query.FollowingSlot > query.Contract.Slot.EvaluationTime {
+			period = time.Duration(query.FollowingSlot-query.Contract.Slot.EvaluationTime) * time.Second
+		}
+		probe = &floorProbeState{floor: floor, hold: base, edge: edge, period: period, started: slot,
+			reserved: map[execution.EvaluationTime]*earlierSample{}}
 		state.floorProbe = probe
 		engine.counts.floorProbes[key2(state.source, FloorProbeStarted)]++
 	}

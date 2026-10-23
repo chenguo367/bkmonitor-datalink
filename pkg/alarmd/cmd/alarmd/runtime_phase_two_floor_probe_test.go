@@ -264,7 +264,7 @@ func TestAStuckGroupsFloorIsProbedAndItsHoldComesDownWithNoRoundReadEarly(t *tes
 // after it, passes, and is the hold. 24 s fails; 36, 30 and 27 s pass; 27 s is within readhold.MidpointResolution of
 // 24 s. The hold comes down through 48, 36, 30 and 27 s, every lowering a verified one, over a floor of 24 s. A probe
 // failed at that floor, so the halves within readhold.EdgeProbeReach above it, 30 and 27 s, each read
-// lookback.EdgeProbeFactor times lookback.ProbationRounds clean before they pass, and 36 s, further up, the rounds
+// lookback.EdgeProbeSpan of their minute's rounds clean before they pass, and 36 s, further up, lookback.ProbationRounds
 // alone.
 func TestAProbeComesDownToWhereItsDataIsWholeAndNoFurther(t *testing.T) {
 	t.Parallel()
@@ -311,8 +311,8 @@ func TestAProbeComesDownToWhereItsDataIsWholeAndNoFurther(t *testing.T) {
 		t.Fatalf("controller %v, probe events %v, changes %v; want the half at 24 s failed on the late series' point, raising the floor, and the three above it passed",
 			holds.controller.Stats().FloorProbes, events, changes)
 	}
-	if near := uint64(lookback.ProbationRounds + 2*lookback.EdgeProbeFactor*lookback.ProbationRounds); rounds[lookback.FloorProbeClean] < near {
-		t.Fatalf("%d clean probe rounds, want at least %d: 36 s on the rounds alone, 30 and 27 s on four times them",
+	if near := uint64(lookback.ProbationRounds + 2*int(lookback.EdgeProbeSpan/time.Minute)); rounds[lookback.FloorProbeClean] < near {
+		t.Fatalf("%d clean probe rounds, want at least %d: 36 s on ProbationRounds, 30 and 27 s on eight hours of a minute's rounds each",
 			rounds[lookback.FloorProbeClean], near)
 	}
 	if skipped != 0 || !holds.controller.LoweringVerified(f.queryGroup) {

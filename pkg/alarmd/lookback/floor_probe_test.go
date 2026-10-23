@@ -339,11 +339,10 @@ func TestEachRoundOfAProbeIsReadAtTheFloorAndPassesTheProbe(t *testing.T) {
 	}
 }
 
-// A probe near a floor a probe failed at passes on EdgeProbeFactor times its rounds clean and not one fewer, and its
-// reading and its end say how many it needs.
+// A probe near a floor a probe failed at passes on eight hours of its rounds clean, 480 a minute apart, and not one
+// fewer, and its reading and its end say how many it needs.
 func TestAProbeNearAFailedFloorPassesOnMoreRounds(t *testing.T) {
-	const rounds = 3
-	need := EdgeProbeFactor * rounds
+	const rounds, need = 3, 480
 	r := newProbeRun(t, 30*time.Second, 0, rounds)
 	r.edge = true
 	first := r.f.clock.now().Unix() / 60 * 60
@@ -358,6 +357,42 @@ func TestAProbeNearAFailedFloorPassesOnMoreRounds(t *testing.T) {
 	ends := r.endsSeen()
 	if len(ends) != 1 || ends[0].Event != FloorProbePassed || ends[0].Clean != need || ends[0].Rounds != need {
 		t.Fatalf("ends %+v, want one passed on %d clean rounds", ends, need)
+	}
+}
+
+// Near a floor a probe failed at, a probe needs eight hours of its rounds, the last one begun counting, and never fewer
+// than ProbationRounds: 960 half a minute apart, 480 a minute apart, 412 seventy seconds apart, 160 three minutes
+// apart, ProbationRounds from four minutes on. Elsewhere it needs ProbationRounds at any period.
+func TestAProbeNearAFailedFloorNeedsEightHoursOfItsRounds(t *testing.T) {
+	engine := newFixture(t).engine
+	for _, c := range []struct {
+		period time.Duration
+		edge   int
+	}{
+		{30 * time.Second, 960}, {time.Minute, 480}, {70 * time.Second, 412}, {3 * time.Minute, 160},
+		{4 * time.Minute, ProbationRounds}, {5 * time.Minute, ProbationRounds}, {20 * time.Minute, ProbationRounds},
+	} {
+		if got := engine.probeRounds(&floorProbeState{edge: true, period: c.period}); got != c.edge {
+			t.Fatalf("near a failed floor, %v apart: %d rounds, want %d", c.period, got, c.edge)
+		}
+		if got := engine.probeRounds(&floorProbeState{period: c.period}); got != ProbationRounds {
+			t.Fatalf("elsewhere, %v apart: %d rounds, want %d", c.period, got, ProbationRounds)
+		}
+	}
+}
+
+// A probe's rounds are its Slots: one whose Slots are five minutes apart, over data a minute apart, is near a failed
+// floor on ProbationRounds, eight hours of its Slots being fewer, and not on eight hours of its data's steps.
+func TestAProbesRoundsAreItsSlotsNotItsDataSteps(t *testing.T) {
+	r := newProbeRun(t, 30*time.Second, 0, ProbationRounds)
+	r.edge = true
+	first := r.f.clock.now().Unix() / 60 * 60
+	q := r.slotQuery(first)
+	q.FollowingSlot = execution.EvaluationTime(first + 300)
+	r.f.clock.set(time.Unix(first+int64(r.hold/time.Second), 0))
+	r.f.engine.Prepare(q)
+	if reading, _ := r.f.engine.GroupReading("qg"); reading.FloorProbe == nil || reading.FloorProbe.Rounds != ProbationRounds {
+		t.Fatalf("the group's probe %+v, want one needing %d rounds, its Slots five minutes apart", reading.FloorProbe, ProbationRounds)
 	}
 }
 

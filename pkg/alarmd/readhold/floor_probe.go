@@ -130,8 +130,9 @@ func undatedFloorAt(qg execution.QueryGroupIdentity, record Record, now int64) i
 // after 5 to 51 clean rounds. Of such groups some pass ProbationRounds by
 // chance and then read a round in a few hundred early, which only a sample
 // sees - one round an hour, so about sixty early rounds before one is
-// caught, whatever the rate. Such a probe needs lookback.EdgeProbeFactor times the rounds:
-// the floor itself, or a midpoint within EdgeProbeReach above it.
+// caught, whatever the rate. Such a probe reads lookback.EdgeProbeSpan of
+// rounds clean, ProbationRounds at least: the floor itself, or a midpoint
+// within EdgeProbeReach above it.
 func probeCandidate(record Record, step time.Duration, now int64) (candidate int64, atFloor, edge, ok bool) {
 	hold := current(record)
 	if hold <= 0 || record.EarlierFloorMillis == nil || *record.EarlierFloorMillis >= hold || atLimitHeld(record, now) {

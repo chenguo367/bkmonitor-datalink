@@ -252,8 +252,8 @@ type Options struct {
 	LoweringVerified func(execution.QueryGroupIdentity) bool
 	// FloorProbe is the floor a Query Group whose search below its hold has
 	// run out has its rounds read at as well, whether it is near a floor a
-	// probe has failed at, which needs EdgeProbeFactor times the clean rounds
-	// to pass, and false when it has none to probe
+	// probe has failed at, which needs EdgeProbeSpan of clean rounds to pass,
+	// and false when it has none to probe
 	// (readhold.Controller.FloorProbe; floor_probe.go). Nil probes none.
 	FloorProbe func(execution.QueryGroupIdentity) (floor time.Duration, edge, probing bool)
 	// OnFloorProbe sees every probe end, outside the engine's lock: one that

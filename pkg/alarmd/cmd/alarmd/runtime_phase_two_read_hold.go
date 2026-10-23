@@ -935,8 +935,9 @@ func (holds *productionReadHolds) bindLookback(options *lookback.Options) {
 			// group's floor as the controller has it when the line is written
 			// (-1 while none): the two are one while the probe reads the floor
 			// itself, apart while it reads a midpoint above it. rounds_required
-			// is the clean rounds it needed: ProbationRounds, four times that
-			// near a floor a probe failed at. A failed probe says how its last
+			// is the clean rounds it needed: ProbationRounds, or near a floor a
+			// probe failed at eight hours of its rounds if more - 480 at a
+			// minute's period. A failed probe says how its last
 			// round's formal read differed, in buckets by change class.
 			floor := int64(-1)
 			if record, loaded := holds.controller.Reading(e.Contract.Slot.QueryGroup); loaded && record.EarlierFloorMillis != nil {
