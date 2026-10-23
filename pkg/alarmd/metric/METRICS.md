@@ -1203,6 +1203,12 @@ Labels: `loop`
 
 How long one turn of a long-running loop took, by loop, failed turns included. control is the refresh and reconcile loop; dispatch is the scheduler's queue loop, measured up to the wait. The liveness bound on a loop is judged against the longest turn this shows.
 
+## alarmd_no_data_end_total
+
+Labels: `outcome`
+
+What the no-data end index did, by outcome: sent (series whose alert a level written to end on no data ended while the series was absent from complete answers through the recovery span), not_open (entries removed because the consumer no longer holds their alert - closed by hand, by effective time, by the absent or superseded-identity close - nothing sent), overflow (open alerts not indexed, the Plan's index full; they stay open while their group is absent), unavailable (Plans whose index could not be read or written that round; nothing decided on it), send_failed (series whose end the sink did not take; sent again on the next complete round), undecodable (entries this build could not read, left to the alert's own end), unjudged (absent entries a complete round could not decide on because the consumer's set could not be judged - not read yet after a handover, or no Console; nothing sent or removed). Counted in series or entries, per round. Every outcome exists from start.
+
 ## alarmd_no_data_plans_by_hop_total
 
 Labels: `hop`

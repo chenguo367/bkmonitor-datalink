@@ -77,6 +77,8 @@ type lifecycleStrategy struct {
 	// edit is applied to the item last, for a target shape the fields above
 	// do not express.
 	edit func(item map[string]any)
+	// statusSetter, when set, is every level's recovery_config.status_setter.
+	statusSetter string
 }
 
 type lifecycleFixture struct {
@@ -306,6 +308,9 @@ func (fixture *lifecycleFixture) install(strategy lifecycleStrategy) {
 	}
 	for _, detect := range document["detects"].([]any) {
 		detect.(map[string]any)["trigger_config"].(map[string]any)["check_window"] = 1
+		if strategy.statusSetter != "" {
+			detect.(map[string]any)["recovery_config"].(map[string]any)["status_setter"] = strategy.statusSetter
+		}
 	}
 	if strategy.edit != nil {
 		strategy.edit(item)
@@ -675,6 +680,22 @@ func (fixture *lifecycleFixture) publishOpenAlert(dedupeMD5 string) {
 	ctx := context.Background()
 	prefix := lifecycleLinkPrefix
 	if err := fixture.redis.SAdd(ctx, prefix+":tenant-a:"+lifecycleStrategyID, dedupeMD5).Err(); err != nil {
+		fixture.t.Fatal(err)
+	}
+	notice := `{"bk_tenant_id":"tenant-a","strategy_id":"` + lifecycleStrategyID + `"}`
+	if err := fixture.redis.Publish(ctx, prefix+":changes", notice).Err(); err != nil {
+		fixture.t.Fatal(err)
+	}
+}
+
+// withdrawOpenAlert takes one alert out of the consumer's open alert set, as
+// the consumer does when the alert is closed by hand, and says so on the
+// change channel.
+func (fixture *lifecycleFixture) withdrawOpenAlert(dedupeMD5 string) {
+	fixture.t.Helper()
+	ctx := context.Background()
+	prefix := lifecycleLinkPrefix
+	if err := fixture.redis.SRem(ctx, prefix+":tenant-a:"+lifecycleStrategyID, dedupeMD5).Err(); err != nil {
 		fixture.t.Fatal(err)
 	}
 	notice := `{"bk_tenant_id":"tenant-a","strategy_id":"` + lifecycleStrategyID + `"}`

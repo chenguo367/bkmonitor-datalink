@@ -50,6 +50,10 @@ type Ports struct {
 	// sign would be no-data alerts that never fire - which is indistinguishable
 	// from nothing being absent.
 	NoData execution.PlanNoDataStore
+	// NoDataEnds keeps the no-data end index (execution.NoDataEndIndex).
+	// Optional: without it a level written to end on no data ends only while
+	// its group is in the answer.
+	NoDataEnds execution.NoDataEndIndex
 	// Hosts resolves which business a host belongs to, which decides both what
 	// a no-data roster expects and which of its groups have left. Required for
 	// the same reason: without it every declared host would read as unknown, so
@@ -498,7 +502,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	err = coordinator.ports.Sequencer.Sequence(ctx, sequencingScope(stream.header, stream.stateItems, stream.gapItems), func(sequenceCtx context.Context) error {
 		var executeErr error
 		result, executeErr = coordinator.finalizePreparedWithGaps(
-			withNoDataAbsenceStarts(sequenceCtx, stream.noDataAbsenceStarts), request, stream.header, stream.bindings, stream.state, stream.gaps, stream.evaluated,
+			withNoDataEnds(withNoDataAbsenceStarts(sequenceCtx, stream.noDataAbsenceStarts), stream.noDataEndRound()), request, stream.header, stream.bindings, stream.state, stream.gaps, stream.evaluated,
 			stream.noDataMutations, stream.queryEvidence, stream.seriesCensus, stream.targetSummaries(),
 		)
 		return executeErr
@@ -1657,6 +1661,9 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 	// writes that carry this round's decisions rather than racing them.
 	if err := coordinator.applyNoDataMemory(ctx, request, header.DuePlans,
 		withoutWithheldNoData(noDataMemory, withheldNoData)); err != nil {
+		return execution.SlotExecutionResult{}, err
+	}
+	if err := coordinator.applyNoDataEnds(ctx, request, header, evaluated, withheldNoData); err != nil {
 		return execution.SlotExecutionResult{}, err
 	}
 	if retryPendingReason != "" {

@@ -787,7 +787,7 @@ func openProductionPhaseTwoBundleAssembly(
 		EffectiveTime: legacyTime.Provider(),
 		Finalization:  frozen, Activation: repository, Query: querySource, Sequencer: sequencer,
 		Evaluator: evaluator, Admission: admitter, GapGuard: executionStore, Events: events,
-		NoData: executionStore, NoDataManualCloses: executionStore, Hosts: hostBusiness, State: executionStore, Progress: progressStore, Observer: observer,
+		NoData: executionStore, NoDataEnds: executionStore, NoDataManualCloses: executionStore, Hosts: hostBusiness, State: executionStore, Progress: progressStore, Observer: observer,
 		ExecutionEvidence: slotAppliedMarks,
 		OpenAlerts:        &openAlertCopyPort{cache: openAlertCopy},
 		// The horizon the platform settings copy resolves now, read per Slot:
@@ -1690,6 +1690,11 @@ func maxDuration(values ...time.Duration) time.Duration {
 type openAlertCopyPort struct {
 	cache         *openalerts.Cache
 	registerOwned func(execution.QueryGroupIdentity, []execution.PlanIdentity)
+}
+
+// Holds is the copy's judged membership (execution.OpenAlertJudge).
+func (port openAlertCopyPort) Holds(tenantID, strategyID, fingerprint string) (bool, bool) {
+	return port.cache.Holds(openalerts.StrategyKey{TenantID: tenantID, StrategyID: strategyID}, fingerprint)
 }
 
 func (port openAlertCopyPort) Contains(tenantID, strategyID, fingerprint string) bool {

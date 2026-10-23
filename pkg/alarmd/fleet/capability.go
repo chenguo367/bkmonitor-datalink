@@ -124,7 +124,6 @@ var capabilityByReason = map[string]CapabilityClass{
 	"AGG_INTERVAL_DEFAULTED":            {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported},
 	"RECOVERY_CONFIG_DEFAULTED":         {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported},
 	"RECOVERY_STATUS_SETTER_DEFAULTED":  {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported},
-	"RECOVERY_NODATA_UNSUPPORTED":       {Area: CapabilityAlgorithm, Outcome: CapabilityNotYetSupported},
 
 	"PRIORITY_IGNORED": {IgnoredByDesign: true},
 }

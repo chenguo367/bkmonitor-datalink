@@ -64,7 +64,9 @@ func TestThePerSeriesRetainedStructsKeepTheirSize(t *testing.T) {
 		// same, so they cannot grow without saying so either.
 		{"GapScopeState", unsafe.Sizeof(execution.GapScopeState{}), 72},
 		{"EvaluationResult", unsafe.Sizeof(execution.EvaluationResult{}), 192},
-		{"PlanEvaluationResult", unsafe.Sizeof(execution.PlanEvaluationResult{}), 424},
+		// 424 until NoDataEnds, a slice header a Plan: the index updates of
+		// a Plan written to end on no data, empty for every other.
+		{"PlanEvaluationResult", unsafe.Sizeof(execution.PlanEvaluationResult{}), 448},
 	} {
 		if pinned.got != pinned.want {
 			t.Errorf("%s is %d bytes, pinned at %d", pinned.name, pinned.got, pinned.want)

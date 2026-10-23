@@ -1840,6 +1840,10 @@ type PlanEvaluationResult struct {
 	GuardAfterState   []PlanGapMutation
 	RecoveryGate      RecoveryGateCounts
 	OpenAlertGate     OpenAlertGateCounts
+	// NoDataEnds is what this evaluation said about the no-data end index
+	// (NoDataEndIndex): one update per series and level written to end on no
+	// data. Empty for every Plan without such a level.
+	NoDataEnds []NoDataEndUpdate
 	// HistoryCoverage is observation only. It lives here and nowhere else: a
 	// second copy on the enclosing result would be one more pair of numbers
 	// that have to agree about the same evaluation, and the first time they

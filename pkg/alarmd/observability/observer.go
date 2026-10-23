@@ -135,6 +135,9 @@ const (
 	StageStatePreflight           = "state_preflight"
 	StageGapLoaded                = "gap_loaded"
 	StageNoDataDecided            = "no_data_decided"
+	// StageNoDataEnd names what one Plan's no-data end index did this round,
+	// one outcome a line (NoDataEndOutcomes), counted in Keys.
+	StageNoDataEnd = "no_data_end"
 	// StageTargetResolved names what one Plan's target plan resolved to in
 	// one Slot: the state the admission filter and the absence judgement
 	// both read, and each selector's answer by name (decision-017).
@@ -2224,6 +2227,39 @@ var RecoveryWithheldReasons = []RecoveryWithheldReason{RecoveryWithheldZeroCount
 // end on no data whose last real point is not known, so no data ends nothing.
 const RecoveryWithheldNoDataLastPointUnknown RecoveryWithheldReason = contract.RecoveryWithheldNoDataLastPointUnknown
 
+// The outcomes of the no-data end index (worker), closed: a metric label.
+const (
+	// NoDataEndSent counts series whose end went out: absent through the
+	// recovery span on complete rounds, alert still open.
+	NoDataEndSent = "sent"
+	// NoDataEndNotOpen counts entries removed because the consumer's set no
+	// longer holds their alert - closed by hand, by effective time, by the
+	// absent or superseded-identity close - so nothing is sent for them.
+	NoDataEndNotOpen = "not_open"
+	// NoDataEndOverflow counts open alerts not indexed because the Plan's
+	// index was full (MaxNoDataEndEntriesPerPlan): such an alert is not
+	// ended on no data while its group is absent, and stays open.
+	NoDataEndOverflow = "overflow"
+	// NoDataEndUnavailable counts Plans whose index could not be read or
+	// written this round: nothing is decided on it.
+	NoDataEndUnavailable = "unavailable"
+	// NoDataEndSendFailed counts series whose end the sink did not take; the
+	// entry stays and the next complete round sends again.
+	NoDataEndSendFailed = "send_failed"
+	// NoDataEndUndecodable counts entries this build could not read; they
+	// are left to the alert's own end.
+	NoDataEndUndecodable = "undecodable"
+	// NoDataEndUnjudged counts absent entries a complete round could not
+	// decide on because the consumer's set could not be judged - not read yet
+	// after a handover, or no Console to read it from; nothing is sent or
+	// removed, and the next round with a judged set decides.
+	NoDataEndUnjudged = "unjudged"
+)
+
+// NoDataEndOutcomes is the closed list.
+var NoDataEndOutcomes = []string{NoDataEndSent, NoDataEndNotOpen, NoDataEndOverflow, NoDataEndUnavailable,
+	NoDataEndSendFailed, NoDataEndUndecodable, NoDataEndUnjudged}
+
 // RecoveryWithheldFact counts, for one evaluation, the Level outcomes whose
 // recovery was withheld for one reason.
 type RecoveryWithheldFact struct {
@@ -2657,7 +2693,9 @@ type Observation struct {
 	AlgorithmInputs      []AlgorithmInputFact
 	RecoveryGates        []RecoveryGateFact
 	RecoveryWithheld     []RecoveryWithheldFact
-	OpenAlertGates       []OpenAlertGateFact
+	// NoDataEnd is the outcome of a no_data_end line (NoDataEndOutcomes).
+	NoDataEnd      string `json:"no_data_end,omitempty"`
+	OpenAlertGates []OpenAlertGateFact
 	// LevelOutcomes is what the evaluation concluded per Level outcome and
 	// reason, on an evaluation_completed line: how many Level outcomes were
 	// NORMAL, ABNORMAL, RECOVERY, and for UNKNOWN and TERMINAL by which
@@ -2800,6 +2838,9 @@ func NormalizeObservation(observation Observation) Observation {
 	observation.AlgorithmEvaluations, observation.AlgorithmInputs = normalizeAlgorithmFacts(observation)
 	observation.RecoveryGates = normalizeRecoveryGateFacts(observation)
 	observation.RecoveryWithheld = normalizeRecoveryWithheldFacts(observation)
+	if observation.Stage != StageNoDataEnd || !slices.Contains(NoDataEndOutcomes, observation.NoDataEnd) {
+		observation.NoDataEnd = ""
+	}
 	observation.LevelOutcomes = normalizeLevelOutcomeFacts(observation)
 	observation.OpenAlertGates = normalizeOpenAlertGateFacts(observation)
 	observation.ControlSourceRound = normalizeControlSourceRoundFacts(observation)
@@ -3683,6 +3724,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentState, StageStatePreflight}, {ComponentState, StageGapLoaded},
 	{ComponentState, StageGapGuardProgress},
 	{ComponentEvaluation, StageNoDataDecided},
+	{ComponentState, StageNoDataEnd},
 	{ComponentAccess, StageTargetResolved},
 	{ComponentProgress, StageExecutionEvidenceWritten},
 	{ComponentState, StageNoDataMemoryRead},

@@ -29,7 +29,6 @@ import (
 func TestAStatusSetterIsReadAsTheCheckerReadsItAndWhatDoesNotRunIsSaid(t *testing.T) {
 	const (
 		defaulted = "RECOVERY_STATUS_SETTER_DEFAULTED"
-		noData    = "RECOVERY_NODATA_UNSUPPORTED"
 		window    = "RECOVERY_CONFIG_DEFAULTED"
 	)
 	plain := legacyRecoveryCatalog(t, `{"level":1,"trigger_config":{"count":1,"check_window":1},"recovery_config":{"check_window":3}}`, 1)
@@ -44,8 +43,8 @@ func TestAStatusSetterIsReadAsTheCheckerReadsItAndWhatDoesNotRunIsSaid(t *testin
 	}{
 		{setter: `"recovery"`, windows: 3},
 		{setter: `"close"`, windows: 3, end: "close"},
-		{setter: `"recovery-nodata"`, notes: []string{noData}, detail: `status_setter="recovery-nodata" absent_groups_end_on=points`, windows: 3, nodata: true},
-		{setter: `"close-nodata"`, notes: []string{noData}, windows: 3, end: "close", nodata: true},
+		{setter: `"recovery-nodata"`, windows: 3, nodata: true},
+		{setter: `"close-nodata"`, windows: 3, end: "close", nodata: true},
 		{setter: `"recover"`, notes: []string{defaulted}, detail: `status_setter="recover" read_as=recovery`, windows: 3},
 		{setter: `""`, notes: []string{defaulted}, windows: 3},
 		{setter: `"close-later"`, notes: []string{defaulted}, detail: `status_setter="close-later" read_as=close`, windows: 3, end: "close"},

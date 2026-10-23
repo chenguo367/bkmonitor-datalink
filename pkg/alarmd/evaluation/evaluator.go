@@ -156,6 +156,8 @@ type recordResult struct {
 	// other record.
 	gate     trigger.RecoveryGateV2
 	coverage execution.HistoryCoverage
+	// noDataEnds is the record's updates to the no-data end index.
+	noDataEnds []execution.NoDataEndUpdate
 }
 
 // normalWithheld is withheldCode on a NORMAL outcome and None on any other.
@@ -570,7 +572,8 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 		e.observeSnapshot(tr.Snapshot.States, tr.Snapshot.Result)
 	}
 	events, withoutMessage := keptEvents(tr, execution.RecordAnchor{RecordID: record.RecordID(), SourceTime: record.SourceTime()})
-	result := recordResult{outcomes: outcomes, gate: tr.RecoveryGate, coverage: coverage}
+	result := recordResult{outcomes: outcomes, gate: tr.RecoveryGate, coverage: coverage,
+		noDataEnds: noDataEndUpdates(request, due, record, view, tr.LevelOutcomes)}
 	if advance || len(missingInputGuards) > 0 {
 		mutation, err := buildMutation(request, due, record, view, facts, tr.LevelOutcomes, historyCompleteness,
 			durableGuards{reasons: durableGuardReasons, origins: durableGuardOrigins}, missingInputGuards)
@@ -758,6 +761,7 @@ func (e *Evaluator) evaluateSeriesWith(
 		finishSeriesSample(sample, one)
 		result.LevelOutcomes = append(result.LevelOutcomes, one.outcomes...)
 		countRecoveryGate(&result.RecoveryGate, one.gate)
+		result.NoDataEnds = append(result.NoDataEnds, one.noDataEnds...)
 		countOpenAlertGate(&result.OpenAlertGate, one.gate)
 		result.HistoryCoverage.Merge(one.coverage)
 		if one.state != nil {
@@ -1111,6 +1115,59 @@ func lastRealPointAfter(plan *strategy.CompiledPlan, view execution.RuntimeState
 		return stored.LastRealPointTime
 	}
 	return 0
+}
+
+// noDataEndUpdates is what one record says about the no-data end index: for
+// each Level written to end on no data, whether its alert is open after this
+// round - opened this round, or held by the consumer's set and not recovered
+// now - with the alert's fingerprint, the series' alert dimensions and its
+// last real point. None where the Plan names no alert identity or has no
+// consumer's set to judge by (a Plan that publishes no RECOVERY message), and
+// none for a Level whose last real point is not known: it cannot be timed,
+// and the round that brings a real point writes it.
+func noDataEndUpdates(request execution.EvaluationRequest, due execution.DuePlan, record execution.RecordView,
+	view execution.RuntimeStateView, outcomes []trigger.LevelOutcomeV2) []execution.NoDataEndUpdate {
+	plan := due.CompiledPlan
+	identity := plan.OutputIdentity()
+	ref := plan.StrategyRef()
+	if identity == nil || ref.SnapshotRevision <= 0 || request.OpenAlerts == nil {
+		return nil
+	}
+	var updates []execution.NoDataEndUpdate
+	var dimensions map[string]json.RawMessage
+	fingerprint := ""
+	for _, outcome := range outcomes {
+		if !endsOnNoData(plan, outcome.LevelID) || (outcome.Result == "" && !outcome.RealPoint) {
+			continue
+		}
+		if fingerprint == "" {
+			dimensions = alertDimensions(record.Dimensions(), request.HostOverlay)
+			computed, err := contract.MonitorDedupeMD5(ref.StrategyID, due.Identity.BusinessID, dimensions, *identity)
+			if err != nil {
+				return nil
+			}
+			fingerprint = computed
+		}
+		last := lastRealPointAfter(plan, view, record, outcomes, outcome.LevelID)
+		if last <= 0 {
+			continue
+		}
+		open, judged := true, true
+		switch outcome.Result {
+		case contract.LevelResultAbnormal:
+		case contract.LevelResultRecovery:
+			open = false
+		default:
+			open, judged = false, false
+			if judge, ok := request.OpenAlerts.(execution.OpenAlertJudge); ok {
+				open, judged = judge.Holds(due.Identity.TenantID, ref.StrategyID, fingerprint)
+			}
+		}
+		updates = append(updates, execution.NoDataEndUpdate{Open: open, Judged: judged, Entry: execution.NoDataEndEntry{
+			Series: execution.SeriesIdentityDigest(record.DimensionIdentityDigest()), LevelID: outcome.LevelID,
+			Fingerprint: fingerprint, Dimensions: dimensions, LastRealPoint: last}})
+	}
+	return updates
 }
 
 // endsOnNoData is whether a Plan's Level is written to end its alert on no

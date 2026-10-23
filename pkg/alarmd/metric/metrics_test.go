@@ -452,6 +452,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["alarmd_algorithm_input_total"] = "variableLabels: {algorithm_family,input_name,dependency_point,result}"
 	expected["alarmd_trigger_recovery_beside_level_total"] = "variableLabels: {beside}"
 	expected["alarmd_trigger_recovery_withheld_total"] = "variableLabels: {reason}"
+	expected["alarmd_no_data_end_total"] = "variableLabels: {outcome}"
 	expected["alarmd_trigger_open_alert_gate_total"] = "variableLabels: {outcome}"
 	expected["alarmd_open_alert_set_authoritative_age_seconds"] = "variableLabels: {}"
 	expected["alarmd_open_alert_set_unavailable_total"] = "variableLabels: {reason}"
@@ -1085,6 +1086,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("algorithm_input_total")] = 160
 	bounds[fqName("trigger_recovery_beside_level_total")] = 3
 	bounds[fqName("trigger_recovery_withheld_total")] = len(observability.RecoveryWithheldReasons)
+	bounds[fqName("no_data_end_total")] = len(observability.NoDataEndOutcomes)
 	bounds[fqName("trigger_open_alert_gate_total")] = len(observability.OpenAlertGateOutcomes)
 	bounds[fqName("open_alert_set_authoritative_age_seconds")] = 1
 	bounds[fqName("open_alert_set_unavailable_total")] = len(openalerts.UnavailableReasons)

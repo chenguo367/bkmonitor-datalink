@@ -149,6 +149,7 @@ type phaseTwoMetrics struct {
 	algorithmEvaluations            *prometheus.CounterVec
 	recoveryBeside                  *prometheus.CounterVec
 	recoveryWithheld                *prometheus.CounterVec
+	noDataEnd                       *prometheus.CounterVec
 	levelAbnormal                   *prometheus.CounterVec
 	historyCoverageRejected         *prometheus.CounterVec
 	historyCoverageUnsummarised     *prometheus.CounterVec
@@ -1289,6 +1290,22 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, reason := range observability.RecoveryWithheldReasons {
 		metrics.recoveryWithheld.WithLabelValues(string(reason))
 	}
+	metrics.noDataEnd = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: metricSubsystem, Name: "no_data_end_total",
+		Help: "What the no-data end index did, by outcome: sent (series whose alert a level written to end on no " +
+			"data ended while the series was absent from complete answers through the recovery span), not_open " +
+			"(entries removed because the consumer no longer holds their alert - closed by hand, by effective " +
+			"time, by the absent or superseded-identity close - nothing sent), overflow (open alerts not indexed, " +
+			"the Plan's index full; they stay open while their group is absent), unavailable (Plans whose index " +
+			"could not be read or written that round; nothing decided on it), send_failed (series whose end the " +
+			"sink did not take; sent again on the next complete round), undecodable (entries this build could not " +
+			"read, left to the alert's own end), unjudged (absent entries a complete round could not decide on " +
+			"because the consumer's set could not be judged - not read yet after a handover, or no Console; " +
+			"nothing sent or removed). Counted in series or entries, per round. Every outcome exists from start.",
+	}, []string{"outcome"})
+	for _, outcome := range observability.NoDataEndOutcomes {
+		metrics.noDataEnd.WithLabelValues(outcome)
+	}
 	// The recovery gate: does the consumer hold an open alert on the series
 	// at all. Every outcome is pre-created so
 	// a zero reads as "never happened", and not_configured in particular has
@@ -1908,7 +1925,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.queryFailures,
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectCatalogWrittenBytes, m.objectReads, m.stateGenerationSkew, m.stateCarry,
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
-		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.recoveryWithheld, m.openAlertGate,
+		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.recoveryWithheld, m.noDataEnd, m.openAlertGate,
 	}...), append(append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), append(m.handover.collectors(), m.sreActions.actions, m.sreActions.rollouts, m.sreActions.watched, m.sreActions.receipts, m.cliAuth.total, m.cliAuth.rosterApplied)...), append(m.controlFacts.collectors(), m.traceExport.collectors()...)...),
 		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.fleetTracker, m.effectiveTimeRefresh, m.activationRebuild, m.timelineRepair, m.activationSkippedTimelines, m.timelineUnreadableReports, m.activationHeader, m.activationBlocked, m.liveReserve, m.roundMemory, m.targetGroup, m.effectiveClose, m.logLines, m.observerPanics, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.apmCarried, m.apmCarriedBytes, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.controlFactsWrites, m.queryCooldownLoads, m.eventBusinessAttribution, m.detectionSnapshots, m.detectionSnapshotStates, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
 		m.controlSourceRetainedStale, m.controlSourceLastGoodIdentity, m.platformSettings,
@@ -2160,6 +2177,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	}
 	for _, fact := range observation.RecoveryGates {
 		m.recoveryBeside.WithLabelValues(string(fact.Cause)).Add(float64(fact.Records))
+	}
+	if observation.Stage == observability.StageNoDataEnd && observation.NoDataEnd != "" {
+		m.noDataEnd.WithLabelValues(observation.NoDataEnd).Add(float64(observation.Counts.Keys))
 	}
 	for _, fact := range observation.RecoveryWithheld {
 		m.recoveryWithheld.WithLabelValues(string(fact.Reason)).Add(float64(fact.Levels))

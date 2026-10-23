@@ -84,10 +84,12 @@ type streamedExecution struct {
 	// noDataAbsenceStarts carries each Plan's absent series to the output's
 	// manual-close check (decision-024).
 	noDataAbsenceStarts noDataAbsenceStarts
-	effective           map[execution.ConsumerRef]strategy.EffectiveTimeFact
-	evaluated           execution.EvaluationResult
-	delivered           []execution.SeriesDelivery
-	series              uint64
+	// noDataEnds is each Plan's no-data end index as this Slot read it.
+	noDataEnds map[execution.PlanIdentity]execution.NoDataEndLoaded
+	effective  map[execution.ConsumerRef]strategy.EffectiveTimeFact
+	evaluated  execution.EvaluationResult
+	delivered  []execution.SeriesDelivery
+	series     uint64
 	// retainedByPhase is this execution's retained bytes split by what they
 	// were retained for. The total is the sum rather than a counter of its
 	// own: a sixth budget's worth of memory arriving with no phase attached
@@ -804,6 +806,9 @@ func appendProvisional(target *execution.EvaluationResult, next execution.Evalua
 		}
 		plan.LevelOutcomes = append(plan.LevelOutcomes, nextPlan.LevelOutcomes...)
 		plan.StateResults = append(plan.StateResults, nextPlan.StateResults...)
+		// Read after the merge, by the commit that keeps the no-data end
+		// index: every series' updates, not the first one's.
+		plan.NoDataEnds = append(plan.NoDataEnds, nextPlan.NoDataEnds...)
 		// Counts, so they accumulate across the series of one Slot rather than
 		// being replaced by the last one merged. A Slot's window coverage is
 		// the whole Slot's, and reporting only the final series would make a
@@ -1023,6 +1028,9 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 		return err
 	}
 	if err := stream.loadNoDataMemory(ctx); err != nil {
+		return err
+	}
+	if err := stream.loadNoDataEnds(ctx); err != nil {
 		return err
 	}
 	if err := stream.evaluateSeries(ctx, completion, preparedSeriesEvaluations); err != nil {

@@ -84,11 +84,9 @@ func readLegacyRecoveryStatusSetter(raw json.RawMessage) legacyRecoveryStatusSet
 
 // notes are the dispositions this build gives the level for what it wrote:
 // a malformed value takes the default window (RECOVERY_CONFIG_DEFAULTED,
-// said by the caller, which owns the window), a value outside the four is
-// read as the checker reads it, and a -nodata, which this build executes
-// only for a group still in the answer with a zero that is no observation,
-// says that a group absent from it still ends only on points. A close is
-// executed - the caller freezes it into the recovery plan - and says nothing.
+// said by the caller, which owns the window), and a value outside the four
+// is read as the checker reads it. A close and a -nodata are executed - the
+// caller freezes both into the recovery plan - and say nothing.
 func (setter legacyRecoveryStatusSetter) notes(sourceID string, levelID uint32) []ObjectDisposition {
 	if setter.malformed {
 		return nil
@@ -105,9 +103,6 @@ func (setter legacyRecoveryStatusSetter) notes(sourceID string, levelID uint32) 
 			read = "close"
 		}
 		notes = append(notes, note(ReasonRecoveryStatusSetterDefaulted, fmt.Sprintf("status_setter=%s read_as=%s", written, read)))
-	}
-	if setter.noData {
-		notes = append(notes, note(ReasonRecoveryNoDataUnsupported, fmt.Sprintf("status_setter=%s absent_groups_end_on=points", written)))
 	}
 	return notes
 }
