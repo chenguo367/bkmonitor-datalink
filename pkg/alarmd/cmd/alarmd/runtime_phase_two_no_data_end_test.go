@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
@@ -209,5 +210,37 @@ func TestALevelWithRecoveryDisabledEndsNothingUntilTheSwitchIsOff(t *testing.T) 
 	}
 	if recovered != 1 {
 		t.Fatalf("A recovered %d times within six rounds of recovery turned on (from round %d), want once", recovered, first)
+	}
+}
+
+// The index serves only a deployment that can ask the consumer's open alert
+// set, one with the link's Console. Without it no absent series' alert could
+// ever be judged open, so no end would ever be sent, and every entry would be
+// a write each round for nothing: no index is kept. The same strategy and
+// rounds with the Console keep the Plan's one key.
+func TestADeploymentWithoutTheLinkKeepsNoNoDataEndIndex(t *testing.T) {
+	strategy := lifecycleStrategy{revision: 7, noDataOff: true, statusSetter: "recovery-nodata"}
+	for name, test := range map[string]struct {
+		configure func(*config.Config)
+		keys      int
+	}{
+		"with the Console": {keys: 1},
+		"without the Console": {configure: func(cfg *config.Config) {
+			cfg.PhaseTwo.Linkd.ConsoleURL, cfg.PhaseTwo.Linkd.Username, cfg.PhaseTwo.Linkd.Password = "", "", ""
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := startLifecycleFixtureWith(t, strategy, nil, test.configure)
+			fixture.serve(false, 90, lifecycleHostA, lifecycleHostB)
+			fixture.mustAttempt(1)
+			if opened := fixture.thresholdEventsFor(lifecycleHostB); len(opened) != 1 || opened[0].EventKind != contract.TriggerEventAbnormal {
+				t.Fatalf("round 1 sent B %+v, want its ABNORMAL", opened)
+			}
+			fixture.serve(false, 90, lifecycleHostA)
+			fixture.mustAttempt(2)
+			if keys := fixture.noDataEndKeys(); len(keys) != test.keys {
+				t.Fatalf("index keys after two rounds = %v, want %d", keys, test.keys)
+			}
+		})
 	}
 }

@@ -23,14 +23,53 @@ import (
 )
 
 // NoDataEndBackend keeps the no-data end index (execution.NoDataEndIndex):
-// one hash per Plan, read whole and written field by field. No header and no
-// version: an entry is the newest word about one series' open alert, a
-// second owner's write during a handover says the same thing, and a lost
-// write is made again by the next round that evaluates the series.
+// one hash per Plan, read whole a page at a time and written field by field.
+// No header and no version: an entry is the newest word about one series'
+// open alert, a second owner's write during a handover says the same thing,
+// and a lost write is made again by the next round that evaluates the
+// series.
 type NoDataEndBackend interface {
 	Backend
-	ReadHash(context.Context, string) (map[string][]byte, error)
+	ScanHash(ctx context.Context, key string, count int64) (map[string][]byte, error)
 	WriteHashFields(ctx context.Context, key string, puts map[string][]byte, deletes []string, ttl time.Duration) error
+}
+
+// noDataEndScanCount is how many fields one HSCAN of an index asks for. An
+// entry is a field of about 66 bytes and a value of 110 to 300 (the alert's
+// dimensions), so a page is a few hundred kilobytes: a Plan at its cap of
+// MaxNoDataEndEntriesPerPlan entries is read in about a hundred commands,
+// none of which holds the server for long, where one HGETALL would return
+// 20 to 40 MB in one. Values over 64 bytes keep the hash in its hashtable
+// encoding, so the count is honoured rather than the whole hash returned.
+const noDataEndScanCount = 1000
+
+// ScanHash reads one hash whole with HSCAN, count fields a command. A field
+// HSCAN returns twice is kept once; one written during the scan may be
+// missed, which costs that entry this round and nothing after.
+func (backend *RedisBackend) ScanHash(ctx context.Context, key string, count int64) (map[string][]byte, error) {
+	if backend == nil || backend.client == nil {
+		return nil, fmt.Errorf("state: redis backend is not configured")
+	}
+	if key == "" || count <= 0 {
+		return nil, fmt.Errorf("state: invalid hash scan")
+	}
+	var record map[string][]byte
+	for cursor := uint64(0); ; {
+		page, next, err := backend.client.HScan(ctx, key, cursor, "", count).Result()
+		if err != nil {
+			return nil, err
+		}
+		for index := 0; index+1 < len(page); index += 2 {
+			if record == nil {
+				record = make(map[string][]byte, len(page)/2)
+			}
+			record[page[index]] = []byte(page[index+1])
+		}
+		if next == 0 {
+			return record, nil
+		}
+		cursor = next
+	}
 }
 
 // WriteHashFields puts and deletes fields of one hash and sets its life, in
@@ -115,7 +154,7 @@ func (store *ExecutionStore) LoadNoDataEnds(ctx context.Context, keys []executio
 			loaded = append(loaded, item)
 			continue
 		}
-		fields, err := backend.ReadHash(ctx, redisKey)
+		fields, err := backend.ScanHash(ctx, redisKey, noDataEndScanCount)
 		if err != nil {
 			item.Unavailable = true
 			loaded = append(loaded, item)

@@ -73,6 +73,14 @@ type OpenAlertJudge interface {
 	Holds(tenantID, strategyID, fingerprint string) (held, judged bool)
 }
 
+// OpenAlertLink is an open alert set that says whether any consumer's set
+// stands behind it. One that is not linked can never judge, so nothing that
+// acts only on judged answers - the no-data end index - is kept beside it:
+// its entries would be writes no round could ever read for an end.
+type OpenAlertLink interface {
+	Linked() bool
+}
+
 // NoDataEndLoaded is one Plan's index as read: Unavailable when it could not
 // be read, which a round reads as nothing to decide on, never as an empty
 // index; Undecodable counts entries this build could not read, which are

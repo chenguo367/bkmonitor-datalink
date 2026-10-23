@@ -76,6 +76,9 @@ func (stream *streamedExecution) loadNoDataEnds(ctx context.Context) error {
 	if index == nil || stream.coordinator.ports.OpenAlerts == nil {
 		return nil
 	}
+	if link, ok := stream.coordinator.ports.OpenAlerts.(execution.OpenAlertLink); ok && !link.Linked() {
+		return nil
+	}
 	var keys []execution.NoDataEndKey
 	for _, due := range stream.header.DuePlans {
 		if planEndsOnNoData(due) && due.CompiledPlan.OutputIdentity() != nil {

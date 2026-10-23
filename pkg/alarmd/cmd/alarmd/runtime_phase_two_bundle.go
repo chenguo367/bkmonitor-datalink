@@ -789,7 +789,9 @@ func openProductionPhaseTwoBundleAssembly(
 		Evaluator: evaluator, Admission: admitter, GapGuard: executionStore, Events: events,
 		NoData: executionStore, NoDataEnds: executionStore, NoDataManualCloses: executionStore, Hosts: hostBusiness, State: executionStore, Progress: progressStore, Observer: observer,
 		ExecutionEvidence: slotAppliedMarks,
-		OpenAlerts:        &openAlertCopyPort{cache: openAlertCopy},
+		// Linked only with the link's Console: without it the copy is never
+		// read and can never judge, and the worker keeps no no-data end index.
+		OpenAlerts: &openAlertCopyPort{cache: openAlertCopy, linked: cfg.PhaseTwo.Linkd.ConsoleURL != ""},
 		// The horizon the platform settings copy resolves now, read per Slot:
 		// runtime state lives at most this long past a series' last write.
 		StateHorizon: func() int64 { return platformSettings.Current().NoDataTrackingHorizonSeconds },
@@ -1690,6 +1692,14 @@ func maxDuration(values ...time.Duration) time.Duration {
 type openAlertCopyPort struct {
 	cache         *openalerts.Cache
 	registerOwned func(execution.QueryGroupIdentity, []execution.PlanIdentity)
+	// linked is whether the deployment has the link's Console, the only way
+	// the copy is ever read (execution.OpenAlertLink).
+	linked bool
+}
+
+// Linked says whether a consumer's set stands behind the copy.
+func (port openAlertCopyPort) Linked() bool {
+	return port.linked
 }
 
 // Holds is the copy's judged membership (execution.OpenAlertJudge).
