@@ -104,6 +104,9 @@ const (
 // NoteSlotDecision keeps part of what a round decided, for a group in
 // probation, until the round's reread ends; any other group's is dropped.
 func (engine *Engine) NoteSlotDecision(report SlotDecisionReport) {
+	if !engine.KeepsDecisions(report.QueryGroup) {
+		return
+	}
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
 	state := engine.groups[report.QueryGroup]

@@ -144,6 +144,31 @@ func TestALoweredHoldPutsEveryRoundOnProbation(t *testing.T) {
 	}
 }
 
+// Whether a group's decisions are kept, read without the engine's lock,
+// follows its probation: not before a lowering, from the lowering on, not
+// once its rounds read clean, again on the next lowering, and not once the
+// group leaves this process.
+func TestTheGroupsWhoseDecisionsAreKeptFollowTheirProbation(t *testing.T) {
+	f := newProbationFixture(t, 2)
+	kept := func(want bool, when string) {
+		t.Helper()
+		_, in := f.engine.InProbation("qg")
+		if got := f.engine.KeepsDecisions("qg"); got != want || in != want {
+			t.Fatalf("%s: decisions kept %v, in probation %v, want %v", when, got, in, want)
+		}
+	}
+	f.round(2*time.Minute, "3")
+	kept(false, "never lowered")
+	f.cleanRound(time.Minute + 30*time.Second)
+	kept(true, "lowered")
+	f.cleanRound(time.Minute + 30*time.Second)
+	kept(false, "its rounds read clean")
+	f.cleanRound(time.Minute)
+	kept(true, "lowered again")
+	f.engine.Forget("qg")
+	kept(false, "forgotten")
+}
+
 // A round of a probation whose reread finds its whole window read early
 // raises the hold as a sample would, at once, and its probation counts
 // again from none. What it caught is counted by the lowering it followed: a

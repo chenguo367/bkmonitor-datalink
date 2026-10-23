@@ -162,12 +162,12 @@ func (engine *Engine) noteRoundHoldLocked(state *group, query Query, lowering *e
 			since = int(int64(slot-*lowering) / period)
 		}
 		if since < engine.probationRounds() {
-			state.probation = &probationState{verified: verified}
+			engine.setProbationLocked(query.Contract.Slot.QueryGroup, state, &probationState{verified: verified})
 		}
 	case hold < state.lastHold:
-		state.probation = &probationState{verified: verified}
+		engine.setProbationLocked(query.Contract.Slot.QueryGroup, state, &probationState{verified: verified})
 	case hold > state.lastHold:
-		state.probation = nil
+		engine.setProbationLocked(query.Contract.Slot.QueryGroup, state, nil)
 	}
 	state.lastHold, state.holdSeen = hold, true
 }
@@ -221,7 +221,7 @@ func (engine *Engine) finishProbationLocked(state *group, candidate *sample) {
 	switch outcome {
 	case ProbationClean:
 		if state.probation.clean++; state.probation.clean >= engine.probationRounds() {
-			state.probation = nil
+			engine.setProbationLocked(candidate.queryGroup, state, nil)
 		}
 	case ProbationWindowReadEarly:
 		state.probation.clean = 0
@@ -242,6 +242,26 @@ func (engine *Engine) probationGroupsLocked() map[string]uint64 {
 		}
 	}
 	return groups
+}
+
+// setProbationLocked starts, restarts or ends a group's probation, and keeps
+// the set read without the lock (KeepsDecisions) beside it.
+func (engine *Engine) setProbationLocked(queryGroup execution.QueryGroupIdentity, state *group, probation *probationState) {
+	state.probation = probation
+	if probation != nil {
+		engine.probationGroups.Store(queryGroup, struct{}{})
+		return
+	}
+	engine.probationGroups.Delete(queryGroup)
+}
+
+// KeepsDecisions is whether a round's decision for the Query Group would be
+// kept (NoteSlotDecision): the group is in probation. Read without the
+// engine's lock, so a report for any other group - nearly every series of
+// every Slot - is turned away before it is built.
+func (engine *Engine) KeepsDecisions(queryGroup execution.QueryGroupIdentity) bool {
+	_, kept := engine.probationGroups.Load(queryGroup)
+	return kept
 }
 
 // InProbation reports whether a Query Group is in probation, and how many of

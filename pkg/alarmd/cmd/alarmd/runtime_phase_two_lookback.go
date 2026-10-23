@@ -530,7 +530,11 @@ func (tap *lookbackDecisionTap) Observe(ctx context.Context, observation observa
 	if trace.StrategyID == "" {
 		trace.StrategyID = slot.StrategyID
 	}
-	if trace.QueryGroupKey == "" || trace.EvaluationTime <= 0 {
+	// Nearly every series is of a group not in probation, whose decision is
+	// not kept: turned away before the report is built, without the
+	// engine's lock.
+	if trace.QueryGroupKey == "" || trace.EvaluationTime <= 0 ||
+		!engine.KeepsDecisions(execution.QueryGroupIdentity(trace.QueryGroupKey)) {
 		return
 	}
 	report := lookback.SlotDecisionReport{QueryGroup: execution.QueryGroupIdentity(trace.QueryGroupKey),

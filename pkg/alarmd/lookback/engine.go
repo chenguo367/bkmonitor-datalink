@@ -317,6 +317,11 @@ type Engine struct {
 	// source, counted on the query's own goroutine: the map is built once
 	// and only its counters change.
 	firstReadBytes map[string]*atomic.Uint64
+	// probationGroups is the Query Groups in probation, kept beside each
+	// group's probation (setProbationLocked) and read without the lock: every
+	// series of every Slot reports its decision (NoteSlotDecision), and only
+	// a group in probation keeps it.
+	probationGroups sync.Map
 
 	mu     sync.Mutex
 	groups map[execution.QueryGroupIdentity]*group
@@ -953,6 +958,7 @@ func (engine *Engine) Forget(queryGroup execution.QueryGroupIdentity) {
 		slot.dropped = true
 	}
 	engine.endProbeLocked(state, FloorProbeOwnerLost, execution.FrozenExecutionContractRef{Slot: execution.SlotIdentity{QueryGroup: queryGroup}})
+	engine.probationGroups.Delete(queryGroup)
 	delete(engine.groups, queryGroup)
 }
 
