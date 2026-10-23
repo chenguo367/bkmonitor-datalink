@@ -211,10 +211,13 @@ func (record Record) HeldAtLimit() bool {
 
 // ProbeProgress is how far a shadow probe has read: what it reads - its kind,
 // the hold it reads its rounds at, and the group's hold and floor then - the
-// Slot it started at, and its clean rounds in a row. It is the progress of
-// that probe alone: the probe the record has now, of the same kind at the
-// same holds over the same floor, started less than FloorStanding ago, goes
-// on from it (FloorProbeResume); any other starts from none. The lookback
+// Slot it started at, its clean rounds in a row and the Slot of the latest of
+// them. It is the progress of that probe alone: the probe the record has now,
+// of the same kind at the same holds over the same floor, whose latest kept
+// round is less than FloorStanding old, goes on from it (FloorProbeResume);
+// any other starts from none. A probe of a long period runs past
+// FloorStanding from its start - ProbationRounds rounds at twenty minutes are
+// forty hours - so its age is not what makes its rounds stale. The lookback
 // writes it every ProbeProgressEvery clean rounds (FloorProbeProgress); a
 // probe's end, and every write that moves what the probe reads, clears it.
 type ProbeProgress struct {
@@ -224,9 +227,11 @@ type ProbeProgress struct {
 	FloorMillis     *int64                   `json:"floor_ms,omitempty"`
 	Clean           int                      `json:"clean_rounds"`
 	StartedSlot     execution.EvaluationTime `json:"started_slot"`
+	KeptSlot        execution.EvaluationTime `json:"kept_slot"`
 }
 
 func (progress *ProbeProgress) valid() bool {
 	return progress == nil || (progress.CandidateMillis >= 0 && progress.HoldMillis > progress.CandidateMillis &&
-		(progress.FloorMillis == nil || *progress.FloorMillis >= 0) && progress.Clean >= 0 && progress.StartedSlot > 0)
+		(progress.FloorMillis == nil || *progress.FloorMillis >= 0) && progress.Clean >= 0 && progress.StartedSlot > 0 &&
+		progress.KeptSlot >= progress.StartedSlot)
 }

@@ -65,8 +65,8 @@ type FloorProbeProgressEvidence struct {
 
 // progressOf is the record's progress of the probe of kind at candidate, and
 // false when the record keeps none for it: none kept, or one of another
-// probe - another kind, holds or floor - or started FloorStanding ago or more,
-// whose rounds say nothing of the data now.
+// probe - another kind, holds or floor - or one whose latest kept round was
+// read FloorStanding ago or more, whose rounds say nothing of the data now.
 func progressOf(record Record, kind string, candidate, now int64) (ProbeProgress, bool) {
 	probe := record.Probe
 	if probe == nil || probe.Kind != kind || probe.CandidateMillis != candidate || probe.HoldMillis != current(record) {
@@ -76,7 +76,7 @@ func progressOf(record Record, kind string, candidate, now int64) (ProbeProgress
 		(probe.FloorMillis != nil && *probe.FloorMillis != *record.EarlierFloorMillis) {
 		return ProbeProgress{}, false
 	}
-	if now-int64(probe.StartedSlot)*1000 >= FloorStanding.Milliseconds() {
+	if now-int64(probe.KeptSlot)*1000 >= FloorStanding.Milliseconds() {
 		return ProbeProgress{}, false
 	}
 	return *probe, true
@@ -115,7 +115,8 @@ func (controller *Controller) FloorProbeResume(qg execution.QueryGroupIdentity, 
 // the write dropped when it loses its compare.
 func (controller *Controller) FloorProbeProgress(ctx context.Context, evidence FloorProbeProgressEvidence) error {
 	if evidence.Contract.Validate() != nil || evidence.Floor < 0 || evidence.Hold <= evidence.Floor ||
-		!slices.Contains(FloorProbeKinds, evidence.Kind) || evidence.Clean < 0 || evidence.Started <= 0 {
+		!slices.Contains(FloorProbeKinds, evidence.Kind) || evidence.Clean < 0 || evidence.Started <= 0 ||
+		evidence.Contract.Slot.EvaluationTime < evidence.Started {
 		return errors.New("alarmd readhold: invalid floor probe progress")
 	}
 	qg := evidence.Contract.Slot.QueryGroup
@@ -136,7 +137,7 @@ func (controller *Controller) FloorProbeProgress(ctx context.Context, evidence F
 	}
 	next := clone(state.record)
 	next.Probe = &ProbeProgress{Kind: kind, CandidateMillis: candidate, HoldMillis: current(next), Clean: evidence.Clean,
-		StartedSlot: evidence.Started}
+		StartedSlot: evidence.Started, KeptSlot: evidence.Contract.Slot.EvaluationTime}
 	if next.EarlierFloorMillis != nil {
 		floor := *next.EarlierFloorMillis
 		next.Probe.FloorMillis = &floor

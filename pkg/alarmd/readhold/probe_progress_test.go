@@ -25,9 +25,15 @@ import (
 // the hold the group has now.
 func keepProgress(t *testing.T, c *Controller, kind string, candidate time.Duration, clean int, started execution.EvaluationTime) {
 	t.Helper()
+	keepProgressAt(t, c, kind, candidate, clean, started, started+60)
+}
+
+// keepProgressAt is keepProgress whose latest clean round is the Slot kept.
+func keepProgressAt(t *testing.T, c *Controller, kind string, candidate time.Duration, clean int, started, kept execution.EvaluationTime) {
+	t.Helper()
 	record, _ := c.Reading("qg")
 	hold := current(record)
-	if err := c.FloorProbeProgress(context.Background(), FloorProbeProgressEvidence{Contract: holdContract("qg", started+60, hold),
+	if err := c.FloorProbeProgress(context.Background(), FloorProbeProgressEvidence{Contract: holdContract("qg", kept, hold),
 		Floor: candidate, Kind: kind, Hold: time.Duration(hold) * time.Millisecond, Clean: clean, Started: started}); err != nil {
 		t.Fatal(err)
 	}
@@ -142,8 +148,8 @@ func TestKeptRoundsOverAnotherFloorAreNotResumed(t *testing.T) {
 		name, kept string
 		resumes    bool
 	}{
-		{"no floor as kept", `,"probe":{"kind":"verify","candidate_ms":300000,"hold_ms":400000,"clean_rounds":50,"started_slot":%d}`, true},
-		{"a floor the record has not", `,"probe":{"kind":"verify","candidate_ms":300000,"hold_ms":400000,"floor_ms":100000,"clean_rounds":50,"started_slot":%d}`, false},
+		{"no floor as kept", `,"probe":{"kind":"verify","candidate_ms":300000,"hold_ms":400000,"clean_rounds":50,"started_slot":%[1]d,"kept_slot":%[1]d}`, true},
+		{"a floor the record has not", `,"probe":{"kind":"verify","candidate_ms":300000,"hold_ms":400000,"floor_ms":100000,"clean_rounds":50,"started_slot":%[1]d,"kept_slot":%[1]d}`, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ctl, store, now := controllerFixture(t)
@@ -161,19 +167,48 @@ func TestKeptRoundsOverAnotherFloorAreNotResumed(t *testing.T) {
 	}
 }
 
-// Kept rounds of a probe started a FloorStanding ago or more say nothing of the data now: the next probe starts
-// from none.
+// Kept rounds go stale a FloorStanding after the latest of them was read, not after their probe started: a probe of a
+// long period runs past a day - ProbationRounds rounds at twenty minutes are forty hours - and one taken over then
+// goes on from its rounds, and a progress write that late is kept. Rounds whose latest is a day old say nothing of the
+// data now: the next probe starts from none.
 func TestKeptRoundsADayOldAreNoEvidence(t *testing.T) {
 	c, _, now := verifyingGroup(t, "")
 	started := execution.EvaluationTime(now.Unix() - 3600)
-	keepProgress(t, c, FloorProbeKindVerify, 5*time.Minute, 50, started)
-	*now = time.Unix(int64(started), 0).Add(FloorStanding - time.Second)
-	if _, _, ok := c.FloorProbeResume("qg", FloorProbeKindVerify, 5*time.Minute); !ok {
-		t.Fatal("rounds kept within a day are not resumed")
+	kept := started + execution.EvaluationTime(30*time.Hour/time.Second)
+	*now = time.Unix(int64(kept), 0)
+	keepProgressAt(t, c, FloorProbeKindVerify, 5*time.Minute, 90, started, kept)
+	if record, _ := c.Reading("qg"); record.Probe == nil || record.Probe.Clean != 90 || record.Probe.KeptSlot != kept {
+		t.Fatalf("a progress write 30 h into its probe kept %+v", record.Probe)
+	}
+	if got := c.Stats().ProbeProgress; got[ProbeProgressWritten] != 1 {
+		t.Fatalf("progress writes %v, want one written", got)
+	}
+	*now = time.Unix(int64(kept), 0).Add(FloorStanding - time.Second)
+	if clean, from, ok := takenOver(t, c).FloorProbeResume("qg", FloorProbeKindVerify, 5*time.Minute); !ok || clean != 90 || from != started {
+		t.Fatalf("rounds kept within a day resumed %d from %d (%v), want 90 from %d", clean, from, ok, started)
 	}
 	*now = now.Add(time.Second)
-	if _, _, ok := c.FloorProbeResume("qg", FloorProbeKindVerify, 5*time.Minute); ok {
-		t.Fatal("rounds a day old are resumed")
+	if _, _, ok := takenOver(t, c).FloorProbeResume("qg", FloorProbeKindVerify, 5*time.Minute); ok {
+		t.Fatal("rounds whose latest is a day old are resumed")
+	}
+}
+
+// Progress whose latest round precedes its probe's start is no progress of that probe: refused, and nothing written.
+// One whose latest round is the Slot it started at is kept.
+func TestProgressWhoseLatestRoundPrecedesItsProbeIsRefused(t *testing.T) {
+	c, store, now := verifyingGroup(t, "")
+	started := execution.EvaluationTime(now.Unix() - 3600)
+	record, _ := c.Reading("qg")
+	hold := current(record)
+	writes := len(store.requests)
+	err := c.FloorProbeProgress(context.Background(), FloorProbeProgressEvidence{Contract: holdContract("qg", started-60, hold),
+		Floor: 5 * time.Minute, Kind: FloorProbeKindVerify, Hold: time.Duration(hold) * time.Millisecond, Clean: 10, Started: started})
+	if err == nil || len(store.requests) != writes {
+		t.Fatalf("progress kept before its probe started: %v, %d writes", err, len(store.requests)-writes)
+	}
+	keepProgressAt(t, c, FloorProbeKindVerify, 5*time.Minute, 1, started, started)
+	if record, _ := c.Reading("qg"); record.Probe == nil || record.Probe.KeptSlot != started {
+		t.Fatalf("progress kept at its start: %+v", record.Probe)
 	}
 }
 
@@ -209,7 +244,7 @@ func TestKeptRoundsDecodeBothWays(t *testing.T) {
 		want int
 	}{
 		{`{"hold_ms":600000,"since_slot":60}`, -1},
-		{`{"hold_ms":600000,"since_slot":60,"probe":{"kind":"verify","candidate_ms":300000,"hold_ms":600000,"clean_rounds":50,"started_slot":120}}`, 50},
+		{`{"hold_ms":600000,"since_slot":60,"probe":{"kind":"verify","candidate_ms":300000,"hold_ms":600000,"clean_rounds":50,"started_slot":120,"kept_slot":720}}`, 50},
 	} {
 		record, err := Decode([]byte(c.raw))
 		if err != nil || (record.Probe == nil) != (c.want < 0) || (record.Probe != nil && record.Probe.Clean != c.want) {
@@ -221,8 +256,10 @@ func TestKeptRoundsDecodeBothWays(t *testing.T) {
 		}
 	}
 	for _, raw := range []string{
-		`{"hold_ms":600000,"since_slot":60,"probe":{"kind":"verify","candidate_ms":300000,"hold_ms":600000,"clean_rounds":-1,"started_slot":120}}`,
-		`{"hold_ms":600000,"since_slot":60,"probe":{"kind":"verify","candidate_ms":300000,"hold_ms":200000,"clean_rounds":5,"started_slot":120}}`,
+		`{"hold_ms":600000,"since_slot":60,"probe":{"kind":"verify","candidate_ms":300000,"hold_ms":600000,"clean_rounds":-1,"started_slot":120,"kept_slot":720}}`,
+		`{"hold_ms":600000,"since_slot":60,"probe":{"kind":"verify","candidate_ms":300000,"hold_ms":200000,"clean_rounds":5,"started_slot":120,"kept_slot":720}}`,
+		// Its latest round before it started.
+		`{"hold_ms":600000,"since_slot":60,"probe":{"kind":"verify","candidate_ms":300000,"hold_ms":600000,"clean_rounds":5,"started_slot":120,"kept_slot":60}}`,
 	} {
 		if _, err := Decode([]byte(raw)); err == nil {
 			t.Fatalf("%s decoded", raw)
