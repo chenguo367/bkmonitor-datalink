@@ -351,6 +351,14 @@ const ReasonRecoveryConfigDefaulted = "RECOVERY_CONFIG_DEFAULTED"
 // the part before "-" is "close", recovered otherwise.
 const ReasonRecoveryStatusSetterDefaulted = "RECOVERY_STATUS_SETTER_DEFAULTED"
 
+// ReasonRecoveryDisabledByConfig names a Level whose recovery_config states
+// disable_recovery: its alerts are not recovered - neither on the recovery
+// window nor on no data - and end only by a control-plane close (the
+// strategy deleted or disabled, its target removed, a capability refusal,
+// the effective-time close). The level runs as its owner wrote it; the note
+// says alarmd honours the switch.
+const ReasonRecoveryDisabledByConfig = "RECOVERY_DISABLED_BY_CONFIG"
+
 // The item fields a strategy cannot be compiled without, each refused under
 // its own name with the field it names, as a rejected configuration (the
 // last good Plan stays). They used to be one word, filed as PLAN_INVALID, and
@@ -2447,8 +2455,13 @@ func compilePlan(
 	// get_recovery_configs reads every detect's recovery, and one it cannot
 	// read raises for the whole strategy: the checker then takes its default
 	// for every level (recover.py:253-267). Found once, before the levels.
+	// A level whose owner turned recovery off has no window to read - the
+	// page hides it, and writes none for a new item - so it defaults nobody.
 	recoveryDefaulted, unreadableRecovery := false, uint32(0)
 	for _, detect := range source.Detects {
+		if legacyRecoveryDisabled(detect.Recovery) {
+			continue
+		}
 		if _, readable := legacyRecoveryWindow(detect.Recovery); !readable {
 			recoveryDefaulted, unreadableRecovery = true, detect.Level
 			break
@@ -2570,7 +2583,15 @@ func compilePlan(
 		// what this build should do with it is a rule difference awaiting
 		// product, registered in the trigger review of 2026-10-09, section 6.
 		recoveryWindows := uint32(legacyDefaultRecoveryWindows)
-		if written, readable := legacyRecoveryWindow(detect.Recovery); readable && !recoveryDefaulted {
+		disabled := legacyRecoveryDisabled(detect.Recovery)
+		if disabled {
+			// No window is read and none defaulted: a level that does not
+			// recover has none, and an ending or -nodata written beside the
+			// switch does not run either.
+			recoveryWindows = 0
+			dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigNoted,
+				Reason: ReasonRecoveryDisabledByConfig, FieldPath: "detects[*].recovery_config.disable_recovery"})
+		} else if written, readable := legacyRecoveryWindow(detect.Recovery); readable && !recoveryDefaulted {
 			if written < 1 {
 				dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigRejected, Reason: "RECOVERY_CONFIG_INVALID",
 					Detail: fmt.Sprintf("recovery_config.check_window is %d", written)})
@@ -2588,8 +2609,8 @@ func compilePlan(
 		// The status_setter of a level the checker reads its own recovery
 		// for; a strategy-wide default and a borrowed trigger take
 		// "recovery" with the default window, as the checker does.
-		recoveryFields := map[string]any{"enabled": true}
-		if !recoveryDefaulted && !borrowed {
+		recoveryFields := map[string]any{"enabled": !disabled}
+		if !recoveryDefaulted && !borrowed && !disabled {
 			setter := readLegacyRecoveryStatusSetter(detect.Recovery)
 			if setter.close && !setter.malformed {
 				recoveryFields["end"] = contract.RecoveryEndClose

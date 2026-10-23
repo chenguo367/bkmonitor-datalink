@@ -496,6 +496,9 @@ var AlwaysReportedWithheld = []WithheldKey{
 	{Disposition: DispositionConfigNoted, Reason: ReasonNoDataGroupBoundAboveDefault},
 	// "No strategy here ends its alerts other than as it wrote."
 	{Disposition: DispositionConfigNoted, Reason: ReasonRecoveryStatusSetterDefaulted},
+	// "No strategy here keeps its alerts open past recovery: every one
+	// recovers on its own."
+	{Disposition: DispositionConfigNoted, Reason: ReasonRecoveryDisabledByConfig},
 }
 
 // WithheldKey pairs what happened to an object with why. Neither half answers

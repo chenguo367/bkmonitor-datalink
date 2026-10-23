@@ -79,6 +79,9 @@ type lifecycleStrategy struct {
 	edit func(item map[string]any)
 	// statusSetter, when set, is every level's recovery_config.status_setter.
 	statusSetter string
+	// disableRecovery writes every level's recovery_config.disable_recovery
+	// as true.
+	disableRecovery bool
 }
 
 type lifecycleFixture struct {
@@ -310,6 +313,9 @@ func (fixture *lifecycleFixture) install(strategy lifecycleStrategy) {
 		detect.(map[string]any)["trigger_config"].(map[string]any)["check_window"] = 1
 		if strategy.statusSetter != "" {
 			detect.(map[string]any)["recovery_config"].(map[string]any)["status_setter"] = strategy.statusSetter
+		}
+		if strategy.disableRecovery {
+			detect.(map[string]any)["recovery_config"].(map[string]any)["disable_recovery"] = true
 		}
 	}
 	if strategy.edit != nil {

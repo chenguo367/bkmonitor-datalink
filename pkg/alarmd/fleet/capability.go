@@ -149,10 +149,12 @@ var capabilityByReason = map[string]CapabilityClass{
 }
 
 // capabilityCostNotes are the reasons noted on a strategy that runs entirely
-// as written: the note is a cost its owner chose, not a part of it that runs
-// differently, so it is no capability fact and leaves the strategy supported.
+// as written: the note is a cost or a behaviour its owner chose, not a part
+// of it that runs differently, so it is no capability fact and leaves the
+// strategy supported.
 var capabilityCostNotes = map[string]bool{
 	"NO_DATA_GROUP_BOUND_ABOVE_DEFAULT": true,
+	"RECOVERY_DISABLED_BY_CONFIG":       true,
 }
 
 // capabilityRejected is the area of the configuration refusals that are

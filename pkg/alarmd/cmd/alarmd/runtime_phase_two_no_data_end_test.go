@@ -170,3 +170,44 @@ func TestAnAbsentSeriesWhoseAlertIsNoLongerOpenIsDroppedNotEnded(t *testing.T) {
 func fieldNamesSeriesOf(_ *lifecycleFixture, field string, event contract.TriggerEventV1) bool {
 	return len(field) > 64 && field[:64] == event.RecordRef.DimensionIdentityDigest
 }
+
+// A level written with disable_recovery ends nothing by itself: a host back
+// under the threshold is not recovered, and one that stopped reporting is not
+// ended on no data although the level is written recovery-nodata - the
+// switch wins, and no no-data end index is kept for the Plan. Turned off
+// again, the level recovers the host that came back.
+func TestALevelWithRecoveryDisabledEndsNothingUntilTheSwitchIsOff(t *testing.T) {
+	strategy := lifecycleStrategy{revision: 7, noDataOff: true, statusSetter: "recovery-nodata", disableRecovery: true}
+	fixture := startLifecycleFixture(t, strategy, nil)
+	fixture.serve(false, 90, lifecycleHostA, lifecycleHostB)
+	fixture.mustAttempt(1)
+	openedA, openedB := fixture.thresholdEventsFor(lifecycleHostA), fixture.thresholdEventsFor(lifecycleHostB)
+	if len(openedA) != 1 || len(openedB) != 1 || openedA[0].EventKind != contract.TriggerEventAbnormal {
+		t.Fatalf("round 1 sent A %+v and B %+v, want one ABNORMAL each", openedA, openedB)
+	}
+	fixture.publishOpenAlert(openedA[0].DedupeMD5)
+	fixture.publishOpenAlert(openedB[0].DedupeMD5)
+	// A under the threshold, B gone: with recovery on, A recovers on round 2
+	// and B ends by round 5 (R+T+1 windows past its last point).
+	fixture.serve(false, 10, lifecycleHostA)
+	for round := int64(2); round <= 8; round++ {
+		fixture.mustAttempt(round)
+	}
+	if got := append(recoveriesOf(fixture.thresholdEventsFor(lifecycleHostA)), recoveriesOf(fixture.thresholdEventsFor(lifecycleHostB))...); len(got) != 0 {
+		t.Fatalf("a level with recovery disabled ended %+v", got)
+	}
+	if keys := fixture.noDataEndKeys(); len(keys) != 0 {
+		t.Fatalf("index keys = %v, want none: no level ends on no data", keys)
+	}
+
+	strategy.revision, strategy.disableRecovery = 8, false
+	first := fixture.change(strategy, 8)
+	recovered := 0
+	for round := int64(9); round <= first+6 && recovered == 0; round++ {
+		fixture.mustAttempt(round)
+		recovered = len(recoveriesOf(fixture.thresholdEventsFor(lifecycleHostA)))
+	}
+	if recovered != 1 {
+		t.Fatalf("A recovered %d times within six rounds of recovery turned on (from round %d), want once", recovered, first)
+	}
+}

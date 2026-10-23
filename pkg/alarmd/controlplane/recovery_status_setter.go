@@ -49,6 +49,23 @@ type legacyRecoveryStatusSetter struct {
 	malformed bool
 }
 
+// legacyRecoveryDisabled is whether a detect's recovery_config states
+// disable_recovery as true: its owner turned automatic recovery off, and the
+// level's alerts end only by a control-plane close. Only an explicit JSON
+// true disables. The default where the key is absent is the writer's to
+// state - a writer whose page defaults it by strategy type writes the value
+// itself, since the type is not in the document - so absent, false or
+// anything else keeps the level recovering, which is also how every document
+// that does not state the key reads.
+func legacyRecoveryDisabled(raw json.RawMessage) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil {
+		return false
+	}
+	var disabled bool
+	return json.Unmarshal(fields["disable_recovery"], &disabled) == nil && disabled
+}
+
 func readLegacyRecoveryStatusSetter(raw json.RawMessage) legacyRecoveryStatusSetter {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(raw, &fields) != nil {
