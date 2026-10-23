@@ -65,6 +65,26 @@ type CapabilityClass struct {
 	Area            string
 	Outcome         string
 	IgnoredByDesign bool
+	// Reversible is a refusal a configuration change or a writer catching up
+	// lifts - the deployment's dynamic-group source, its downstream reserve or
+	// snapshot retention, a target plan not yet written - rather than one this
+	// build cannot detect. Counted with the capability outcome it has, and
+	// never a reason to close the strategy's alerts (ClosesAsUnsupported).
+	Reversible bool
+}
+
+// ClosesAsUnsupported is whether a strategy refused for reason
+// (UNSUPPORTED_PHASE2_CAPABILITY) is one alarmd does not detect: a known
+// capability refusal, by design or not yet supported in this build, that no
+// configuration change lifts. Its open alerts close as no longer detected; a
+// reversible refusal, or a reason this table does not know, keeps them open
+// with the refusal named.
+func ClosesAsUnsupported(reason string) bool {
+	class, known := capabilityByReason[reason]
+	if !known || class.Reversible {
+		return false
+	}
+	return class.Outcome == CapabilityUnsupportedByDesign || class.Outcome == CapabilityNotYetSupported
 }
 
 // dispositionCompatibilityIgnored is a strategy alarmd leaves to the
@@ -101,8 +121,8 @@ var capabilityByReason = map[string]CapabilityClass{
 	"UNSUPPORTED_TARGET_PLAN":               {Area: CapabilityTarget, Outcome: CapabilityNotYetSupported},
 	"TARGET_PLAN_EMPTY":                     {Area: CapabilityTarget, Outcome: CapabilityNotYetSupported},
 	"TARGET_PLAN_TENANT_MISMATCH":           {Area: CapabilityTarget, Outcome: CapabilityNotYetSupported},
-	"TARGET_PLAN_MISSING":                   {Area: CapabilityTarget, Outcome: CapabilityNotYetSupported},
-	"DYNAMIC_GROUP_SOURCE_UNCONFIGURED":     {Area: CapabilityTarget, Outcome: CapabilityNotYetSupported},
+	"TARGET_PLAN_MISSING":                   {Area: CapabilityTarget, Outcome: CapabilityNotYetSupported, Reversible: true},
+	"DYNAMIC_GROUP_SOURCE_UNCONFIGURED":     {Area: CapabilityTarget, Outcome: CapabilityNotYetSupported, Reversible: true},
 
 	"ALGORITHM_NOT_MIGRATED":         {Area: CapabilityAlgorithm, Outcome: CapabilityNotYetSupported},
 	"ALGORITHM_UNSUPPORTED":          {Area: CapabilityAlgorithm, Outcome: CapabilityNotYetSupported},
@@ -111,8 +131,8 @@ var capabilityByReason = map[string]CapabilityClass{
 	"NO_DATA_TRIGGER_BEYOND_HORIZON": {Area: CapabilityAlgorithm, Outcome: CapabilityNotYetSupported},
 
 	"EFFECTIVE_TIME_SCHEMA_UNSUPPORTED": {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported},
-	"SNAPSHOT_RETENTION_INSUFFICIENT":   {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported},
-	"COMPLETION_OFFSET_BELOW_RESERVE":   {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported},
+	"SNAPSHOT_RETENTION_INSUFFICIENT":   {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported, Reversible: true},
+	"COMPLETION_OFFSET_BELOW_RESERVE":   {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported, Reversible: true},
 	"PLAN_BUDGET_EXCEEDED":              {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported},
 	"LEVEL_BUDGET_EXCEEDED":             {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported},
 	"ABOVE_AGG_INTERVAL":                {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported},

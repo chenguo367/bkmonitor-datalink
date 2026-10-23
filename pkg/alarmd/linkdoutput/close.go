@@ -44,8 +44,8 @@ const CloseReasonTargetOutOfScope = "target_out_of_scope"
 const CloseReasonSupersededIdentity = "superseded_identity"
 
 // CloseReasonUnsupported is the close for an alert of a strategy that still
-// exists and that alarmd no longer detects: its publication refused it for
-// a capability this build lacks. It says "nobody judges this any more", not
+// exists and that alarmd does not detect: its publication refused it for a
+// capability alarmd does not support, by design or not yet in this build. It says "nobody judges this any more", not
 // "this is normal" - closed, never resolved - and the capability goes in the
 // content (CloseRequest.Detail).
 const CloseReasonUnsupported = "strategy_unsupported"
@@ -88,7 +88,7 @@ var closeText = map[string]struct{ salt, title, content string }{
 	CloseReasonSupersededIdentity: {"alarmd-superseded-identity-close-v1", "The alert's series is now identified under a new fingerprint",
 		"Close requested because alarmd now identifies this series under a new identity and nothing evaluates this alert any more; this does not indicate metric recovery."},
 	CloseReasonUnsupported: {"alarmd-unsupported-strategy-close-v1", "Strategy is no longer detected by alarmd",
-		"Close requested because alarmd no longer detects this strategy, which it refuses for a capability this build lacks, and nothing evaluates this alert any more; this does not indicate metric recovery."},
+		"Close requested because alarmd does not detect this strategy - it uses a capability alarmd does not support - and nothing evaluates this alert any more; this does not indicate metric recovery."},
 }
 
 func ConvertClose(request CloseRequest) (Event, error) {

@@ -342,6 +342,15 @@ func TestTheAlertsOfAStrategyRefusedForACapabilityAreClosedAsNoLongerDetected(t 
 	if len(supported.writer.batches) != 0 {
 		t.Fatalf("a listed strategy refused for nothing was closed: %+v", supported.writer.batches)
 	}
+	// Refused for the deployment's configuration - a change lifts it - the
+	// strategy keeps its alerts, with the refusal named on its object.
+	reversible := newRefusedFixture(map[string]string{"10": "COMPLETION_OFFSET_BELOW_RESERVE"})
+	reversible.loop.step(ctx)
+	advance(reversible, "observation-two")
+	reversible.loop.step(ctx)
+	if len(reversible.writer.batches) != 0 {
+		t.Fatalf("a strategy refused for a reversible configuration was closed: %+v", reversible.writer.batches)
+	}
 
 	flapping := newRefusedFixture(map[string]string{"10": "QUERY_SOURCE_RETIRED"})
 	flapping.loop.step(ctx)

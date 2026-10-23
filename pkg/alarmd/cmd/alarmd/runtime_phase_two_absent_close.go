@@ -278,7 +278,7 @@ func (loop *absentStrategyClose) step(ctx context.Context) {
 	round := absentalerts.Round{
 		Identities:         identitiesByKey(departed),
 		SnapshotStrategies: snapshotKeys(observed), SnapshotUsable: haveSnapshot,
-		Refused:             loop.control.CapabilityRefused(),
+		Refused:             capabilityRefusals(loop.control.CapabilityRefused()),
 		SnapshotObservation: observed.Observation,
 		After:               loop.lastDecided, Now: now,
 	}
@@ -629,6 +629,24 @@ func identitiesByKey(entries []controlplane.DepartedStrategy) map[absentalerts.K
 			absentalerts.Identity{BusinessID: entry.BusinessID, Revision: entry.Revision, GlobalBusiness: entry.GlobalBusiness}
 	}
 	return identities
+}
+
+// capabilityRefusals is the refused strategies whose alerts close as no
+// longer detected: refused for a capability alarmd does not support
+// (fleet.ClosesAsUnsupported). A refusal a configuration change lifts - the
+// dynamic-group source, the downstream reserve, snapshot retention, a target
+// plan not yet written - keeps its alerts open with the refusal named.
+func capabilityRefusals(refused map[string]string) map[string]string {
+	if len(refused) == 0 {
+		return nil
+	}
+	closing := make(map[string]string, len(refused))
+	for strategyID, reason := range refused {
+		if fleet.ClosesAsUnsupported(reason) {
+			closing[strategyID] = reason
+		}
+	}
+	return closing
 }
 
 func snapshotKeys(observed controlplane.ObservedSnapshot) map[absentalerts.Key]struct{} {
