@@ -65,11 +65,14 @@ type CapabilityClass struct {
 	Area            string
 	Outcome         string
 	IgnoredByDesign bool
-	// Reversible is a refusal a configuration change or a writer catching up
+	// Reversible is a refusal a configuration change, a limit or a writer
 	// lifts - the deployment's dynamic-group source, its downstream reserve or
-	// snapshot retention, a target plan not yet written - rather than one this
-	// build cannot detect. Counted with the capability outcome it has, and
-	// never a reason to close the strategy's alerts (ClosesAsUnsupported).
+	// snapshot retention, its compiler budgets, a target plan the writer has
+	// not written, wrote empty or wrote for another tenant - or a defect of
+	// this build that a fixed one lifts, rather than a capability this build
+	// does not have. Counted with the capability outcome it has, and never a
+	// reason to close the strategy's alerts (ClosesAsUnsupported): closing
+	// them for a refusal that lifts would end alerts nothing reopens.
 	Reversible bool
 }
 
@@ -119,22 +122,22 @@ var capabilityByReason = map[string]CapabilityClass{
 	"UNSUPPORTED_TARGET_VALUE_SHAPE":        {Area: CapabilityTarget, Outcome: CapabilityNotYetSupported},
 	"GLOBAL_STRATEGY_UNSUPPORTED":           {Area: CapabilityTarget, Outcome: CapabilityNotYetSupported},
 	"UNSUPPORTED_TARGET_PLAN":               {Area: CapabilityTarget, Outcome: CapabilityNotYetSupported},
-	"TARGET_PLAN_EMPTY":                     {Area: CapabilityTarget, Outcome: CapabilityNotYetSupported},
-	"TARGET_PLAN_TENANT_MISMATCH":           {Area: CapabilityTarget, Outcome: CapabilityNotYetSupported},
+	"TARGET_PLAN_EMPTY":                     {Area: CapabilityTarget, Outcome: CapabilityNotYetSupported, Reversible: true},
+	"TARGET_PLAN_TENANT_MISMATCH":           {Area: CapabilityTarget, Outcome: CapabilityNotYetSupported, Reversible: true},
 	"TARGET_PLAN_MISSING":                   {Area: CapabilityTarget, Outcome: CapabilityNotYetSupported, Reversible: true},
 	"DYNAMIC_GROUP_SOURCE_UNCONFIGURED":     {Area: CapabilityTarget, Outcome: CapabilityNotYetSupported, Reversible: true},
 
 	"ALGORITHM_NOT_MIGRATED":         {Area: CapabilityAlgorithm, Outcome: CapabilityNotYetSupported},
 	"ALGORITHM_UNSUPPORTED":          {Area: CapabilityAlgorithm, Outcome: CapabilityNotYetSupported},
 	"ALGORITHM_NOT_SLIDING":          {Area: CapabilityAlgorithm, Outcome: CapabilityNotYetSupported},
-	"EVALUATION_STEP_INCONSISTENT":   {Area: CapabilityAlgorithm, Outcome: CapabilityNotYetSupported},
+	"EVALUATION_STEP_INCONSISTENT":   {Area: CapabilityAlgorithm, Outcome: CapabilityNotYetSupported, Reversible: true},
 	"NO_DATA_TRIGGER_BEYOND_HORIZON": {Area: CapabilityAlgorithm, Outcome: CapabilityNotYetSupported},
 
 	"EFFECTIVE_TIME_SCHEMA_UNSUPPORTED": {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported},
 	"SNAPSHOT_RETENTION_INSUFFICIENT":   {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported, Reversible: true},
 	"COMPLETION_OFFSET_BELOW_RESERVE":   {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported, Reversible: true},
-	"PLAN_BUDGET_EXCEEDED":              {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported},
-	"LEVEL_BUDGET_EXCEEDED":             {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported},
+	"PLAN_BUDGET_EXCEEDED":              {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported, Reversible: true},
+	"LEVEL_BUDGET_EXCEEDED":             {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported, Reversible: true},
 	"ABOVE_AGG_INTERVAL":                {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported},
 	"NOT_DIVISIBLE":                     {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported},
 	"BELOW_FLOOR":                       {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported},
