@@ -3,8 +3,10 @@ package linkdoutput
 import (
 	"encoding/json"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
@@ -111,6 +113,34 @@ func TestTheExistingCloseReasonsKeepTheirEventIDs(t *testing.T) {
 		}
 		if event.EventID != want {
 			t.Errorf("%q: event id %s, want %s", reason, event.EventID, want)
+		}
+	}
+}
+
+// The capability a close names is cut to closeDetailLimit bytes, and on a
+// rune boundary: a cut through a rune would reach the alert as U+FFFD.
+func TestACloseDetailIsCutOnARuneBoundary(t *testing.T) {
+	long := strings.Repeat("a", closeDetailLimit+20)
+	split := strings.Repeat("a", closeDetailLimit-1) + "能力"
+	for detail, want := range map[string]string{
+		"NO_DATA_ROSTER_UNSUPPORTED": " Capability: NO_DATA_ROSTER_UNSUPPORTED.",
+		long:                         " Capability: " + long[:closeDetailLimit] + ".",
+		split:                        " Capability: " + strings.Repeat("a", closeDetailLimit-1) + ".",
+	} {
+		event, err := ConvertClose(CloseRequest{TenantID: "tenant-test", Fingerprint: "0123456789abcdef0123456789abcdef",
+			AlertInstanceID: "active-instance", StrategyID: 123, StrategyRevision: 4, BusinessID: 2,
+			OccurredAt: time.Unix(1800000000, 0), Reason: CloseReasonUnsupported, Detail: detail})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wire struct {
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal(event.Payload, &wire); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasSuffix(wire.Content, want) || strings.ContainsRune(wire.Content, utf8.RuneError) {
+			t.Fatalf("content for a %d-byte detail = %q, want it to end %q", len(detail), wire.Content, want)
 		}
 	}
 }

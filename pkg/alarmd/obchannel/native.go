@@ -209,7 +209,8 @@ func NativeOperationsWith(handler http.Handler, options NativeOptions) []Operati
 			"表只记循环每轮已做的事，读页面不调 link；每页对快照不列的行做一次文档是否存在的检查。"+
 			"局限：alarmd 分不出策略是被删了，还是这个 ID 只在拆分前的旧策略表里存在过，要拿 ID 和业务去 SaaS 策略表查；"+
 			"执行事实只对本任期被决定过关闭的候选才有，重启后要宽限加 ⌈候选数/8⌉ 轮 × 5 分钟才填满；source_now=document 只说明文档键还在，不说明写方为什么不列它；"+
-			"被拒绝的轮次不动表，table.at 早于 last_round.at 时行是旧的。", map[string]Field{
+			"被拒绝的轮次不动表，table.at 早于 last_round.at 时行是旧的。"+
+			"refused_for 非空的行是源里还列着、但发布因本版本缺少的能力拒绝了的策略（改配置也恢复不了），同样按缺失关闭，关闭原因是 strategy_unsupported；配置或瞬时原因的拒绝不进候选。", map[string]Field{
 			"limit":       integer("返回行上限；默认50。", 1, int64(fleet.AbsentPageRows)),
 			"cursor":      text("上一页的 next_cursor。", "absent.list next_cursor"),
 			"outcome":     enumField("按本轮决定过滤。", fleet.AbsentOutcomes),

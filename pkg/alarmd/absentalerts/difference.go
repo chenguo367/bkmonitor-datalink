@@ -30,6 +30,14 @@
 // before is not judged: a strategy leaves the list when it is gone, and a
 // writer that drops strategies on error is the writer's to fix.
 //
+// A strategy the cache lists and alarmd's publication refused stands with
+// the absent ones when the refusal is for a capability this build lacks and
+// no configuration change brings back (fleet.ClosesAsUnsupported): alarmd
+// will not run it, so its unrecovered alerts have nothing to recover them
+// either, and its close says it is no longer detected rather than gone
+// (Round.Refused). A refusal a configuration change or a later read can
+// undo is not a candidate: the strategy comes back on its own.
+//
 // The roster can only err by missing a strategy or listing one twice, which
 // costs a close and never makes one; and a close the link receives for an
 // alert that is no longer active is a no-op on its side. The link's own

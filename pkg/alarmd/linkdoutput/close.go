@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"unicode/utf8"
 )
 
 const ActionClosed = "closed"
@@ -119,7 +120,12 @@ func ConvertClose(request CloseRequest) (Event, error) {
 	content := text.content
 	if detail := request.Detail; detail != "" {
 		if len(detail) > closeDetailLimit {
-			detail = detail[:closeDetailLimit]
+			// Cut on a rune boundary: a split rune would be encoded as U+FFFD.
+			cut := closeDetailLimit
+			for cut > 0 && !utf8.RuneStart(detail[cut]) {
+				cut--
+			}
+			detail = detail[:cut]
 		}
 		content += " Capability: " + detail + "."
 	}

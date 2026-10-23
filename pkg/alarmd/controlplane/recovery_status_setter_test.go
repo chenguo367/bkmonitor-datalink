@@ -97,15 +97,19 @@ func TestAStatusSetterIsReadAsTheCheckerReadsItAndWhatDoesNotRunIsSaid(t *testin
 
 // A strategy whose recovery is defaulted as a whole, and a level whose
 // trigger is borrowed, take "recovery" with the default window as the
-// checker does, so a status_setter written on them is neither read nor
-// noted.
+// checker does, so a status_setter written on them is not read: no level
+// ends closed or on no data.
 func TestAStatusSetterIsNotReadWhereTheCheckerTakesItsDefault(t *testing.T) {
 	catalog := legacyRecoveryCatalog(t,
-		`{"level":1,"trigger_config":{"count":1,"check_window":1},"recovery_config":{"check_window":3,"status_setter":"close"}},`+
+		`{"level":1,"trigger_config":{"count":1,"check_window":1},"recovery_config":{"check_window":3,"status_setter":"close-nodata"}},`+
 			`{"level":2,"trigger_config":{"count":1,"check_window":1},"recovery_config":{}}`, 1, 2)
-	for _, disposition := range catalog.Dispositions {
-		if disposition.Reason == "RECOVERY_CLOSE_UNSUPPORTED" {
-			t.Fatalf("a defaulted strategy's status_setter was read: %+v", disposition)
+	recoveries := legacyRecoveryOf(t, catalog)
+	if len(recoveries) != 2 {
+		t.Fatalf("recoveries = %+v, want both levels", recoveries)
+	}
+	for level, got := range recoveries {
+		if got.End != "" || got.MissingData != "" {
+			t.Fatalf("level %d recovery = %+v: a defaulted strategy's status_setter was read", level, got)
 		}
 	}
 }

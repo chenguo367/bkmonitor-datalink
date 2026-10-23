@@ -160,6 +160,11 @@ var removedLabelValues = []struct {
 	// waived.
 	{"absent_strategy_round_total", "disposition", "snapshot_shrunk", false},
 	{"absent_strategy_difference", "side", "writer_holds_last_good", false},
+	// A level written to end its alert closed, or to end it when no data
+	// arrives through the recovery window, was noted as not run and published
+	// at zero regardless. Both now run, and nothing is noted.
+	{"catalog_withheld_objects", "reason", "RECOVERY_CLOSE_UNSUPPORTED", false},
+	{"catalog_withheld_objects", "reason", "RECOVERY_NODATA_UNSUPPORTED", false},
 }
 
 // A removed label value is emitted by no family, whatever its source
