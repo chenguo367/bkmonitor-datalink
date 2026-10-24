@@ -28,6 +28,10 @@ const (
 	LogSearchDefaultTotalBytes = 256 << 10
 	LogSearchMaxTotalBytes     = 1 << 20
 	LogSearchMaxCursorBytes    = 4096
+	// LogSearchMaxOffset bounds the offset a cursor may carry where the
+	// storage pages by offset: a cursor asks UQ for at most this many lines
+	// past the window's first, so no call reads deep into a window.
+	LogSearchMaxOffset = 10000
 	// logSearchCursorValues bounds a table's search_after values and the
 	// bytes of each, so a cursor carries sort keys, never a row.
 	logSearchCursorValues     = 8
@@ -66,6 +70,8 @@ type LogLine struct {
 	TextBytes int               `json:"text_bytes"`
 	Truncated bool              `json:"truncated,omitempty"`
 	Redacted  bool              `json:"redacted,omitempty"`
+	// FieldsCut names the fields whose values were cut to 256 bytes.
+	FieldsCut []string `json:"fields_cut,omitempty"`
 }
 
 // LogSearchLimits are the bounds this page was read under.
@@ -91,6 +97,7 @@ type LogPage struct {
 	NextCursor        string          `json:"next_cursor,omitempty"`
 	StoppedAt         string          `json:"stopped_at,omitempty"`
 	TruncatedLines    int             `json:"truncated_lines"`
+	FieldsCut         int             `json:"fields_cut"`
 	RedactedLines     int             `json:"redacted_lines"`
 	Partial           bool            `json:"partial"`
 	QueryStringBytes  int             `json:"query_string_bytes"`
@@ -250,6 +257,20 @@ func (p *Provider) LogSearch(ctx context.Context, request LogSearchRequest) (Log
 		if cursor.Order != order || cursor.Binding != logBinding(request.TableID, request.QueryString, order, start, end) {
 			return page, fail("log_search_cursor_mismatch", "cursor belongs to another table, filter or order; pass the same ones the first page was read with.")
 		}
+		// A cursor is the caller's to send, and its binding is a digest the
+		// caller can compute: its window, offset and tables are held to the
+		// first page's rules again here, not trusted.
+		if end.After(now) || end.Sub(start) < time.Minute || end.Sub(start) > MaxWindow {
+			return page, fail("log_search_cursor_invalid", "the cursor's window must end no later than now and span 1m to 30 days, as a first page's does.")
+		}
+		for table, options := range cursor.Options {
+			if table != request.TableID && !strings.HasPrefix(table, request.TableID+"|") {
+				return page, fail("log_search_cursor_invalid", "the cursor names a table other than table_id.")
+			}
+			if options.From != nil && *options.From > LogSearchMaxOffset {
+				return page, fail("log_search_cursor_offset_exceeded", fmt.Sprintf("the cursor's offset is past the maximum %d; narrow the window or the filter.", LogSearchMaxOffset))
+			}
+		}
 		if request.Window != "" || request.End != "" {
 			return page, fail("invalid_input", "a cursor carries its window; omit window and end when passing one.")
 		}
@@ -341,6 +362,15 @@ func (p *Provider) LogSearch(ctx context.Context, request LogSearchRequest) (Log
 	if !ok {
 		return page, fail("uq_response_invalid", "UQ's continuation is not a sort key or offset this operation can carry.")
 	}
+	deep := false
+	for table, options := range next {
+		if table != request.TableID && !strings.HasPrefix(table, request.TableID+"|") {
+			return page, fail("uq_response_invalid", "UQ's continuation names a table other than table_id.")
+		}
+		if options.From != nil && *options.From > LogSearchMaxOffset {
+			deep = true
+		}
+	}
 	rows := answer.List
 	if cursor.Skip > len(rows) {
 		return page, fail("log_search_cursor_stale", "the page this cursor points into has fewer lines than it had; read again without the cursor.")
@@ -366,6 +396,7 @@ func (p *Provider) LogSearch(ctx context.Context, request LogSearchRequest) (Log
 		if line.Truncated {
 			page.TruncatedLines++
 		}
+		page.FieldsCut += len(line.FieldsCut)
 		if redacted {
 			page.RedactedLines++
 		}
@@ -383,6 +414,8 @@ func (p *Provider) LogSearch(ctx context.Context, request LogSearchRequest) (Log
 		page.Done = true
 	case len(next) == 0:
 		page.Limitations = append(page.Limitations, "UQ returned a full page without a continuation, so this operation cannot read past it; narrow the window or the filter")
+	case deep:
+		page.Limitations = append(page.Limitations, fmt.Sprintf("the next page's offset passes the maximum %d, so no cursor is given; narrow the window or the filter", LogSearchMaxOffset))
 	default:
 		resume := logCursor{Version: 1, Binding: cursor.Binding, Start: cursor.Start, End: cursor.End, Order: order, PageSize: limits.Lines, Options: next}
 		page.NextCursor, ok = resume.encode()
@@ -393,6 +426,9 @@ func (p *Provider) LogSearch(ctx context.Context, request LogSearchRequest) (Log
 	}
 	if page.StoppedAt == "total_bytes" {
 		page.Limitations = append(page.Limitations, fmt.Sprintf("the page stopped at %d lines to stay within total_bytes %d; next_cursor reads on from the next line", answered, limits.TotalBytes))
+	}
+	if page.FieldsCut > 0 {
+		page.Limitations = append(page.Limitations, fmt.Sprintf("%d field values were cut to %d bytes; fields_cut names them per line", page.FieldsCut, LogCountValueBytes))
 	}
 	if page.TruncatedLines > 0 {
 		page.Limitations = append(page.Limitations, fmt.Sprintf("%d lines were cut to line_bytes %d; text_bytes is each line's length before the cut", page.TruncatedLines, limits.LineBytes))
@@ -439,6 +475,9 @@ func logLine(row map[string]any, redact func(string) string, lineBytes int) (Log
 		clean := redact(raw)
 		if clean != raw {
 			redacted = true
+		}
+		if len(clean) > LogCountValueBytes {
+			line.FieldsCut = append(line.FieldsCut, field)
 		}
 		line.Fields[field] = cutValue(clean)
 	}

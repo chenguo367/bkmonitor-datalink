@@ -283,3 +283,78 @@ func TestLogSearchReadsOnWithUQsOwnCursor(t *testing.T) {
 		t.Fatalf("a value-bearing continuation: %v", err)
 	}
 }
+
+// Redaction comes before the cut: a credential that straddles line_bytes, or
+// the 256 bytes a field value is cut to, is redacted whole, so no prefix of it
+// leaves; text_bytes is the redacted length, and a cut field is named.
+func TestLogSearchRedactsBeforeItCuts(t *testing.T) {
+	text := strings.Repeat("x", 10) + "runtime-credential tail"
+	row := rawRow(logNow.Add(-time.Minute), text)
+	row["path"] = "/" + strings.Repeat("a", 250) + "runtime-credential/0.log"
+	server := &rawServer{answers: []string{rawAnswer(1, nil, row)}}
+	p := server.provider(t)
+	request := searchRequest()
+	request.LineBytes = 15
+	page, err := p.LogSearch(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := page.Lines[0]
+	redactedText := redact.New("runtime-credential").Text(text)
+	if strings.Contains(line.Text, "runti") || !line.Redacted || !line.Truncated || line.TextBytes != len(redactedText) || line.Text != redactedText[:15] {
+		t.Fatalf("straddling text %+v: want it redacted whole, then cut; text_bytes %d", line, len(redactedText))
+	}
+	path := line.Fields["path"]
+	if strings.Contains(path, "runti") || len(path) != LogCountValueBytes || len(line.FieldsCut) != 1 || line.FieldsCut[0] != "path" || page.FieldsCut != 1 {
+		t.Fatalf("straddling field %q (%d bytes) cut %v page %d: want it redacted whole, then cut and named", path, len(path), line.FieldsCut, page.FieldsCut)
+	}
+	if !strings.Contains(strings.Join(page.Limitations, ";"), "field values were cut to 256 bytes") {
+		t.Fatalf("limitations %v do not name the cut field", page.Limitations)
+	}
+}
+
+// A cursor is the caller's to send and its binding a digest anyone can
+// compute, so its window, offset and tables are held to the first page's
+// rules again: an end in the future, a span outside 1m..30d, an offset past
+// the maximum and another table are each refused by name; a continuation
+// from UQ past the maximum offset is not handed out.
+func TestLogSearchHoldsACursorToTheFirstPagesRules(t *testing.T) {
+	server := &rawServer{answers: []string{rawAnswer(0, nil)}}
+	p := server.provider(t)
+	built := func(start, end time.Time, options map[string]logCursorTableOptions) string {
+		c := logCursor{Version: 1, Start: start.Unix(), End: end.Unix(), Order: "desc", PageSize: 10, Options: options,
+			Binding: logBinding("2_bklog.fixture", "", "desc", start.UTC(), end.UTC())}
+		encoded, _ := c.encode()
+		return encoded
+	}
+	deep, shallow := LogSearchMaxOffset+1, 100
+	for name, tc := range map[string]struct {
+		cursor string
+		code   string
+	}{
+		"end in the future": {built(logNow.Add(23*time.Hour), logNow.Add(24*time.Hour), nil), "log_search_cursor_invalid"},
+		"span over 30 days": {built(logNow.Add(-31*24*time.Hour), logNow, nil), "log_search_cursor_invalid"},
+		"span under 1m":     {built(logNow.Add(-30*time.Second), logNow, nil), "log_search_cursor_invalid"},
+		"offset past max":   {built(logNow.Add(-time.Hour), logNow, map[string]logCursorTableOptions{"2_bklog.fixture|doris": {From: &deep}}), "log_search_cursor_offset_exceeded"},
+		"another table":     {built(logNow.Add(-time.Hour), logNow, map[string]logCursorTableOptions{"2_bklog.other|doris": {From: &shallow}}), "log_search_cursor_invalid"},
+	} {
+		request := searchRequest()
+		request.Window, request.Cursor = "", tc.cursor
+		if _, err := p.LogSearch(context.Background(), request); code(err) != tc.code {
+			t.Fatalf("%s: %v, want %s", name, err, tc.code)
+		}
+	}
+	request := searchRequest()
+	request.Window, request.Cursor = "", built(logNow.Add(-time.Hour), logNow, map[string]logCursorTableOptions{"2_bklog.fixture|doris": {From: &shallow}})
+	if _, err := p.LogSearch(context.Background(), request); err != nil {
+		t.Fatalf("a cursor within every rule: %v", err)
+	}
+	server.answers = []string{rawAnswer(3, map[string]any{"2_bklog.fixture|doris": map[string]any{"from": LogSearchMaxOffset + 2}},
+		rawRow(logNow.Add(-time.Minute), "a"), rawRow(logNow.Add(-2*time.Minute), "b"))}
+	request = searchRequest()
+	request.Lines = 2
+	page, err := p.LogSearch(context.Background(), request)
+	if err != nil || page.NextCursor != "" || page.Done || !strings.Contains(strings.Join(page.Limitations, ";"), "passes the maximum") {
+		t.Fatalf("continuation past the maximum offset: %+v %v", page, err)
+	}
+}
