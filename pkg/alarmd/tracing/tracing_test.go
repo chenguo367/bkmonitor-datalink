@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	collector "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	"google.golang.org/protobuf/proto"
@@ -298,10 +300,12 @@ func TestAFullQueueDropsAndCounts(t *testing.T) {
 	}
 }
 
-// Over real OTLP/HTTP: spans go to /v1/traces on the endpoint, the
-// resource carries the service and the token, and the token is the only
-// place it appears.
-func TestTheExportSpeaksOTLPWithTheToken(t *testing.T) {
+// otlpExport sends one sampled Slot with one query through an exporter built
+// for cfg to a collector on real OTLP/HTTP, and is what the collector
+// received: the paths it was sent to, the resource's attributes and the
+// spans.
+func otlpExport(t *testing.T, cfg Config) ([]string, map[string]string, int) {
+	t.Helper()
 	var mu sync.Mutex
 	var paths []string
 	var requests []*collector.ExportTraceServiceRequest
@@ -317,9 +321,8 @@ func TestTheExportSpeaksOTLPWithTheToken(t *testing.T) {
 		_, _ = writer.Write(raw)
 	}))
 	t.Cleanup(server.Close)
-	counters := &countersForTest{}
-	exporter, err := New(Config{Endpoint: server.URL, Token: "token-for-test", SampleRatio: 1, MaxTracesPerSecond: 5,
-		ServiceVersion: "0.4.0", InstanceID: "worker-1"}, counters)
+	cfg.Endpoint = server.URL
+	exporter, err := New(cfg, &countersForTest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,9 +337,6 @@ func TestTheExportSpeaksOTLPWithTheToken(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(requests) == 0 || paths[0] != "/v1/traces" {
-		t.Fatalf("collector saw %v, want a request to /v1/traces", paths)
-	}
 	attributes := map[string]string{}
 	spans := 0
 	for _, request := range requests {
@@ -349,9 +349,49 @@ func TestTheExportSpeaksOTLPWithTheToken(t *testing.T) {
 			}
 		}
 	}
+	return paths, attributes, spans
+}
+
+// Over real OTLP/HTTP: spans go to /v1/traces on the endpoint, the
+// resource carries the service and the token, and the token is the only
+// place it appears.
+func TestTheExportSpeaksOTLPWithTheToken(t *testing.T) {
+	paths, attributes, spans := otlpExport(t, Config{Token: "token-for-test", SampleRatio: 1, MaxTracesPerSecond: 5,
+		ServiceVersion: "0.4.0", InstanceID: "worker-1"})
+	if len(paths) == 0 || paths[0] != "/v1/traces" {
+		t.Fatalf("collector saw %v, want a request to /v1/traces", paths)
+	}
 	if spans != 2 || attributes["service.name"] != "alarmd" || attributes["service.version"] != "0.4.0" ||
 		attributes["service.instance.id"] != "worker-1" || attributes[TokenAttribute] != "token-for-test" {
 		t.Fatalf("collector got %d spans with resource %v", spans, attributes)
+	}
+}
+
+// The resource the collector gets names the SDK the spans come from, with
+// the values the SDK's own default resource gives them - a provider given a
+// resource of its own does not get the default's - beside everything it
+// carried before, the token among them, and nothing else. The environment's
+// resource attributes are merged under it as they were: one of their own is
+// kept, and one alarmd sets itself is alarmd's.
+func TestTheExportedResourceNamesItsSDKBesideWhatItCarried(t *testing.T) {
+	t.Setenv("OTEL_SERVICE_NAME", "")
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "deployment.environment=test,service.name=other")
+	own, err := resource.New(context.Background(), resource.WithTelemetrySDK())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"service.name": "alarmd", "service.version": "0.4.0", "service.instance.id": "worker-1",
+		TokenAttribute: "token-for-test", "deployment.environment": "test"}
+	for _, attribute := range own.Attributes() {
+		want[string(attribute.Key)] = attribute.Value.Emit()
+	}
+	if len(want) != 8 || want["telemetry.sdk.language"] != "go" || want["telemetry.sdk.version"] == "" {
+		t.Fatalf("the SDK names itself %v", own.Attributes())
+	}
+	_, attributes, spans := otlpExport(t, Config{Token: "token-for-test", SampleRatio: 1, MaxTracesPerSecond: 5,
+		ServiceVersion: "0.4.0", InstanceID: "worker-1"})
+	if spans != 2 || !reflect.DeepEqual(attributes, want) {
+		t.Fatalf("collector got %d spans with resource %v, want %v", spans, attributes, want)
 	}
 }
 

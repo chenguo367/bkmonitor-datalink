@@ -32,6 +32,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/sdk"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
@@ -142,6 +143,14 @@ func newExporter(cfg Config, counters Counters, exporter sdktrace.SpanExporter) 
 		attribute.String("service.name", "alarmd"),
 		attribute.String("service.version", cfg.ServiceVersion),
 		attribute.String("service.instance.id", cfg.InstanceID),
+		// The SDK the spans come from, named as the SDK's own default
+		// resource names it. A provider given a resource of its own keeps
+		// that and the environment's (OTEL_RESOURCE_ATTRIBUTES), not the
+		// default, so without these the spans would not say which SDK made
+		// them.
+		attribute.String("telemetry.sdk.name", "opentelemetry"),
+		attribute.String("telemetry.sdk.language", "go"),
+		attribute.String("telemetry.sdk.version", sdk.Version()),
 	}
 	if cfg.Token != "" {
 		attributes = append(attributes, attribute.String(TokenAttribute, cfg.Token))
