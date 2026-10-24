@@ -356,6 +356,7 @@ func otlpExport(t *testing.T, cfg Config) ([]string, map[string]string, int) {
 // resource carries the service and the token, and the token is the only
 // place it appears.
 func TestTheExportSpeaksOTLPWithTheToken(t *testing.T) {
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "")
 	paths, attributes, spans := otlpExport(t, Config{Token: "token-for-test", SampleRatio: 1, MaxTracesPerSecond: 5,
 		ServiceVersion: "0.4.0", InstanceID: "worker-1"})
 	if len(paths) == 0 || paths[0] != "/v1/traces" {
@@ -392,6 +393,50 @@ func TestTheExportedResourceNamesItsSDKBesideWhatItCarried(t *testing.T) {
 		ServiceVersion: "0.4.0", InstanceID: "worker-1"})
 	if spans != 2 || !reflect.DeepEqual(attributes, want) {
 		t.Fatalf("collector got %d spans with resource %v, want %v", spans, attributes, want)
+	}
+}
+
+// The deployment names the instance: a service.instance.id in the
+// environment's resource (OTEL_RESOURCE_ATTRIBUTES, which the chart sets to
+// the Pod's namespace, name and container beside the k8s.* attributes) is
+// the one the collector gets, with those attributes and alarmd's own, the
+// token and the SDK among them, and nothing else. A process the deployment
+// does not name, or names as empty, is its worker id.
+func TestTheDeploymentNamesTheInstanceAndTheWorkerIDIsTheFallback(t *testing.T) {
+	own, err := resource.New(context.Background(), resource.WithTelemetrySDK())
+	if err != nil {
+		t.Fatal(err)
+	}
+	podAttributes := "k8s.namespace.name=ns1,k8s.pod.name=alarmd-0,k8s.pod.uid=uid-1,k8s.container.name=alarmd"
+	for _, tc := range []struct {
+		name, environment string
+		want              map[string]string
+	}{
+		{name: "named by the deployment", environment: "service.instance.id=ns1.alarmd-0.alarmd," + podAttributes,
+			want: map[string]string{"service.instance.id": "ns1.alarmd-0.alarmd", "k8s.namespace.name": "ns1",
+				"k8s.pod.name": "alarmd-0", "k8s.pod.uid": "uid-1", "k8s.container.name": "alarmd"}},
+		{name: "not named", environment: podAttributes,
+			want: map[string]string{"service.instance.id": "worker-1", "k8s.namespace.name": "ns1",
+				"k8s.pod.name": "alarmd-0", "k8s.pod.uid": "uid-1", "k8s.container.name": "alarmd"}},
+		{name: "named as empty", environment: "service.instance.id=", want: map[string]string{"service.instance.id": "worker-1"}},
+		{name: "no environment", want: map[string]string{"service.instance.id": "worker-1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OTEL_SERVICE_NAME", "")
+			t.Setenv("OTEL_RESOURCE_ATTRIBUTES", tc.environment)
+			want := map[string]string{"service.name": "alarmd", "service.version": "0.4.0", TokenAttribute: "token-for-test"}
+			for _, attribute := range own.Attributes() {
+				want[string(attribute.Key)] = attribute.Value.Emit()
+			}
+			for key, value := range tc.want {
+				want[key] = value
+			}
+			_, attributes, spans := otlpExport(t, Config{Token: "token-for-test", SampleRatio: 1, MaxTracesPerSecond: 5,
+				ServiceVersion: "0.4.0", InstanceID: "worker-1"})
+			if spans != 2 || !reflect.DeepEqual(attributes, want) {
+				t.Fatalf("collector got %d spans with resource %v, want %v", spans, attributes, want)
+			}
+		})
 	}
 }
 
