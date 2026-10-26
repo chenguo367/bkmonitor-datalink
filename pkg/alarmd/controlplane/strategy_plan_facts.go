@@ -35,6 +35,12 @@ type StrategyPlanFacts struct {
 	DimensionFields   []string
 	DynamicDimensions bool
 	HasOutputIdentity bool
+	// RecordDimensionFields are the dimensions the Plans' records carry
+	// (InputProjection.DimensionFields), which reach the alert with the
+	// opening event. Some reach beyond the output identity: ProcPort's
+	// records carry the ports they found (bind_ip, listen, ...) and are
+	// identified by the target and process alone.
+	RecordDimensionFields []string
 	// Levels are the declared Levels the Plans detect, in level order.
 	// LevelsWhole says every Level the strategy declares is among them: no
 	// Level of it was refused, withheld or kept from a previous definition.
@@ -119,6 +125,7 @@ func frozenPlanFacts(plan *FrozenPlan) StrategyPlanFacts {
 		facts.DynamicDimensions = identity.DynamicDimensions
 		facts.DimensionFields = sortedCopy(identity.DimensionFields)
 	}
+	facts.RecordDimensionFields = sortedCopy(plan.Plan.InputProjection.DimensionFields)
 	for _, level := range plan.Plan.StrategyIR.Levels {
 		facts.Levels = append(facts.Levels, level.Definition)
 	}

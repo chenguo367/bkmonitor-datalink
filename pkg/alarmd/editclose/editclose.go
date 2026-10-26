@@ -165,11 +165,15 @@ type Plan struct {
 	Revision          int64
 	DimensionFields   []string
 	DynamicDimensions bool
-	Levels            []contract.LevelDefinitionV2
-	LevelsWhole       bool
-	NoData            bool
-	NoDataDimensions  []string
-	NoDataSuspended   bool
+	// RecordFields are the dimensions the Plans' records carry beyond the
+	// grouping (controlplane.StrategyPlanFacts.RecordDimensionFields): the
+	// strategy still writes them, so an alert carrying one has not lost it.
+	RecordFields     []string
+	Levels           []contract.LevelDefinitionV2
+	LevelsWhole      bool
+	NoData           bool
+	NoDataDimensions []string
+	NoDataSuspended  bool
 	// Facts is the Plans' strategy facts, nil where they have none.
 	Facts *contract.StrategyFactsV2
 }
@@ -182,6 +186,7 @@ func (plan Plan) Key() string {
 	b.WriteString(strconv.FormatInt(plan.Revision, 10))
 	b.WriteString("|")
 	b.WriteString(strings.Join(plan.DimensionFields, ","))
+	b.WriteString("|" + strings.Join(plan.RecordFields, ","))
 	b.WriteString("|" + strconv.FormatBool(plan.DynamicDimensions) + "|")
 	for _, level := range plan.Levels {
 		b.WriteString(strconv.FormatUint(uint64(level.LevelID), 10) + ":" + level.LevelCode + ",")
@@ -250,7 +255,7 @@ func Decide(plan Plan, alert Alert) (decision, note string) {
 		return OutcomeMetricChanged, note
 	}
 	if noData {
-		if plan.NoData && groupingChanged(facts, planGrouping(plan.Facts, true), alert.DimensionKeys, plan.NoDataDimensions, false) {
+		if plan.NoData && groupingChanged(facts, planGrouping(plan.Facts, true), alert.DimensionKeys, plan.NoDataDimensions, nil, false) {
 			return OutcomeDimensionsChanged, note
 		}
 		if facts != nil {
@@ -268,7 +273,7 @@ func Decide(plan Plan, alert Alert) (decision, note string) {
 		}
 		return OutcomeKept, note
 	}
-	if groupingChanged(facts, planGrouping(plan.Facts, false), alert.DimensionKeys, plan.DimensionFields, plan.DynamicDimensions) {
+	if groupingChanged(facts, planGrouping(plan.Facts, false), alert.DimensionKeys, plan.DimensionFields, plan.RecordFields, plan.DynamicDimensions) {
 		return OutcomeDimensionsChanged, note
 	}
 	return levelVerdict(plan, alert.Severity), note
@@ -317,19 +322,21 @@ func alertFamily(alert Alert) (noData, known bool) {
 // alert's facts and the Plans' both state one (current is the Plans'), and
 // otherwise by the removed-or-renamed check over the alert's dimension
 // names, which a dynamic grouping skips.
-func groupingChanged(facts *contract.StrategyFactsV2, current string, keys, grouping []string, dynamic bool) bool {
+func groupingChanged(facts *contract.StrategyFactsV2, current string, keys, grouping, carried []string, dynamic bool) bool {
 	if facts != nil && facts.DimensionDigest != "" && current != "" {
 		return facts.DimensionDigest != current
 	}
-	return !dynamic && carriesDroppedDimension(keys, grouping)
+	return !dynamic && carriesDroppedDimension(keys, grouping, carried)
 }
 
 // carriesDroppedDimension reports whether the alert has a dimension the
-// grouping no longer names. A "tags." prefix is read the way the
+// grouping no longer names. Only grouping is compared: a dimension the
+// records still carry beyond the grouping (carried) is not one the edit
+// dropped, whatever the grouping says. A "tags." prefix is read the way the
 // fingerprint reads it (contract.ProjectMonitorTarget), on both sides.
-func carriesDroppedDimension(keys, grouping []string) bool {
-	grouped := make(map[string]struct{}, len(grouping))
-	for _, field := range grouping {
+func carriesDroppedDimension(keys, grouping, carried []string) bool {
+	grouped := make(map[string]struct{}, len(grouping)+len(carried))
+	for _, field := range append(append([]string(nil), grouping...), carried...) {
 		grouped[strings.TrimPrefix(field, "tags.")] = struct{}{}
 	}
 	for _, key := range keys {

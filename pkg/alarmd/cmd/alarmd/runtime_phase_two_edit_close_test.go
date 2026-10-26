@@ -564,6 +564,22 @@ func TestWithoutFactsOnlyARemovedDimensionCloses(t *testing.T) {
 	removed.threshold("threshold", 8, "critical", "ip", "device")
 	removed.step()
 	removed.wantClosed(t, map[string]string{"threshold": "dimensions_changed"})
+
+	// A ProcPort alert carries the ports its record found beside its
+	// identity; an edit that changed nothing of either keeps it.
+	procPort := newEditFixture()
+	plan = editPlan()
+	plan.DimensionFields = []string{"bk_target_cloud_id", "bk_target_ip", "display_name"}
+	plan.RecordDimensionFields = []string{"bind_ip", "listen", "nonlisten", "not_accurate_listen", "protocol"}
+	plan.StrategyFacts = groupedFacts(t, plan.DimensionFields, []string{"ip"})
+	procPort.plans.facts["10"] = plan
+	procPort.threshold("threshold", 8, "critical", "bind_ip", "bk_target_cloud_id", "bk_target_ip", "display_name",
+		"listen", "nonlisten", "not_accurate_listen", "protocol")
+	procPort.step()
+	procPort.wantClosed(t, map[string]string{})
+	if stats := procPort.loop.Stats(); stats[editclose.OutcomeKept] != 1 {
+		t.Fatalf("stats %+v, want the ProcPort alert kept", stats)
+	}
 }
 
 // The condition rule is held: a condition change closes nothing, and the

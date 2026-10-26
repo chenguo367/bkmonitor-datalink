@@ -186,7 +186,8 @@ func strategyRefusal(facts controlplane.StrategyPlanFacts, found bool) string {
 
 func planOf(facts controlplane.StrategyPlanFacts) editclose.Plan {
 	return editclose.Plan{Revision: facts.Revision, DimensionFields: facts.DimensionFields, DynamicDimensions: facts.DynamicDimensions,
-		Levels: facts.Levels, LevelsWhole: facts.LevelsWhole,
+		RecordFields: facts.RecordDimensionFields,
+		Levels:       facts.Levels, LevelsWhole: facts.LevelsWhole,
 		NoData: facts.NoData, NoDataDimensions: facts.NoDataAggDimension, NoDataSuspended: facts.NoDataSuspended,
 		Facts: facts.StrategyFacts}
 }

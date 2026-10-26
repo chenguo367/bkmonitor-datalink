@@ -49,8 +49,19 @@ func TestDecide(t *testing.T) {
 	dynamic.DynamicDimensions = true
 	noDataRegrouped := current()
 	noDataRegrouped.NoDataDimensions = nil
+	// The threshold records carry ip; a no-data point carries only its own
+	// grouping, so that is no reason to keep a regrouped no-data alert.
+	noDataRegroupedCarried := noDataRegrouped
+	noDataRegroupedCarried.RecordFields = []string{"device", "ip"}
 	tagged := current()
 	tagged.DimensionFields = []string{"tags.device", "ip"}
+	// ProcPort: identified by target and process, its records also carry
+	// the ports they found.
+	procPort := Plan{Revision: 9, DimensionFields: []string{"bk_target_cloud_id", "bk_target_ip", "display_name"},
+		RecordFields: []string{"bind_ip", "listen", "nonlisten", "not_accurate_listen", "protocol"},
+		Levels:       []contract.LevelDefinitionV2{{LevelID: 1}}, LevelsWhole: true}
+	carriedBeside := withoutDevice
+	carriedBeside.RecordFields = []string{"ip", "port"}
 
 	for name, test := range map[string]struct {
 		plan  Plan
@@ -70,12 +81,17 @@ func TestDecide(t *testing.T) {
 		"a grouping dimension removed":     {withoutDevice, threshold(8, "warning", "ip", "device"), OutcomeDimensionsChanged},
 		"a grouping dimension renamed":     {current(), threshold(8, "warning", "ip", "nic"), OutcomeDimensionsChanged},
 		"a tags prefix reads as the field": {tagged, threshold(8, "warning", "ip", "device"), OutcomeKept},
+		// What the records carry beyond the grouping was not dropped.
+		"dimensions the records carry beyond the grouping": {procPort, threshold(8, "critical", "bind_ip", "bk_target_cloud_id",
+			"bk_target_ip", "display_name", "listen", "nonlisten", "not_accurate_listen", "protocol"), OutcomeKept},
+		"a removed grouping dimension beside carried ones": {carriedBeside, threshold(8, "warning", "ip", "port", "device"), OutcomeDimensionsChanged},
 		// The record leaves out a grouping dimension its series did not
 		// carry, so an alert lacking a current one is not decided.
-		"a grouping dimension the alert lacks": {current(), threshold(8, "warning", "ip"), OutcomeKept},
-		"dynamic dimensions are not compared":  {dynamic, threshold(8, "warning", "ip", "device"), OutcomeKept},
-		"a no-data group regrouped":            {noDataRegrouped, noData(8, "ip"), OutcomeDimensionsChanged},
-		"a no-data group that survived":        {withoutDevice, noData(8, "ip"), OutcomeKept},
+		"a grouping dimension the alert lacks":                     {current(), threshold(8, "warning", "ip"), OutcomeKept},
+		"dynamic dimensions are not compared":                      {dynamic, threshold(8, "warning", "ip", "device"), OutcomeKept},
+		"a no-data group regrouped":                                {noDataRegrouped, noData(8, "ip"), OutcomeDimensionsChanged},
+		"a no-data group regrouped, threshold records carrying it": {noDataRegroupedCarried, noData(8, "ip"), OutcomeDimensionsChanged},
+		"a no-data group that survived":                            {withoutDevice, noData(8, "ip"), OutcomeKept},
 
 		// level_removed.
 		"its level removed":                      {withoutWarning, threshold(8, "warning", "ip", "device"), OutcomeLevelRemoved},
