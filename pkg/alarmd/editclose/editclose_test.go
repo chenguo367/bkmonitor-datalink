@@ -98,7 +98,7 @@ func TestDecide(t *testing.T) {
 		"no dimensions object":          {withoutDevice, Alert{Revision: 8, EvaluationFamily: "metric_algorithm", Severity: "warning"}, OutcomeFamilyUnknown},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if got := Decide(test.plan, test.alert); got != test.want {
+			if got, _ := Decide(test.plan, test.alert); got != test.want {
 				t.Fatalf("Decide = %s, want %s", got, test.want)
 			}
 		})
@@ -113,8 +113,9 @@ func TestOnlyTheThreeChangesClose(t *testing.T) {
 			closing++
 		}
 	}
-	if closing != 3 || !Closes("dimensions_changed") || !Closes("level_removed") || !Closes("no_data_disabled") || Closes("kept") {
-		t.Fatalf("%d closing decisions, want dimensions_changed, level_removed and no_data_disabled", closing)
+	if closing != 5 || !Closes("metric_changed") || !Closes("condition_changed") || !Closes("dimensions_changed") ||
+		!Closes("level_removed") || !Closes("no_data_disabled") || Closes("kept") {
+		t.Fatalf("%d closing decisions, want metric_changed, condition_changed, dimensions_changed, level_removed and no_data_disabled", closing)
 	}
 }
 
@@ -133,6 +134,7 @@ func TestThePlanKeyMovesWithEveryFact(t *testing.T) {
 		func(p *Plan) { p.NoData = false },
 		func(p *Plan) { p.NoDataDimensions = nil },
 		func(p *Plan) { p.NoDataSuspended = true },
+		func(p *Plan) { p.Facts = &contract.StrategyFactsV1{Schema: "v1", MetricDigest: "m", ConditionMD5: "c"} },
 	}
 	for index, change := range changes {
 		changed := current()
@@ -140,5 +142,69 @@ func TestThePlanKeyMovesWithEveryFact(t *testing.T) {
 		if changed.Key() == base.Key() {
 			t.Fatalf("change %d left the key as it was", index)
 		}
+	}
+}
+
+// strategyFacts is the opening event's strategy facts as the link stores
+// them.
+func strategyFacts(metric, condition string) []byte {
+	return []byte(`{"schema":"v1","metric_digest":"` + metric + `","condition_md5":"` + condition + `"}`)
+}
+
+func withFacts(alert Alert, facts []byte) Alert {
+	alert.Facts = facts
+	return alert
+}
+
+// The metric and condition rules, from the facts the opening event carried
+// against the current Plans'.
+func TestDecideTheStrategyFacts(t *testing.T) {
+	plan := current()
+	plan.Facts = &contract.StrategyFactsV1{Schema: "v1", MetricDigest: "metric-b", ConditionMD5: "condition-b"}
+	noDataOff := plan
+	noDataOff.NoData, noDataOff.NoDataDimensions = false, nil
+	for name, test := range map[string]struct {
+		plan       Plan
+		alert      Alert
+		want, note string
+	}{
+		"metric changed closes a threshold alert": {plan, withFacts(threshold(8, "warning", "ip", "device"), strategyFacts("metric-a", "condition-b")),
+			OutcomeMetricChanged, ""},
+		"metric changed closes a no-data alert": {plan, withFacts(noData(8, "ip"), strategyFacts("metric-a", "condition-b")), OutcomeMetricChanged, ""},
+		"condition changed closes a no-data alert": {plan, withFacts(noData(8, "ip"), strategyFacts("metric-b", "condition-a")),
+			OutcomeConditionChanged, ""},
+		"condition changed leaves a threshold alert": {plan, withFacts(threshold(8, "warning", "ip", "device"), strategyFacts("metric-b", "condition-a")),
+			OutcomeKept, ""},
+		// The connector of the first condition is not in the digest (the
+		// platform's rule), so the same digest on both sides is no change.
+		"unchanged facts keep": {plan, withFacts(noData(8, "ip"), strategyFacts("metric-b", "condition-b")), OutcomeKept, ""},
+		"condition changed before no-data off": {noDataOff, withFacts(noData(8, "ip"), strategyFacts("metric-b", "condition-a")),
+			OutcomeConditionChanged, ""},
+		"an alert at the current revision is not compared": {plan, withFacts(threshold(9, "warning", "ip", "device"), strategyFacts("metric-a", "condition-a")),
+			OutcomeCurrentRevision, ""},
+
+		// Missing or unreadable facts decide neither rule; the others still run.
+		"no facts":              {plan, noData(8, "ip"), OutcomeKept, OutcomeFactsMissing},
+		"no facts, no-data off": {noDataOff, noData(8, "ip"), OutcomeNoDataDisabled, OutcomeFactsMissing},
+		"another schema": {plan, withFacts(threshold(8, "warning", "ip", "device"),
+			[]byte(`{"schema":"v2","metric_digest":"metric-a","condition_md5":"condition-a"}`)), OutcomeKept, OutcomeFactsUnknownSchema},
+		"no schema": {plan, withFacts(threshold(8, "warning", "ip", "device"), []byte(`{"metric_digest":"metric-a"}`)),
+			OutcomeKept, OutcomeFactsUnknownSchema},
+		"facts that are not an object": {plan, withFacts(threshold(8, "warning", "ip", "device"), []byte(`"v1"`)), OutcomeKept, OutcomeFactsUnknownSchema},
+		"v1 without a digest": {plan, withFacts(threshold(8, "warning", "ip", "device"), []byte(`{"schema":"v1","metric_digest":"metric-a"}`)),
+			OutcomeKept, OutcomeFactsUnknownSchema},
+		"Plans without facts": {current(), withFacts(threshold(8, "warning", "ip", "device"), strategyFacts("metric-a", "condition-a")),
+			OutcomeKept, OutcomePlanFactsMissing},
+		"Plans with facts of another schema": {func() Plan {
+			p := current()
+			p.Facts = &contract.StrategyFactsV1{Schema: "v2", MetricDigest: "metric-b", ConditionMD5: "condition-b"}
+			return p
+		}(), withFacts(threshold(8, "warning", "ip", "device"), strategyFacts("metric-a", "condition-a")), OutcomeKept, OutcomePlanFactsMissing},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got, note := Decide(test.plan, test.alert); got != test.want || note != test.note {
+				t.Fatalf("Decide = %s, %q; want %s, %q", got, note, test.want, test.note)
+			}
+		})
 	}
 }

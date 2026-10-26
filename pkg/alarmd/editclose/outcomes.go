@@ -73,7 +73,7 @@ const (
 
 // Outcomes is every word the loop counts, decisions included, for the
 // metric that pre-creates them.
-var Outcomes = append(append([]string(nil), Decisions...),
+var Outcomes = append(append(append([]string(nil), Decisions...), Notes...),
 	OutcomeNotLeader, OutcomePublicationUnavailable, OutcomeRosterUnavailable,
 	OutcomeStrategyUnpublished, OutcomePlanRetained, OutcomePlansDisagree, OutcomePlanUnrevisioned,
 	OutcomeEvidenceUnavailable, OutcomeEvidenceTruncated,

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -409,5 +410,117 @@ func TestTheEditCloseRunsOverTheAbsentClosesRoster(t *testing.T) {
 	absent.loop.step(ctx)
 	if absent.loop.lastRoster != nil {
 		t.Fatal("a roster read in a term that ended was kept")
+	}
+}
+
+// derivedFacts is the strategy facts of one query config, derived the way
+// the catalog derives them.
+func derivedFacts(t *testing.T, queryConfig string) *contract.StrategyFactsV1 {
+	t.Helper()
+	facts, err := contract.DeriveStrategyFactsV1([]json.RawMessage{json.RawMessage(queryConfig)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return facts
+}
+
+// withFacts gives the alert's record the facts its opening event carried.
+func (fixture *editFixture) withFacts(t *testing.T, id string, facts *contract.StrategyFactsV1) {
+	t.Helper()
+	encoded, err := json.Marshal(facts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := fixture.link.records[id]
+	record.StrategyFacts = encoded
+	fixture.link.records[id] = record
+}
+
+const (
+	cpuQuery    = `{"metric_id":"bk_monitor.system.cpu.usage","agg_condition":[{"key":"ip","value":["192.0.2.1"],"method":"eq"}]}`
+	memoryQuery = `{"metric_id":"bk_monitor.system.mem.usage","agg_condition":[{"key":"ip","value":["192.0.2.1"],"method":"eq"}]}`
+)
+
+// A metric change closes every alert of the strategy, threshold and
+// no-data alike.
+func TestAMetricChangeClosesEveryAlertOfTheStrategy(t *testing.T) {
+	fixture := newEditFixture()
+	plan := editPlan()
+	plan.StrategyFacts = derivedFacts(t, memoryQuery)
+	fixture.plans.facts["10"] = plan
+	fixture.threshold("threshold", 8, "critical", "ip", "device")
+	fixture.noData("no-data", 8, "ip")
+	fixture.threshold("current", 9, "critical", "ip", "device")
+	for _, id := range []string{"threshold", "no-data", "current"} {
+		fixture.withFacts(t, id, derivedFacts(t, cpuQuery))
+	}
+	fixture.step()
+	fixture.wantClosed(t, map[string]string{"threshold": "metric_changed", "no-data": "metric_changed"})
+}
+
+// A condition change closes the no-data alerts and leaves the threshold
+// alerts open.
+func TestAConditionChangeClosesNoDataAlertsAndLeavesThresholdAlerts(t *testing.T) {
+	fixture := newEditFixture()
+	plan := editPlan()
+	plan.StrategyFacts = derivedFacts(t, `{"metric_id":"bk_monitor.system.cpu.usage","agg_condition":[{"key":"ip","value":["192.0.2.2"],"method":"eq"}]}`)
+	fixture.plans.facts["10"] = plan
+	fixture.threshold("threshold", 8, "critical", "ip", "device")
+	fixture.noData("no-data", 8, "ip")
+	for _, id := range []string{"threshold", "no-data"} {
+		fixture.withFacts(t, id, derivedFacts(t, cpuQuery))
+	}
+	fixture.step()
+	fixture.wantClosed(t, map[string]string{"no-data": "condition_changed"})
+}
+
+// The first condition's connector is not a change, by the platform's own
+// rule; the second's is.
+func TestAConnectorOnlyChangeOfTheFirstConditionIsNoChange(t *testing.T) {
+	before := `{"metric_id":"m","agg_condition":[{"key":"ip","value":["192.0.2.1"],"method":"eq","condition":"and"},` +
+		`{"condition":"or","key":"device","value":["eth0"],"method":"eq"}]}`
+	firstChanged := `{"metric_id":"m","agg_condition":[{"key":"ip","value":["192.0.2.1"],"method":"eq","condition":"or"},` +
+		`{"condition":"or","key":"device","value":["eth0"],"method":"eq"}]}`
+	secondChanged := `{"metric_id":"m","agg_condition":[{"key":"ip","value":["192.0.2.1"],"method":"eq","condition":"and"},` +
+		`{"condition":"and","key":"device","value":["eth0"],"method":"eq"}]}`
+	for current, want := range map[string]map[string]string{firstChanged: {}, secondChanged: {"no-data": "condition_changed"}} {
+		fixture := newEditFixture()
+		plan := editPlan()
+		plan.StrategyFacts = derivedFacts(t, current)
+		fixture.plans.facts["10"] = plan
+		fixture.noData("no-data", 8, "ip")
+		fixture.withFacts(t, "no-data", derivedFacts(t, before))
+		fixture.step()
+		fixture.wantClosed(t, want)
+	}
+}
+
+// An alert whose opening event carried no strategy facts, or facts of a
+// schema this build does not read, is not decided by the metric and
+// condition rules; it is counted, and the other rules still apply.
+func TestMissingOrUnknownFactsAreSkippedAndCounted(t *testing.T) {
+	fixture := newEditFixture()
+	plan := editPlan()
+	plan.StrategyFacts = derivedFacts(t, memoryQuery)
+	plan.DimensionFields = []string{"ip"}
+	fixture.plans.facts["10"] = plan
+	fixture.threshold("no-facts", 8, "critical", "ip")
+	fixture.threshold("other-schema", 8, "critical", "ip")
+	record := fixture.link.records["other-schema"]
+	record.StrategyFacts = json.RawMessage(`{"schema":"v2","metric_digest":"x","condition_md5":"y"}`)
+	fixture.link.records["other-schema"] = record
+	fixture.threshold("no-facts-dimension-dropped", 8, "critical", "ip", "device")
+	fixture.step()
+	fixture.wantClosed(t, map[string]string{"no-facts-dimension-dropped": "dimensions_changed"})
+	stats := fixture.loop.Stats()
+	if stats[editclose.OutcomeFactsMissing] != 2 || stats[editclose.OutcomeFactsUnknownSchema] != 1 || stats[editclose.OutcomeKept] != 2 {
+		t.Fatalf("stats %+v, want two facts_missing, one facts_unknown_schema and two kept", stats)
+	}
+	// Remembered decisions keep their note. The link has dropped the alert
+	// that was closed.
+	fixture.link.alerts["10"] = fixture.link.alerts["10"][:2]
+	fixture.step()
+	if stats := fixture.loop.Stats(); stats[editclose.OutcomeFactsMissing] != 3 || stats[editclose.OutcomeFactsUnknownSchema] != 2 {
+		t.Fatalf("stats %+v, want the remembered decisions counted with their notes", stats)
 	}
 }

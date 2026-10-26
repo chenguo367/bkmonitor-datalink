@@ -181,6 +181,10 @@ type AlertRecord struct {
 	// wrote it (metric_algorithm or no_data from this process), empty when
 	// the record names none.
 	EvaluationFamily string
+	// StrategyFacts is extra_data.strategy_facts as the opening event wrote
+	// it (contract.StrategyFactsV1), unparsed: nil when the record has none,
+	// and whether its schema is one this build reads is the reader's to say.
+	StrategyFacts json.RawMessage
 }
 
 // ErrAlertNotFound is the link answering that it has no such alert.
@@ -204,7 +208,8 @@ func (reader *HTTPReconciler) alertRecord(ctx context.Context, tenantID, alertID
 			Labels        map[string]json.RawMessage `json:"labels"`
 			Dimensions    map[string]json.RawMessage `json:"dimensions"`
 			ExtraData     struct {
-				EvaluationFamily string `json:"evaluation_family"`
+				EvaluationFamily string          `json:"evaluation_family"`
+				StrategyFacts    json.RawMessage `json:"strategy_facts"`
 			} `json:"extra_data"`
 		} `json:"payload"`
 	}
@@ -233,6 +238,9 @@ func (reader *HTTPReconciler) alertRecord(ctx context.Context, tenantID, alertID
 		sort.Strings(record.DimensionKeys)
 	}
 	record.EvaluationFamily = p.ExtraData.EvaluationFamily
+	if facts := p.ExtraData.StrategyFacts; len(facts) > 0 && string(facts) != "null" {
+		record.StrategyFacts = facts
+	}
 	return record, nil
 }
 

@@ -53,14 +53,17 @@ const CloseReasonUnsupported = "strategy_unsupported"
 
 // CloseReasonStrategyChanged is the close for an alert an edit of its
 // strategy orphaned: the strategy exists and is detected, and its current
-// revision can no longer produce or recover the alert - a grouping
-// dimension it was told apart by is gone, its level was removed, or no-data
-// detection was switched off. Which of those goes in the content
-// (CloseRequest.Detail, one of the StrategyChanged* words).
+// revision can no longer produce or recover the alert - its metrics changed,
+// a grouping dimension it was told apart by is gone, its level was removed,
+// a no-data alert's filter conditions changed, or no-data detection was
+// switched off. Which of those goes in the content (CloseRequest.Detail,
+// one of the StrategyChanged* words).
 const CloseReasonStrategyChanged = "strategy_changed"
 
 // The words a CloseReasonStrategyChanged close names as its detail.
 const (
+	StrategyChangedMetric     = "metric_changed"
+	StrategyChangedCondition  = "condition_changed"
 	StrategyChangedDimensions = "dimensions_changed"
 	StrategyChangedLevel      = "level_removed"
 	StrategyChangedNoData     = "no_data_disabled"

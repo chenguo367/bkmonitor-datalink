@@ -47,6 +47,9 @@ type StrategyPlanFacts struct {
 	NoData             bool
 	NoDataAggDimension []string
 	NoDataSuspended    bool
+	// StrategyFacts is the Plans' strategy facts
+	// (contract.EvaluationPlanV2.StrategyFacts), nil where they have none.
+	StrategyFacts *contract.StrategyFactsV1
 	// Retained says the Plans are the last good ones kept in place of a
 	// definition the round could not compile (StrategyLookup.Retained): what
 	// runs is not the strategy's current definition.
@@ -107,6 +110,10 @@ func (index *strategyIndex) planFacts(tenantID, strategyID string) (StrategyPlan
 
 func frozenPlanFacts(plan *FrozenPlan) StrategyPlanFacts {
 	facts := StrategyPlanFacts{Revision: plan.Plan.StrategyRef.SnapshotRevision, NoDataSuspended: plan.NoDataSuspended != ""}
+	if plan.Plan.StrategyFacts != nil {
+		strategyFacts := *plan.Plan.StrategyFacts
+		facts.StrategyFacts = &strategyFacts
+	}
 	if identity := plan.Plan.OutputIdentity; identity != nil {
 		facts.HasOutputIdentity = true
 		facts.DynamicDimensions = identity.DynamicDimensions

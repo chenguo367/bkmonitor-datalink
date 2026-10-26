@@ -174,7 +174,8 @@ func TestAnAlertRecordCarriesItsOpeningDimensionsAndFamily(t *testing.T) {
 		body := alertJSON()
 		payload := body["payload"].(map[string]any)
 		payload["dimensions"] = map[string]any{"device": "eth0", "bk_target_ip": "192.0.2.1"}
-		payload["extra_data"] = map[string]any{"evaluation_family": "no_data", "window": map[string]any{"size": 5}}
+		payload["extra_data"] = map[string]any{"evaluation_family": "no_data", "window": map[string]any{"size": 5},
+			"strategy_facts": map[string]any{"schema": "v1", "metric_digest": "m", "condition_md5": "c"}}
 		_ = json.NewEncoder(w).Encode(body)
 	})
 	record, err := reader.AlertRecord(consoleCtx(), "system", "alert-1")
@@ -182,13 +183,14 @@ func TestAnAlertRecordCarriesItsOpeningDimensionsAndFamily(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !record.DimensionsRead || len(record.DimensionKeys) != 2 || record.DimensionKeys[0] != "bk_target_ip" ||
-		record.DimensionKeys[1] != "device" || record.EvaluationFamily != "no_data" {
-		t.Fatalf("record %+v, want dimensions bk_target_ip and device and family no_data", record)
+		record.DimensionKeys[1] != "device" || record.EvaluationFamily != "no_data" ||
+		string(record.StrategyFacts) != `{"condition_md5":"c","metric_digest":"m","schema":"v1"}` {
+		t.Fatalf("record %+v, want dimensions bk_target_ip and device, family no_data and the strategy facts", record)
 	}
 	bare := rosterServer(t, func(w http.ResponseWriter, r *http.Request) { _ = json.NewEncoder(w).Encode(alertJSON()) })
 	record, err = bare.AlertRecord(consoleCtx(), "system", "alert-1")
-	if err != nil || record.DimensionsRead || record.EvaluationFamily != "" {
-		t.Fatalf("record %+v err %v, want no dimensions read and no family", record, err)
+	if err != nil || record.DimensionsRead || record.EvaluationFamily != "" || record.StrategyFacts != nil {
+		t.Fatalf("record %+v err %v, want no dimensions read, no family and no facts", record, err)
 	}
 }
 

@@ -634,6 +634,29 @@ func TestAnUnnamedSignalTypeIsOmittedRatherThanGuessed(t *testing.T) {
 	}
 }
 
+// The strategy facts are written as the Plan froze them, under
+// extra_data.strategy_facts; an event without them writes none.
+func TestTheStrategyFactsAreWrittenInExtraData(t *testing.T) {
+	facts := contract.StrategyFactsV1{Schema: "v1", MetricDigest: "3815df5a36678b1d738aa6f9a1522549", ConditionMD5: "92811130e44a4e5eb434d4dd5acbfdaa"}
+	message := convert(t, decision(func(e *contract.TriggerEventV1) { e.StrategyFacts = &facts }))
+	var extra map[string]json.RawMessage
+	if err := json.Unmarshal(message["extra_data"], &extra); err != nil {
+		t.Fatal(err)
+	}
+	want := `{"schema":"v1","metric_digest":"3815df5a36678b1d738aa6f9a1522549","condition_md5":"92811130e44a4e5eb434d4dd5acbfdaa"}`
+	if string(extra["strategy_facts"]) != want {
+		t.Fatalf("extra_data.strategy_facts = %s, want %s", extra["strategy_facts"], want)
+	}
+	bare := convert(t, decision(nil))
+	var bareExtra map[string]json.RawMessage
+	if err := json.Unmarshal(bare["extra_data"], &bareExtra); err != nil {
+		t.Fatal(err)
+	}
+	if _, written := bareExtra["strategy_facts"]; written {
+		t.Fatalf("extra_data = %v, want no strategy facts on an event without them", bareExtra)
+	}
+}
+
 // A decision over several values has no single observed value; none is
 // written rather than one picked.
 func TestSeveralObservedValuesWriteNoValue(t *testing.T) {

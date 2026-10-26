@@ -2729,6 +2729,10 @@ func compilePlan(
 	if ref.SnapshotRevision > 0 {
 		plan.OutputIdentity = &contract.MonitorOutputIdentity{DynamicDimensions: dataset.DynamicDimensions, DimensionFields: append([]string{}, dataset.IdentityFields...)}
 		plan.SubjectFacts = frozenSubjectFacts(source, item)
+		// Nil when the query configs cannot be read the way the platform
+		// compares them: the events carry no facts, and the edit close names
+		// their alerts facts_missing rather than deciding on a guess.
+		plan.StrategyFacts, _ = contract.DeriveStrategyFactsV1(item.QueryConfigs)
 	}
 	scheduleSpec, refusal, err := planScheduleSpec(sourceID, plan, step.Seconds)
 	if err != nil {

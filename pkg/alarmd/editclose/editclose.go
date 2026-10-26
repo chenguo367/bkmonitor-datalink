@@ -22,8 +22,12 @@
 // alert at the current revision is never one.
 //
 // Each candidate is judged from its own record against the current Plans'
-// facts, and closed only on a fact both sides state:
+// facts, and closed only on a fact both sides state, in the platform's
+// order:
 //
+//   - metric_changed: the strategy's metrics are not the ones the alert
+//     was raised under. Read from the strategy facts the opening event
+//     carried (contract.StrategyFactsV1) against the current Plans'.
 //   - dimensions_changed: the alert carries a dimension the current Plans no
 //     longer tell series apart by - a grouping dimension removed or renamed.
 //     The output identity the alert's fingerprint is built from is what is
@@ -40,9 +44,20 @@
 //     detected (a refused Level is not a removed one) and only for the
 //     built-in levels, whose names the link stores unchanged; a level whose
 //     name the link may have mapped is not decided.
+//   - condition_changed: a no-data alert whose strategy's filter conditions
+//     are not the ones it was raised under, by the platform's own condition
+//     digest (contract.AggConditionMD5), from the strategy facts as above. A
+//     threshold alert is not closed on a condition change.
 //   - no_data_disabled: a no-data alert of a strategy that no longer
 //     configures no-data detection. A strategy that configures it and whose
 //     Plans do not attach it is not switched off and is not decided.
+//
+// metric_changed and condition_changed are decided only for an alert whose
+// strategy facts carry a schema this build reads (v1), against Plans that
+// carry facts too. An alert without them - every alert opened before events
+// carried them - or with another schema is not decided by those two rules,
+// for good, and is counted (facts_missing, facts_unknown_schema,
+// plan_facts_missing) beside whatever the other rules decided.
 //
 // Every candidate that is not closed is counted under the word that kept
 // it, so a still-firing alert whose group survived the edit is a reading
@@ -50,6 +65,7 @@
 package editclose
 
 import (
+	"encoding/json"
 	"strconv"
 	"strings"
 
@@ -87,21 +103,43 @@ const (
 	// configures no-data and whose Plans do not attach it. Not closed.
 	OutcomeNoDataSuspended = "no_data_suspended"
 
-	// The three closes, by the change that decided them: the same words the
-	// close names (linkdoutput.StrategyChanged*).
+	// The closes, by the change that decided them: the same words the close
+	// names (linkdoutput.StrategyChanged*).
+	OutcomeMetricChanged     = linkdoutput.StrategyChangedMetric
+	OutcomeConditionChanged  = linkdoutput.StrategyChangedCondition
 	OutcomeDimensionsChanged = linkdoutput.StrategyChangedDimensions
 	OutcomeLevelRemoved      = linkdoutput.StrategyChangedLevel
 	OutcomeNoDataDisabled    = linkdoutput.StrategyChangedNoData
 )
 
-// Decisions is every word Decide returns.
+// The notes Decide returns beside a decision: why metric_changed and
+// condition_changed could not be decided for the alert.
+const (
+	// OutcomeFactsMissing is an alert whose opening event carried no
+	// strategy facts.
+	OutcomeFactsMissing = "facts_missing"
+	// OutcomeFactsUnknownSchema is an alert whose strategy facts are of a
+	// schema this build does not read, or not readable as one it does.
+	OutcomeFactsUnknownSchema = "facts_unknown_schema"
+	// OutcomePlanFactsMissing is a current Plan without strategy facts.
+	OutcomePlanFactsMissing = "plan_facts_missing"
+)
+
+// Decisions is every word Decide returns as its decision.
 var Decisions = []string{OutcomeCurrentRevision, OutcomeRevisionAhead, OutcomeRevisionUnknown, OutcomeFamilyUnknown,
 	OutcomeKept, OutcomeLevelsPartial, OutcomeSeverityUnmapped, OutcomeNoDataSuspended,
-	OutcomeDimensionsChanged, OutcomeLevelRemoved, OutcomeNoDataDisabled}
+	OutcomeMetricChanged, OutcomeConditionChanged, OutcomeDimensionsChanged, OutcomeLevelRemoved, OutcomeNoDataDisabled}
+
+// Notes is every word Decide returns as its note.
+var Notes = []string{OutcomeFactsMissing, OutcomeFactsUnknownSchema, OutcomePlanFactsMissing}
 
 // Closes reports whether a decision is a close.
 func Closes(decision string) bool {
-	return decision == OutcomeDimensionsChanged || decision == OutcomeLevelRemoved || decision == OutcomeNoDataDisabled
+	switch decision {
+	case OutcomeMetricChanged, OutcomeConditionChanged, OutcomeDimensionsChanged, OutcomeLevelRemoved, OutcomeNoDataDisabled:
+		return true
+	}
+	return false
 }
 
 // Plan is what the strategy's current Plans state (controlplane
@@ -115,6 +153,8 @@ type Plan struct {
 	NoData            bool
 	NoDataDimensions  []string
 	NoDataSuspended   bool
+	// Facts is the Plans' strategy facts, nil where they have none.
+	Facts *contract.StrategyFactsV1
 }
 
 // Key is the plan's facts as one comparable word: two Plans with the same
@@ -131,7 +171,10 @@ func (plan Plan) Key() string {
 	}
 	b.WriteString("|" + strconv.FormatBool(plan.LevelsWhole) + "|" + strconv.FormatBool(plan.NoData) + "|")
 	b.WriteString(strings.Join(plan.NoDataDimensions, ","))
-	b.WriteString("|" + strconv.FormatBool(plan.NoDataSuspended))
+	b.WriteString("|" + strconv.FormatBool(plan.NoDataSuspended) + "|")
+	if plan.Facts != nil {
+		b.WriteString(plan.Facts.Schema + ":" + plan.Facts.MetricDigest + ":" + plan.Facts.ConditionMD5)
+	}
 	return b.String()
 }
 
@@ -142,6 +185,9 @@ type Alert struct {
 	DimensionsRead   bool
 	EvaluationFamily string
 	Severity         string
+	// Facts is extra_data.strategy_facts as the opening event wrote it,
+	// unparsed; nil where it wrote none.
+	Facts json.RawMessage
 }
 
 // The evaluation families this process writes (linkdoutput's
@@ -166,36 +212,61 @@ var addedDimensions = map[string]struct{}{
 // writes them (linkdoutput.SeverityFor): its default severities, by name.
 var builtInLevels = map[string]uint32{"critical": 1, "warning": 2, "info": 3}
 
-// Decide is one alert's verdict against the current Plans.
-func Decide(plan Plan, alert Alert) string {
+// Decide is one alert's verdict against the current Plans, and a note when
+// the strategy facts could not be compared (one of Notes, or empty).
+func Decide(plan Plan, alert Alert) (decision, note string) {
 	switch {
 	case alert.Revision <= 0:
-		return OutcomeRevisionUnknown
+		return OutcomeRevisionUnknown, ""
 	case alert.Revision == plan.Revision:
-		return OutcomeCurrentRevision
+		return OutcomeCurrentRevision, ""
 	case alert.Revision > plan.Revision:
-		return OutcomeRevisionAhead
+		return OutcomeRevisionAhead, ""
 	}
 	noData, known := alertFamily(alert)
 	if !known {
-		return OutcomeFamilyUnknown
+		return OutcomeFamilyUnknown, ""
+	}
+	facts, note := comparableFacts(plan, alert)
+	if facts != nil && facts.MetricDigest != plan.Facts.MetricDigest {
+		return OutcomeMetricChanged, note
 	}
 	if noData {
+		if plan.NoData && carriesDroppedDimension(alert.DimensionKeys, plan.NoDataDimensions) {
+			return OutcomeDimensionsChanged, note
+		}
+		if facts != nil && facts.ConditionMD5 != plan.Facts.ConditionMD5 {
+			return OutcomeConditionChanged, note
+		}
 		if !plan.NoData {
 			if plan.NoDataSuspended {
-				return OutcomeNoDataSuspended
+				return OutcomeNoDataSuspended, note
 			}
-			return OutcomeNoDataDisabled
+			return OutcomeNoDataDisabled, note
 		}
-		if carriesDroppedDimension(alert.DimensionKeys, plan.NoDataDimensions) {
-			return OutcomeDimensionsChanged
-		}
-		return OutcomeKept
+		return OutcomeKept, note
 	}
 	if !plan.DynamicDimensions && carriesDroppedDimension(alert.DimensionKeys, plan.DimensionFields) {
-		return OutcomeDimensionsChanged
+		return OutcomeDimensionsChanged, note
 	}
-	return levelVerdict(plan, alert.Severity)
+	return levelVerdict(plan, alert.Severity), note
+}
+
+// comparableFacts is the alert's strategy facts when they and the Plans'
+// can be compared, or the note that says why not.
+func comparableFacts(plan Plan, alert Alert) (*contract.StrategyFactsV1, string) {
+	if plan.Facts == nil || plan.Facts.Schema != contract.StrategyFactsSchemaV1 {
+		return nil, OutcomePlanFactsMissing
+	}
+	if len(alert.Facts) == 0 {
+		return nil, OutcomeFactsMissing
+	}
+	var facts contract.StrategyFactsV1
+	if json.Unmarshal(alert.Facts, &facts) != nil || facts.Schema != contract.StrategyFactsSchemaV1 ||
+		facts.MetricDigest == "" || facts.ConditionMD5 == "" {
+		return nil, OutcomeFactsUnknownSchema
+	}
+	return &facts, ""
 }
 
 // alertFamily is whether the alert is a no-data alert, and whether that is

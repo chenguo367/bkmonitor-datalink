@@ -59,8 +59,8 @@ type editAlertKey struct{ tenantID, alertID string }
 // editMemory is a decision that closed nothing, and the facts it was taken
 // against.
 type editMemory struct {
-	planKey  string
-	decision string
+	planKey        string
+	decision, note string
 }
 
 // editStrategyClose closes the open alerts an edit of their strategy
@@ -97,7 +97,7 @@ func (loop *editStrategyClose) Stats() map[string]uint64 {
 }
 
 func (loop *editStrategyClose) count(outcome string, n int) {
-	if n <= 0 {
+	if n <= 0 || outcome == "" {
 		return
 	}
 	loop.countsMu.Lock()
@@ -187,7 +187,8 @@ func strategyRefusal(facts controlplane.StrategyPlanFacts, found bool) string {
 func planOf(facts controlplane.StrategyPlanFacts) editclose.Plan {
 	return editclose.Plan{Revision: facts.Revision, DimensionFields: facts.DimensionFields, DynamicDimensions: facts.DynamicDimensions,
 		Levels: facts.Levels, LevelsWhole: facts.LevelsWhole,
-		NoData: facts.NoData, NoDataDimensions: facts.NoDataAggDimension, NoDataSuspended: facts.NoDataSuspended}
+		NoData: facts.NoData, NoDataDimensions: facts.NoDataAggDimension, NoDataSuspended: facts.NoDataSuspended,
+		Facts: facts.StrategyFacts}
 }
 
 // closeStrategy decides and closes one strategy's listed alerts, spending
@@ -226,6 +227,7 @@ func (loop *editStrategyClose) closeStrategy(ctx context.Context, key absentaler
 		memoryKey := editAlertKey{tenantID: key.TenantID, alertID: alert.AlertID}
 		if memory, ok := loop.remembered[memoryKey]; ok && memory.planKey == planKey {
 			loop.count(memory.decision, 1)
+			loop.count(memory.note, 1)
 			loop.count(editclose.OutcomeRemembered, 1)
 			continue
 		}
@@ -242,11 +244,13 @@ func (loop *editStrategyClose) closeStrategy(ctx context.Context, key absentaler
 			unreadable++
 			continue
 		}
-		decision := editclose.Decide(plan, editclose.Alert{Revision: record.Revision, DimensionKeys: record.DimensionKeys,
-			DimensionsRead: record.DimensionsRead, EvaluationFamily: record.EvaluationFamily, Severity: record.Severity})
+		decision, note := editclose.Decide(plan, editclose.Alert{Revision: record.Revision, DimensionKeys: record.DimensionKeys,
+			DimensionsRead: record.DimensionsRead, EvaluationFamily: record.EvaluationFamily, Severity: record.Severity,
+			Facts: record.StrategyFacts})
 		loop.count(decision, 1)
+		loop.count(note, 1)
 		if !editclose.Closes(decision) {
-			loop.remember(memoryKey, editMemory{planKey: planKey, decision: decision})
+			loop.remember(memoryKey, editMemory{planKey: planKey, decision: decision, note: note})
 			continue
 		}
 		if record.BusinessID == 0 {

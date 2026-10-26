@@ -41,7 +41,7 @@ import (
 // Detector conversion emits closed only for a level written to end its alert
 // closed (status_setter close: LevelAction, ActionReasonRecoveryClose);
 // ConvertClose handles the control-plane closes - effective time, absence,
-// scope, identity, an unsupported strategy - separately. A repeated triggered
+// scope, identity, an unsupported strategy, a strategy edit - separately. A repeated triggered
 // is how a continuing anomaly is stated.
 const (
 	ActionTriggered = "triggered"
@@ -167,6 +167,13 @@ type wireExtraData struct {
 	// carries it (contract.DetectionSnapshotV1): only on the events of a
 	// strategy with named outputs, absent from every other message.
 	DetectionSnapshot json.RawMessage `json:"detection_snapshot,omitempty"`
+	// StrategyFacts is the configuration the event was decided under
+	// (contract.StrategyFactsV1: schema, metric_digest, condition_md5), on
+	// every event of a Plan that has it. The link keeps an alert's
+	// extra_data from its opening event, so on the alert these are the
+	// facts of the revision that raised it, which the edit close compares
+	// with the current revision's.
+	StrategyFacts *contract.StrategyFactsV1 `json:"strategy_facts,omitempty"`
 }
 
 type wireEvent struct {
@@ -293,6 +300,7 @@ func (converter *Converter) Convert(event *contract.TriggerEventV1) (Event, erro
 			SignalType:          event.SignalType,
 			EvaluationFamily:    evaluationFamilyMetricAlgorithm,
 			DetectionSnapshot:   event.DetectionSnapshot,
+			StrategyFacts:       event.StrategyFacts,
 		},
 	}
 	if begin := primary.DecisionWindow.Trigger.AnomalyBeginTime; begin > 0 {
