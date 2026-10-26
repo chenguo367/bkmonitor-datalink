@@ -139,6 +139,7 @@ func TestAGlobalPromQLsOutputGroupingIsItsOutermostByList(t *testing.T) {
 		"max by (bcs_cluster_id) (sum by (bcs_cluster_id, pod) (k8s:m))":                               {"bcs_cluster_id"},
 		"sum by (a, b) (k8s:m) / on (a) group_left sum by (a, c) (k8s:n)":                              {"a"},
 		"(histogram_quantile(0.95, sum by (le, app_name) (increase(bkmonitor:apm:d[60s])))) / 1000000": {"app_name", "le"},
+		"sum by (a) (sum by (b) (k8s:m))":                                                              {"a"},
 		"sum without (pod) (k8s:m)":                                                                    nil,
 		"rate(k8s:m[1m])":                                                                              nil,
 		`count_values("v", k8s:m{a="sum by (x)"})`:                                                     nil,
