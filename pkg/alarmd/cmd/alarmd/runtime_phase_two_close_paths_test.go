@@ -588,14 +588,13 @@ func eventFacts(plan controlplane.StrategyPlanFacts, noData bool) *contract.Stra
 // part on the same alerts and none decides from what it was not given.
 func TestTheClosePathsOfOneStrategyActTogether(t *testing.T) {
 	fixture := startClosePathsFixture(t)
-	// Each edit is activated in a second of its own. The activation boundary
-	// is the Leader's clock in seconds, and two activations in one second
-	// are inventory row L43b, same-boundary cutover: the cutover leaves the
-	// Query Group the edit moves the strategy out of current and draining
-	// at once, its timeline open with the previous revision, and its
-	// inactive close can close by that revision. That is a case of its own
-	// (TestASameBoundaryCutoverLeavesTheOldQueryGroupDrainingNotCurrent),
-	// not one this case means to run into.
+	// Each edit is published in the same second as the activation before
+	// it: inventory row L43b, same-boundary cutover. The cutover moves the
+	// activation boundary one second past the open Segments, so the Query
+	// Group the edit moves the strategy out of is retired there and the new
+	// one opens there (TestASameBoundaryCutoverLeavesTheOldQueryGroupDrainingNotCurrent).
+	// The case's clock then moves one second, to that boundary, as a real
+	// one would: until it does, the edit has not taken effect.
 	nextSecond := func() { fixture.life.clock.Store(fixture.life.clock.Load() + time.Second.Milliseconds()) }
 	key := closePathsKey()
 
@@ -625,8 +624,8 @@ func TestTheClosePathsOfOneStrategyActTogether(t *testing.T) {
 
 	// Step 1: the edit removes the device dimension, inside the effective
 	// window.
-	nextSecond()
 	edited := fixture.publish(2, []string{"bk_target_ip", "bk_target_cloud_id"}, false, nil)
+	nextSecond()
 	if !sameStrings(edited.DimensionFields, sortedStrings("bk_target_cloud_id", "bk_target_ip")) || edited.StrategyFacts == nil ||
 		edited.StrategyFacts.MetricDigest != before.StrategyFacts.MetricDigest || edited.StrategyFacts.DimensionDigest == before.StrategyFacts.DimensionDigest {
 		t.Fatalf("revision 2 publishes %+v, want the host grouping, the same metric and another grouping digest", edited)
@@ -788,8 +787,8 @@ func TestTheClosePathsOfOneStrategyActTogether(t *testing.T) {
 	// condition_rule_held and kept, T1 (a threshold alert, not the rule's to
 	// judge) is kept, and the edit closes nothing.
 	fixture.console.fail(false)
-	nextSecond()
 	noData := fixture.publish(3, []string{"bk_target_ip", "bk_target_cloud_id"}, true, nil)
+	nextSecond()
 	if !noData.NoData || noData.StrategyFacts == nil || noData.StrategyFacts.NoDataDimensionDigest == "" {
 		t.Fatalf("revision 3 publishes %+v, want no-data detected with its grouping digest", noData)
 	}
@@ -802,9 +801,9 @@ func TestTheClosePathsOfOneStrategyActTogether(t *testing.T) {
 		closePathsT1: {revision: 3, family: "metric_algorithm", severity: "critical", dimensions: thresholdDimensions(false), facts: eventFacts(noData, false)},
 	})
 	fixture.setMembers(closePathsN1, closePathsT1)
-	nextSecond()
 	conditioned := fixture.publish(4, []string{"bk_target_ip", "bk_target_cloud_id"}, true,
 		[]any{map[string]any{"key": "bk_target_ip", "method": "eq", "value": []any{lifecycleHostA}}})
+	nextSecond()
 	if c, n := conditioned.StrategyFacts, noData.StrategyFacts; c == nil || c.MetricDigest != n.MetricDigest || c.DimensionDigest != n.DimensionDigest ||
 		c.NoDataDimensionDigest != n.NoDataDimensionDigest || c.ConditionMD5 == n.ConditionMD5 || c.ConditionBasis != n.ConditionBasis {
 		t.Fatalf("revision 4 publishes facts %+v after %+v, want only the condition digest changed", c, n)
