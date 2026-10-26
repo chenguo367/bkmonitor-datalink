@@ -70,13 +70,15 @@ const (
 // A target plan's absence is judged only against a complete resolution.
 //
 // decision-017 section 3.4, third item, and the ruling quoted in section 4:
-// when a selector of the plan cannot be resolved, the Plan's no-data pauses
-// for the round - no NORMAL and no ANOMALY is synthesised, the memory is not
-// written and first_absent does not move - under
+// when a selector of the plan cannot be resolved, the Plan's absence pauses
+// for the round - no ANOMALY, no exit from the target, and a silent member's
+// memory and first_absent do not move - under
 // SKIPPED_TARGET_SELECTOR_UNAVAILABLE; when every selector answered and
 // members were dropped in validation, the same pause under its own name,
 // SKIPPED_TARGET_MEMBERS_DROPPED. The members that did resolve still admit
-// their records, so the threshold detection goes on. With a complete
+// their records, so the threshold detection goes on, and a member that
+// reported is judged present (A1); host 1 here never had an absence open, so
+// its recovery is held by the open-alert gate and no no-data event is sent. With a complete
 // resolution the same edit is judged, which is the other side: the host the
 // plan no longer names is closed exactly once (A8) and the one it now names
 // is expected.
