@@ -1392,7 +1392,10 @@ type StateGenerationSkewFacts struct {
 
 // StateCarryFacts count history carried across a moved state generation.
 // Scope is "plan" for the Control Leader's decision per activation and
-// "series" for a Worker's per series; Count is how many met Result.
+// "series" for a Worker's per series; "no_data_plan" is the Control Leader's
+// decision about the Plan's no-data state and "no_data_load" what a Worker
+// found when it read that state from the generation it moved from. Count is
+// how many met Result.
 type StateCarryFacts struct {
 	Scope  string
 	Result string
@@ -1402,10 +1405,14 @@ type StateCarryFacts struct {
 // StateCarryScopes and StateCarryResults are the closed vocabularies of
 // StateCarryFacts; a value outside them is reported as "other".
 var (
-	StateCarryScopes  = []string{"plan", "series"}
+	StateCarryScopes  = []string{"plan", "series", "no_data_plan", "no_data_load"}
 	StateCarryResults = map[string][]string{
 		"plan":   {"carried", "partial", "none_detect_changed", "none_previous_unreadable", "none_discontinuous"},
 		"series": {"carried", "nothing_kept", "skipped_active_guard", "old_missing"},
+		"no_data_plan": {"carried", "carried_ends_only", "not_carried_semantics_changed",
+			"not_carried_previous_unreadable"},
+		"no_data_load": {"memory_carried", "memory_previous_empty", "memory_previous_unreadable",
+			"ends_carried", "ends_previous_empty", "ends_previous_unreadable", "ends_previous_not_cleared"},
 	}
 )
 

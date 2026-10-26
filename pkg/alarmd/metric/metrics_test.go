@@ -1028,7 +1028,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("state_generation_skew_total"): len(observability.StateGenerationSkewKinds) + 1,
 		// Every (scope, result) pair of the closed vocabulary, plus the one
 		// the normalizer folds anything else into.
-		fqName("state_generation_carry_total"):        len(observability.StateCarryResults["plan"]) + len(observability.StateCarryResults["series"]) + 1,
+		fqName("state_generation_carry_total"): len(observability.StateCarryResults["plan"]) + len(observability.StateCarryResults["series"]) +
+			len(observability.StateCarryResults["no_data_plan"]) + len(observability.StateCarryResults["no_data_load"]) + 1,
 		fqName("undrained_draining_query_groups"):     1,
 		fqName("draining_cursor_pruned_query_groups"): 1,
 		fqName("rebalance_planned_moves"):             1,
