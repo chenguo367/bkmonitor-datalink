@@ -113,7 +113,6 @@ const (
 	closeOutcomeSourceUnknown        = string(observability.EffectiveCloseSourceUnknown)
 	closeOutcomeEvidenceUnavailable  = string(observability.EffectiveCloseEvidenceUnavailable)
 	closeOutcomeIndexSetAcked        = string(observability.EffectiveCloseIndexSetAcked)
-	closeOutcomeIndexSetDraining     = string(observability.EffectiveCloseIndexSetGroupDraining)
 )
 
 // maintenanceGroup is what the loop knows about one owned Query Group from
@@ -786,15 +785,6 @@ func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.Q
 					closeOutcomeEvidenceUnavailable, errInactiveAlertsUnlisted, 0)
 				continue
 			}
-			if m.currentAndDraining(qg) {
-				// The set stands in for alerts nobody listed, by this Plan's
-				// judgement alone; a Query Group current and draining at once
-				// may hold a revision the strategy has left. The listing path
-				// is the link's own answer and is not held here.
-				m.observeTrace(ctx, observability.TraceFields{QueryGroupKey: string(qg), StrategyID: plan.Identity.StrategyID},
-					closeOutcomeIndexSetDraining, errIndexSetGroupDraining, 0)
-				continue
-			}
 			alerts, fromSet = membersAsAlerts(members, m.sourceID), true
 			if missing, ok := m.cache.UnlistedMissing(key); ok && missing > 0 {
 				// Alerts a reconcile named active and missing from the set
@@ -987,9 +977,6 @@ var (
 	// The Plan is inactive and the open-alert copy holds no current
 	// calibration of its strategy's set to list the alerts to close.
 	errInactiveAlertsUnlisted = errors.New("inactive close: the strategy's open alerts cannot be listed, its set has no current calibration")
-	// The Query Group is in the current active set and in the draining
-	// projection at once (productionPhaseTwoControl.CurrentAndDraining).
-	errIndexSetGroupDraining = errors.New("inactive close: the index set does not stand in for a Query Group that is current and draining at once")
 	// The set stands in, and an earlier reconcile named alerts active and
 	// missing from it, which the set's members do not carry.
 	errIndexSetMissingUnlisted = errors.New("inactive close: alerts a reconcile named missing from the index set are not closed from it until a reconcile lists them")
@@ -1266,14 +1253,4 @@ func cliMaintenanceOperation(source *maintenanceSource) obchannel.Operation {
 				Limitations: []string{"Use meta.answered_by to identify this process: each replica maintains the Query Groups it owns, and another replica's outcomes are read by targeting it.",
 					"Counts and outcomes are this process's since it started: first_at is when this process first saw the Query Group under the word, not when the condition began. first_error is the text at first_at and error the latest, which has been the text since error_since: read a time only with its own text. At most 32 Query Groups are kept per word, the one seen longest ago giving way; each error's text is cut to 256 bytes."}}
 		}}
-}
-
-// currentAndDraining reports whether the bundle's Control last found the
-// Query Group in the current active set and in the draining projection at
-// once; false without a Control that says.
-func (m *effectiveMaintenance) currentAndDraining(qg execution.QueryGroupIdentity) bool {
-	control, ok := m.bundle.dependencies.Control.(interface {
-		CurrentAndDraining(execution.QueryGroupIdentity) bool
-	})
-	return ok && control.CurrentAndDraining(qg)
 }

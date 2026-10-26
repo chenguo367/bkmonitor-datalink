@@ -58,9 +58,7 @@ func newEffectiveCloseCollector() *effectiveCloseCollector {
 				"missing from the set, which the set's members do not carry and are not closed from it, once per Plan per "+
 				"step - a calibrated set with no alerts is not counted; "+
 				"index_set_close_acked counts, among close_acked, closes sent by fingerprint from the index set's "+
-				"members because the set had no current calibration to list them; index_set_group_draining is such a "+
-				"Plan whose set was held back instead, its Query Group in the current active set and in the draining "+
-				"projection at once, once per Plan per step. Every cell exists from the "+
+				"members because the set had no current calibration to list them. Every cell exists from the "+
 				"start so a zero is a reading and not an absence.", []string{"outcome"}, nil),
 	}
 }
