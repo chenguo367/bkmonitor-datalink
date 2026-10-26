@@ -78,6 +78,13 @@ const closeDetailLimit = 128
 // SeverityAllLevels.
 // OccurredAt is a current maintenance decision, never a historical Slot.
 //
+// AlertInstanceID feeds only the event id; the wire's alert_id is the
+// Fingerprint, which is what the link resolves the close by (with the
+// tenant and this deployment's event source). A close addressed from the
+// link's index set rather than from a listed alert has no instance id to
+// carry and carries the Fingerprint in its place: deterministic, so the same
+// close at the same time is the same event.
+//
 // Reason says which close this is. Empty is CloseReasonInactive, which is
 // what every caller sent before there was a second reason, and what keeps
 // the event id of an inactive close identical across this change.
@@ -115,13 +122,19 @@ var closeText = map[string]struct{ salt, title, content, detail string }{
 		"Close requested because the strategy was edited and its current configuration can no longer produce or recover this alert; this does not indicate metric recovery.", "Change"},
 }
 
+// NativeFingerprint is whether value is a native source alert fingerprint,
+// the only alert a close can address: 16 bytes in lowercase hex.
+func NativeFingerprint(value string) bool {
+	fingerprint, err := hex.DecodeString(value)
+	return err == nil && len(fingerprint) == 16 && hex.EncodeToString(fingerprint) == value
+}
+
 func ConvertClose(request CloseRequest) (Event, error) {
 	// Match StrategySnapshotRef: negative IDs identify non-BKCC spaces; zero is unset.
 	if request.TenantID == "" || request.AlertInstanceID == "" || request.StrategyID <= 0 || request.StrategyRevision <= 0 || request.BusinessID == 0 || request.OccurredAt.Unix() <= 0 {
 		return Event{}, errors.New("close requires tenant, active instance, strategy revision, business and current time")
 	}
-	fingerprint, err := hex.DecodeString(request.Fingerprint)
-	if err != nil || len(fingerprint) != 16 || hex.EncodeToString(fingerprint) != request.Fingerprint {
+	if !NativeFingerprint(request.Fingerprint) {
 		return Event{}, errors.New("close requires the native source alert fingerprint")
 	}
 	reason := request.Reason

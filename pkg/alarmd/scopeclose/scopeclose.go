@@ -120,13 +120,18 @@ const (
 	// fingerprint of its own address before its alert identity read CMDB's.
 	// Every other outcome counts those observations with the target ones.
 	OutcomeSupersededCloseSent = "superseded_identity_close_sent"
+	// OutcomeIndexSetCloseSent counts, among close_sent, the closes
+	// addressed from the strategy's index set: the link's reconcile gave no
+	// rows to list the alert by, and the set, read fresh, carries its
+	// fingerprint, which the close carries as the alert's id.
+	OutcomeIndexSetCloseSent = "index_set_close_sent"
 )
 
 // Outcomes lists every outcome, for the metric that pre-creates them.
 var Outcomes = []string{OutcomeCloseSent, OutcomeUnconfirmed, OutcomeCacheUnavailable, OutcomeNotMember,
 	OutcomeSetUnavailable, OutcomeProducerForeign, OutcomeSendFailed, OutcomeMemoryFull, OutcomeFingerprintUnsupported,
 	OutcomeStaleDeferred, OutcomeIndefinite, OutcomeIdentityInvalid, OutcomeObservationExpired, OutcomeBusinessUnknown,
-	OutcomeSupersededCloseSent}
+	OutcomeSupersededCloseSent, OutcomeIndexSetCloseSent}
 
 // The bounds of what the facts carry.
 const (
@@ -176,6 +181,11 @@ type OpenSet interface {
 	Holds(key openalerts.StrategyKey, fingerprint string) (held, judged bool)
 	ActiveAlerts(key openalerts.StrategyKey) []openalerts.Alert
 	OwnEventSourceID() string
+	// UnlistedMemberCount and UnlistedHolds answer from the strategy's index
+	// set where the link's reconcile gave no usable rows for it
+	// (openalerts.UnlistedMembers); ok is false anywhere else.
+	UnlistedMemberCount(key openalerts.StrategyKey) (count int, ok bool)
+	UnlistedHolds(key openalerts.StrategyKey, fingerprint string) (held, ok bool)
 }
 
 // AlertBusiness answers which business one alert was filed under, from the
@@ -325,6 +335,11 @@ func (closer *Closer) Screen(key openalerts.StrategyKey) string {
 	count, judged := set.MemberCount(key)
 	switch {
 	case !judged:
+		// Without a calibration, a fresh index set with members still has
+		// alerts to judge against; an empty one is not judged empty.
+		if members, ok := set.UnlistedMemberCount(key); ok && members > 0 {
+			return ""
+		}
 		return OutcomeSetUnavailable
 	case count == 0:
 		return OutcomeNotMember
@@ -390,6 +405,13 @@ func (closer *Closer) Observe(drop Drop) {
 		return
 	}
 	held, judged := set.Holds(key, drop.Fingerprint)
+	if !judged {
+		// Only a member is taken from the index set: a fingerprint it does
+		// not carry stays unjudged, never "not a member".
+		if member, ok := set.UnlistedHolds(key, drop.Fingerprint); ok && member {
+			held, judged = true, true
+		}
+	}
 	ek := entryKey{key: key, fingerprint: drop.Fingerprint}
 	now := closer.options.Now()
 	closer.mu.Lock()
@@ -477,6 +499,7 @@ func (closer *Closer) Step(ctx context.Context) {
 	alerts := map[openalerts.StrategyKey]map[string]openalerts.Alert{}
 	batch := make([]linkdoutput.CloseRequest, 0, closer.options.Batch)
 	decided := make([]entryKey, 0, closer.options.Batch)
+	fromSet := map[entryKey]bool{}
 	for n := 0; n < len(confirmed) && len(batch) < closer.options.Batch; n++ {
 		ek := confirmed[(start+n)%len(confirmed)]
 		after = ek
@@ -495,14 +518,24 @@ func (closer *Closer) Step(ctx context.Context) {
 		alert, listed := byFingerprint[ek.fingerprint]
 		if !listed {
 			held, judged := set.Holds(ek.key, ek.fingerprint)
-			if judged && !held {
+			member, unlisted := set.UnlistedHolds(ek.key, ek.fingerprint)
+			switch {
+			case judged && !held:
 				closer.forget(ek, OutcomeNotMember)
-			} else {
+				continue
+			case unlisted && member:
+				// The reconcile gave no rows to list the alert by, and the
+				// index set carries it: the close is addressed by its
+				// fingerprint, on this deployment's source, which is what
+				// the link resolves a close by.
+				alert = openalerts.Alert{AlertID: ek.fingerprint, EventSourceID: own, Fingerprint: ek.fingerprint}
+				fromSet[ek] = true
+			default:
 				// Held, and the calibration has not listed the alert yet:
 				// the close needs the alert's id, which only it carries.
 				closer.count(ek.key, OutcomeSetUnavailable, 1)
+				continue
 			}
-			continue
 		}
 		if alert.EventSourceID != own {
 			closer.forget(ek, OutcomeProducerForeign)
@@ -515,6 +548,12 @@ func (closer *Closer) Step(ctx context.Context) {
 			continue
 		case requestIdentityInvalid:
 			closer.forget(ek, OutcomeIdentityInvalid)
+			continue
+		}
+		if global && fromSet[ek] {
+			// Its business is on the alert's record, and an alert addressed
+			// from the index set has no id to read the record by.
+			closer.count(ek.key, OutcomeBusinessUnknown, 1)
 			continue
 		}
 		if global {
@@ -550,6 +589,11 @@ func (closer *Closer) Step(ctx context.Context) {
 		return
 	}
 	closer.decide(decided, OutcomeCloseSent, now)
+	for _, ek := range decided {
+		if fromSet[ek] {
+			closer.count(ek.key, OutcomeIndexSetCloseSent, 1)
+		}
+	}
 }
 
 // fresh is whether the entry's last observation is recent enough to act on.
@@ -820,6 +864,14 @@ func (set cacheSet) Holds(key openalerts.StrategyKey, fingerprint string) (bool,
 
 func (set cacheSet) ActiveAlerts(key openalerts.StrategyKey) []openalerts.Alert {
 	return set.cache.ActiveAlerts(key)
+}
+
+func (set cacheSet) UnlistedMemberCount(key openalerts.StrategyKey) (int, bool) {
+	return set.cache.UnlistedMemberCount(key)
+}
+
+func (set cacheSet) UnlistedHolds(key openalerts.StrategyKey, fingerprint string) (bool, bool) {
+	return set.cache.UnlistedHolds(key, fingerprint)
 }
 
 func (set cacheSet) OwnEventSourceID() string { return set.cache.OwnEventSourceID() }

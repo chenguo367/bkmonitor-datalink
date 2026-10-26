@@ -112,6 +112,7 @@ const (
 	closeOutcomeSourceLastKnown      = string(observability.EffectiveCloseSourceLastKnown)
 	closeOutcomeSourceUnknown        = string(observability.EffectiveCloseSourceUnknown)
 	closeOutcomeEvidenceUnavailable  = string(observability.EffectiveCloseEvidenceUnavailable)
+	closeOutcomeIndexSetAcked        = string(observability.EffectiveCloseIndexSetAcked)
 )
 
 // maintenanceGroup is what the loop knows about one owned Query Group from
@@ -756,23 +757,31 @@ func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.Q
 		}
 		key := openalerts.StrategyKey{TenantID: plan.Identity.TenantID, StrategyID: plan.Identity.StrategyID}
 		alerts, listed := m.cache.ListActiveAlerts(key)
+		fromSet := false
 		if !listed {
-			// The set has no current calibration: its alerts to close cannot
-			// be listed, which is not "none open". Counted once per Plan each
-			// step that finds it inactive, until a calibration lists them.
+			// The set has no current calibration: its alerts to close are
+			// not listed, which is not "none open". Its members, read fresh,
+			// stand in for them (openalerts.UnlistedMembers); without them
+			// the Plan is counted once each step that finds it inactive,
+			// until a calibration lists its alerts.
 			m.requestCalibration(key, at)
-			m.observeTrace(ctx, observability.TraceFields{QueryGroupKey: string(qg), StrategyID: plan.Identity.StrategyID},
-				closeOutcomeEvidenceUnavailable, errInactiveAlertsUnlisted, 0)
-			continue
-		}
-		known := make(map[string]bool, len(alerts))
-		for _, alert := range alerts {
-			known[alert.Fingerprint] = true
-		}
-		for _, member := range m.cache.Members(key) {
-			if !known[member] {
-				m.requestCalibration(key, at)
-				break
+			members, fresh := m.cache.UnlistedMembers(key)
+			if !fresh {
+				m.observeTrace(ctx, observability.TraceFields{QueryGroupKey: string(qg), StrategyID: plan.Identity.StrategyID},
+					closeOutcomeEvidenceUnavailable, errInactiveAlertsUnlisted, 0)
+				continue
+			}
+			alerts, fromSet = membersAsAlerts(members, m.sourceID), true
+		} else {
+			known := make(map[string]bool, len(alerts))
+			for _, alert := range alerts {
+				known[alert.Fingerprint] = true
+			}
+			for _, member := range m.cache.Members(key) {
+				if !known[member] {
+					m.requestCalibration(key, at)
+					break
+				}
 			}
 		}
 		if len(alerts) == 0 {
@@ -798,6 +807,12 @@ func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.Q
 		// they are about, and a close carries its alert's, read from the
 		// alert's record; every other Plan's carry the Plan's business.
 		global := plan.Compiled.GlobalBusiness()
+		if global && fromSet {
+			// A member has no record to read its business from.
+			m.observeTrace(ctx, observability.TraceFields{QueryGroupKey: string(qg), StrategyID: plan.Identity.StrategyID},
+				closeOutcomeBusinessUnknown, errSetMemberBusinessUnknown, len(alerts))
+			continue
+		}
 		batch := make([]linkdoutput.CloseRequest, 0, m.capacity.CloseBatch)
 		unknown := 0
 		for _, alert := range alerts {
@@ -833,7 +848,7 @@ func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.Q
 		if len(batch) == 0 {
 			continue
 		}
-		sent, err := m.sendClose(ctx, qg, runner, plan, key, batch)
+		sent, err := m.sendClose(ctx, qg, runner, plan, key, batch, fromSet)
 		if planRecheckRefused(err) {
 			continue
 		}
@@ -851,7 +866,7 @@ func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.Q
 // Each way it can not send is named: the flight busy, the owner check
 // refusing, the Plan's boundary having moved to active or its effective
 // time unreadable at the send, the producer failing.
-func (m *effectiveMaintenance) sendClose(ctx context.Context, qg execution.QueryGroupIdentity, runner maintenanceRunner, plan controlplane.MaintenancePlan, key openalerts.StrategyKey, batch []linkdoutput.CloseRequest) (int, error) {
+func (m *effectiveMaintenance) sendClose(ctx context.Context, qg execution.QueryGroupIdentity, runner maintenanceRunner, plan controlplane.MaintenancePlan, key openalerts.StrategyKey, batch []linkdoutput.CloseRequest, fromSet bool) (int, error) {
 	sent := 0
 	// Counted in flight on the Query Group's lifecycle, as a Slot is: a
 	// handover waits for the send before releasing the lease it is under.
@@ -899,6 +914,10 @@ func (m *effectiveMaintenance) sendClose(ctx context.Context, qg execution.Query
 		m.requestCalibration(key, now)
 		sent = len(batch)
 		m.observe(ctx, qg, closeOutcomeAcked, nil, sent)
+		if fromSet {
+			m.observeTrace(round, observability.TraceFields{QueryGroupKey: string(qg), StrategyID: plan.Identity.StrategyID},
+				closeOutcomeIndexSetAcked, nil, sent)
+		}
 		return nil
 	})
 	switch {
@@ -937,7 +956,28 @@ var (
 	// The Plan is inactive and the open-alert copy holds no current
 	// calibration of its strategy's set to list the alerts to close.
 	errInactiveAlertsUnlisted = errors.New("inactive close: the strategy's open alerts cannot be listed, its set has no current calibration")
+	// A global business Plan's close carries each alert's business, read
+	// from the alert's record; a member of the set has none to read.
+	errSetMemberBusinessUnknown = errors.New("inactive close: the alerts are addressed from the index set, which names no business for a global business Plan")
 )
+
+// membersAsAlerts addresses each member of a strategy's index set as an
+// alert of this deployment's source, its fingerprint standing in for the
+// instance id (linkdoutput.CloseRequest). The link resolves a close to the
+// active alert by tenant, this deployment's event source and fingerprint,
+// so a member that is another producer's alert, or no alert at all, is
+// closed by nothing there. A member that is not a native fingerprint is not
+// one a close can address and is left out, as an alert of another source
+// is.
+func membersAsAlerts(members []string, source string) []openalerts.Alert {
+	alerts := make([]openalerts.Alert, 0, len(members))
+	for _, member := range members {
+		if linkdoutput.NativeFingerprint(member) {
+			alerts = append(alerts, openalerts.Alert{AlertID: member, EventSourceID: source, Fingerprint: member})
+		}
+	}
+	return alerts
+}
 
 // planRecheckRefused reports a send the recheck of its own Plan refused:
 // counted, and the step goes on to the Query Group's next Plan, which has

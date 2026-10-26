@@ -3863,10 +3863,16 @@ const (
 	// whose open alerts could not be listed: its set in the open-alert copy
 	// has no current calibration - never calibrated, past its age, the
 	// calibration failing, or a truncated one that listed nothing. Not
-	// "nothing to close": a calibrated set with no alerts is not counted.
-	// The absent-strategy close's word for the same condition. One per Plan,
-	// per step that finds it inactive.
+	// "nothing to close": a calibrated set with no alerts is not counted,
+	// and neither is a set whose members, read fresh, stand in for its
+	// alerts (index_set_close_acked). The absent-strategy close's word for
+	// the same condition. One per Plan, per step that finds it inactive.
 	EffectiveCloseEvidenceUnavailable ReasonCode = "evidence_unavailable"
+	// EffectiveCloseIndexSetAcked counts, among close_acked, the alerts
+	// closed from the strategy's index set: its alerts not listed (no
+	// current calibration), its members read fresh and standing in for them,
+	// each close addressed by fingerprint. Counts alerts.
+	EffectiveCloseIndexSetAcked ReasonCode = "index_set_close_acked"
 )
 
 // EffectiveCloseOutcomes is every outcome, for the metric to pre-create each
@@ -3877,7 +3883,7 @@ var EffectiveCloseOutcomes = []ReasonCode{
 	EffectiveCloseEffectiveTimeUnknown, EffectiveCloseLegacyUnavailable, EffectiveCloseUnavailable, EffectiveCloseUnsupportedRunner,
 	EffectiveCloseViewNotExecutable, EffectiveCloseCalendarDeletionUnsettled, EffectiveCloseBoundaryActive,
 	EffectiveCloseBusinessUnknown, EffectiveCloseSourceLastKnown, EffectiveCloseSourceUnknown,
-	EffectiveCloseEvidenceUnavailable,
+	EffectiveCloseEvidenceUnavailable, EffectiveCloseIndexSetAcked,
 }
 
 // Maintenance details are bounded log reasons, not new metric label dimensions.
