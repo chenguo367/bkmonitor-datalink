@@ -24,8 +24,9 @@ func newTargetScopeCloseCollector() *targetScopeCloseCollector {
 		outcomeIs: prometheus.NewDesc(prometheus.BuildFQName("", metricSubsystem, "target_scope_close_total"),
 			"What the close of alerts whose target left the strategy's monitoring scope decided, by outcome. "+
 				"unconfirmed is a fingerprint of an open alert turned away by one Slot, waiting for a second; "+
-				"close_sent counts alerts a close was sent for, acknowledged by the broker, not alerts the link "+
-				"closed. cache_unavailable counts rejections decided on facts that "+
+				"close_sent counts closes sent and acknowledged by the broker, one per alert: the broker's "+
+				"acknowledgement, not the link's, so it includes closes the link finds no active alert for (orphaned "+
+				"there). cache_unavailable counts rejections decided on facts that "+
 				"were not all read or current, which are never closed; not_member definitive rejections whose "+
 				"fingerprint is not an open alert; set_unavailable decisions refused because the open set could "+
 				"not be judged (not calibrated and the index set not read fresh, disjoint, unavailable); producer_foreign open alerts of another "+

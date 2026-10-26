@@ -1298,8 +1298,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	}
 	metrics.noDataEnd = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: metricSubsystem, Name: "no_data_end_total",
-		Help: "What the no-data end index did, by outcome: sent (series whose alert a level written to end on no " +
-			"data ended while the series was absent from complete answers through the recovery span), not_open " +
+		Help: "What the no-data end index did, by outcome: sent (series whose end event the sink took, for a level " +
+			"written to end on no data, the series absent from complete answers through the recovery span - taken " +
+			"by the broker, not ended by the link, which finds no active alert for one already closed), not_open " +
 			"(entries removed because the consumer no longer holds their alert - closed by hand, by effective " +
 			"time, by the absent or superseded-identity close - nothing sent), overflow (open alerts not indexed, " +
 			"the Plan's index full; they stay open while their group is absent), unavailable (Plans whose index " +

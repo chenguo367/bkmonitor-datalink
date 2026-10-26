@@ -1479,13 +1479,21 @@ func TestQueryCooldownLoadResultsArePreCreated(t *testing.T) {
 	}
 }
 
-// close_acked is what the broker took, not what the consumer did with it:
-// whether an alert closed is the consumer's to say, so the help does not say
-// that none is left open.
-func TestTheEffectiveCloseHelpCountsSendsNotClosedAlerts(t *testing.T) {
-	help := newEffectiveCloseCollector().outcomes.String()
-	if strings.Contains(help, "left open") || !strings.Contains(help, "consumer") {
-		t.Fatalf("help = %s, want the sends counted and the closing left to the consumer", help)
+// close_acked and close_sent are what the broker took, not what the link
+// did with it. The producer's answer is the broker's acknowledgement: it
+// cannot tell a close the link acted on from one the link found no active
+// alert for (orphaned), so every close family's help says it counts the
+// sends acknowledged, those among them, and does not say none is left open.
+func TestTheCloseHelpsCountSendsTheBrokerAcknowledged(t *testing.T) {
+	for family, help := range map[string]string{
+		"effective_close_total":       newEffectiveCloseCollector().outcomes.String(),
+		"target_scope_close_total":    newTargetScopeCloseCollector().outcomeIs.String(),
+		"strategy_edit_close_total":   newEditCloseCollector().outcomeIs.String(),
+		"absent_strategy_close_total": newAbsentCloseCollector().outcomeIs.String(),
+	} {
+		if strings.Contains(help, "left open") || !strings.Contains(help, "acknowledged by the broker") || !strings.Contains(help, "(orphaned there)") {
+			t.Fatalf("%s help = %s, want the sends the broker acknowledged counted, closes the link finds nothing active for among them", family, help)
+		}
 	}
 }
 

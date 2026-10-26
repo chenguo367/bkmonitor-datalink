@@ -63,7 +63,8 @@ const (
 	// names no business to file it under: not sent. Alerts.
 	OutcomeBusinessUnknown = "business_unknown"
 	// OutcomeCloseSent and OutcomeSendFailed are closes the producer
-	// accepted and refused. Alerts.
+	// accepted and refused. Accepted is the broker's acknowledgement, not
+	// the link closing the alert. Alerts.
 	OutcomeCloseSent  = "close_sent"
 	OutcomeSendFailed = "send_failed"
 	// OutcomeMemoryFull counts the times the decision memory reached its

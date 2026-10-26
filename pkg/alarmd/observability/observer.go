@@ -3800,8 +3800,10 @@ const ReasonTraceExportFailed ReasonCode = "trace_export_failed"
 // existed the whole close chain normalized to reason_code=other on the
 // metrics side and had no cell of its own.
 const (
-	// EffectiveCloseAcked counts alerts closed, one per alert the broker
-	// acknowledged.
+	// EffectiveCloseAcked counts closes the broker acknowledged, one per
+	// alert: sent, not closed. A close the link finds no active alert for
+	// (orphaned there, an alert it already closed) is acknowledged all the
+	// same; the producer's answer cannot tell the two apart.
 	EffectiveCloseAcked ReasonCode = "close_acked"
 	// EffectiveClosePrecheckFailed is the owner and content check before a
 	// send refusing: the fence, the content scope or the timeline moved.
@@ -3872,8 +3874,8 @@ const (
 	// absent-strategy close's word for the same condition. One per Plan, per
 	// step that finds it inactive.
 	EffectiveCloseEvidenceUnavailable ReasonCode = "evidence_unavailable"
-	// EffectiveCloseIndexSetAcked counts, among close_acked, the alerts
-	// closed from the strategy's index set: its alerts not listed (no
+	// EffectiveCloseIndexSetAcked counts, among close_acked, the closes
+	// sent from the strategy's index set: its alerts not listed (no
 	// current calibration), its members read fresh and standing in for them,
 	// each close addressed by fingerprint. Counts alerts.
 	EffectiveCloseIndexSetAcked ReasonCode = "index_set_close_acked"

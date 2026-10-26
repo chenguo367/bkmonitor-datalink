@@ -41,8 +41,9 @@ func newAbsentCloseCollector() *absentCloseCollector {
 			"What the control leader's difference against disabled or deleted strategies decided, by outcome. "+
 				"Counted per strategy except close_sent, send_failed, producer_foreign, producer_unknown and "+
 				"business_unknown, "+
-				"which count alerts. close_decided counts decisions and close_sent counts what went out, "+
-				"acknowledged by the broker; neither says the link closed anything, which absent.list reads "+
+				"which count alerts. close_decided counts decisions and close_sent counts closes sent and "+
+				"acknowledged by the broker, which includes closes the link finds no active alert for (orphaned "+
+				"there); neither says the link closed anything, which absent.list reads "+
 				"per strategy as the alerts its reconcile still lists active after an earlier send. "+
 				"identity_unknown and revision_unknown are strategies decided and not sent because no business or "+
 				"revision could be found for them; business_unknown are alerts of a global business strategy not "+
