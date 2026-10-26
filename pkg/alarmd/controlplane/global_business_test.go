@@ -396,6 +396,78 @@ func TestAGlobalBusinessPromQLStrategyNamingItsDataLabelCompiles(t *testing.T) {
 	}
 }
 
+// A global business PromQL Plan files each record under the business its
+// grouping names, in the attribution's order: the bk_biz_id it keeps, else
+// the namespace or cluster it keeps, else the Plan's own business. An
+// ordinary PromQL Plan's projection is what it was, whatever it groups by.
+func TestAGlobalBusinessPromQLPlanIsAttributedByItsGrouping(t *testing.T) {
+	compile := func(t *testing.T, promQL string, global bool) contract.EvaluationPlanV2 {
+		strategy := twoThresholdStrategiesWithDelay(t, 0)[0]
+		strategy.Document = editedDocument(t, strategy.Document, func(top map[string]any) { top["strategy_revision"] = 7 }, func(item map[string]any) {
+			item["query_configs"] = []any{map[string]any{"data_source_label": "prometheus", "data_type_label": "time_series", "agg_interval": 60, "promql": promQL}}
+		})
+		strategy.Identity.GlobalBusiness = global
+		catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{
+			Planner: globalBusinessPlanner(t), Strategies: []controlplane.SourceStrategy{strategy}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(catalog.QueryGroups) != 1 {
+			t.Fatalf("groups = %d, dispositions %+v", len(catalog.QueryGroups), catalog.Dispositions)
+		}
+		return catalog.QueryGroups[0].Plans[0].Plan
+	}
+	lookups := admission.BusinessLookups{Clusters: clusterBusinesses{"BCS-K8S-1": "77"}, Namespaces: namespaceBusinesses{"BCS-K8S-1|team-a": "88"}}
+	for name, test := range map[string]struct {
+		promQL string
+		fields []string
+		record map[string]any
+		want   admission.BusinessAttribution
+	}{
+		"grouped by business": {"sum by (bk_biz_id) (rate(k8s:container_cpu_usage_seconds_total[1m]))", []string{"bk_biz_id"},
+			map[string]any{"bk_biz_id": "33"}, admission.BusinessAttribution{BusinessID: "33", Source: contract.BusinessAttributionDimension}},
+		"grouped by cluster and namespace": {"sum by (bcs_cluster_id, namespace) (rate(k8s:container_cpu_usage_seconds_total[1m]))",
+			[]string{"bcs_cluster_id", "namespace"}, map[string]any{"bcs_cluster_id": "BCS-K8S-1", "namespace": "team-a"},
+			admission.BusinessAttribution{BusinessID: "88", Source: contract.BusinessAttributionNamespace}},
+		"grouped by cluster, the namespace unmapped": {"sum by (bcs_cluster_id, namespace) (rate(k8s:container_cpu_usage_seconds_total[1m]))",
+			[]string{"bcs_cluster_id", "namespace"}, map[string]any{"bcs_cluster_id": "BCS-K8S-1", "namespace": "team-b"},
+			admission.BusinessAttribution{BusinessID: "77", Source: contract.BusinessAttributionCluster}},
+		"the global APM latency strategy": {"(histogram_quantile(0.95,sum by (le,app_name,bk_instance_id,service_name,span_name) " +
+			"(increase(bkmonitor:apm:bk_apm_duration_bucket[60s])))) / 1000000", []string{"app_name", "bk_instance_id", "le", "service_name", "span_name"},
+			map[string]any{"app_name": "a", "bk_biz_id": "33", "bcs_cluster_id": "BCS-K8S-1"}, admission.BusinessAttribution{Source: contract.BusinessAttributionGlobal}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			plan := compile(t, test.promQL, true)
+			if !reflect.DeepEqual(plan.InputProjection.DimensionFields, test.fields) {
+				t.Fatalf("dimension fields = %v, want %v", plan.InputProjection.DimensionFields, test.fields)
+			}
+			dimensions := map[string]json.RawMessage{}
+			for key, value := range test.record {
+				encoded, _ := json.Marshal(value)
+				dimensions[key] = encoded
+			}
+			want := test.want
+			if want.BusinessID == "" {
+				want.BusinessID = "2"
+			}
+			if got := admission.AttributeBusiness(plan.TargetPlan, plan.InputProjection.DimensionFields, "2", dimensions, lookups); got != want {
+				t.Fatalf("attribution = %+v, want %+v", got, want)
+			}
+			ordinary := compile(t, test.promQL, false)
+			if len(ordinary.InputProjection.DimensionFields) != 0 {
+				t.Fatalf("an ordinary PromQL Plan's dimension fields became %v", ordinary.InputProjection.DimensionFields)
+			}
+		})
+	}
+}
+
+type namespaceBusinesses map[string]string
+
+func (n namespaceBusinesses) LookupNamespaceBusiness(cluster, namespace string) (string, bool) {
+	business, found := n[cluster+"|"+namespace]
+	return business, found
+}
+
 type clusterBusinesses map[string]string
 
 func (c clusterBusinesses) LookupClusterBusiness(cluster string) (string, bool) {

@@ -6,6 +6,7 @@
 package controlplane
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 
@@ -184,10 +185,152 @@ func promQLMetricRoute(name string) int {
 	if len(parts) != 3 && len(parts) != 4 || strings.TrimSpace(parts[1]) == "" {
 		return promQLRouteBare
 	}
+	// The provider looks the database and table up as written and compiles
+	// only the metric part as a pattern (structured space.go), so a pattern
+	// anywhere before the metric names no table and reads nothing.
+	for _, part := range parts[1 : len(parts)-1] {
+		if strings.TrimLeft(part, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-") != "" {
+			return promQLRouteBare
+		}
+	}
 	if router, isSource := promQLRouterSources[parts[0]]; isSource && !router {
 		return promQLRouteOtherSource
 	}
 	return promQLRouteTable
+}
+
+// promQLAggregations are PromQL's aggregation operators: the ones that take a
+// by or without grouping.
+var promQLAggregations = map[string]bool{
+	"sum": true, "min": true, "max": true, "avg": true, "group": true, "stddev": true, "stdvar": true, "count": true,
+	"count_values": true, "bottomk": true, "topk": true, "quantile": true, "limitk": true, "limit_ratio": true,
+}
+
+// promQLOutputGrouping is the label set a PromQL expression's results carry
+// when it can be read off the expression: the by list of its outermost
+// aggregations (the shallowest parenthesis depth; several at that depth, as
+// on either side of a binary operator, keep only the labels they share). An
+// expression with no aggregation, one grouped without, or one this cannot
+// read answers nil - its labels are the selectors' own, which are not known
+// before the answer. The result is sorted and without duplicates, the form
+// an input projection's dimension fields take.
+func promQLOutputGrouping(expression string) []string {
+	if _, ok := promQLSelectorMetrics(expression); !ok {
+		return nil
+	}
+	s := expression
+	depth, best := 0, -1
+	var grouping map[string]bool
+	for i := 0; i < len(s); {
+		c := s[i]
+		switch {
+		case c == '"' || c == '\'' || c == '`':
+			end, _ := promQLStringEnd(s, i)
+			i = end
+		case c == '#':
+			for i < len(s) && s[i] != '\n' {
+				i++
+			}
+		case c == '[' || c == '{':
+			closer := map[byte]byte{'[': ']', '{': '}'}[c]
+			for i < len(s) && s[i] != closer {
+				if s[i] == '"' || s[i] == '\'' || s[i] == '`' {
+					end, _ := promQLStringEnd(s, i)
+					i = end
+					continue
+				}
+				i++
+			}
+			i++
+		case c == '(':
+			depth++
+			i++
+		case c == ')':
+			depth--
+			i++
+		case promQLWordByte(c) && !(c >= '0' && c <= '9'):
+			start := i
+			for i < len(s) && promQLWordByte(s[i]) {
+				i++
+			}
+			word := strings.ToLower(s[start:i])
+			if !promQLAggregations[word] {
+				continue
+			}
+			labels, ok := promQLAggregationGrouping(s, i)
+			if best >= 0 && depth > best {
+				continue
+			}
+			if !ok {
+				labels = map[string]bool{}
+			}
+			if best < 0 || depth < best {
+				best, grouping = depth, labels
+				continue
+			}
+			for label := range grouping {
+				if !labels[label] {
+					delete(grouping, label)
+				}
+			}
+		default:
+			i++
+		}
+	}
+	if len(grouping) == 0 {
+		return nil
+	}
+	fields := make([]string, 0, len(grouping))
+	for label := range grouping {
+		fields = append(fields, label)
+	}
+	sort.Strings(fields)
+	return fields
+}
+
+// promQLAggregationGrouping reads an aggregation's by list, written either
+// before its argument (sum by (a) (x)) or after it (sum (x) by (a)), from
+// just after the operator's name. False is no by list, or a without list.
+func promQLAggregationGrouping(s string, i int) (map[string]bool, bool) {
+	i = promQLSkipSpace(s, i)
+	if !promQLFollowedByGrouping(s, i) {
+		if i >= len(s) || s[i] != '(' {
+			return nil, false
+		}
+		depth := 0
+		for ; i < len(s); i++ {
+			if s[i] == '(' {
+				depth++
+			} else if s[i] == ')' {
+				depth--
+				if depth == 0 {
+					break
+				}
+			}
+		}
+		i = promQLSkipSpace(s, i+1)
+		if !promQLFollowedByGrouping(s, i) {
+			return nil, false
+		}
+	}
+	if !strings.EqualFold(s[i:i+2], "by") {
+		return nil, false
+	}
+	i = promQLSkipSpace(s, i+2)
+	if i >= len(s) || s[i] != '(' {
+		return nil, false
+	}
+	end := strings.IndexByte(s[i:], ')')
+	if end < 0 {
+		return nil, false
+	}
+	labels := map[string]bool{}
+	for _, label := range strings.Split(s[i+1:i+end], ",") {
+		if label = strings.TrimSpace(label); label != "" {
+			labels[label] = true
+		}
+	}
+	return labels, true
 }
 
 // promQLKeywords are PromQL's words that are not metric names: binary and

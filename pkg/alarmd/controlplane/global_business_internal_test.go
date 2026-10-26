@@ -7,6 +7,7 @@ package controlplane
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
@@ -75,11 +76,12 @@ func TestAGlobalBusinessPromQLQueryIsAdmittedOnlyWhenEverySelectorRoutes(t *test
 		"a subquery and an offset":           "max_over_time(k8s:node_load1[10m:1m] offset 5m)",
 		"strings that look like metrics": `label_replace(k8s:up, "dst", "bkmonitor:up", "src", "(.*)") ` +
 			`+ on () group_left count_values("up", k8s:ready)`,
-		"topk and scalars":   "topk(5, k8s:node_load1) * 2 + 1e3 - .5",
-		"a comment":          "k8s:up # up is the bare name this comment mentions\n",
-		"single quotes":      `{__name__='bkmonitor:k8s:up', job='a\'b'}`,
-		"the bool modifier":  "k8s:up == bool 1",
-		"an aggregation tag": "sum(k8s:up) by (pod)",
+		"topk and scalars":              "topk(5, k8s:node_load1) * 2 + 1e3 - .5",
+		"a comment":                     "k8s:up # up is the bare name this comment mentions\n",
+		"single quotes":                 `{__name__='bkmonitor:k8s:up', job='a\'b'}`,
+		"a pattern only for the metric": `{__name__=~"bkmonitor:k8s:.*"}`,
+		"the bool modifier":             "k8s:up == bool 1",
+		"an aggregation tag":            "sum(k8s:up) by (pod)",
 	}
 	for name, expression := range admitted {
 		t.Run(name, func(t *testing.T) {
@@ -104,6 +106,12 @@ func TestAGlobalBusinessPromQLQueryIsAdmittedOnlyWhenEverySelectorRoutes(t *test
 		"a computing platform table":    {"bkdata:db:table:m", GlobalBusinessQueryKind, "bkdata:db:table:m"},
 		"an unterminated matcher":       {`k8s:up{pod="a`, GlobalBusinessQueryKind, "unreadable"},
 		"an unterminated range":         {`rate(k8s:up[5m)`, GlobalBusinessQueryKind, "unreadable"},
+		// The provider looks the database and table up as written; only the
+		// metric part is a pattern.
+		"a pattern for the data label": {`{__name__=~"bkmonitor:.*:cpu"}`, GlobalBusinessQueryTable, "bkmonitor:.*:cpu"},
+		"an alternation for the label": {`{__name__=~"bkmonitor:(a|b):cpu"}`, GlobalBusinessQueryTable, "bkmonitor:(a|b):cpu"},
+		"a pattern for the database":   {`{__name__=~"bkmonitor:sys.*:cpu_summary:usage"}`, GlobalBusinessQueryTable, "bkmonitor:sys.*:cpu_summary:usage"},
+		"a pattern for the table":      {`{__name__=~"bkmonitor:system:cpu_.+:usage"}`, GlobalBusinessQueryTable, "bkmonitor:system:cpu_.+:usage"},
 	}
 	for name, test := range refused {
 		t.Run(name, func(t *testing.T) {
@@ -119,5 +127,26 @@ func TestAGlobalBusinessPromQLQueryIsAdmittedOnlyWhenEverySelectorRoutes(t *test
 				t.Fatalf("an ordinary PromQL strategy was refused: %+v %q", refusal, word)
 			}
 		})
+	}
+}
+
+// A global business PromQL Plan's records carry the labels its outermost
+// aggregation groups by; that list is what its business is read from.
+func TestAGlobalPromQLsOutputGroupingIsItsOutermostByList(t *testing.T) {
+	for expression, want := range map[string][]string{
+		"sum by (bk_biz_id) (rate(k8s:m[1m]))":                                                         {"bk_biz_id"},
+		"sum(rate(k8s:m[1m])) by (namespace, bcs_cluster_id)":                                          {"bcs_cluster_id", "namespace"},
+		"max by (bcs_cluster_id) (sum by (bcs_cluster_id, pod) (k8s:m))":                               {"bcs_cluster_id"},
+		"sum by (a, b) (k8s:m) / on (a) group_left sum by (a, c) (k8s:n)":                              {"a"},
+		"(histogram_quantile(0.95, sum by (le, app_name) (increase(bkmonitor:apm:d[60s])))) / 1000000": {"app_name", "le"},
+		"sum without (pod) (k8s:m)":                                                                    nil,
+		"rate(k8s:m[1m])":                                                                              nil,
+		`count_values("v", k8s:m{a="sum by (x)"})`:                                                     nil,
+		"sum by (bk_biz_id, bk_biz_id) (k8s:m) # by (x)":                                               {"bk_biz_id"},
+		`k8s:m{pod="a`: nil,
+	} {
+		if got := promQLOutputGrouping(expression); !reflect.DeepEqual(got, want) {
+			t.Errorf("promQLOutputGrouping(%q) = %v, want %v", expression, got, want)
+		}
 	}
 }

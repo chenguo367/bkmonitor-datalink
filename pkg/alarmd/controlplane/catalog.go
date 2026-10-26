@@ -2436,6 +2436,14 @@ func compilePlan(
 	if itemHasAlgorithm(item, strategy.DetectorKindProcPort) {
 		dimensionFields = []string{"bind_ip", "listen", "nonlisten", "not_accurate_listen", "protocol"}
 	}
+	// A global business PromQL Plan's records carry the labels its outermost
+	// aggregation groups by, and those are what its business is read from
+	// (admission.AttributeBusiness): bk_biz_id, else the cluster and
+	// namespace, else the Plan's own business. Ordinary PromQL Plans keep the
+	// empty list they had.
+	if identity.GlobalBusiness && inputs != nil && inputs.primary.PromQL != nil && len(dimensionFields) == 0 {
+		dimensionFields = promQLOutputGrouping(inputs.primary.PromQL.Expression)
+	}
 	projection := contract.InputProjectionV2{DynamicDimensions: dataset.DynamicDimensions, ValueFields: []string{"value"}, DimensionFields: dimensionFields, BusinessIdentityField: "bk_biz_id", MultiValueAlignment: "SINGLE_VALUE", DataUnit: unit, MissingValuePolicy: contract.MissingValuePolicyRequired}
 	detectByLevel := make(map[uint32]legacyDetect, len(source.Detects))
 	duplicateDetect := make(map[uint32]struct{})
