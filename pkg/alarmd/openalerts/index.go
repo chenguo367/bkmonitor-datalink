@@ -242,7 +242,7 @@ func NewIndex(options IndexOptions) (*Cache, error) {
 		return nil, errors.New("alarmd openalerts: invalid index unavailable policy")
 	}
 	cache := &Cache{now: options.Now, policy: options.Policy, maxLocal: options.MaxLocalEntries,
-		added: map[member]stamped{}, recovered: map[member]stamped{},
+		added: map[member]stamped{}, episodes: map[member]episode{},
 		refreshes: map[string]uint64{}, noticesRefused: map[NoticeRefusal]uint64{}, unavailable: map[UnavailableReason]uint64{}, lookups: map[Answer]uint64{}, ownLookups: map[Answer]uint64{},
 		gateSince: options.Now(),
 		index:     &indexState{options: options, entries: map[StrategyKey]*indexEntry{}, wake: make(chan struct{}, 1), consoleWake: make(chan struct{}, 1), opened: map[member]ownRecord{}},
@@ -315,9 +315,9 @@ func (cache *Cache) SetTracked(keys []StrategyKey) error {
 			cache.leaveOpen(m, DepartureUntracked)
 		}
 	}
-	for m := range cache.recovered {
+	for m := range cache.episodes {
 		if _, exists := unique[m.key]; !exists {
-			delete(cache.recovered, m)
+			delete(cache.episodes, m)
 		}
 	}
 	cache.index.order = cache.index.order[:0]
@@ -401,9 +401,9 @@ func (cache *Cache) Untrack(keys ...StrategyKey) {
 				cache.leaveOpen(m, DepartureUntracked)
 			}
 		}
-		for m := range cache.recovered {
+		for m := range cache.episodes {
 			if m.key == key {
-				delete(cache.recovered, m)
+				delete(cache.episodes, m)
 			}
 		}
 	}
@@ -990,9 +990,9 @@ func (cache *Cache) applyCalibration(job indexJob, started time.Time, result Rec
 			cache.leaveSent(m, DepartureNotResent)
 		}
 	}
-	for m, s := range cache.recovered {
-		if m.key == job.key && s.at.Before(started) {
-			delete(cache.recovered, m)
+	for m, e := range cache.episodes {
+		if m.key == job.key && !e.firstRecovery.IsZero() && e.firstRecovery.Before(started) {
+			delete(cache.episodes, m)
 		}
 	}
 	cache.pruneOpened(job.key, entry, started)
@@ -1174,14 +1174,19 @@ func (cache *Cache) indexContains(m member, now time.Time, count bool) bool {
 
 // recoveryLapsed is whether this process's record of what it sent (added)
 // has stopped answering the fingerprint held, while the strategy's set has
-// no current calibration: this process's RECOVERY of it was taken more
-// than a grace ago (the calibration interval, as expireRecovered waits)
-// with no ABNORMAL since, and the set's own read, where there is a current
-// one, does not carry it. A healthy series says RECOVERY every cycle;
-// without this, once the link closed the alert the record kept every
+// no current calibration: the alert's episode is released - every Level
+// its ABNORMALs named has had its own acknowledged RECOVERY, or
+// episodeBackstopIntervals of the strategy's interval have passed since
+// the episode's first (the calibration interval where no envelope said the
+// interval) - with no ABNORMAL since, and the set's own read, where there
+// is a current one, does not carry it. A healthy series says RECOVERY every
+// cycle; without this, once the link closed the alert the record kept every
 // cycle's RECOVERY passing for as long as no complete calibration came, an
-// orphan each time. Within the grace the RECOVERY passes: the alert may
-// stand at another Level, whose own RECOVERY is to come.
+// orphan each time. Until then the RECOVERY passes: the alert may stand at
+// another Level, whose own RECOVERY is to come - measured up to 11
+// intervals after the first Level's. A grace of the calibration interval
+// after the first RECOVERY at any Level instead passed a flapping series'
+// orphan every cycle for half an hour after each recovery.
 //
 // Only added lapses. What a calibration named missing from the set is the
 // link's own positive answer that the alert is active, and only another
@@ -1191,8 +1196,8 @@ func (cache *Cache) indexContains(m member, now time.Time, count bool) bool {
 // carrying the fingerprint, answer for it themselves. Called with the lock
 // held.
 func (cache *Cache) recoveryLapsed(entry *indexEntry, m member, now time.Time) bool {
-	recovered, ok := cache.recovered[m]
-	if !ok || now.Sub(recovered.at) <= cache.index.options.ReconcileInterval || cache.calibrated(entry, now) {
+	e, ok := cache.episodes[m]
+	if !ok || !e.released(now, cache.index.options.ReconcileInterval) || cache.calibrated(entry, now) {
 		return false
 	}
 	if entry != nil && !cache.stale(entry, now) {
