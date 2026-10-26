@@ -457,6 +457,18 @@ func (m *effectiveMaintenance) step(ctx context.Context) {
 			continue
 		}
 		m.refreshLegacy(ctx, qg, known.legacy)
+		// A close is judged only on Plans read under the lease the owner
+		// holds now. A lease that moved since the read is a timeline or
+		// content that changed: a strategy edited out of this Query Group
+		// retires its timeline, the read under the new lease finds no Plan
+		// (counted unavailable above), and the Plans of the old read are the
+		// edited strategy's previous revision, whose effective time is not
+		// the strategy's any more. They are judged again once a read under
+		// the current lease lands.
+		if scope, revision, accepting := runner.maintenanceLease(); !accepting ||
+			known.contentScope != scope || known.timelineRevision != revision {
+			continue
+		}
 		m.closeInactive(ctx, qg, runner, known.closable, deletions, sourceErr)
 	}
 }
