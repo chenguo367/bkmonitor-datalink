@@ -3873,6 +3873,13 @@ const (
 	// current calibration), its members read fresh and standing in for them,
 	// each close addressed by fingerprint. Counts alerts.
 	EffectiveCloseIndexSetAcked ReasonCode = "index_set_close_acked"
+	// EffectiveCloseIndexSetGroupDraining is a Plan outside its effective
+	// time whose index set would stand in for its unlisted alerts, held
+	// because its Query Group is in the current active set and in the
+	// draining projection at once: an activation that left the Query Group
+	// with its timeline open, whose Plans may be a strategy's revision the
+	// current one replaced. One per Plan, per step that finds it inactive.
+	EffectiveCloseIndexSetGroupDraining ReasonCode = "index_set_group_draining"
 )
 
 // EffectiveCloseOutcomes is every outcome, for the metric to pre-create each
@@ -3883,7 +3890,7 @@ var EffectiveCloseOutcomes = []ReasonCode{
 	EffectiveCloseEffectiveTimeUnknown, EffectiveCloseLegacyUnavailable, EffectiveCloseUnavailable, EffectiveCloseUnsupportedRunner,
 	EffectiveCloseViewNotExecutable, EffectiveCloseCalendarDeletionUnsettled, EffectiveCloseBoundaryActive,
 	EffectiveCloseBusinessUnknown, EffectiveCloseSourceLastKnown, EffectiveCloseSourceUnknown,
-	EffectiveCloseEvidenceUnavailable, EffectiveCloseIndexSetAcked,
+	EffectiveCloseEvidenceUnavailable, EffectiveCloseIndexSetAcked, EffectiveCloseIndexSetGroupDraining,
 }
 
 // Maintenance details are bounded log reasons, not new metric label dimensions.
