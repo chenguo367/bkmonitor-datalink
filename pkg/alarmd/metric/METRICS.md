@@ -97,7 +97,7 @@ Query Groups the publication brings back from retirement that have not drained a
 
 Labels: `outcome`
 
-Activation bodies the Control Leader rebuilt under a header present without its body, by outcome. rebuilt: written back byte for byte from the copy last read under the same header. rebuilt_draining_unknown: rebuilt from the open Segments without that copy; the Plans are exact, and Query Groups a cutover removed that had not drained stop executing now rather than at their boundary. not_needed: the body was back or the header gone. conflict: another writer moved first; nothing written. timeline_missing, coverage_invalid, header_unparsable, header_pending: refused by name, nothing written, and the fleet stays without an activation until the cause is fixed.
+Activation bodies the Control Leader rebuilt under a header present without its body, by outcome. rebuilt: written back byte for byte from the copy last read under the same header. rebuilt_draining_unknown: rebuilt from the open Segments without that copy; the Plans are exact, and Query Groups a cutover removed that had not drained stop executing now rather than at their boundary. not_needed: the body was back or the header gone. conflict: another writer moved first; nothing written. timeline_missing, timeline_unreadable, coverage_invalid, header_unparsable, header_pending: refused by name, nothing written, and the fleet stays without an activation until the cause is fixed.
 
 ## alarmd_activation_renewal_conflict_total
 

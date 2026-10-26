@@ -328,7 +328,7 @@ func TestAcceptFailsWhenAStrategyChangeDoesNotReachTheFleet(t *testing.T) {
 	for kind, want := range map[string]string{
 		"CONTROL_SOURCE_STALE": verdictFail, "ACTIVATION_BEHIND": verdictFail, "CONTROL_LEADER_ABSENT": verdictFail,
 		"SOURCE_BLOCKED": verdictFail, "ACTIVATION_BLOCKED": verdictFail, "VIEW_PUBLISH_FAILING": verdictFail,
-		"VIEW_STREAM_NO_SESSIONS": verdictFail, "PLATFORM_SETTINGS_STALE": verdictPass,
+		"VIEW_STREAM_NO_SESSIONS": verdictFail, "ACTIVATION_FAILING": verdictFail, "PLATFORM_SETTINGS_STALE": verdictPass,
 	} {
 		f := healthyFixture()
 		f.override = map[string]func() (string, map[string]any){"fleet.get": fleetWith(kind)}

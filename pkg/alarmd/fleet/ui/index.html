@@ -908,7 +908,8 @@ var DEGRADATION = {
   METRICS_INTERNAL_LISTEN_MISSING: '副本配了 CLI 管理凭据，对外端口不再给 /metrics，又没配集群内端口：检测不受影响，但这个副本的自监控指标抓不到',
   CLI_AUTH_UNAVAILABLE: '副本配了 CLI 管理凭据，但 CLI 没起来、发不出会话：为了不把路堵死，公开面没有收紧，依赖地址等仍然公开；检测不受影响',
   ACTIVATION_BLOCKED: '上一次发布有 QG 被扣住：它们的时间轴被发布流程之外的写入改过，保持原来的内容照常执行（没有可执行段的不执行），其余策略已按新配置生效；删掉说明里列出的时间轴键（下次切换会重新开段）或查清外部写入后会自动切过去；哪些 QG、什么原因、要删哪个键见说明',
-  ACTIVATION_HEADER_MISSING: '激活记录的头不见了、正文还在，leader 没能按正文写回：检测照常按正文执行，但策略变更不会生效、当前激活的对象不再续期，到期后整个舰队停止检测；上一次写回的结果见说明'
+  ACTIVATION_HEADER_MISSING: '激活记录的头不见了、正文还在，leader 没能按正文写回：检测照常按正文执行，但策略变更不会生效、当前激活的对象不再续期，到期后整个舰队停止检测；上一次写回的结果见说明',
+  ACTIVATION_FAILING: '激活每一轮都失败、超过设计允许的时间（没有更新的发布在等，所以不算落后）：检测暂时照常，但当前激活的对象不再续期，到期后整个舰队停止检测；失败阶段、连续轮数与原文见说明'
 };
 
 // What each line owes past its sentence, per check and held to the Go list:

@@ -47,13 +47,14 @@ var acceptSurfaceDegradations = []string{"METRICS_INTERNAL_LISTEN_MISSING", "CLI
 // change does not reach what the fleet executes - in the publication, the
 // activation, or the view reaching the workers - each held to the fleet's
 // bound: no refresh round has succeeded, the activation is behind the
-// publication, nobody holds the leader lease, the round accepts none of the
+// publication or its round keeps failing with nothing newer waiting, nobody
+// holds the leader lease, the round accepts none of the
 // strategies the source lists, the cutover held query groups back, the
 // leader cannot publish its view, or no worker holds a stream to take it.
 // The refresh counters cannot say it: a round that fails is not in
 // source_refresh_total, and the rest happen after the round.
 var acceptControlDegradations = []string{"CONTROL_SOURCE_STALE", "ACTIVATION_BEHIND", "CONTROL_LEADER_ABSENT", "SOURCE_BLOCKED",
-	"ACTIVATION_BLOCKED", "VIEW_PUBLISH_FAILING", "VIEW_STREAM_NO_SESSIONS"}
+	"ACTIVATION_BLOCKED", "VIEW_PUBLISH_FAILING", "VIEW_STREAM_NO_SESSIONS", "ACTIVATION_FAILING"}
 
 // acceptHorizonSources are the sources a no-data horizon may be read from.
 var acceptHorizonSources = []string{"DEFAULT", "VALUES", "DYNAMIC"}
