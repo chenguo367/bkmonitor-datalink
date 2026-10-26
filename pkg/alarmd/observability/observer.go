@@ -18,6 +18,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/absentalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/editclose"
 )
 
 type Component string
@@ -56,7 +57,10 @@ const (
 	// StageAbsentStrategyClose is the control leader's difference between the
 	// alert link's unrecovered alerts and the strategy snapshot, and the
 	// closes it pushes for strategies that no longer exist.
-	StageAbsentStrategyClose  = "absent_strategy_close"
+	StageAbsentStrategyClose = "absent_strategy_close"
+	// StageStrategyEditClose is the control leader's close of the alerts an
+	// edit of their strategy orphaned (package editclose).
+	StageStrategyEditClose    = "strategy_edit_close"
 	StageLegacyPodCache       = "legacy_pod_cache"
 	StageSnapshotRefreshed    = "snapshot_refreshed"
 	StageSnapshotUnavailable  = "snapshot_unavailable"
@@ -3671,6 +3675,9 @@ var phaseTwoComponentStages = []ComponentStage{
 	// ninety more series for a loop that runs twelve times an hour on one
 	// replica and is fully answered by its own family.
 	{ComponentControlPlane, StageAbsentStrategyClose},
+	// The edit close, for the same reason: its own family
+	// (strategy_edit_close_total) has a cell per outcome.
+	{ComponentControlPlane, StageStrategyEditClose},
 	{ComponentControlPlane, StageSnapshotRefreshed}, {ComponentControlPlane, StageSnapshotUnavailable},
 	{ComponentControlPlane, StageActivationFailed},
 	// A failed write of the leader's control facts. It was written as
@@ -3880,6 +3887,18 @@ func absentCloseReasons() []ReasonCode {
 	return reasons
 }
 
+// EditCloseReasons is the edit close's vocabulary as observability reason
+// codes, declared where the decision is made (editclose.Outcomes).
+var EditCloseReasons = editCloseReasons()
+
+func editCloseReasons() []ReasonCode {
+	reasons := make([]ReasonCode, 0, len(editclose.Outcomes))
+	for _, outcome := range editclose.Outcomes {
+		reasons = append(reasons, ReasonCode(outcome))
+	}
+	return reasons
+}
+
 var contractClassReasons = []ReasonCode{
 	ReasonContractDeterministic, ReasonContractRetryable, ReasonContractCoverage,
 }
@@ -3995,7 +4014,7 @@ var allResourceReasons = joinReasons(
 // allLogReasons is every reason NormalizeReason can return: the limiter keeps
 // a bucket for each, and refuses a reason it has none for, so a catalogue
 // NormalizeReason accepts and this list leaves out has its lines dropped.
-var allLogReasons = joinReasons(unclassifiedReasons, []ReasonCode{ReasonTraceExportFailed}, resourceOnlyReasons, activationFailureReasons, ViewStreamReasons, SchedulerDecisionReasons, SlotPathReasons, effectiveMaintenanceReasons, AbsentCloseReasons, CompletionAttributionReasons, AdmissionFailureReasons, NoDataStallReasons, contractClassReasons, []ReasonCode{ReasonHeldBySupplement, ReasonHeldByMaintenance, ReasonSlotCancelled}, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
+var allLogReasons = joinReasons(unclassifiedReasons, []ReasonCode{ReasonTraceExportFailed}, resourceOnlyReasons, activationFailureReasons, ViewStreamReasons, SchedulerDecisionReasons, SlotPathReasons, effectiveMaintenanceReasons, AbsentCloseReasons, EditCloseReasons, CompletionAttributionReasons, AdmissionFailureReasons, NoDataStallReasons, contractClassReasons, []ReasonCode{ReasonHeldBySupplement, ReasonHeldByMaintenance, ReasonSlotCancelled}, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
 
 var componentStageSet = makeComponentStageSet(allComponentStages)
 var metricComponentStageSet = makeComponentStageSet(metricComponentStages)
@@ -4010,6 +4029,7 @@ var viewStreamReasonSet = makeReasonSet(ViewStreamReasons)
 var schedulerDecisionReasonSet = makeReasonSet(SchedulerDecisionReasons)
 var effectiveMaintenanceReasonSet = makeReasonSet(effectiveMaintenanceReasons)
 var absentCloseReasonSet = makeReasonSet(AbsentCloseReasons)
+var editCloseReasonSet = makeReasonSet(EditCloseReasons)
 var contractObservationReasons, contractObservationReasonSet, contractObservationMetricReasonByCode = loadContractObservationReasons()
 
 func makeComponentStageSet(values []ComponentStage) map[ComponentStage]struct{} {

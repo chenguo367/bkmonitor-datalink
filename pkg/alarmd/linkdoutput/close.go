@@ -51,6 +51,21 @@ const CloseReasonSupersededIdentity = "superseded_identity"
 // content (CloseRequest.Detail).
 const CloseReasonUnsupported = "strategy_unsupported"
 
+// CloseReasonStrategyChanged is the close for an alert an edit of its
+// strategy orphaned: the strategy exists and is detected, and its current
+// revision can no longer produce or recover the alert - a grouping
+// dimension it was told apart by is gone, its level was removed, or no-data
+// detection was switched off. Which of those goes in the content
+// (CloseRequest.Detail, one of the StrategyChanged* words).
+const CloseReasonStrategyChanged = "strategy_changed"
+
+// The words a CloseReasonStrategyChanged close names as its detail.
+const (
+	StrategyChangedDimensions = "dimensions_changed"
+	StrategyChangedLevel      = "level_removed"
+	StrategyChangedNoData     = "no_data_disabled"
+)
+
 // closeDetailLimit bounds the detail a close's content repeats.
 const closeDetailLimit = 128
 
@@ -69,7 +84,8 @@ type CloseRequest struct {
 	OccurredAt                               time.Time
 	Reason                                   string
 	// Detail is what the content names beside the reason - for
-	// CloseReasonUnsupported, the capability - bounded by closeDetailLimit.
+	// CloseReasonUnsupported, the capability; for CloseReasonStrategyChanged,
+	// the change - bounded by closeDetailLimit.
 	// It is not part of the event id: the same alert closed for the same
 	// reason is one event whatever the detail reads.
 	Detail string
@@ -79,17 +95,21 @@ type CloseRequest struct {
 // is derived under. The salts differ so that the same alert closed for two
 // different reasons is two events; the inactive salt is the original string
 // so that an inactive close keeps the id it has always had.
-var closeText = map[string]struct{ salt, title, content string }{
+// detail is the word the content introduces CloseRequest.Detail with, for
+// the reasons that carry one.
+var closeText = map[string]struct{ salt, title, content, detail string }{
 	CloseReasonInactive: {"alarmd-inactive-close-v1", "Strategy is outside its effective time",
-		"Close requested because the strategy is currently inactive; this does not indicate metric recovery."},
+		"Close requested because the strategy is currently inactive; this does not indicate metric recovery.", ""},
 	CloseReasonAbsent: {"alarmd-absent-strategy-close-v1", "Strategy no longer exists",
-		"Close requested because the strategy was disabled or deleted and nothing evaluates this alert any more; this does not indicate metric recovery."},
+		"Close requested because the strategy was disabled or deleted and nothing evaluates this alert any more; this does not indicate metric recovery.", ""},
 	CloseReasonTargetOutOfScope: {"alarmd-target-out-of-scope-close-v1", "Target is no longer in the strategy's scope",
-		"Close requested because the target this alert is about left the strategy's monitoring scope and nothing evaluates this alert any more; this does not indicate metric recovery."},
+		"Close requested because the target this alert is about left the strategy's monitoring scope and nothing evaluates this alert any more; this does not indicate metric recovery.", ""},
 	CloseReasonSupersededIdentity: {"alarmd-superseded-identity-close-v1", "The alert's series is now identified under a new fingerprint",
-		"Close requested because alarmd now identifies this series under a new identity and nothing evaluates this alert any more; this does not indicate metric recovery."},
+		"Close requested because alarmd now identifies this series under a new identity and nothing evaluates this alert any more; this does not indicate metric recovery.", ""},
 	CloseReasonUnsupported: {"alarmd-unsupported-strategy-close-v1", "Strategy is no longer detected by alarmd",
-		"Close requested because alarmd does not detect this strategy - it uses a capability alarmd does not support - and nothing evaluates this alert any more; this does not indicate metric recovery."},
+		"Close requested because alarmd does not detect this strategy - it uses a capability alarmd does not support - and nothing evaluates this alert any more; this does not indicate metric recovery.", "Capability"},
+	CloseReasonStrategyChanged: {"alarmd-strategy-changed-close-v1", "Strategy was changed and no longer produces this alert",
+		"Close requested because the strategy was edited and its current configuration can no longer produce or recover this alert; this does not indicate metric recovery.", "Change"},
 }
 
 func ConvertClose(request CloseRequest) (Event, error) {
@@ -127,7 +147,11 @@ func ConvertClose(request CloseRequest) (Event, error) {
 			}
 			detail = detail[:cut]
 		}
-		content += " Capability: " + detail + "."
+		label := text.detail
+		if label == "" {
+			label = "Detail"
+		}
+		content += " " + label + ": " + detail + "."
 	}
 	wire := wireEvent{TenantID: request.TenantID, EventID: id, AlertID: request.Fingerprint,
 		Title: text.title, Content: content,

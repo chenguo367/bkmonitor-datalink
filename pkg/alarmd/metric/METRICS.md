@@ -2007,6 +2007,12 @@ Labels: `client`
 
 When the latest census of the store was taken.
 
+## alarmd_strategy_edit_close_total
+
+Labels: `outcome`
+
+What the control leader's close of alerts orphaned by an edit of their strategy came to, by outcome. Per listed alert: current_revision (raised under the strategy's current revision, not a candidate), revision_ahead, revision_unknown, family_unknown, kept (a candidate every decidable rule keeps), levels_partial, severity_unmapped and no_data_suspended (a rule could not decide it; not closed), and the three closes decided - dimensions_changed, level_removed, no_data_disabled; remembered counts, among those, the ones taken from memory without reading the record again. close_sent and send_failed count closes the producer accepted and refused, business_unknown closes not sent for want of a business, record_unreadable alerts whose record could not be read (read again later), read_deferred alerts not read because the round's reads were spent, producer_foreign and producer_unknown alerts of another source or none. Per strategy: strategy_unpublished, plan_retained, plans_disagree, plan_unrevisioned, evidence_unavailable, evidence_truncated. Per round: not_leader, publication_unavailable, roster_unavailable. memory_full counts drops of the decision memory. Every cell exists from the start so a zero is a reading and not an absence.
+
 ## alarmd_target_excluded_absent_members_total
 
 Excluded members absent from a complete current host snapshot, counted per member per Plan per Slot. These exclusions are normal no-ops and do not make the target unavailable.
