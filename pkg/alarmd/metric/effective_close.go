@@ -58,7 +58,10 @@ func newEffectiveCloseCollector() *effectiveCloseCollector {
 				"missing from the set, which the set's members do not carry and are not closed from it, once per Plan per "+
 				"step - a calibrated set with no alerts is not counted; "+
 				"index_set_close_acked counts, among close_acked, closes sent by fingerprint from the index set's "+
-				"members because the set had no current calibration to list them. Every cell exists from the "+
+				"members because the set had no current calibration to list them; close_already_sent counts, by "+
+				"alert, closes held back because this process sent them and their evidence was not read since - a "+
+				"listed alert's within a minute, one from the index set until a read of the set lands after the send, "+
+				"at most the set's stale bound. Every cell exists from the "+
 				"start so a zero is a reading and not an absence.", []string{"outcome"}, nil),
 	}
 }

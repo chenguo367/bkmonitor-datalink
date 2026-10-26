@@ -90,6 +90,11 @@ func TestAnIndexSetCloseIsNotSentAgainBeforeTheSetIsReadAgain(t *testing.T) {
 		if closes := fixture.closes(); len(closes) != 1 {
 			t.Fatalf("%d minute(s) on, with no read of the set since, the inactive close sent %+v, want A1 once", step, closes)
 		}
+		// The hold is counted, not silent: each step that finds A1 held
+		// says so.
+		if held := fixture.maintenanceCounts()[closeOutcomeAlreadySent]; held < uint64(2*step) {
+			t.Fatalf("%d minute(s) on, close_already_sent = %d, want the held repeat counted each step", step, held)
+		}
 		if after := fixture.copy.Snapshot(closePathsKey()).IndexReadAt; !after.Equal(read) {
 			t.Fatalf("a read of the set landed at %s, after the one at %s; the case needs none", after, read)
 		}

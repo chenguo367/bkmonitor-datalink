@@ -305,8 +305,8 @@ func TestEffectiveMaintenanceACKDedupExpiresAndFailedWritesRetry(t *testing.T) {
 	f.m.step(context.Background())
 	f.advance(59 * time.Second)
 	f.m.step(context.Background())
-	if len(f.writer.batches) != 1 {
-		t.Fatal("ACK not deduplicated for a minute")
+	if len(f.writer.batches) != 1 || f.m.counts[closeOutcomeAlreadySent] != 1 {
+		t.Fatalf("batches %d, counts %v: ACK not deduplicated for a minute, or the hold not counted", len(f.writer.batches), f.m.counts)
 	}
 	f.advance(time.Second)
 	f.m.step(context.Background())

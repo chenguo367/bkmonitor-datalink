@@ -3879,6 +3879,13 @@ const (
 	// current calibration), its members read fresh and standing in for them,
 	// each close addressed by fingerprint. Counts alerts.
 	EffectiveCloseIndexSetAcked ReasonCode = "index_set_close_acked"
+	// EffectiveCloseAlreadySent counts, by alert, a close held back because
+	// this process sent it and its evidence has not been read since: a
+	// listed alert's within the minute its send asks a calibration in, one
+	// addressed from the index set until a read of the set lands after the
+	// send, at most the set's stale bound. The listing or set still names the
+	// alert only because it was read before the link closed it.
+	EffectiveCloseAlreadySent ReasonCode = "close_already_sent"
 )
 
 // EffectiveCloseOutcomes is every outcome, for the metric to pre-create each
@@ -3889,7 +3896,7 @@ var EffectiveCloseOutcomes = []ReasonCode{
 	EffectiveCloseEffectiveTimeUnknown, EffectiveCloseLegacyUnavailable, EffectiveCloseUnavailable, EffectiveCloseUnsupportedRunner,
 	EffectiveCloseViewNotExecutable, EffectiveCloseCalendarDeletionUnsettled, EffectiveCloseBoundaryActive,
 	EffectiveCloseBusinessUnknown, EffectiveCloseSourceLastKnown, EffectiveCloseSourceUnknown,
-	EffectiveCloseEvidenceUnavailable, EffectiveCloseIndexSetAcked,
+	EffectiveCloseEvidenceUnavailable, EffectiveCloseIndexSetAcked, EffectiveCloseAlreadySent,
 }
 
 // Maintenance details are bounded log reasons, not new metric label dimensions.

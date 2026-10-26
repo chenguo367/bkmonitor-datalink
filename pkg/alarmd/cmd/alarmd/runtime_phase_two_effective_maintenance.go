@@ -113,6 +113,7 @@ const (
 	closeOutcomeSourceUnknown        = string(observability.EffectiveCloseSourceUnknown)
 	closeOutcomeEvidenceUnavailable  = string(observability.EffectiveCloseEvidenceUnavailable)
 	closeOutcomeIndexSetAcked        = string(observability.EffectiveCloseIndexSetAcked)
+	closeOutcomeAlreadySent          = string(observability.EffectiveCloseAlreadySent)
 )
 
 // maintenanceGroup is what the loop knows about one owned Query Group from
@@ -849,13 +850,17 @@ func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.Q
 			continue
 		}
 		batch := make([]linkdoutput.CloseRequest, 0, m.capacity.CloseBatch)
-		unknown := 0
+		unknown, already := 0, 0
 		for _, alert := range alerts {
 			if alert.EventSourceID != m.sourceID {
 				continue
 			}
 			sentKey := key.TenantID + "\x00" + alert.EventSourceID + "\x00" + alert.AlertID
 			if _, sent := m.sent[sentKey]; sent {
+				// Held back until its evidence is read again after the send
+				// (pruneSent), and counted: a hold that says nothing reads as
+				// a close nobody decided.
+				already++
 				continue
 			}
 			alertBusiness := business
@@ -879,6 +884,10 @@ func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.Q
 		if unknown > 0 {
 			m.observeTrace(ctx, observability.TraceFields{QueryGroupKey: string(qg), StrategyID: plan.Identity.StrategyID},
 				closeOutcomeBusinessUnknown, errors.New("an alert's record names no business for a global business Plan"), unknown)
+		}
+		if already > 0 {
+			m.observeTrace(ctx, observability.TraceFields{QueryGroupKey: string(qg), StrategyID: plan.Identity.StrategyID},
+				closeOutcomeAlreadySent, nil, already)
 		}
 		if len(batch) == 0 {
 			continue
