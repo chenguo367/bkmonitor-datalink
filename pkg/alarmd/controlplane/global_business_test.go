@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/admission"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 )
 
@@ -171,6 +173,7 @@ func TestAGlobalBusinessStrategyIsWithheldWhereItCannotRunAsOne(t *testing.T) {
 		protocol string
 		reason   string
 		source   string
+		metric   string
 	}{
 		"an old-form target": {
 			item: func(item map[string]any) {
@@ -180,13 +183,23 @@ func TestAGlobalBusinessStrategyIsWithheldWhereItCannotRunAsOne(t *testing.T) {
 			reason: controlplane.GlobalBusinessLegacyTarget,
 			source: "bk_monitor/time_series",
 		},
-		"a PromQL query": {
+		"a PromQL query over a bare metric name": {
 			item: func(item map[string]any) {
 				item["query_configs"] = []any{map[string]any{"data_source_label": "prometheus", "data_type_label": "time_series",
-					"promql": "sum by (host) (up)", "agg_interval": 60}}
+					"promql": "sum by (host) (k8s:node_load1) / sum by (host) (up)", "agg_interval": 60}}
+			},
+			reason: controlplane.GlobalBusinessQueryTable,
+			source: controlplane.GlobalQuerySourcePromQL,
+			metric: "up",
+		},
+		"a PromQL query over a log source": {
+			item: func(item map[string]any) {
+				item["query_configs"] = []any{map[string]any{"data_source_label": "prometheus", "data_type_label": "time_series",
+					"promql": "count(bklog:index_set:m)", "agg_interval": 60}}
 			},
 			reason: controlplane.GlobalBusinessQueryKind,
 			source: controlplane.GlobalQuerySourcePromQL,
+			metric: "bklog:index_set:m",
 		},
 		"an event query": {
 			item: func(item map[string]any) {
@@ -238,6 +251,9 @@ func TestAGlobalBusinessStrategyIsWithheldWhereItCannotRunAsOne(t *testing.T) {
 				if disposition.Reason == "GLOBAL_STRATEGY_UNSUPPORTED" {
 					found = true
 					want := "reason=" + test.reason + " source=" + test.source
+					if test.source == controlplane.GlobalQuerySourcePromQL {
+						want += " metric=" + test.metric
+					}
 					if disposition.Disposition != controlplane.DispositionUnsupported || disposition.Detail != want {
 						t.Fatalf("disposition = %+v, want UNSUPPORTED with %q", disposition, want)
 					}
@@ -322,6 +338,71 @@ func TestAGlobalBusinessStrategyThatMeetsTheConditionsCompiles(t *testing.T) {
 	}
 }
 
+// A global business strategy whose PromQL names its data label compiles as
+// a global Plan, counted accepted under promql: the global APM latency
+// strategy (224 on the test environment) as written. Its records name no
+// bk_biz_id and no cluster - the expression groups by application, instance,
+// service and span - so each is filed under the Plan's own business, the
+// strategy groups by neither, and a record that happens to carry bk_biz_id
+// does not move it either.
+func TestAGlobalBusinessPromQLStrategyNamingItsDataLabelCompiles(t *testing.T) {
+	strategy := twoThresholdStrategiesWithDelay(t, 0)[0]
+	strategy.Document = editedDocument(t, strategy.Document, func(top map[string]any) { top["strategy_revision"] = 7 }, func(item map[string]any) {
+		item["query_configs"] = []any{map[string]any{"data_source_label": "prometheus", "data_type_label": "time_series", "agg_interval": 60,
+			"agg_dimension": []any{"app_name", "bk_instance_id", "service_name"},
+			"promql": "(histogram_quantile(0.95,sum by (le,app_name,bk_instance_id,service_name,span_name) " +
+				"(increase(bkmonitor:apm:bk_apm_duration_bucket[60s])))) / 1000000"}}
+	})
+	strategy.Identity.GlobalBusiness = true
+	catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{
+		Planner: globalBusinessPlanner(t), Strategies: []controlplane.SourceStrategy{strategy}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog.QueryGroups) != 1 {
+		t.Fatalf("groups = %d, dispositions %+v", len(catalog.QueryGroups), catalog.Dispositions)
+	}
+	group := catalog.QueryGroups[0]
+	plan := group.Plans[0].Plan
+	if !plan.GlobalBusiness || !group.QueryPlan.GlobalBusiness || group.QueryPlan.PromQL == nil {
+		t.Fatalf("Plan global=%t, facts global=%t, promql=%v", plan.GlobalBusiness, group.QueryPlan.GlobalBusiness, group.QueryPlan.PromQL)
+	}
+	wantRecord := []controlplane.GlobalStrategy{{SourceID: strategy.SourceID, QuerySource: controlplane.GlobalQuerySourcePromQL}}
+	if !reflect.DeepEqual(catalog.GlobalStrategies, wantRecord) {
+		t.Fatalf("global strategies = %+v, want %+v", catalog.GlobalStrategies, wantRecord)
+	}
+	if got := controlplane.ComposeCatalog(catalog).GlobalStrategies; !reflect.DeepEqual(got, map[string]int{"accepted": 1, "global_unsupported": 0, "withheld": 0}) {
+		t.Fatalf("outcomes = %v", got)
+	}
+	business := group.QueryPlan.BusinessID
+	if business == "" {
+		t.Fatal("the Plan carries no business of its own")
+	}
+	clusters := admission.BusinessLookups{Clusters: clusterBusinesses{"BCS-K8S-1": "77"}}
+	for name, record := range map[string]map[string]any{
+		"the expression's own groups":   {"app_name": "a", "bk_instance_id": "i", "service_name": "s", "span_name": "x"},
+		"a stray bk_biz_id and cluster": {"app_name": "a", "bk_biz_id": "33", "bcs_cluster_id": "BCS-K8S-1"},
+	} {
+		dimensions := map[string]json.RawMessage{}
+		for key, value := range record {
+			encoded, _ := json.Marshal(value)
+			dimensions[key] = encoded
+		}
+		got := admission.AttributeBusiness(plan.TargetPlan, plan.InputProjection.DimensionFields, business, dimensions, clusters)
+		want := admission.BusinessAttribution{BusinessID: business, Source: contract.BusinessAttributionGlobal}
+		if got != want {
+			t.Fatalf("%s: attribution = %+v, want %+v (dimension fields %v)", name, got, want, plan.InputProjection.DimensionFields)
+		}
+	}
+}
+
+type clusterBusinesses map[string]string
+
+func (c clusterBusinesses) LookupClusterBusiness(cluster string) (string, bool) {
+	business, found := c[cluster]
+	return business, found
+}
+
 // The global composition is a partition of the strategies the source marks
 // global: each one counted once under what the round did with it,
 // the three outcomes adding up to them, and the refused ones' word and source
@@ -373,7 +454,7 @@ func TestTheGlobalCompositionPartitionsTheStrategiesTheSourceMarksGlobal(t *test
 		refusedCount += count
 	}
 	wantSplit := map[controlplane.GlobalUnsupportedKey]int{
-		{Reason: controlplane.GlobalBusinessQueryKind, QuerySource: controlplane.GlobalQuerySourcePromQL}: 1,
+		{Reason: controlplane.GlobalBusinessQueryTable, QuerySource: controlplane.GlobalQuerySourcePromQL}: 1,
 	}
 	if refusedCount != composition.GlobalStrategies["global_unsupported"] || !reflect.DeepEqual(composition.GlobalUnsupported, wantSplit) {
 		t.Fatalf("refused split = %v adding up to %d, want %v adding up to the refused outcome",
