@@ -3879,13 +3879,19 @@ const (
 	// current calibration), its members read fresh and standing in for them,
 	// each close addressed by fingerprint. Counts alerts.
 	EffectiveCloseIndexSetAcked ReasonCode = "index_set_close_acked"
-	// EffectiveCloseAlreadySent counts, by alert, a close held back because
-	// this process sent it and its evidence has not been read since: a
-	// listed alert's within the minute its send asks a calibration in, one
-	// addressed from the index set until a read of the set lands after the
-	// send, at most the set's stale bound. The listing or set still names the
-	// alert only because it was read before the link closed it.
+	// EffectiveCloseAlreadySent counts a close held back because this
+	// process sent it, once per send held (the first step that holds it),
+	// not once per step: a listed alert's within the minute its send asks a
+	// calibration in, one addressed from the index set until a read of the
+	// set after the send no longer carries the member, or the set's stale
+	// bound has passed since the send. The listing or set still names the
+	// alert only because it was read before the link processed the close.
 	EffectiveCloseAlreadySent ReasonCode = "close_already_sent"
+	// EffectiveCloseSentMemoryFull counts, once per Plan per step, closes
+	// not sent because the memory of sends (EffectiveCloseAlreadySent's) is
+	// at its bound: a close it could not remember would go out again on
+	// every step. Sent once the memory has room.
+	EffectiveCloseSentMemoryFull ReasonCode = "sent_memory_full"
 	// EffectiveCloseReopenedSinceRead counts, by alert, a close held back
 	// because a recovery for its fingerprint was sent after the listing or
 	// the index set it was decided from was read, and an ABNORMAL of it after
@@ -3905,7 +3911,7 @@ var EffectiveCloseOutcomes = []ReasonCode{
 	EffectiveCloseEffectiveTimeUnknown, EffectiveCloseLegacyUnavailable, EffectiveCloseUnavailable, EffectiveCloseUnsupportedRunner,
 	EffectiveCloseViewNotExecutable, EffectiveCloseCalendarDeletionUnsettled, EffectiveCloseBoundaryActive,
 	EffectiveCloseBusinessUnknown, EffectiveCloseSourceLastKnown, EffectiveCloseSourceUnknown,
-	EffectiveCloseEvidenceUnavailable, EffectiveCloseIndexSetAcked, EffectiveCloseAlreadySent,
+	EffectiveCloseEvidenceUnavailable, EffectiveCloseIndexSetAcked, EffectiveCloseAlreadySent, EffectiveCloseSentMemoryFull,
 	EffectiveCloseReopenedSinceRead, EffectiveCloseRecoveryUnknown,
 }
 

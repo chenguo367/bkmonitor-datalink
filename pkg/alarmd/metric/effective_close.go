@@ -58,10 +58,12 @@ func newEffectiveCloseCollector() *effectiveCloseCollector {
 				"missing from the set, which the set's members do not carry and are not closed from it, once per Plan per "+
 				"step - a calibrated set with no alerts is not counted; "+
 				"index_set_close_acked counts, among close_acked, closes sent by fingerprint from the index set's "+
-				"members because the set had no current calibration to list them; close_already_sent counts, by "+
-				"alert, closes held back because this process sent them and their evidence was not read since - a "+
-				"listed alert's within a minute, one from the index set until a read of the set lands after the send, "+
-				"at most the set's stale bound; reopened_since_read and recovery_unknown count, by alert, closes held "+
+				"members because the set had no current calibration to list them; close_already_sent counts, once "+
+				"per send held and not per step, closes held back because this process sent them - a listed alert's "+
+				"within a minute of the send, one from the index set until a read of the set after the send no longer "+
+				"carries the member or the set's stale bound has passed since the send, after which a set still "+
+				"carrying it closes it once more; sent_memory_full counts, once per Plan per step, closes not sent because "+
+				"that memory of sends is at its bound, sent once it has room; reopened_since_read and recovery_unknown count, by alert, closes held "+
 				"back because a recovery of the fingerprint was sent after the listing or set they were decided from "+
 				"was read and an ABNORMAL of it after that, or the record of reopens could not be read. Every cell "+
 				"exists from the "+

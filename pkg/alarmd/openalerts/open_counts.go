@@ -152,3 +152,25 @@ func (cache *Cache) EvidenceStarted(key StrategyKey) (listed, index time.Time) {
 	}
 	return entry.calibratedStarted, entry.indexReadStarted
 }
+
+// IndexCarries is, for a close addressed from the strategy's set, what the
+// set's own last read says: when it landed, whether it carries each of
+// fingerprints, and the set's stale bound (StrategySnapshot.StaleAfter). A
+// strategy not tracked answers a zero time and nothing carried.
+func (cache *Cache) IndexCarries(key StrategyKey, fingerprints []string) (readAt time.Time, carried []bool, staleAfter time.Duration) {
+	carried = make([]bool, len(fingerprints))
+	if cache == nil {
+		return time.Time{}, carried, 0
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	staleAfter = cache.index.staleAfter()
+	entry := cache.index.entries[key]
+	if entry == nil {
+		return time.Time{}, carried, staleAfter
+	}
+	for i, fingerprint := range fingerprints {
+		_, carried[i] = entry.index[fingerprint]
+	}
+	return entry.indexReadAt, carried, staleAfter
+}

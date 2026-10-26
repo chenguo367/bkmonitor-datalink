@@ -90,10 +90,10 @@ func TestAnIndexSetCloseIsNotSentAgainBeforeTheSetIsReadAgain(t *testing.T) {
 		if closes := fixture.closes(); len(closes) != 1 {
 			t.Fatalf("%d minute(s) on, with no read of the set since, the inactive close sent %+v, want A1 once", step, closes)
 		}
-		// The hold is counted, not silent: each step that finds A1 held
-		// says so.
-		if held := fixture.maintenanceCounts()[closeOutcomeAlreadySent]; held < uint64(2*step) {
-			t.Fatalf("%d minute(s) on, close_already_sent = %d, want the held repeat counted each step", step, held)
+		// The hold is counted, not silent, and once per send held, not
+		// once per step.
+		if held := fixture.maintenanceCounts()[closeOutcomeAlreadySent]; held != 1 {
+			t.Fatalf("%d minute(s) on, close_already_sent = %d, want the one send held counted once", step, held)
 		}
 		if after := fixture.copy.Snapshot(closePathsKey()).IndexReadAt; !after.Equal(read) {
 			t.Fatalf("a read of the set landed at %s, after the one at %s; the case needs none", after, read)
@@ -101,29 +101,46 @@ func TestAnIndexSetCloseIsNotSentAgainBeforeTheSetIsReadAgain(t *testing.T) {
 	}
 }
 
-// A read of the set that lands after the send and still carries the member
-// is fresh evidence the alert is open: the member is closed again, ten
-// seconds on, where the minute a listed alert's close is held would not
-// have let it go yet.
-func TestAnIndexSetCloseIsSentAgainOnceAReadAfterItStillCarriesTheMember(t *testing.T) {
-	fixture := standInClosedOnce(t)
-	before := fixture.copy.Snapshot(closePathsKey()).IndexReadAt
-	fixture.life.clock.Store(fixture.life.clock.Load() + (10 * time.Second).Milliseconds())
-	// The link says the set changed, as it does on writing it; the copy
-	// reads the set on its next round, and finds A1 still there.
+// readAfter has the link say the set changed, as it does on writing it,
+// and waits until the copy has read the set after before.
+func (fixture *closePathsFixture) readAfter(before time.Time) time.Time {
+	fixture.t.Helper()
 	notice, _ := json.Marshal(map[string]string{"bk_tenant_id": closePathsTenant, "strategy_id": lifecycleStrategyID})
 	if err := fixture.life.redis.Publish(context.Background(), lifecycleLinkPrefix+":changes", notice).Err(); err != nil {
-		t.Fatal(err)
+		fixture.t.Fatal(err)
 	}
 	fixture.waitFor("the copy reads the set again", func() bool {
 		return fixture.copy.Snapshot(closePathsKey()).IndexReadAt.After(before)
 	}, func() string { return fixture.copy.Snapshot(closePathsKey()).IndexReadAt.String() })
-	fixture.waitFor("the member is closed again", func() bool {
-		return fixture.maintenanceCounts()[closeOutcomeIndexSetAcked] >= 2
-	}, func() string {
-		return "index_set_close_acked=" + strconv.FormatUint(fixture.maintenanceCounts()[closeOutcomeIndexSetAcked], 10)
-	})
-	if closes := fixture.closes(); len(closes) != 2 || closes[1].Fingerprint != closePathsA1 {
-		t.Fatalf("after the read, the inactive close sent %+v, want A1 twice", closes)
+	return fixture.copy.Snapshot(closePathsKey()).IndexReadAt
+}
+
+// Reads of the set that land after the send and still carry the member are
+// no evidence the alert is still open: the set's copy lags the link's
+// processing of the close by over a minute. Live, releasing on such a read
+// sent each of a strategy's 138 members three times, about 38 s apart.
+// Three reads 38 s apart, each still carrying A1, send nothing again; the
+// hold is counted once. Then a read without A1 lets the send go and sends
+// nothing.
+func TestAnIndexSetCloseIsHeldThroughReadsThatStillCarryTheMemberInTheBundle(t *testing.T) {
+	fixture := standInClosedOnce(t)
+	read := fixture.copy.Snapshot(closePathsKey()).IndexReadAt
+	for n := 1; n <= 3; n++ {
+		fixture.life.clock.Store(fixture.life.clock.Load() + (38 * time.Second).Milliseconds())
+		read = fixture.readAfter(read)
+		fixture.stepsRun(2)
+		if closes := fixture.closes(); len(closes) != 1 {
+			t.Fatalf("after read %d still carrying A1, the inactive close sent %+v, want A1 once", n, closes)
+		}
+	}
+	if held := fixture.maintenanceCounts()[closeOutcomeAlreadySent]; held != 1 {
+		t.Fatalf("close_already_sent = %d, want the one send held counted once", held)
+	}
+	fixture.setMembers()
+	fixture.life.clock.Store(fixture.life.clock.Load() + (38 * time.Second).Milliseconds())
+	fixture.readAfter(read)
+	fixture.stepsRun(2)
+	if closes := fixture.closes(); len(closes) != 1 {
+		t.Fatalf("after a read without A1, the inactive close sent %+v, want A1 once", closes)
 	}
 }

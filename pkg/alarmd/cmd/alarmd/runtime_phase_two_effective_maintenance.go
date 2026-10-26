@@ -114,6 +114,7 @@ const (
 	closeOutcomeEvidenceUnavailable  = string(observability.EffectiveCloseEvidenceUnavailable)
 	closeOutcomeIndexSetAcked        = string(observability.EffectiveCloseIndexSetAcked)
 	closeOutcomeAlreadySent          = string(observability.EffectiveCloseAlreadySent)
+	closeOutcomeSentMemoryFull       = string(observability.EffectiveCloseSentMemoryFull)
 	closeOutcomeReopenedSinceRead    = string(observability.EffectiveCloseReopenedSinceRead)
 	closeOutcomeRecoveryUnknown      = string(observability.EffectiveCloseRecoveryUnknown)
 )
@@ -181,10 +182,14 @@ type effectiveMaintenance struct {
 	// deletes the external member or declares Linkd closed; reconciliation
 	// confirms that. A close of a listed alert is held a minute, which the
 	// calibration its send requests answers within. A close addressed from
-	// the index set is held until a read of that strategy's set lands after
-	// the send (pruneSent), and at most the set's stale bound, past which the
-	// set no longer stands in: what the set listed before the send is no
-	// evidence the alert is still open after it. Bounded by LocalEntries.
+	// the index set is held until a read of the set after the send no
+	// longer carries the member, or until the set's stale bound has passed
+	// since the send, and is sent again at most once a stale bound
+	// (pruneSent): the set's copy lags the link's processing of a close by
+	// over a minute, so a read landing after the send still carries the
+	// member. An entry also goes when its strategy is no longer tracked
+	// here. Bounded by LocalEntries: at the bound a close, listed or from
+	// the set, is not sent until an entry goes (sent_memory_full).
 	sent map[string]sentClose
 	// recoveries is the fleet's record of the recoveries alarmd sent (L40),
 	// nil without the link's Console: a close is held back on a recovery of
@@ -411,6 +416,13 @@ func (m *effectiveMaintenance) step(ctx context.Context) {
 	for key := range m.calibrationRequested {
 		if m.refs[key] == 0 {
 			delete(m.calibrationRequested, key)
+		}
+	}
+	// A send of a strategy no Plan here tracks any more is not held: its
+	// Plan ended or moved, and whoever tracks it next judges it afresh.
+	for id, sent := range m.sent {
+		if m.refs[sent.key] == 0 {
+			delete(m.sent, id)
 		}
 	}
 	m.trackingMu.Unlock()
@@ -856,18 +868,30 @@ func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.Q
 			continue
 		}
 		batch := make([]linkdoutput.CloseRequest, 0, m.capacity.CloseBatch)
-		unknown, already := 0, 0
+		unknown, already, full := 0, 0, false
 		for _, alert := range alerts {
 			if alert.EventSourceID != m.sourceID {
 				continue
 			}
 			sentKey := key.TenantID + "\x00" + alert.EventSourceID + "\x00" + alert.AlertID
-			if _, sent := m.sent[sentKey]; sent {
-				// Held back until its evidence is read again after the send
-				// (pruneSent), and counted: a hold that says nothing reads as
-				// a close nobody decided.
-				already++
+			if sent, held := m.sent[sentKey]; held {
+				// Held back until pruneSent lets it go, and counted once, at
+				// the first step that holds it: a hold that says nothing
+				// reads as a close nobody decided, and one counted every
+				// step reads as the step rate, not as the repeats held.
+				if !sent.counted {
+					sent.counted = true
+					m.sent[sentKey] = sent
+					already++
+				}
 				continue
+			}
+			// A close the memory of sends has no room for is not sent: not
+			// remembered, it would go out again on every step. It waits,
+			// counted, until a send held there is let go.
+			if len(m.sent)+len(batch) >= m.capacity.LocalEntries {
+				full = true
+				break
 			}
 			alertBusiness := business
 			if global {
@@ -894,6 +918,10 @@ func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.Q
 		if already > 0 {
 			m.observeTrace(ctx, observability.TraceFields{QueryGroupKey: string(qg), StrategyID: plan.Identity.StrategyID},
 				closeOutcomeAlreadySent, nil, already)
+		}
+		if full {
+			m.observeTrace(ctx, observability.TraceFields{QueryGroupKey: string(qg), StrategyID: plan.Identity.StrategyID},
+				closeOutcomeSentMemoryFull, errSentMemoryFull, 1)
 		}
 		batch = m.holdReopened(ctx, qg, plan, key, batch, fromSet)
 		if len(batch) == 0 {
@@ -959,7 +987,8 @@ func (m *effectiveMaintenance) sendClose(ctx context.Context, qg execution.Query
 		}
 		for _, request := range batch {
 			if len(m.sent) < m.capacity.LocalEntries {
-				m.sent[key.TenantID+"\x00"+m.sourceID+"\x00"+request.AlertInstanceID] = sentClose{at: now, key: key, fromSet: fromSet}
+				m.sent[key.TenantID+"\x00"+m.sourceID+"\x00"+request.AlertInstanceID] = sentClose{at: now, key: key,
+					fingerprint: request.Fingerprint, fromSet: fromSet}
 			}
 		}
 		m.requestCalibration(key, now)
@@ -997,9 +1026,10 @@ func (m *effectiveMaintenance) sendClose(ctx context.Context, qg execution.Query
 }
 
 var (
-	errClosePrecheck = errors.New("inactive close: owner check before send")
-	errCloseNotHeld  = errors.New("the Query Group is no longer held here, or the replica is draining")
-	errCloseSend     = errors.New("inactive close: send")
+	errSentMemoryFull = errors.New("inactive close: the memory of sends is at its bound")
+	errClosePrecheck  = errors.New("inactive close: owner check before send")
+	errCloseNotHeld   = errors.New("the Query Group is no longer held here, or the replica is draining")
+	errCloseSend      = errors.New("inactive close: send")
 	// The recheck of the one Plan a batch is for: its effective time active
 	// again, or not readable, at the send. Both are that Plan's alone.
 	errCloseBoundaryActive = errors.New("inactive close: the Plan is active again at the send")
@@ -1161,22 +1191,33 @@ func (m *effectiveMaintenance) releaseGroupLocked(qg execution.QueryGroupIdentit
 }
 
 // sentClose is one close the broker acknowledged: when, for which
-// strategy, and whether it was addressed from the strategy's index set.
+// strategy and fingerprint, whether it was addressed from the strategy's
+// index set, and whether a step has counted its repeat held.
 type sentClose struct {
-	at      time.Time
-	key     openalerts.StrategyKey
-	fromSet bool
+	at          time.Time
+	key         openalerts.StrategyKey
+	fingerprint string
+	fromSet     bool
+	counted     bool
 }
 
 // pruneSent lets go of the sends whose repeat is no longer held back: a
 // listed alert's a minute after its send; one addressed from the index set
-// once a read of its strategy's set has landed after the send - a read that
-// still carries the member is fresh evidence and closes it again - or once
-// the set's stale bound, a minute at least, has passed. Held a minute only,
-// a set's members were sent again by the step after it whenever the copy
-// had not read the set since: the same closes twice, a minute apart.
+// once a read of its strategy's set landed after the send without the
+// member - nothing is sent then, the set no longer names it - or once the
+// set's stale bound, a minute at least, has passed since the send, after
+// which a set read fresh and still carrying the member closes it once more
+// and holds that send in turn. A read after the send that still carries
+// the member is not evidence the alert is still open: the set's copy lags
+// the link's processing of the close by over a minute, and releasing on it
+// sent each of a strategy's members three times, about 38 s apart. Held a
+// minute only, they were sent again by the step after it whenever the copy
+// had not read the set since.
 func (m *effectiveMaintenance) pruneSent(now time.Time) {
-	snapshots := map[openalerts.StrategyKey]openalerts.StrategySnapshot{}
+	type fromSet struct {
+		ids, fingerprints []string
+	}
+	sets := map[openalerts.StrategyKey]*fromSet{}
 	for id, sent := range m.sent {
 		if !sent.fromSet {
 			if now.Sub(sent.at) >= time.Minute {
@@ -1184,13 +1225,20 @@ func (m *effectiveMaintenance) pruneSent(now time.Time) {
 			}
 			continue
 		}
-		snapshot, read := snapshots[sent.key]
-		if !read {
-			snapshot = m.cache.Snapshot(sent.key)
-			snapshots[sent.key] = snapshot
+		set := sets[sent.key]
+		if set == nil {
+			set = &fromSet{}
+			sets[sent.key] = set
 		}
-		if snapshot.IndexReadAt.After(sent.at) || now.Sub(sent.at) >= max(snapshot.StaleAfter, time.Minute) {
-			delete(m.sent, id)
+		set.ids, set.fingerprints = append(set.ids, id), append(set.fingerprints, sent.fingerprint)
+	}
+	for key, set := range sets {
+		readAt, carried, staleAfter := m.cache.IndexCarries(key, set.fingerprints)
+		for i, id := range set.ids {
+			sent := m.sent[id]
+			if now.Sub(sent.at) >= max(staleAfter, time.Minute) || (readAt.After(sent.at) && !carried[i]) {
+				delete(m.sent, id)
+			}
 		}
 	}
 }

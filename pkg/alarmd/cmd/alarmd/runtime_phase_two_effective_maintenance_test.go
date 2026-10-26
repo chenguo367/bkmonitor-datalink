@@ -58,8 +58,14 @@ type maintenanceTestIndex struct {
 	own          string
 	reconcileErr error
 	members      []string
-	readErr      error
-	trusted      bool
+	// membersOf, when set, answers each read of the set instead of members:
+	// a set whose members change between reads.
+	membersOf func() []string
+	// alertsOf, when set, answers each reconcile's alerts instead of
+	// alerts: a listing that changes between calibrations.
+	alertsOf func() []openalerts.Alert
+	readErr  error
+	trusted  bool
 }
 
 // confirmedMaintenanceFacts is a Console that has confirmed where the sets
@@ -77,6 +83,9 @@ func (s maintenanceTestIndex) ReadSet(context.Context, openalerts.StrategyKey) (
 	if s.readErr != nil {
 		return nil, s.readErr
 	}
+	if s.membersOf != nil {
+		return s.membersOf(), nil
+	}
 	if s.members != nil {
 		return s.members, nil
 	}
@@ -91,7 +100,11 @@ func (s maintenanceTestIndex) Reconcile(ctx context.Context, key openalerts.Stra
 		return openalerts.Reconciliation{}, s.reconcileErr
 	}
 	members, _ := s.ReadSet(ctx, key)
-	return openalerts.Reconciliation{EventSourceID: s.own, Members: members, Alerts: s.alerts}, nil
+	alerts := s.alerts
+	if s.alertsOf != nil {
+		alerts = s.alertsOf()
+	}
+	return openalerts.Reconciliation{EventSourceID: s.own, Members: members, Alerts: alerts}, nil
 }
 func (s maintenanceTestIndex) Watch(ctx context.Context, ready func(bool), _ func(openalerts.StrategyKey), _ func(openalerts.NoticeRefusal)) error {
 	ready(true)
