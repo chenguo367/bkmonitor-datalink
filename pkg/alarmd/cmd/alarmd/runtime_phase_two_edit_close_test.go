@@ -582,6 +582,23 @@ func TestWithoutFactsOnlyARemovedDimensionCloses(t *testing.T) {
 	}
 }
 
+// A listed alert that names no producer is not decided, even where its
+// record says it is this process's: the listing is what binds an alert to
+// the source, and one that does not is counted, not closed.
+func TestAListedAlertWithoutAProducerIsNotDecided(t *testing.T) {
+	fixture := newEditFixture()
+	plan := editPlan()
+	plan.DimensionFields = []string{"ip"}
+	fixture.plans.facts["10"] = plan
+	fixture.threshold("threshold", 8, "critical", "ip", "device")
+	fixture.link.alerts["10"][0].EventSourceID = ""
+	fixture.step()
+	fixture.wantClosed(t, map[string]string{})
+	if stats := fixture.loop.Stats(); stats[editclose.OutcomeProducerUnknown] != 1 || stats[editclose.OutcomeDimensionsChanged] != 0 {
+		t.Fatalf("stats %+v, want producer_unknown counted and nothing decided", stats)
+	}
+}
+
 // The condition rule is held: a condition change closes nothing, and the
 // no-data alerts it would have closed are counted condition_rule_held.
 // Threshold alerts are not its to judge.
