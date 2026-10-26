@@ -1347,7 +1347,7 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 	if err := validateQueryIdentity(source.Identity, facts); err != nil {
 		return candidate, err
 	}
-	if refusal, word := globalBusinessRefusal(source.SourceID, source.Identity, targetScope, facts); refusal != nil {
+	if refusal, word := globalBusinessRefusal(source.SourceID, source.Identity, targetScope, facts, querySource.QueryConfigs); refusal != nil {
 		candidate.dispositions = append(candidate.dispositions, *refusal)
 		candidate.globalRefusal = word
 		return candidate, errors.New(ReasonGlobalStrategyUnsupported + ": " + refusal.Detail)

@@ -610,3 +610,107 @@ func TestAGlobalStrategyListedTwiceIsCountedOnceAccepted(t *testing.T) {
 			duplicate, len(catalog.GlobalStrategies), composition.GlobalStrategies, want)
 	}
 }
+
+// A global strategy's PromQL that carries agg_condition is refused as
+// condition_ignored with the condition keys named: the PromQL path sends
+// nothing of agg_condition, so the business filter the writer adds when one
+// strategy covers several selected businesses (bk_biz_id eq the selected)
+// would not narrow a query that skips the space, and the strategy would read
+// every business of its tenant. The same PromQL without the condition is
+// admitted, and an ordinary strategy carrying it compiles as before.
+func TestAGlobalBusinessPromQLCarryingAConditionIsRefused(t *testing.T) {
+	const promQL = "sum by (bk_biz_id) (bkmonitor:apm:bk_apm_count)"
+	businesses := []any{map[string]any{"key": "bk_biz_id", "method": "eq", "value": []any{2, 5}}}
+	single := func(conditions []any) func(map[string]any) {
+		return func(item map[string]any) {
+			config := map[string]any{"data_source_label": "prometheus", "data_type_label": "time_series", "agg_interval": 60, "promql": promQL}
+			if conditions != nil {
+				config["agg_condition"] = conditions
+			}
+			item["query_configs"] = []any{config}
+		}
+	}
+	multi := func(item map[string]any) {
+		query := func(alias, promql string) map[string]any {
+			return map[string]any{"data_source_label": "prometheus", "data_type_label": "time_series", "expression_mode": "promql",
+				"alias": alias, "promql": promql, "agg_interval": 60}
+		}
+		second := query("b", "sum by (bk_biz_id) (bkmonitor:apm:bk_apm_total)")
+		second["agg_condition"] = []any{
+			map[string]any{"key": "service_name", "method": "eq", "value": []any{"s"}},
+			map[string]any{"condition": "and", "key": "bk_biz_id", "method": "eq", "value": []any{2, 5}},
+		}
+		item["expression"] = "a / b"
+		item["query_configs"] = []any{query("a", promQL), second}
+	}
+	build := func(t *testing.T, item func(map[string]any), global bool) (controlplane.SourceStrategy, controlplane.Catalog) {
+		t.Helper()
+		strategy := twoThresholdStrategiesWithDelay(t, 0)[0]
+		strategy.Document = editedDocument(t, strategy.Document, func(top map[string]any) { top["strategy_revision"] = 7 }, item)
+		strategy.Identity.GlobalBusiness = global
+		catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{
+			Planner: globalBusinessPlanner(t), Strategies: []controlplane.SourceStrategy{strategy}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strategy, catalog
+	}
+	for name, test := range map[string]struct {
+		item      func(map[string]any)
+		detail    string
+		fieldPath string
+	}{
+		"the selected businesses on one PromQL": {
+			item:      single(businesses),
+			detail:    "reason=condition_ignored source=promql keys=bk_biz_id",
+			fieldPath: "items[0].query_configs[0].agg_condition",
+		},
+		"a condition on the second query of a PromQL expression": {
+			item:      multi,
+			detail:    "reason=condition_ignored source=promql keys=bk_biz_id,service_name",
+			fieldPath: "items[0].query_configs[1].agg_condition",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			strategy, global := build(t, test.item, true)
+			if len(global.QueryGroups) != 0 {
+				t.Fatalf("the global strategy compiled into %d groups", len(global.QueryGroups))
+			}
+			var refused []controlplane.ObjectDisposition
+			for _, disposition := range global.Dispositions {
+				if disposition.Reason == "GLOBAL_STRATEGY_UNSUPPORTED" {
+					refused = append(refused, disposition)
+				}
+			}
+			if len(refused) != 1 || refused[0].Disposition != controlplane.DispositionUnsupported ||
+				refused[0].Detail != test.detail || refused[0].FieldPath != test.fieldPath {
+				t.Fatalf("refusals = %+v, want one UNSUPPORTED at %s with %q", refused, test.fieldPath, test.detail)
+			}
+			wantRecord := []controlplane.GlobalStrategy{{SourceID: strategy.SourceID, Refusal: "condition_ignored", QuerySource: "promql"}}
+			if !reflect.DeepEqual(global.GlobalStrategies, wantRecord) {
+				t.Fatalf("global strategies = %+v, want %+v", global.GlobalStrategies, wantRecord)
+			}
+			wantSplit := map[controlplane.GlobalUnsupportedKey]int{{Reason: "condition_ignored", QuerySource: "promql"}: 1}
+			if got := controlplane.ComposeCatalog(global).GlobalUnsupported; !reflect.DeepEqual(got, wantSplit) {
+				t.Fatalf("global unsupported = %v, want %v", got, wantSplit)
+			}
+			// An ordinary strategy carrying the same condition compiles.
+			_, ordinary := build(t, test.item, false)
+			if len(ordinary.QueryGroups) != 1 || ordinary.QueryGroups[0].QueryPlan.PromQL == nil || ordinary.GlobalStrategies != nil {
+				t.Fatalf("the ordinary strategy: groups %d, dispositions %+v", len(ordinary.QueryGroups), ordinary.Dispositions)
+			}
+		})
+	}
+	for name, conditions := range map[string][]any{"no agg_condition": nil, "an empty agg_condition": {}} {
+		t.Run(name, func(t *testing.T) {
+			strategy, catalog := build(t, single(conditions), true)
+			if len(catalog.QueryGroups) != 1 || !catalog.QueryGroups[0].QueryPlan.GlobalBusiness {
+				t.Fatalf("groups = %d, dispositions %+v", len(catalog.QueryGroups), catalog.Dispositions)
+			}
+			wantRecord := []controlplane.GlobalStrategy{{SourceID: strategy.SourceID, QuerySource: "promql"}}
+			if !reflect.DeepEqual(catalog.GlobalStrategies, wantRecord) {
+				t.Fatalf("global strategies = %+v, want %+v", catalog.GlobalStrategies, wantRecord)
+			}
+		})
+	}
+}

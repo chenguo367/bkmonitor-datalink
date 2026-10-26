@@ -86,7 +86,7 @@ func TestAGlobalBusinessPromQLQueryIsAdmittedOnlyWhenEverySelectorRoutes(t *test
 	for name, expression := range admitted {
 		t.Run(name, func(t *testing.T) {
 			facts := execution.QueryPlanFacts{PromQL: &execution.PromQLQuery{Expression: expression}}
-			if refusal, word := globalBusinessRefusal("1001", SourceIdentity{GlobalBusiness: true}, nil, facts); refusal != nil || word != "" {
+			if refusal, word := globalBusinessRefusal("1001", SourceIdentity{GlobalBusiness: true}, nil, facts, nil); refusal != nil || word != "" {
 				t.Fatalf("%q refused: %+v %q", expression, refusal, word)
 			}
 		})
@@ -116,14 +116,14 @@ func TestAGlobalBusinessPromQLQueryIsAdmittedOnlyWhenEverySelectorRoutes(t *test
 	for name, test := range refused {
 		t.Run(name, func(t *testing.T) {
 			facts := execution.QueryPlanFacts{PromQL: &execution.PromQLQuery{Expression: test.expression}}
-			refusal, word := globalBusinessRefusal("1001", SourceIdentity{GlobalBusiness: true}, nil, facts)
+			refusal, word := globalBusinessRefusal("1001", SourceIdentity{GlobalBusiness: true}, nil, facts, nil)
 			want := "reason=" + test.reason + " source=" + GlobalQuerySourcePromQL + " metric=" + test.metric
 			if refusal == nil || refusal.Detail != want || word != test.reason || refusal.Reason != ReasonGlobalStrategyUnsupported {
 				t.Fatalf("%q: refusal = %+v word %q, want detail %q and word %s", test.expression, refusal, word, want, test.reason)
 			}
 			// An ordinary strategy's PromQL is scoped by its space and is
 			// none of this admission's business.
-			if refusal, word := globalBusinessRefusal("1001", SourceIdentity{}, nil, facts); refusal != nil || word != "" {
+			if refusal, word := globalBusinessRefusal("1001", SourceIdentity{}, nil, facts, nil); refusal != nil || word != "" {
 				t.Fatalf("an ordinary PromQL strategy was refused: %+v %q", refusal, word)
 			}
 		})
@@ -149,5 +149,43 @@ func TestAGlobalPromQLsOutputGroupingIsItsOutermostByList(t *testing.T) {
 		if got := promQLOutputGrouping(expression); !reflect.DeepEqual(got, want) {
 			t.Errorf("promQLOutputGrouping(%q) = %v, want %v", expression, got, want)
 		}
+	}
+}
+
+// The condition keys a condition_ignored detail names are bounded, the rest
+// counted, and a config whose agg_condition cannot be read is named
+// unreadable rather than passed as one without conditions.
+func TestTheConditionKeysOfAGlobalPromQLAreBoundedAndNeverGuessed(t *testing.T) {
+	for name, test := range map[string]struct {
+		configs   []json.RawMessage
+		keys      string
+		fieldPath string
+	}{
+		"ten keys": {
+			configs: []json.RawMessage{json.RawMessage(`{"agg_condition":[{"key":"k0"},{"key":"k1"},{"key":"k2"},{"key":"k3"},` +
+				`{"key":"k4"},{"key":"k5"},{"key":"k6"},{"key":"k7"},{"key":"k8"},{"key":"k9"},{"key":"k0"}]}`)},
+			keys:      "k0,k1,k2,k3,k4,k5,k6,k7,+2",
+			fieldPath: "items[0].query_configs[0].agg_condition",
+		},
+		"an unreadable condition": {
+			configs:   []json.RawMessage{json.RawMessage(`{"agg_condition":[]}`), json.RawMessage(`{"agg_condition":{"key":"bk_biz_id"}}`)},
+			keys:      "unreadable",
+			fieldPath: "items[0].query_configs[1].agg_condition",
+		},
+		"a condition without a key": {
+			configs:   []json.RawMessage{json.RawMessage(`{"agg_condition":[{"method":"eq","value":[2]}]}`)},
+			keys:      "(empty)",
+			fieldPath: "items[0].query_configs[0].agg_condition",
+		},
+		"none": {
+			configs: []json.RawMessage{json.RawMessage(`{"agg_condition":[]}`), json.RawMessage(`{}`)},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			keys, fieldPath := promQLConditionKeys(test.configs)
+			if keys != test.keys || fieldPath != test.fieldPath {
+				t.Fatalf("keys %q at %q, want %q at %q", keys, fieldPath, test.keys, test.fieldPath)
+			}
+		})
 	}
 }

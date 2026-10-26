@@ -6,6 +6,8 @@
 package controlplane
 
 import (
+	"encoding/json"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -43,12 +45,22 @@ const (
 	// GlobalBusinessOutputProtocol: the Plan would publish the compatible
 	// event, which has no place for the business an alert is about.
 	GlobalBusinessOutputProtocol = "output_protocol"
+	// GlobalBusinessConditionIgnored: a PromQL query carries agg_condition.
+	// The PromQL path sends the expression and its filter_dict match and
+	// nothing of agg_condition, so a condition there - the business filter
+	// the writer adds when one strategy covers several selected businesses -
+	// would not narrow what a query that skips the space reads, and the
+	// strategy would read every business of its tenant. The detail names the
+	// condition keys (keys=<key>,...). The writer lifts it by writing the
+	// filter into the PromQL itself.
+	GlobalBusinessConditionIgnored = "condition_ignored"
 )
 
 // GlobalBusinessRefusalWords is every word a GLOBAL_STRATEGY_UNSUPPORTED
 // refusal names, the reason label's closed set in the global composition.
 var GlobalBusinessRefusalWords = []string{
 	GlobalBusinessLegacyTarget, GlobalBusinessQueryKind, GlobalBusinessQueryTable, GlobalBusinessOutputProtocol,
+	GlobalBusinessConditionIgnored,
 }
 
 // globalBusinessQuerySemantics are the query sources a global business Plan
@@ -84,9 +96,12 @@ func GlobalQuerySource(facts execution.QueryPlanFacts) string {
 // before its Plan is compiled, and nil for one that passes or is not global.
 // The word it was refused for is returned beside the record, for the round's
 // global composition to count without reading it back out of the detail.
-// The output protocol is decided later and checked where it is.
+// The output protocol is decided later and checked where it is. queryConfigs
+// are the item's query configs as the source carries them, which is where a
+// PromQL query's agg_condition is: the compiled facts do not carry it.
 func globalBusinessRefusal(
 	sourceID string, identity SourceIdentity, targetScope *contract.TargetScopeV2, facts execution.QueryPlanFacts,
+	queryConfigs []json.RawMessage,
 ) (*ObjectDisposition, string) {
 	if !identity.GlobalBusiness {
 		return nil, ""
@@ -101,12 +116,17 @@ func globalBusinessRefusal(
 	}
 	if facts.PromQL != nil {
 		reason, metric := globalPromQLRefusal(facts.PromQL.Expression)
-		if reason == "" {
-			return nil, ""
+		if reason != "" {
+			refusal := globalBusinessUnsupported(sourceID, reason, "items[0].query_configs", source)
+			refusal.Detail += " metric=" + metric
+			return &refusal, reason
 		}
-		refusal := globalBusinessUnsupported(sourceID, reason, "items[0].query_configs", source)
-		refusal.Detail += " metric=" + metric
-		return &refusal, reason
+		if keys, fieldPath := promQLConditionKeys(queryConfigs); keys != "" {
+			refusal := globalBusinessUnsupported(sourceID, GlobalBusinessConditionIgnored, fieldPath, source)
+			refusal.Detail += " keys=" + keys
+			return &refusal, GlobalBusinessConditionIgnored
+		}
+		return nil, ""
 	}
 	for _, semantics := range facts.SourceSemantics {
 		if _, supported := globalBusinessQuerySemantics[semantics]; !supported {
@@ -119,6 +139,52 @@ func globalBusinessRefusal(
 		}
 	}
 	return nil, ""
+}
+
+// promQLConditionKeysShown bounds the condition keys a condition_ignored
+// detail names; the rest are counted (+<n>).
+const promQLConditionKeysShown = 8
+
+// promQLConditionKeys names the agg_condition keys PromQL query configs carry,
+// distinct and sorted, and the field path of the first config carrying one;
+// empty for configs that carry none. A config whose agg_condition cannot be
+// read is named unreadable rather than taken for one without conditions.
+func promQLConditionKeys(queryConfigs []json.RawMessage) (string, string) {
+	seen := map[string]bool{}
+	fieldPath := ""
+	for index, raw := range queryConfigs {
+		var config struct {
+			AggConditions []struct {
+				Key string `json:"key"`
+			} `json:"agg_condition"`
+		}
+		if err := json.Unmarshal(raw, &config); err != nil {
+			return "unreadable", fmt.Sprintf("items[0].query_configs[%d].agg_condition", index)
+		}
+		for _, condition := range config.AggConditions {
+			if fieldPath == "" {
+				fieldPath = fmt.Sprintf("items[0].query_configs[%d].agg_condition", index)
+			}
+			key := strings.TrimSpace(condition.Key)
+			if key == "" {
+				key = "(empty)"
+			}
+			seen[key] = true
+		}
+	}
+	if len(seen) == 0 {
+		return "", ""
+	}
+	keys := make([]string, 0, len(seen))
+	for key := range seen {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	if len(keys) > promQLConditionKeysShown {
+		rest := len(keys) - promQLConditionKeysShown
+		keys = append(keys[:promQLConditionKeysShown], "+"+strconv.Itoa(rest))
+	}
+	return strings.Join(keys, ","), fieldPath
 }
 
 // namesTableOrDataLabel reports whether a query's table id routes on its
