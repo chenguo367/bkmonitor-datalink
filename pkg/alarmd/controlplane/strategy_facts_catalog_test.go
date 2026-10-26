@@ -75,7 +75,7 @@ func TestAPlanFreezesItsStrategyFacts(t *testing.T) {
 	// and the md5 of ["host"], the grouping the test dataset identifies
 	// series by; the strategy detects no no-data.
 	want := contract.StrategyFactsV2{Schema: "v2", MetricDigest: "3815df5a36678b1d738aa6f9a1522549", ConditionMD5: "92811130e44a4e5eb434d4dd5acbfdaa",
-		DimensionDigest: "f8110ed86ce585651a6e4dd7acda8018"}
+		DimensionDigest: "f8110ed86ce585651a6e4dd7acda8018", ConditionBasis: "query"}
 	if plan.Plan.StrategyFacts == nil || *plan.Plan.StrategyFacts != want {
 		t.Fatalf("strategy facts = %+v, want %+v", plan.Plan.StrategyFacts, want)
 	}

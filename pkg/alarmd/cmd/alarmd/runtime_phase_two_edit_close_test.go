@@ -460,42 +460,6 @@ func TestAMetricChangeClosesEveryAlertOfTheStrategy(t *testing.T) {
 	fixture.wantClosed(t, map[string]string{"threshold": "metric_changed", "no-data": "metric_changed"})
 }
 
-// A condition change closes the no-data alerts and leaves the threshold
-// alerts open.
-func TestAConditionChangeClosesNoDataAlertsAndLeavesThresholdAlerts(t *testing.T) {
-	fixture := newEditFixture()
-	plan := editPlan()
-	plan.StrategyFacts = derivedFacts(t, `{"metric_id":"bk_monitor.system.cpu.usage","agg_condition":[{"key":"ip","value":["192.0.2.2"],"method":"eq"}]}`)
-	fixture.plans.facts["10"] = plan
-	fixture.threshold("threshold", 8, "critical", "ip", "device")
-	fixture.noData("no-data", 8, "ip")
-	fixture.withEventFacts(t, "threshold", derivedFacts(t, cpuQuery), false)
-	fixture.withEventFacts(t, "no-data", derivedFacts(t, cpuQuery), true)
-	fixture.step()
-	fixture.wantClosed(t, map[string]string{"no-data": "condition_changed"})
-}
-
-// The first condition's connector is not a change, by the platform's own
-// rule; the second's is.
-func TestAConnectorOnlyChangeOfTheFirstConditionIsNoChange(t *testing.T) {
-	before := `{"metric_id":"m","agg_condition":[{"key":"ip","value":["192.0.2.1"],"method":"eq","condition":"and"},` +
-		`{"condition":"or","key":"device","value":["eth0"],"method":"eq"}]}`
-	firstChanged := `{"metric_id":"m","agg_condition":[{"key":"ip","value":["192.0.2.1"],"method":"eq","condition":"or"},` +
-		`{"condition":"or","key":"device","value":["eth0"],"method":"eq"}]}`
-	secondChanged := `{"metric_id":"m","agg_condition":[{"key":"ip","value":["192.0.2.1"],"method":"eq","condition":"and"},` +
-		`{"condition":"and","key":"device","value":["eth0"],"method":"eq"}]}`
-	for current, want := range map[string]map[string]string{firstChanged: {}, secondChanged: {"no-data": "condition_changed"}} {
-		fixture := newEditFixture()
-		plan := editPlan()
-		plan.StrategyFacts = derivedFacts(t, current)
-		fixture.plans.facts["10"] = plan
-		fixture.noData("no-data", 8, "ip")
-		fixture.withEventFacts(t, "no-data", derivedFacts(t, before), true)
-		fixture.step()
-		fixture.wantClosed(t, want)
-	}
-}
-
 // An alert whose opening event carried no strategy facts, or facts of a
 // schema this build does not read, is not decided by the metric and
 // condition rules; it is counted, and the other rules still apply.
@@ -602,33 +566,67 @@ func TestWithoutFactsOnlyARemovedDimensionCloses(t *testing.T) {
 	removed.wantClosed(t, map[string]string{"threshold": "dimensions_changed"})
 }
 
-// A strategy whose conditions hold a key the publisher injects is not closed
-// on a condition change: the digest moves with the publisher's own state
-// too. The skip is counted. A change of conditions the user wrote alone still
-// closes the no-data alerts.
-func TestAConditionChangeOverAnInjectedKeyIsSkippedAndCounted(t *testing.T) {
-	diskQuery := func(types string) string {
-		return `{"metric_id":"bk_monitor.system.disk.in_use","agg_condition":[{"key":"device_type","method":"neq","value":[` + types + `]},` +
-			`{"key":"mount_point","method":"eq","value":["/"],"condition":"and"}]}`
-	}
+// The condition rule is held: a condition change closes nothing, and the
+// no-data alerts it would have closed are counted condition_rule_held.
+// Threshold alerts are not its to judge.
+func TestAConditionChangeIsHeldAndClosesNothing(t *testing.T) {
 	fixture := newEditFixture()
 	plan := editPlan()
-	plan.StrategyFacts = derivedFacts(t, diskQuery(`"tmpfs","overlay"`))
+	plan.StrategyFacts = derivedFacts(t, `{"metric_id":"bk_monitor.system.cpu.usage","agg_condition":[{"key":"ip","value":["192.0.2.2"],"method":"eq"}]}`)
 	fixture.plans.facts["10"] = plan
+	fixture.threshold("threshold", 8, "critical", "ip", "device")
 	fixture.noData("no-data", 8, "ip")
-	fixture.withEventFacts(t, "no-data", derivedFacts(t, diskQuery(`"tmpfs"`)), true)
+	fixture.withEventFacts(t, "threshold", derivedFacts(t, cpuQuery), false)
+	fixture.withEventFacts(t, "no-data", derivedFacts(t, cpuQuery), true)
 	fixture.step()
 	fixture.wantClosed(t, map[string]string{})
-	if stats := fixture.loop.Stats(); stats[editclose.OutcomeConditionInjected] != 1 || stats[editclose.OutcomeKept] != 1 {
-		t.Fatalf("stats %+v, want the alert kept and counted condition_injected", stats)
+	if stats := fixture.loop.Stats(); stats[editclose.OutcomeConditionRuleHeld] != 1 || stats[editclose.OutcomeKept] != 2 {
+		t.Fatalf("stats %+v, want one condition_rule_held and both alerts kept", stats)
 	}
+}
 
-	userOnly := newEditFixture()
-	plan.StrategyFacts = derivedFacts(t, `{"metric_id":"bk_monitor.system.disk.in_use","agg_condition":[{"key":"mount_point","method":"eq","value":["/data"]}]}`)
-	userOnly.plans.facts["10"] = plan
-	userOnly.noData("no-data", 8, "ip")
-	userOnly.withEventFacts(t, "no-data",
-		derivedFacts(t, `{"metric_id":"bk_monitor.system.disk.in_use","agg_condition":[{"key":"mount_point","method":"eq","value":["/"]}]}`), true)
-	userOnly.step()
-	userOnly.wantClosed(t, map[string]string{"no-data": "condition_changed"})
+// What the held rule would compare: the first condition's connector is not
+// a change (the platform's rule), the second's is; a catalog metric's merged
+// conditions changing alone (object_filter) is not, its user conditions are;
+// a query holding a publisher-injected key is named query_injected.
+func TestTheHeldConditionRuleComparesTheUsersConditions(t *testing.T) {
+	before := `{"metric_id":"m","agg_condition":[{"key":"ip","value":["192.0.2.1"],"method":"eq","condition":"and"},` +
+		`{"condition":"or","key":"device","value":["eth0"],"method":"eq"}]}`
+	catalog := func(merged, user string) string {
+		return `{"metric_id":"m","agg_condition":[{"key":"ip","value":["192.0.2.1"],"method":"eq"},{"condition":"and","key":"model_id","method":"eq","value":["` +
+			merged + `"]}],"metric_snapshot":{"metric_id":7,"agg_condition":[{"key":"ip","value":["` + user + `"],"method":"eq"}]}}`
+	}
+	disk := func(types string) string {
+		return `{"metric_id":"m","agg_condition":[{"key":"device_type","method":"neq","value":[` + types + `]}]}`
+	}
+	for name, test := range map[string]struct {
+		raised, current string
+		held            uint64
+		basis           string
+	}{
+		"first connector": {before, `{"metric_id":"m","agg_condition":[{"key":"ip","value":["192.0.2.1"],"method":"eq","condition":"or"},` +
+			`{"condition":"or","key":"device","value":["eth0"],"method":"eq"}]}`, 0, "query"},
+		"second connector": {before, `{"metric_id":"m","agg_condition":[{"key":"ip","value":["192.0.2.1"],"method":"eq","condition":"and"},` +
+			`{"condition":"and","key":"device","value":["eth0"],"method":"eq"}]}`, 1, "query"},
+		"object_filter only":    {catalog("host", "192.0.2.1"), catalog("vm", "192.0.2.1"), 0, "snapshot_user"},
+		"user condition":        {catalog("host", "192.0.2.1"), catalog("host", "192.0.2.2"), 1, "snapshot_user"},
+		"publisher's exclusion": {disk(`"tmpfs"`), disk(`"tmpfs","overlay"`), 1, "query_injected"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newEditFixture()
+			plan := editPlan()
+			plan.StrategyFacts = derivedFacts(t, test.current)
+			if plan.StrategyFacts.ConditionBasis != test.basis {
+				t.Fatalf("basis %s, want %s", plan.StrategyFacts.ConditionBasis, test.basis)
+			}
+			fixture.plans.facts["10"] = plan
+			fixture.noData("no-data", 8, "ip")
+			fixture.withEventFacts(t, "no-data", derivedFacts(t, test.raised), true)
+			fixture.step()
+			fixture.wantClosed(t, map[string]string{})
+			if held := fixture.loop.Stats()[editclose.OutcomeConditionRuleHeld]; held != test.held {
+				t.Fatalf("condition_rule_held %d, want %d", held, test.held)
+			}
+		})
+	}
 }

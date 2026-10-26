@@ -637,13 +637,14 @@ func TestAnUnnamedSignalTypeIsOmittedRatherThanGuessed(t *testing.T) {
 // The strategy facts are written as the Plan froze them, under
 // extra_data.strategy_facts; an event without them writes none.
 func TestTheStrategyFactsAreWrittenInExtraData(t *testing.T) {
-	facts := contract.StrategyFactsV2{Schema: "v2", MetricDigest: "3815df5a36678b1d738aa6f9a1522549", ConditionMD5: "92811130e44a4e5eb434d4dd5acbfdaa"}
+	facts := contract.StrategyFactsV2{Schema: "v2", MetricDigest: "3815df5a36678b1d738aa6f9a1522549", ConditionMD5: "92811130e44a4e5eb434d4dd5acbfdaa",
+		ConditionBasis: "snapshot_user"}
 	message := convert(t, decision(func(e *contract.TriggerEventV1) { e.StrategyFacts = &facts }))
 	var extra map[string]json.RawMessage
 	if err := json.Unmarshal(message["extra_data"], &extra); err != nil {
 		t.Fatal(err)
 	}
-	want := `{"schema":"v2","metric_digest":"3815df5a36678b1d738aa6f9a1522549","condition_md5":"92811130e44a4e5eb434d4dd5acbfdaa"}`
+	want := `{"schema":"v2","metric_digest":"3815df5a36678b1d738aa6f9a1522549","condition_md5":"92811130e44a4e5eb434d4dd5acbfdaa","condition_basis":"snapshot_user"}`
 	if string(extra["strategy_facts"]) != want {
 		t.Fatalf("extra_data.strategy_facts = %s, want %s", extra["strategy_facts"], want)
 	}
@@ -660,7 +661,8 @@ func TestTheStrategyFactsAreWrittenInExtraData(t *testing.T) {
 // An event writes the grouping of its own series: the Plan's for a
 // threshold event, the no-data one for a no-data event, and never both.
 func TestAnEventWritesTheGroupingOfItsOwnSeries(t *testing.T) {
-	facts := contract.StrategyFactsV2{Schema: "v2", MetricDigest: "m", ConditionMD5: "c", DimensionDigest: "threshold", NoDataDimensionDigest: "no-data"}
+	facts := contract.StrategyFactsV2{Schema: "v2", MetricDigest: "m", ConditionMD5: "c", ConditionBasis: "query",
+		DimensionDigest: "threshold", NoDataDimensionDigest: "no-data"}
 	for _, noData := range []bool{false, true} {
 		message := convert(t, decision(func(e *contract.TriggerEventV1) {
 			e.StrategyFacts = &facts
@@ -678,7 +680,7 @@ func TestAnEventWritesTheGroupingOfItsOwnSeries(t *testing.T) {
 		if noData {
 			want = "no-data"
 		}
-		if extra.StrategyFacts["dimension_digest"] != want || len(extra.StrategyFacts) != 4 {
+		if extra.StrategyFacts["dimension_digest"] != want || len(extra.StrategyFacts) != 5 {
 			t.Fatalf("no-data %v: strategy_facts = %v, want dimension_digest %s and no other grouping", noData, extra.StrategyFacts, want)
 		}
 	}

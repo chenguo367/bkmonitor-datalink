@@ -136,7 +136,7 @@ func TestThePlanKeyMovesWithEveryFact(t *testing.T) {
 		func(p *Plan) { p.NoDataSuspended = true },
 		func(p *Plan) { p.Facts = &contract.StrategyFactsV2{Schema: "v2", MetricDigest: "m", ConditionMD5: "c"} },
 		func(p *Plan) {
-			p.Facts = &contract.StrategyFactsV2{Schema: "v2", MetricDigest: "m", ConditionMD5: "c", ConditionInjected: true}
+			p.Facts = &contract.StrategyFactsV2{Schema: "v2", MetricDigest: "m", ConditionMD5: "c", ConditionBasis: "query"}
 		},
 	}
 	for index, change := range changes {
@@ -151,7 +151,7 @@ func TestThePlanKeyMovesWithEveryFact(t *testing.T) {
 // strategyFacts is the opening event's strategy facts as the link stores
 // them.
 func strategyFacts(metric, condition string) []byte {
-	return []byte(`{"schema":"v2","metric_digest":"` + metric + `","condition_md5":"` + condition + `"}`)
+	return []byte(`{"schema":"v2","metric_digest":"` + metric + `","condition_md5":"` + condition + `","condition_basis":"query"}`)
 }
 
 func withFacts(alert Alert, facts []byte) Alert {
@@ -163,7 +163,7 @@ func withFacts(alert Alert, facts []byte) Alert {
 // against the current Plans'.
 func TestDecideTheStrategyFacts(t *testing.T) {
 	plan := current()
-	plan.Facts = &contract.StrategyFactsV2{Schema: "v2", MetricDigest: "metric-b", ConditionMD5: "condition-b"}
+	plan.Facts = &contract.StrategyFactsV2{Schema: "v2", MetricDigest: "metric-b", ConditionMD5: "condition-b", ConditionBasis: "query"}
 	noDataOff := plan
 	noDataOff.NoData, noDataOff.NoDataDimensions = false, nil
 	for name, test := range map[string]struct {
@@ -174,26 +174,20 @@ func TestDecideTheStrategyFacts(t *testing.T) {
 		"metric changed closes a threshold alert": {plan, withFacts(threshold(8, "warning", "ip", "device"), strategyFacts("metric-a", "condition-b")),
 			OutcomeMetricChanged, ""},
 		"metric changed closes a no-data alert": {plan, withFacts(noData(8, "ip"), strategyFacts("metric-a", "condition-b")), OutcomeMetricChanged, ""},
-		"condition changed closes a no-data alert": {plan, withFacts(noData(8, "ip"), strategyFacts("metric-b", "condition-a")),
-			OutcomeConditionChanged, ""},
+		// The condition rule is held: counted, nothing closed.
+		"condition changed is held for a no-data alert": {plan, withFacts(noData(8, "ip"), strategyFacts("metric-b", "condition-a")),
+			OutcomeKept, OutcomeConditionRuleHeld},
 		"condition changed leaves a threshold alert": {plan, withFacts(threshold(8, "warning", "ip", "device"), strategyFacts("metric-b", "condition-a")),
 			OutcomeKept, ""},
 		// The connector of the first condition is not in the digest (the
 		// platform's rule), so the same digest on both sides is no change.
 		"unchanged facts keep": {plan, withFacts(noData(8, "ip"), strategyFacts("metric-b", "condition-b")), OutcomeKept, ""},
-		"condition changed over a condition the alert's publisher injected": {plan, withFacts(noData(8, "ip"),
-			[]byte(`{"schema":"v2","metric_digest":"metric-b","condition_md5":"condition-a","condition_injected":true}`)), OutcomeKept, OutcomeConditionInjected},
-		"condition changed over a condition the current publisher injected": {func() Plan {
-			p := plan
-			facts := *plan.Facts
-			facts.ConditionInjected = true
-			p.Facts = &facts
-			return p
-		}(), withFacts(noData(8, "ip"), strategyFacts("metric-b", "condition-a")), OutcomeKept, OutcomeConditionInjected},
-		"injected and unchanged": {plan, withFacts(noData(8, "ip"),
-			[]byte(`{"schema":"v2","metric_digest":"metric-b","condition_md5":"condition-b","condition_injected":true}`)), OutcomeKept, ""},
-		"condition changed before no-data off": {noDataOff, withFacts(noData(8, "ip"), strategyFacts("metric-b", "condition-a")),
-			OutcomeConditionChanged, ""},
+		"a snapshot that could not be read": {plan, withFacts(noData(8, "ip"),
+			[]byte(`{"schema":"v2","metric_digest":"metric-b","condition_md5":"condition-a","condition_basis":"snapshot_unreadable"}`)), OutcomeKept, OutcomeSnapshotUnreadable},
+		"no condition basis": {plan, withFacts(noData(8, "ip"), []byte(`{"schema":"v2","metric_digest":"metric-b","condition_md5":"condition-b"}`)),
+			OutcomeKept, OutcomeFactsUnknownSchema},
+		"condition held, then no-data off": {noDataOff, withFacts(noData(8, "ip"), strategyFacts("metric-b", "condition-a")),
+			OutcomeNoDataDisabled, OutcomeConditionRuleHeld},
 		"an alert at the current revision is not compared": {plan, withFacts(threshold(9, "warning", "ip", "device"), strategyFacts("metric-a", "condition-a")),
 			OutcomeCurrentRevision, ""},
 
@@ -227,13 +221,13 @@ func TestDecideTheStrategyFacts(t *testing.T) {
 // alert's dimension names otherwise; schema v1 is not one this build reads.
 func TestDecideTheGroupingDigest(t *testing.T) {
 	facts := func(dimension string) []byte {
-		return []byte(`{"schema":"v2","metric_digest":"metric-b","condition_md5":"condition-b","dimension_digest":"` + dimension + `"}`)
+		return []byte(`{"schema":"v2","metric_digest":"metric-b","condition_md5":"condition-b","condition_basis":"query","dimension_digest":"` + dimension + `"}`)
 	}
 	plan := current()
-	plan.Facts = &contract.StrategyFactsV2{Schema: "v2", MetricDigest: "metric-b", ConditionMD5: "condition-b",
+	plan.Facts = &contract.StrategyFactsV2{Schema: "v2", MetricDigest: "metric-b", ConditionMD5: "condition-b", ConditionBasis: "query",
 		DimensionDigest: "grouping-b", NoDataDimensionDigest: "no-data-b"}
 	undigested := plan
-	undigested.Facts = &contract.StrategyFactsV2{Schema: "v2", MetricDigest: "metric-b", ConditionMD5: "condition-b"}
+	undigested.Facts = &contract.StrategyFactsV2{Schema: "v2", MetricDigest: "metric-b", ConditionMD5: "condition-b", ConditionBasis: "query"}
 	dynamic := undigested
 	dynamic.DynamicDimensions = true
 	for name, test := range map[string]struct {
@@ -250,12 +244,43 @@ func TestDecideTheGroupingDigest(t *testing.T) {
 		"Plans state no grouping":                {undigested, withFacts(threshold(8, "warning", "ip", "nic"), facts("grouping-a")), OutcomeDimensionsChanged, ""},
 		"dynamic Plans state no grouping":        {dynamic, withFacts(threshold(8, "warning", "ip", "nic"), facts("grouping-a")), OutcomeKept, ""},
 		"schema v1": {plan, withFacts(threshold(8, "warning", "ip", "device"),
-			[]byte(`{"schema":"v1","metric_digest":"metric-a","condition_md5":"condition-b","dimension_digest":"grouping-a"}`)), OutcomeKept, OutcomeFactsUnknownSchema},
+			[]byte(`{"schema":"v1","metric_digest":"metric-a","condition_md5":"condition-b","condition_basis":"query","dimension_digest":"grouping-a"}`)), OutcomeKept, OutcomeFactsUnknownSchema},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got, note := Decide(test.plan, test.alert); got != test.want || note != test.note {
 				t.Fatalf("Decide = %s, %q; want %s, %q", got, note, test.want, test.note)
 			}
 		})
+	}
+}
+
+// The condition rule as it will run once released: a close only between
+// digests of the same basis; held while it is not released; an unreadable
+// snapshot on either side decides nothing.
+func TestConditionVerdict(t *testing.T) {
+	facts := func(md5, basis string) *contract.StrategyFactsV2 {
+		return &contract.StrategyFactsV2{Schema: "v2", MetricDigest: "m", ConditionMD5: md5, ConditionBasis: basis}
+	}
+	for name, test := range map[string]struct {
+		alert, current *contract.StrategyFactsV2
+		released       bool
+		decision, note string
+	}{
+		"held":                        {facts("a", "query"), facts("b", "query"), false, "", OutcomeConditionRuleHeld},
+		"held, unchanged":             {facts("a", "query"), facts("a", "query"), false, "", ""},
+		"released, same basis":        {facts("a", "snapshot_user"), facts("b", "snapshot_user"), true, OutcomeConditionChanged, ""},
+		"released, unchanged":         {facts("a", "snapshot_user"), facts("a", "snapshot_user"), true, "", ""},
+		"released, other basis":       {facts("a", "snapshot_user"), facts("b", "query"), true, "", OutcomeConditionRuleHeld},
+		"alert snapshot unreadable":   {facts("a", "snapshot_unreadable"), facts("b", "query"), true, "", OutcomeSnapshotUnreadable},
+		"current snapshot unreadable": {facts("a", "query"), facts("a", "snapshot_unreadable"), true, "", OutcomeSnapshotUnreadable},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if decision, note := conditionVerdict(test.alert, test.current, test.released); decision != test.decision || note != test.note {
+				t.Fatalf("conditionVerdict = %q, %q; want %q, %q", decision, note, test.decision, test.note)
+			}
+		})
+	}
+	if conditionRuleReleased {
+		t.Fatal("condition_changed is released before the publisher states what a snapshot's conditions are")
 	}
 }

@@ -52,7 +52,7 @@ func TestDeriveStrategyFactsV2(t *testing.T) {
 	}
 	// md5 of ["bk_monitor.system.cpu.usage"]; md5 of ["device","ip"] and of ["ip"].
 	if *facts != (StrategyFactsV2{Schema: "v2", MetricDigest: "3815df5a36678b1d738aa6f9a1522549", ConditionMD5: "92811130e44a4e5eb434d4dd5acbfdaa",
-		DimensionDigest: "c95842d36b7a76c5ef0fd863a1ea154e", NoDataDimensionDigest: "1f99f60df760995e0e77a1169a328a0d"}) {
+		DimensionDigest: "c95842d36b7a76c5ef0fd863a1ea154e", ConditionBasis: "query", NoDataDimensionDigest: "1f99f60df760995e0e77a1169a328a0d"}) {
 		t.Fatalf("facts %+v", *facts)
 	}
 	bare, err := DeriveStrategyFactsV2([]json.RawMessage{json.RawMessage(`{"metric_id":"bk_monitor.system.cpu.usage"}`)}, StrategyGrouping{Dynamic: true})
@@ -100,11 +100,11 @@ func TestGroupingDigestIsOfTheKeySet(t *testing.T) {
 // An event carries the grouping of its own series: the no-data one for a
 // no-data event, and never the Plan's other one.
 func TestAnEventCarriesItsOwnGrouping(t *testing.T) {
-	plan := StrategyFactsV2{Schema: "v2", MetricDigest: "m", ConditionMD5: "c", DimensionDigest: "threshold", NoDataDimensionDigest: "no-data"}
-	if got := plan.ForEvent(false); got != (StrategyFactsV2{Schema: "v2", MetricDigest: "m", ConditionMD5: "c", DimensionDigest: "threshold"}) {
+	plan := StrategyFactsV2{Schema: "v2", MetricDigest: "m", ConditionMD5: "c", ConditionBasis: "query", DimensionDigest: "threshold", NoDataDimensionDigest: "no-data"}
+	if got := plan.ForEvent(false); got != (StrategyFactsV2{Schema: "v2", MetricDigest: "m", ConditionMD5: "c", ConditionBasis: "query", DimensionDigest: "threshold"}) {
 		t.Fatalf("threshold event facts %+v", got)
 	}
-	if got := plan.ForEvent(true); got != (StrategyFactsV2{Schema: "v2", MetricDigest: "m", ConditionMD5: "c", DimensionDigest: "no-data"}) {
+	if got := plan.ForEvent(true); got != (StrategyFactsV2{Schema: "v2", MetricDigest: "m", ConditionMD5: "c", ConditionBasis: "query", DimensionDigest: "no-data"}) {
 		t.Fatalf("no-data event facts %+v", got)
 	}
 }
@@ -146,18 +146,69 @@ func TestPromQLMetricIDMatchesThePlatform(t *testing.T) {
 	}
 }
 
-// A query whose conditions may hold one the publisher added says so.
-func TestDeriveStrategyFactsMarksInjectedConditions(t *testing.T) {
-	for query, want := range map[string]bool{
-		`{"metric_id":"m","agg_condition":[{"key":"mount_point","method":"eq","value":["/"]}]}`:                                                                  false,
-		`{"metric_id":"m","agg_condition":[{"key":"device_type","method":"neq","value":["tmpfs"]}]}`:                                                             true,
-		`{"metric_id":"m","agg_condition":[{"key":"bk_biz_id","method":"eq","value":["2"]},{"key":"ip","method":"eq","value":["192.0.2.1"],"condition":"and"}]}`: true,
-		`{"metric_id":"m","agg_condition":[],"metric_snapshot":{"metric_id":7}}`:                                                                                 true,
-		`{"metric_id":"m","agg_condition":[],"metric_snapshot":{}}`:                                                                                              false,
+// Each query's conditions are read for a basis, and the item's basis is
+// the weakest of them.
+func TestDeriveStrategyFactsNamesTheConditionBasis(t *testing.T) {
+	user := `[{"key":"ip","value":["192.0.2.1"],"method":"eq"}]`
+	plain := `{"metric_id":"m","agg_condition":[{"key":"mount_point","method":"eq","value":["/"]}]}`
+	injected := `{"metric_id":"m","agg_condition":[{"key":"device_type","method":"neq","value":["tmpfs"]}]}`
+	business := `{"metric_id":"m","agg_condition":[{"key":"bk_biz_id","method":"eq","value":["2"]}]}`
+	snapshot := `{"metric_id":"m","agg_condition":[{"key":"bk_biz_id","method":"eq","value":["2"]}],"metric_snapshot":{"metric_id":7,"agg_condition":` + user + `}}`
+	member := `{"metric_id":"m","agg_condition":[],"metric_snapshot":{"metric_id":7,"agg_condition":[],"derived":{"metric_id":3,"agg_condition":` + user + `}}}`
+	for name, vector := range map[string]struct {
+		queries []string
+		want    string
+	}{
+		"query":                          {[]string{plain}, "query"},
+		"query with device_type":         {[]string{injected}, "query_injected"},
+		"query with bk_biz_id":           {[]string{business}, "query_injected"},
+		"snapshot":                       {[]string{snapshot}, "snapshot_user"},
+		"member":                         {[]string{member}, "snapshot_user"},
+		"snapshot without conditions":    {[]string{`{"metric_id":"m","agg_condition":[],"metric_snapshot":{"metric_id":7}}`}, "snapshot_unreadable"},
+		"empty snapshot":                 {[]string{`{"metric_id":"m","agg_condition":[],"metric_snapshot":{}}`}, "snapshot_unreadable"},
+		"null snapshot conditions":       {[]string{`{"metric_id":"m","agg_condition":[],"metric_snapshot":{"agg_condition":null}}`}, "snapshot_unreadable"},
+		"snapshot conditions not a list": {[]string{`{"metric_id":"m","agg_condition":[],"metric_snapshot":{"agg_condition":{"key":"ip"}}}`}, "snapshot_unreadable"},
+		"snapshot condition without a method": {[]string{`{"metric_id":"m","agg_condition":[],"metric_snapshot":{"agg_condition":[{"key":"ip","value":["192.0.2.1"]}]}}`},
+			"snapshot_unreadable"},
+		"member without conditions": {[]string{`{"metric_id":"m","agg_condition":[],"metric_snapshot":{"agg_condition":[],"derived":{"metric_id":3}}}`}, "snapshot_unreadable"},
+		"snapshot not an object":    {[]string{`{"metric_id":"m","agg_condition":[],"metric_snapshot":[1]}`}, "snapshot_unreadable"},
+		"null snapshot":             {[]string{`{"metric_id":"m","agg_condition":[],"metric_snapshot":null}`}, "query"},
+		"snapshot and query":        {[]string{snapshot, plain}, "query"},
+		"query and injected":        {[]string{plain, injected}, "query_injected"},
+		"injected and unreadable":   {[]string{injected, `{"metric_id":"m","agg_condition":[],"metric_snapshot":{}}`}, "snapshot_unreadable"},
+		"two snapshots":             {[]string{snapshot, member}, "snapshot_user"},
+		"injected and snapshot":     {[]string{injected, snapshot}, "query_injected"},
+		"null derived block":        {[]string{`{"metric_id":"m","agg_condition":[],"metric_snapshot":{"agg_condition":[],"derived":null}}`}, "snapshot_unreadable"},
+	} {
+		queries := make([]json.RawMessage, 0, len(vector.queries))
+		for _, query := range vector.queries {
+			queries = append(queries, json.RawMessage(query))
+		}
+		facts, err := DeriveStrategyFactsV2(queries, StrategyGrouping{})
+		if err != nil || facts.ConditionBasis != vector.want {
+			t.Errorf("%s: facts %+v err %v, want basis %s", name, facts, err, vector.want)
+		}
+	}
+}
+
+// A catalog metric's conditions are read from its snapshot, the user's, by
+// the platform's rule: a change of the merged conditions alone (object_filter
+// or member recipe) leaves the digest where it was. The expected digests are
+// the golden vectors above: 92811130... for [{key: ip, value: [192.0.2.1],
+// method: eq}].
+func TestACatalogMetricsConditionsAreTheUsers(t *testing.T) {
+	user := `[{"key":"ip","value":["192.0.2.1"],"method":"eq"}]`
+	merged := `[{"key":"ip","value":["192.0.2.1"],"method":"eq"},{"condition":"and","key":"model_id","method":"eq","value":["host"]}]`
+	refiltered := `[{"key":"ip","value":["192.0.2.1"],"method":"eq"},{"condition":"and","key":"model_id","method":"eq","value":["vm"]}]`
+	for name, query := range map[string]string{
+		"snapshot":               `{"metric_id":"m","agg_condition":` + merged + `,"metric_snapshot":{"metric_id":7,"agg_condition":` + user + `}}`,
+		"snapshot, refiltered":   `{"metric_id":"m","agg_condition":` + refiltered + `,"metric_snapshot":{"metric_id":7,"agg_condition":` + user + `}}`,
+		"member":                 `{"metric_id":"m","agg_condition":` + merged + `,"metric_snapshot":{"agg_condition":` + merged + `,"derived":{"agg_condition":` + user + `}}}`,
+		"member, recipe changed": `{"metric_id":"m","agg_condition":` + refiltered + `,"metric_snapshot":{"agg_condition":` + refiltered + `,"derived":{"agg_condition":` + user + `}}}`,
 	} {
 		facts, err := DeriveStrategyFactsV2([]json.RawMessage{json.RawMessage(query)}, StrategyGrouping{})
-		if err != nil || facts.ConditionInjected != want {
-			t.Errorf("%s: facts %+v err %v, want injected %v", query, facts, err, want)
+		if err != nil || facts.ConditionMD5 != "92811130e44a4e5eb434d4dd5acbfdaa" || facts.ConditionBasis != "snapshot_user" {
+			t.Errorf("%s: facts %+v err %v, want the user's condition digest", name, facts, err)
 		}
 	}
 }

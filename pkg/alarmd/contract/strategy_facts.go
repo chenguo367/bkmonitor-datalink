@@ -37,22 +37,22 @@ const StrategyFactsSchemaV2 = "v2"
 //     time_series) counts under the id the platform derives from its text
 //     (PromQLMetricID).
 //   - ConditionMD5 is the platform's get_agg_condition_md5 of the query
-//     config's agg_condition (AggConditionMD5) when the item has one query
-//     config. With several, it is the hex MD5 of their AggConditionMD5s
-//     joined by "," in query order: the platform compares the conditions
-//     query by query and closes on any difference, which a digest of the
-//     ordered list states the same way.
+//     config's conditions as read for its ConditionBasis (AggConditionMD5,
+//     over queryConditions) when the item has one query config. With
+//     several, it is the hex MD5 of their AggConditionMD5s joined by "," in
+//     query order: the platform compares the conditions query by query and
+//     closes on any difference, which a digest of the ordered list states
+//     the same way.
 //   - DimensionDigest is the GroupingDigest of the dimensions the event's
 //     series is grouped by, the key set its alert fingerprint is built from:
 //     the Plan's output identity fields for a threshold event, and the
 //     no-data configuration's agg_dimension for a no-data event. Empty when
 //     the grouping is every dimension the series carries (dynamic
 //     dimensions), which no fixed set states.
-//   - ConditionInjected says some query's agg_condition may hold a
-//     condition the publisher added and the user did not write
-//     (InjectedConditionKeys): ConditionMD5 then moves with the publisher's
-//     own state as well as with the user's edits, and a reader must not
-//     take a change of it for an edit.
+//   - ConditionBasis says what ConditionMD5 was computed over (the
+//     ConditionBasis* words), the weakest across the item's queries in the
+//     order snapshot_unreadable < query_injected < query < snapshot_user: a
+//     digest is only as good as its least certain query.
 //   - NoDataDimensionDigest is on a Plan only, beside DimensionDigest: the
 //     GroupingDigest of its no-data agg_dimension, empty when the Plan
 //     detects no no-data. ForEvent puts the one an event is grouped by in
@@ -62,9 +62,33 @@ type StrategyFactsV2 struct {
 	MetricDigest          string `json:"metric_digest"`
 	ConditionMD5          string `json:"condition_md5"`
 	DimensionDigest       string `json:"dimension_digest,omitempty"`
-	ConditionInjected     bool   `json:"condition_injected,omitempty"`
+	ConditionBasis        string `json:"condition_basis"`
 	NoDataDimensionDigest string `json:"no_data_dimension_digest,omitempty"`
 }
+
+// The bases a ConditionMD5 is computed over, from the strongest:
+const (
+	// ConditionBasisSnapshotUser: every query is a catalog metric whose
+	// conditions are read from its metric materialization snapshot, the
+	// user's original input (queryConditions).
+	ConditionBasisSnapshotUser = "snapshot_user"
+	// ConditionBasisQuery: a query has no snapshot and its published
+	// agg_condition holds no key the publisher injects.
+	ConditionBasisQuery = "query"
+	// ConditionBasisQueryInjected: a query has no snapshot and its published
+	// agg_condition holds a key the publisher injects (InjectedConditionKeys),
+	// so the digest moves with the publisher's own state too.
+	ConditionBasisQueryInjected = "query_injected"
+	// ConditionBasisSnapshotUnreadable: a query has a snapshot whose
+	// conditions are missing or not a list of conditions with key, method
+	// and value; the digest was computed over the published agg_condition
+	// and says nothing about the user's input.
+	ConditionBasisSnapshotUnreadable = "snapshot_unreadable"
+)
+
+// conditionBasisRank orders the bases from the weakest.
+var conditionBasisRank = map[string]int{ConditionBasisSnapshotUnreadable: 0, ConditionBasisQueryInjected: 1,
+	ConditionBasisQuery: 2, ConditionBasisSnapshotUser: 3}
 
 // InjectedConditionKeys are the condition keys the strategy publisher adds
 // to a query's agg_condition on its own, which no marker in the published
@@ -79,11 +103,10 @@ type StrategyFactsV2 struct {
 //     ANDed into every OR branch (_business_condition and
 //     _with_business_condition, :204-224, applied at :456-460).
 //
-// A query config carrying the publisher's metric materialization snapshot
-// (metric_snapshot, from the publisher's metric resolver) has the
-// metric row's object_filter and expanded member conditions merged into its
-// agg_condition the same way, under whatever keys the row names; it counts
-// as injected too.
+// Both are added to the query's agg_condition, never to a metric
+// materialization snapshot, so a query whose conditions are read from its
+// snapshot (queryConditions) is not affected by them. A key here only names
+// the basis (query_injected); nothing is decided from it.
 var InjectedConditionKeys = []string{"device_type", "bk_biz_id"}
 
 // PromQLMetricID is the platform's get_metric_id for a prometheus
@@ -146,7 +169,7 @@ func GroupingDigest(fields []string) string {
 func DeriveStrategyFactsV2(queryConfigs []json.RawMessage, grouping StrategyGrouping) (*StrategyFactsV2, error) {
 	metricIDs := make([]string, 0, len(queryConfigs))
 	conditions := make([]string, 0, len(queryConfigs))
-	injected := false
+	basis := ConditionBasisSnapshotUser
 	for index, raw := range queryConfigs {
 		var query struct {
 			MetricID        *string         `json:"metric_id"`
@@ -167,11 +190,11 @@ func DeriveStrategyFactsV2(queryConfigs []json.RawMessage, grouping StrategyGrou
 			metricID = PromQLMetricID(query.PromQL)
 		}
 		metricIDs = append(metricIDs, metricID)
-		if conditionInjected(query.AggCondition, query.MetricSnapshot) {
-			injected = true
+		condition, queryBasis := queryConditions(query.AggCondition, query.MetricSnapshot)
+		if conditionBasisRank[queryBasis] < conditionBasisRank[basis] {
+			basis = queryBasis
 		}
-		condition := query.AggCondition
-		if condition == nil {
+		if isJSONNullOrMissing(condition) {
 			// The platform reads a missing agg_condition as an empty one.
 			condition = json.RawMessage("[]")
 		}
@@ -181,7 +204,7 @@ func DeriveStrategyFactsV2(queryConfigs []json.RawMessage, grouping StrategyGrou
 		}
 		conditions = append(conditions, digest)
 	}
-	facts := &StrategyFactsV2{Schema: StrategyFactsSchemaV2, MetricDigest: md5Hex(jsonText(metricIDs)), ConditionInjected: injected}
+	facts := &StrategyFactsV2{Schema: StrategyFactsSchemaV2, MetricDigest: md5Hex(jsonText(metricIDs)), ConditionBasis: basis}
 	if len(conditions) == 1 {
 		facts.ConditionMD5 = conditions[0]
 	} else {
@@ -196,14 +219,72 @@ func DeriveStrategyFactsV2(queryConfigs []json.RawMessage, grouping StrategyGrou
 	return facts, nil
 }
 
-// conditionInjected reports whether a query's conditions may hold one the
-// publisher added (InjectedConditionKeys, or a metric materialization
-// snapshot beside them).
-func conditionInjected(conditions, snapshot json.RawMessage) bool {
-	var fields map[string]json.RawMessage
-	if json.Unmarshal(snapshot, &fields) == nil && len(fields) > 0 {
-		return true
+// queryConditions is the conditions one query's ConditionMD5 is computed
+// over, and their basis.
+//
+// A query of a catalog metric is published (by the publisher's metric
+// resolver) with the metric row's object_filter and, for an expanded member,
+// the member recipe's conditions merged into its agg_condition; its
+// metric_snapshot keeps the user's original input beside them, and that is
+// read:
+//
+//   - a snapshot with a derived block is an expanded member. Its own
+//     agg_condition holds the merged conditions: the snapshot is built from
+//     the user's and then overwritten with the combined ones.
+//     derived.agg_condition is the user's, the anchor the publisher folds
+//     members back to, and that is read.
+//   - any other snapshot: its agg_condition.
+//
+// The snapshot conditions are taken only if they are a list of conditions
+// each with key, method and value; otherwise - missing, null, another shape -
+// the basis is snapshot_unreadable and the published agg_condition is
+// digested instead. (The publisher's own reader falls back to the published
+// conditions when the key is missing; that is not taken here as the user's
+// input.) A query without a snapshot is read as published, and
+// its basis is query or query_injected (InjectedConditionKeys).
+func queryConditions(conditions, snapshot json.RawMessage) (json.RawMessage, string) {
+	if isJSONNullOrMissing(snapshot) {
+		if hasInjectedKey(conditions) {
+			return conditions, ConditionBasisQueryInjected
+		}
+		return conditions, ConditionBasisQuery
 	}
+	// A snapshot or derived block that is not an object reads as one
+	// without conditions: unreadable.
+	var source map[string]json.RawMessage
+	_ = json.Unmarshal(snapshot, &source)
+	if raw, member := source["derived"]; member {
+		var derived map[string]json.RawMessage
+		_ = json.Unmarshal(raw, &derived)
+		source = derived
+	}
+	user, ok := source["agg_condition"]
+	if !ok || !conditionList(user) {
+		return conditions, ConditionBasisSnapshotUnreadable
+	}
+	return user, ConditionBasisSnapshotUser
+}
+
+// conditionList reports whether raw is a list of conditions, each an
+// object with key, method and value.
+func conditionList(raw json.RawMessage) bool {
+	var list []map[string]json.RawMessage
+	if json.Unmarshal(raw, &list) != nil || list == nil {
+		return false
+	}
+	for _, condition := range list {
+		for _, field := range []string{"key", "method", "value"} {
+			if _, ok := condition[field]; !ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// hasInjectedKey reports whether published conditions hold a key the
+// publisher injects (InjectedConditionKeys).
+func hasInjectedKey(conditions json.RawMessage) bool {
 	var keyed []struct {
 		Key string `json:"key"`
 	}
@@ -214,6 +295,10 @@ func conditionInjected(conditions, snapshot json.RawMessage) bool {
 		}
 	}
 	return false
+}
+
+func isJSONNullOrMissing(raw json.RawMessage) bool {
+	return len(raw) == 0 || strings.TrimSpace(string(raw)) == "null"
 }
 
 // jsonText is a string list as a JSON array, without HTML escaping.

@@ -51,9 +51,9 @@
 //   - condition_changed: a no-data alert whose strategy's filter conditions
 //     are not the ones it was raised under, by the platform's own condition
 //     digest (contract.AggConditionMD5), from the strategy facts as above. A
-//     threshold alert is not closed on a condition change, and neither is an
-//     alert whose conditions, or the current ones, may hold a condition the
-//     publisher added rather than the user (condition_injected).
+//     threshold alert is not closed on a condition change. This rule is held
+//     (conditionRuleReleased): it closes nothing, and every no-data
+//     candidate it would have closed is counted condition_rule_held.
 //   - no_data_disabled: a no-data alert of a strategy that no longer
 //     configures no-data detection. A strategy that configures it and whose
 //     Plans do not attach it is not switched off and is not decided.
@@ -130,11 +130,15 @@ const (
 	OutcomeFactsUnknownSchema = "facts_unknown_schema"
 	// OutcomePlanFactsMissing is a current Plan without strategy facts.
 	OutcomePlanFactsMissing = "plan_facts_missing"
-	// OutcomeConditionInjected is a no-data alert whose condition digest
-	// differs from the current Plans' while either side's conditions may
-	// hold one the publisher added (contract.InjectedConditionKeys):
-	// condition_changed is not decided for it.
-	OutcomeConditionInjected = "condition_injected"
+	// OutcomeConditionRuleHeld is a no-data alert condition_changed would
+	// have been decided for, while the rule is held (conditionRuleReleased)
+	// or the two digests are of different bases.
+	OutcomeConditionRuleHeld = "condition_rule_held"
+	// OutcomeSnapshotUnreadable is a no-data alert whose condition digest,
+	// or the current Plans', was computed beside a metric snapshot whose
+	// conditions could not be read (contract.ConditionBasisSnapshotUnreadable):
+	// condition_changed cannot be decided for it.
+	OutcomeSnapshotUnreadable = "snapshot_unreadable"
 )
 
 // Decisions is every word Decide returns as its decision.
@@ -143,7 +147,8 @@ var Decisions = []string{OutcomeCurrentRevision, OutcomeRevisionAhead, OutcomeRe
 	OutcomeMetricChanged, OutcomeConditionChanged, OutcomeDimensionsChanged, OutcomeLevelRemoved, OutcomeNoDataDisabled}
 
 // Notes is every word Decide returns as its note.
-var Notes = []string{OutcomeFactsMissing, OutcomeFactsUnknownSchema, OutcomePlanFactsMissing, OutcomeConditionInjected}
+var Notes = []string{OutcomeFactsMissing, OutcomeFactsUnknownSchema, OutcomePlanFactsMissing, OutcomeConditionRuleHeld,
+	OutcomeSnapshotUnreadable}
 
 // Closes reports whether a decision is a close.
 func Closes(decision string) bool {
@@ -186,7 +191,7 @@ func (plan Plan) Key() string {
 	b.WriteString("|" + strconv.FormatBool(plan.NoDataSuspended) + "|")
 	if plan.Facts != nil {
 		b.WriteString(plan.Facts.Schema + ":" + plan.Facts.MetricDigest + ":" + plan.Facts.ConditionMD5 + ":" +
-			plan.Facts.DimensionDigest + ":" + plan.Facts.NoDataDimensionDigest + ":" + strconv.FormatBool(plan.Facts.ConditionInjected))
+			plan.Facts.DimensionDigest + ":" + plan.Facts.NoDataDimensionDigest + ":" + plan.Facts.ConditionBasis)
 	}
 	return b.String()
 }
@@ -248,13 +253,12 @@ func Decide(plan Plan, alert Alert) (decision, note string) {
 		if plan.NoData && groupingChanged(facts, planGrouping(plan.Facts, true), alert.DimensionKeys, plan.NoDataDimensions, false) {
 			return OutcomeDimensionsChanged, note
 		}
-		if facts != nil && facts.ConditionMD5 != plan.Facts.ConditionMD5 {
-			if !facts.ConditionInjected && !plan.Facts.ConditionInjected {
-				return OutcomeConditionChanged, note
+		if facts != nil {
+			if decision, held := conditionVerdict(facts, plan.Facts, conditionRuleReleased); decision != "" {
+				return decision, note
+			} else if held != "" {
+				note = held
 			}
-			// The digest moves with conditions the publisher added as well:
-			// not a change anyone can be shown to have made.
-			note = OutcomeConditionInjected
 		}
 		if !plan.NoData {
 			if plan.NoDataSuspended {
@@ -281,7 +285,7 @@ func comparableFacts(plan Plan, alert Alert) (*contract.StrategyFactsV2, string)
 	}
 	var facts contract.StrategyFactsV2
 	if json.Unmarshal(alert.Facts, &facts) != nil || facts.Schema != contract.StrategyFactsSchemaV2 ||
-		facts.MetricDigest == "" || facts.ConditionMD5 == "" {
+		facts.MetricDigest == "" || facts.ConditionMD5 == "" || !knownConditionBasis(facts.ConditionBasis) {
 		return nil, OutcomeFactsUnknownSchema
 	}
 	return &facts, ""
@@ -369,4 +373,41 @@ func planGrouping(facts *contract.StrategyFactsV2, noData bool) string {
 		return facts.NoDataDimensionDigest
 	}
 	return facts.DimensionDigest
+}
+
+// conditionRuleReleased gates condition_changed. It is held: the
+// publisher's statement that a catalog metric's snapshot conditions are the
+// user's original input is a code comment, not a published contract, and a
+// change of that on the publisher's side would make this rule close alerts
+// nobody's edit orphaned. Release it when the publisher documents
+// snapshot.agg_condition as the user's input in its publication spec, or
+// publishes a user-condition digest or marker; released, it compares only
+// digests of the same basis.
+const conditionRuleReleased = false
+
+// conditionVerdict is condition_changed for a no-data alert whose facts and
+// the current Plans' are comparable: the close, or the note that says why
+// it was not decided (snapshot_unreadable, condition_rule_held), or neither
+// when the conditions did not change.
+func conditionVerdict(alert, current *contract.StrategyFactsV2, released bool) (decision, note string) {
+	if alert.ConditionBasis == contract.ConditionBasisSnapshotUnreadable ||
+		current.ConditionBasis == contract.ConditionBasisSnapshotUnreadable {
+		return "", OutcomeSnapshotUnreadable
+	}
+	if alert.ConditionMD5 == current.ConditionMD5 {
+		return "", ""
+	}
+	if !released || alert.ConditionBasis != current.ConditionBasis {
+		return "", OutcomeConditionRuleHeld
+	}
+	return OutcomeConditionChanged, ""
+}
+
+func knownConditionBasis(basis string) bool {
+	switch basis {
+	case contract.ConditionBasisSnapshotUser, contract.ConditionBasisQuery, contract.ConditionBasisQueryInjected,
+		contract.ConditionBasisSnapshotUnreadable:
+		return true
+	}
+	return false
 }
