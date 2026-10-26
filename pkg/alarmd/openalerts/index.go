@@ -1097,6 +1097,10 @@ func (cache *Cache) indexContains(m member, now time.Time, count bool) bool {
 	entry := cache.index.entries[m.key]
 	answer := AnswerSelfMaintained
 	present := false
+	// unread is a set with no current read to answer from - past the stale
+	// bound, or never read - which the gate answers by the unavailable
+	// policy, as it does a set not trusted (indexGate).
+	unread := true
 	if entry != nil {
 		if !cache.calibrated(entry, now) {
 			entry.reconcileRequested = true
@@ -1108,6 +1112,7 @@ func (cache *Cache) indexContains(m member, now time.Time, count bool) bool {
 			answer = AnswerIndexStale
 			entry = nil
 		case !entry.indexReadAt.IsZero() || !entry.calibratedAt.IsZero():
+			unread = false
 			present = cache.setCarries(entry, m.fingerprint, now)
 			answer = AnswerIndexAbsent
 			if present {
@@ -1115,6 +1120,19 @@ func (cache *Cache) indexContains(m member, now time.Time, count bool) bool {
 			}
 		default:
 			present = cache.setCarries(entry, m.fingerprint, now)
+		}
+	}
+	// Under self-maintain an unread set lets an alert this process opened
+	// recover, as an untrusted set does: its send record may already be
+	// pruned by an earlier calibration that listed it open, and only the
+	// record of what this process opened still knows it. The gate still
+	// holds the recovery of an alert this process has no record of opening
+	// and no record of sending - one the consumer opened from another
+	// deployment's events, or one whose record was let go after its own
+	// recovery's grace - that the unread set does not carry.
+	if count && unread && cache.policy == PolicySelfMaintain {
+		if _, opened := cache.index.opened[m]; opened {
+			present = true
 		}
 	}
 	if added, ok := cache.added[m]; ok && (entry == nil || !cache.calibrated(entry, now) || now.Sub(added.at) <= cache.index.options.LocalRetention || !added.at.Before(entry.calibratedStarted)) {
