@@ -499,7 +499,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			Subsystem: metricSubsystem, Name: "worker_no_data_slot_plans_total",
 			Help: "Plans that detect no-data, counted once per Slot by what happened to that detection. " +
 				"The outcomes partition: every such Plan lands on exactly one every Slot, so their sum is " +
-				"the no-data Plans this worker evaluated. EVALUATED is the only one that judged anything. " +
+				"the no-data Plans this worker evaluated. EVALUATED is the only one that judged absence; " +
+				"SKIPPED_QUERY_NOT_FULL and SKIPPED_ANSWER_TRUNCATED still judge the groups that arrived " +
+				"present, and judge no group absent. " +
 				"The others are different kinds of not judging and must be read apart, because once " +
 				"the round is over they look identical. Among them: SKIPPED_QUERY_NOT_FULL is a query that did not " +
 				"cover the period and resolves itself next round; SKIPPED_MEMORY_UNREADABLE is a record " +
