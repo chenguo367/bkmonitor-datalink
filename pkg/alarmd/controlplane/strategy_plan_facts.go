@@ -49,7 +49,7 @@ type StrategyPlanFacts struct {
 	NoDataSuspended    bool
 	// StrategyFacts is the Plans' strategy facts
 	// (contract.EvaluationPlanV2.StrategyFacts), nil where they have none.
-	StrategyFacts *contract.StrategyFactsV1
+	StrategyFacts *contract.StrategyFactsV2
 	// Retained says the Plans are the last good ones kept in place of a
 	// definition the round could not compile (StrategyLookup.Retained): what
 	// runs is not the strategy's current definition.

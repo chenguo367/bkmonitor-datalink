@@ -2,6 +2,7 @@ package contract
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -42,31 +43,121 @@ func TestAggConditionMD5MatchesThePlatform(t *testing.T) {
 // The facts of one query config are its metric digest and the platform's
 // condition md5; a missing agg_condition reads as an empty one, and a
 // query config without a metric_id has no facts.
-func TestDeriveStrategyFactsV1(t *testing.T) {
-	facts, err := DeriveStrategyFactsV1([]json.RawMessage{json.RawMessage(
-		`{"metric_id":"bk_monitor.system.cpu.usage","agg_condition":[{"key":"ip","value":["192.0.2.1"],"method":"eq","condition":"and"}]}`)})
+func TestDeriveStrategyFactsV2(t *testing.T) {
+	facts, err := DeriveStrategyFactsV2([]json.RawMessage{json.RawMessage(
+		`{"metric_id":"bk_monitor.system.cpu.usage","agg_condition":[{"key":"ip","value":["192.0.2.1"],"method":"eq","condition":"and"}]}`)},
+		StrategyGrouping{Fields: []string{"ip", "device"}, NoData: true, NoDataFields: []string{"ip"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// md5 of ["bk_monitor.system.cpu.usage"].
-	if *facts != (StrategyFactsV1{Schema: "v1", MetricDigest: "3815df5a36678b1d738aa6f9a1522549", ConditionMD5: "92811130e44a4e5eb434d4dd5acbfdaa"}) {
+	// md5 of ["bk_monitor.system.cpu.usage"]; md5 of ["device","ip"] and of ["ip"].
+	if *facts != (StrategyFactsV2{Schema: "v2", MetricDigest: "3815df5a36678b1d738aa6f9a1522549", ConditionMD5: "92811130e44a4e5eb434d4dd5acbfdaa",
+		DimensionDigest: "c95842d36b7a76c5ef0fd863a1ea154e", NoDataDimensionDigest: "1f99f60df760995e0e77a1169a328a0d"}) {
 		t.Fatalf("facts %+v", *facts)
 	}
-	bare, err := DeriveStrategyFactsV1([]json.RawMessage{json.RawMessage(`{"metric_id":"bk_monitor.system.cpu.usage"}`)})
-	if err != nil || bare.ConditionMD5 != "d751713988987e9331980363e24189ce" || bare.MetricDigest != facts.MetricDigest {
-		t.Fatalf("facts %+v err %v, want an empty condition", bare, err)
+	bare, err := DeriveStrategyFactsV2([]json.RawMessage{json.RawMessage(`{"metric_id":"bk_monitor.system.cpu.usage"}`)}, StrategyGrouping{Dynamic: true})
+	// A dynamic grouping and no no-data state no grouping digest.
+	if err != nil || bare.ConditionMD5 != "d751713988987e9331980363e24189ce" || bare.MetricDigest != facts.MetricDigest ||
+		bare.DimensionDigest != "" || bare.NoDataDimensionDigest != "" {
+		t.Fatalf("facts %+v err %v, want an empty condition and no grouping", bare, err)
 	}
 	// Two queries: the metric ids in order, the conditions joined in order.
-	two, err := DeriveStrategyFactsV1([]json.RawMessage{json.RawMessage(`{"metric_id":"a","agg_condition":[]}`),
-		json.RawMessage(`{"metric_id":"b","agg_condition":[]}`)})
-	swapped, _ := DeriveStrategyFactsV1([]json.RawMessage{json.RawMessage(`{"metric_id":"b","agg_condition":[]}`),
-		json.RawMessage(`{"metric_id":"a","agg_condition":[]}`)})
+	two, err := DeriveStrategyFactsV2([]json.RawMessage{json.RawMessage(`{"metric_id":"a","agg_condition":[]}`),
+		json.RawMessage(`{"metric_id":"b","agg_condition":[]}`)}, StrategyGrouping{})
+	swapped, _ := DeriveStrategyFactsV2([]json.RawMessage{json.RawMessage(`{"metric_id":"b","agg_condition":[]}`),
+		json.RawMessage(`{"metric_id":"a","agg_condition":[]}`)}, StrategyGrouping{})
 	// md5 of ["a","b"]; md5 of the two empty-condition md5s joined by ",".
 	if err != nil || two.MetricDigest != "e53f04d1bcc1428d9e8db9a93578c5eb" || two.ConditionMD5 != "4a9031297eb2b5f8f7aae3af652c454a" ||
 		swapped.MetricDigest == two.MetricDigest {
 		t.Fatalf("facts %+v / %+v err %v", two, swapped, err)
 	}
-	if _, err := DeriveStrategyFactsV1([]json.RawMessage{json.RawMessage(`{"agg_condition":[]}`)}); err == nil {
+	if _, err := DeriveStrategyFactsV2([]json.RawMessage{json.RawMessage(`{"agg_condition":[]}`)}, StrategyGrouping{}); err == nil {
 		t.Fatal("a query config without a metric_id had facts")
+	}
+}
+
+// The grouping digest is of the key set: order, repeats and a tags. prefix
+// do not move it, a key added does. Expected values are the MD5 of the JSON
+// array of the sorted key set, computed with python3.
+func TestGroupingDigestIsOfTheKeySet(t *testing.T) {
+	for _, vector := range []struct {
+		fields []string
+		want   string
+	}{
+		{[]string{"ip", "device"}, "c95842d36b7a76c5ef0fd863a1ea154e"},
+		{[]string{"device", "ip"}, "c95842d36b7a76c5ef0fd863a1ea154e"},
+		{[]string{"tags.device", "ip", "ip"}, "c95842d36b7a76c5ef0fd863a1ea154e"},
+		{[]string{"ip", "device", "nic"}, "3902f7d0c455498d7c19a40cdc191bf1"},
+		{[]string{"ip"}, "1f99f60df760995e0e77a1169a328a0d"},
+		{nil, "d751713988987e9331980363e24189ce"},
+	} {
+		if got := GroupingDigest(vector.fields); got != vector.want {
+			t.Errorf("GroupingDigest(%v) = %s, want %s", vector.fields, got, vector.want)
+		}
+	}
+}
+
+// An event carries the grouping of its own series: the no-data one for a
+// no-data event, and never the Plan's other one.
+func TestAnEventCarriesItsOwnGrouping(t *testing.T) {
+	plan := StrategyFactsV2{Schema: "v2", MetricDigest: "m", ConditionMD5: "c", DimensionDigest: "threshold", NoDataDimensionDigest: "no-data"}
+	if got := plan.ForEvent(false); got != (StrategyFactsV2{Schema: "v2", MetricDigest: "m", ConditionMD5: "c", DimensionDigest: "threshold"}) {
+		t.Fatalf("threshold event facts %+v", got)
+	}
+	if got := plan.ForEvent(true); got != (StrategyFactsV2{Schema: "v2", MetricDigest: "m", ConditionMD5: "c", DimensionDigest: "no-data"}) {
+		t.Fatalf("no-data event facts %+v", got)
+	}
+}
+
+// The expected ids and digests were computed by bk-monitor's own
+// get_metric_id (bkmonitor/strategy/new_strategy.py), copied verbatim into a
+// scratch script and run with python3 -I on these PromQL texts; the digest
+// is the MD5 of the JSON array of that one id.
+func TestPromQLMetricIDMatchesThePlatform(t *testing.T) {
+	long := `sum(container_memory_working_set_bytes{namespace="命名空间",pod=~"服务-.*"}) by (pod) / ` +
+		`sum(kube_pod_container_resource_limits{resource="memory",namespace="命名空间"}) by (pod)`
+	exactly128 := "rate(up[1m])+rate(up[1m])+rate(up[1m])+rate(up[1m])+rate(up[1m])+rate(up[1m])+rate(up[1m])+rate(up[1m])+rate(up[1m])+rate(up[1m]"
+	for _, vector := range []struct{ name, promql, wantID, wantDigest string }{
+		{"short", `sum(rate(http_requests_total{job="api"}[5m])) by (instance)`,
+			`sum(rate(http_requests_total{job="api"}[5m])) by (instance)`, "0e7fc4ff16c96b3d6a4c23589bd98852"},
+		{"exactly 128", exactly128, exactly128, "c52ced342bc0e8d17bde71be7125daed"},
+		{"129", strings.Repeat("x", 129), strings.Repeat("x", 125) + "...", "5823b93d3df4ced88a22f240b5d5ad2b"},
+		{"long unicode", long, `sum(container_memory_working_set_bytes{namespace="命名空间",pod=~"服务-.*"}) by (pod) / ` +
+			`sum(kube_pod_container_resource_limits{reso...`, "d22b9dc7ae4d126e8db1e9aa9a726cba"},
+	} {
+		if got := PromQLMetricID(vector.promql); got != vector.wantID {
+			t.Errorf("%s: PromQLMetricID = %q; the platform's is %q", vector.name, got, vector.wantID)
+		}
+		query, _ := json.Marshal(map[string]any{"metric_id": "", "data_source_label": "prometheus", "data_type_label": "time_series",
+			"promql": vector.promql, "agg_condition": []any{}})
+		facts, err := DeriveStrategyFactsV2([]json.RawMessage{query}, StrategyGrouping{})
+		if err != nil || facts.MetricDigest != vector.wantDigest {
+			t.Errorf("%s: metric digest %+v err %v, want %s", vector.name, facts, err, vector.wantDigest)
+		}
+	}
+	// A query with its own metric_id, or not PromQL, keeps the id as published.
+	named, _ := DeriveStrategyFactsV2([]json.RawMessage{json.RawMessage(
+		`{"metric_id":"bk_monitor.system.cpu.usage","data_source_label":"prometheus","data_type_label":"time_series","promql":"up"}`)}, StrategyGrouping{})
+	other, _ := DeriveStrategyFactsV2([]json.RawMessage{json.RawMessage(
+		`{"metric_id":"","data_source_label":"bk_monitor","data_type_label":"time_series","promql":"up"}`)}, StrategyGrouping{})
+	// md5 of ["bk_monitor.system.cpu.usage"] and of [""].
+	if named.MetricDigest != "3815df5a36678b1d738aa6f9a1522549" || other.MetricDigest != "399fc6670871474cd7ce0458401fd299" {
+		t.Fatalf("digests %s / %s", named.MetricDigest, other.MetricDigest)
+	}
+}
+
+// A query whose conditions may hold one the publisher added says so.
+func TestDeriveStrategyFactsMarksInjectedConditions(t *testing.T) {
+	for query, want := range map[string]bool{
+		`{"metric_id":"m","agg_condition":[{"key":"mount_point","method":"eq","value":["/"]}]}`:                                                                  false,
+		`{"metric_id":"m","agg_condition":[{"key":"device_type","method":"neq","value":["tmpfs"]}]}`:                                                             true,
+		`{"metric_id":"m","agg_condition":[{"key":"bk_biz_id","method":"eq","value":["2"]},{"key":"ip","method":"eq","value":["192.0.2.1"],"condition":"and"}]}`: true,
+		`{"metric_id":"m","agg_condition":[],"metric_snapshot":{"metric_id":7}}`:                                                                                 true,
+		`{"metric_id":"m","agg_condition":[],"metric_snapshot":{}}`:                                                                                              false,
+	} {
+		facts, err := DeriveStrategyFactsV2([]json.RawMessage{json.RawMessage(query)}, StrategyGrouping{})
+		if err != nil || facts.ConditionInjected != want {
+			t.Errorf("%s: facts %+v err %v, want injected %v", query, facts, err, want)
+		}
 	}
 }

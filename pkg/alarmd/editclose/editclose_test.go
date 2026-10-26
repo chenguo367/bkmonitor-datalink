@@ -134,7 +134,10 @@ func TestThePlanKeyMovesWithEveryFact(t *testing.T) {
 		func(p *Plan) { p.NoData = false },
 		func(p *Plan) { p.NoDataDimensions = nil },
 		func(p *Plan) { p.NoDataSuspended = true },
-		func(p *Plan) { p.Facts = &contract.StrategyFactsV1{Schema: "v1", MetricDigest: "m", ConditionMD5: "c"} },
+		func(p *Plan) { p.Facts = &contract.StrategyFactsV2{Schema: "v2", MetricDigest: "m", ConditionMD5: "c"} },
+		func(p *Plan) {
+			p.Facts = &contract.StrategyFactsV2{Schema: "v2", MetricDigest: "m", ConditionMD5: "c", ConditionInjected: true}
+		},
 	}
 	for index, change := range changes {
 		changed := current()
@@ -148,7 +151,7 @@ func TestThePlanKeyMovesWithEveryFact(t *testing.T) {
 // strategyFacts is the opening event's strategy facts as the link stores
 // them.
 func strategyFacts(metric, condition string) []byte {
-	return []byte(`{"schema":"v1","metric_digest":"` + metric + `","condition_md5":"` + condition + `"}`)
+	return []byte(`{"schema":"v2","metric_digest":"` + metric + `","condition_md5":"` + condition + `"}`)
 }
 
 func withFacts(alert Alert, facts []byte) Alert {
@@ -160,7 +163,7 @@ func withFacts(alert Alert, facts []byte) Alert {
 // against the current Plans'.
 func TestDecideTheStrategyFacts(t *testing.T) {
 	plan := current()
-	plan.Facts = &contract.StrategyFactsV1{Schema: "v1", MetricDigest: "metric-b", ConditionMD5: "condition-b"}
+	plan.Facts = &contract.StrategyFactsV2{Schema: "v2", MetricDigest: "metric-b", ConditionMD5: "condition-b"}
 	noDataOff := plan
 	noDataOff.NoData, noDataOff.NoDataDimensions = false, nil
 	for name, test := range map[string]struct {
@@ -178,6 +181,17 @@ func TestDecideTheStrategyFacts(t *testing.T) {
 		// The connector of the first condition is not in the digest (the
 		// platform's rule), so the same digest on both sides is no change.
 		"unchanged facts keep": {plan, withFacts(noData(8, "ip"), strategyFacts("metric-b", "condition-b")), OutcomeKept, ""},
+		"condition changed over a condition the alert's publisher injected": {plan, withFacts(noData(8, "ip"),
+			[]byte(`{"schema":"v2","metric_digest":"metric-b","condition_md5":"condition-a","condition_injected":true}`)), OutcomeKept, OutcomeConditionInjected},
+		"condition changed over a condition the current publisher injected": {func() Plan {
+			p := plan
+			facts := *plan.Facts
+			facts.ConditionInjected = true
+			p.Facts = &facts
+			return p
+		}(), withFacts(noData(8, "ip"), strategyFacts("metric-b", "condition-a")), OutcomeKept, OutcomeConditionInjected},
+		"injected and unchanged": {plan, withFacts(noData(8, "ip"),
+			[]byte(`{"schema":"v2","metric_digest":"metric-b","condition_md5":"condition-b","condition_injected":true}`)), OutcomeKept, ""},
 		"condition changed before no-data off": {noDataOff, withFacts(noData(8, "ip"), strategyFacts("metric-b", "condition-a")),
 			OutcomeConditionChanged, ""},
 		"an alert at the current revision is not compared": {plan, withFacts(threshold(9, "warning", "ip", "device"), strategyFacts("metric-a", "condition-a")),
@@ -187,19 +201,56 @@ func TestDecideTheStrategyFacts(t *testing.T) {
 		"no facts":              {plan, noData(8, "ip"), OutcomeKept, OutcomeFactsMissing},
 		"no facts, no-data off": {noDataOff, noData(8, "ip"), OutcomeNoDataDisabled, OutcomeFactsMissing},
 		"another schema": {plan, withFacts(threshold(8, "warning", "ip", "device"),
-			[]byte(`{"schema":"v2","metric_digest":"metric-a","condition_md5":"condition-a"}`)), OutcomeKept, OutcomeFactsUnknownSchema},
+			[]byte(`{"schema":"v3","metric_digest":"metric-a","condition_md5":"condition-a"}`)), OutcomeKept, OutcomeFactsUnknownSchema},
 		"no schema": {plan, withFacts(threshold(8, "warning", "ip", "device"), []byte(`{"metric_digest":"metric-a"}`)),
 			OutcomeKept, OutcomeFactsUnknownSchema},
 		"facts that are not an object": {plan, withFacts(threshold(8, "warning", "ip", "device"), []byte(`"v1"`)), OutcomeKept, OutcomeFactsUnknownSchema},
-		"v1 without a digest": {plan, withFacts(threshold(8, "warning", "ip", "device"), []byte(`{"schema":"v1","metric_digest":"metric-a"}`)),
+		"v2 without a digest": {plan, withFacts(threshold(8, "warning", "ip", "device"), []byte(`{"schema":"v2","metric_digest":"metric-a"}`)),
 			OutcomeKept, OutcomeFactsUnknownSchema},
 		"Plans without facts": {current(), withFacts(threshold(8, "warning", "ip", "device"), strategyFacts("metric-a", "condition-a")),
 			OutcomeKept, OutcomePlanFactsMissing},
 		"Plans with facts of another schema": {func() Plan {
 			p := current()
-			p.Facts = &contract.StrategyFactsV1{Schema: "v2", MetricDigest: "metric-b", ConditionMD5: "condition-b"}
+			p.Facts = &contract.StrategyFactsV2{Schema: "v3", MetricDigest: "metric-b", ConditionMD5: "condition-b"}
 			return p
 		}(), withFacts(threshold(8, "warning", "ip", "device"), strategyFacts("metric-a", "condition-a")), OutcomeKept, OutcomePlanFactsMissing},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got, note := Decide(test.plan, test.alert); got != test.want || note != test.note {
+				t.Fatalf("Decide = %s, %q; want %s, %q", got, note, test.want, test.note)
+			}
+		})
+	}
+}
+
+// The grouping rule reads the digests where both sides state one, and the
+// alert's dimension names otherwise; schema v1 is not one this build reads.
+func TestDecideTheGroupingDigest(t *testing.T) {
+	facts := func(dimension string) []byte {
+		return []byte(`{"schema":"v2","metric_digest":"metric-b","condition_md5":"condition-b","dimension_digest":"` + dimension + `"}`)
+	}
+	plan := current()
+	plan.Facts = &contract.StrategyFactsV2{Schema: "v2", MetricDigest: "metric-b", ConditionMD5: "condition-b",
+		DimensionDigest: "grouping-b", NoDataDimensionDigest: "no-data-b"}
+	undigested := plan
+	undigested.Facts = &contract.StrategyFactsV2{Schema: "v2", MetricDigest: "metric-b", ConditionMD5: "condition-b"}
+	dynamic := undigested
+	dynamic.DynamicDimensions = true
+	for name, test := range map[string]struct {
+		plan       Plan
+		alert      Alert
+		want, note string
+	}{
+		"grouping changed":                       {plan, withFacts(threshold(8, "warning", "ip", "device"), facts("grouping-a")), OutcomeDimensionsChanged, ""},
+		"grouping unchanged":                     {plan, withFacts(threshold(8, "warning", "ip", "nic"), facts("grouping-b")), OutcomeKept, ""},
+		"no-data grouping changed":               {plan, withFacts(noData(8, "ip"), facts("no-data-a")), OutcomeDimensionsChanged, ""},
+		"no-data grouping unchanged":             {plan, withFacts(noData(8, "ip"), facts("no-data-b")), OutcomeKept, ""},
+		"alert states no grouping":               {plan, withFacts(threshold(8, "warning", "ip", "nic"), facts("")), OutcomeDimensionsChanged, ""},
+		"alert states no grouping, none dropped": {plan, withFacts(threshold(8, "warning", "ip"), facts("")), OutcomeKept, ""},
+		"Plans state no grouping":                {undigested, withFacts(threshold(8, "warning", "ip", "nic"), facts("grouping-a")), OutcomeDimensionsChanged, ""},
+		"dynamic Plans state no grouping":        {dynamic, withFacts(threshold(8, "warning", "ip", "nic"), facts("grouping-a")), OutcomeKept, ""},
+		"schema v1": {plan, withFacts(threshold(8, "warning", "ip", "device"),
+			[]byte(`{"schema":"v1","metric_digest":"metric-a","condition_md5":"condition-b","dimension_digest":"grouping-a"}`)), OutcomeKept, OutcomeFactsUnknownSchema},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got, note := Decide(test.plan, test.alert); got != test.want || note != test.note {

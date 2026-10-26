@@ -230,7 +230,7 @@ type OutputContextObject struct {
 	GlobalBusiness bool `json:"global_business,omitempty"`
 	// StrategyFacts is read only when an event is rendered, like the signal
 	// type (EvaluationPlanV2.StrategyFacts). Omitted when nil.
-	StrategyFacts *contract.StrategyFactsV1 `json:"strategy_facts,omitempty"`
+	StrategyFacts *contract.StrategyFactsV2 `json:"strategy_facts,omitempty"`
 }
 
 // BuildQueryGroupObject projects the execution content out of a published

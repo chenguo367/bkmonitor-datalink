@@ -31,7 +31,10 @@ func newEditCloseCollector() *editCloseCollector {
 				"again. Beside a decision, facts_missing, facts_unknown_schema and plan_facts_missing count candidates "+
 				"the metric and condition rules could not judge: the alert's opening event carried no strategy facts "+
 				"(every alert opened before events carried them), carried a schema this build does not read, or the "+
-				"current Plans have none. close_sent and send_failed "+
+				"current Plans have none; without facts a grouping is judged only for a dimension removed or renamed. "+
+				"condition_injected counts no-data candidates whose condition digest changed while either side's "+
+				"conditions may hold one the publisher added (device_type, bk_biz_id, a metric materialization): not "+
+				"closed. close_sent and send_failed "+
 				"count closes the producer accepted and refused, business_unknown closes not sent for want of a business, "+
 				"record_unreadable alerts whose record could not be read (read again later), read_deferred alerts not "+
 				"read because the round's reads were spent, producer_foreign and producer_unknown alerts of another "+

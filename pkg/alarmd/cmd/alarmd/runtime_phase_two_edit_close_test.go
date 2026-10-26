@@ -415,9 +415,10 @@ func TestTheEditCloseRunsOverTheAbsentClosesRoster(t *testing.T) {
 
 // derivedFacts is the strategy facts of one query config, derived the way
 // the catalog derives them.
-func derivedFacts(t *testing.T, queryConfig string) *contract.StrategyFactsV1 {
+func derivedFacts(t *testing.T, queryConfig string) *contract.StrategyFactsV2 {
 	t.Helper()
-	facts, err := contract.DeriveStrategyFactsV1([]json.RawMessage{json.RawMessage(queryConfig)})
+	facts, err := contract.DeriveStrategyFactsV2([]json.RawMessage{json.RawMessage(queryConfig)},
+		contract.StrategyGrouping{Fields: []string{"ip", "device"}, NoData: true, NoDataFields: []string{"ip"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,7 +426,7 @@ func derivedFacts(t *testing.T, queryConfig string) *contract.StrategyFactsV1 {
 }
 
 // withFacts gives the alert's record the facts its opening event carried.
-func (fixture *editFixture) withFacts(t *testing.T, id string, facts *contract.StrategyFactsV1) {
+func (fixture *editFixture) withFacts(t *testing.T, id string, facts *contract.StrategyFactsV2) {
 	t.Helper()
 	encoded, err := json.Marshal(facts)
 	if err != nil {
@@ -451,9 +452,10 @@ func TestAMetricChangeClosesEveryAlertOfTheStrategy(t *testing.T) {
 	fixture.threshold("threshold", 8, "critical", "ip", "device")
 	fixture.noData("no-data", 8, "ip")
 	fixture.threshold("current", 9, "critical", "ip", "device")
-	for _, id := range []string{"threshold", "no-data", "current"} {
-		fixture.withFacts(t, id, derivedFacts(t, cpuQuery))
+	for _, id := range []string{"threshold", "current"} {
+		fixture.withEventFacts(t, id, derivedFacts(t, cpuQuery), false)
 	}
+	fixture.withEventFacts(t, "no-data", derivedFacts(t, cpuQuery), true)
 	fixture.step()
 	fixture.wantClosed(t, map[string]string{"threshold": "metric_changed", "no-data": "metric_changed"})
 }
@@ -467,9 +469,8 @@ func TestAConditionChangeClosesNoDataAlertsAndLeavesThresholdAlerts(t *testing.T
 	fixture.plans.facts["10"] = plan
 	fixture.threshold("threshold", 8, "critical", "ip", "device")
 	fixture.noData("no-data", 8, "ip")
-	for _, id := range []string{"threshold", "no-data"} {
-		fixture.withFacts(t, id, derivedFacts(t, cpuQuery))
-	}
+	fixture.withEventFacts(t, "threshold", derivedFacts(t, cpuQuery), false)
+	fixture.withEventFacts(t, "no-data", derivedFacts(t, cpuQuery), true)
 	fixture.step()
 	fixture.wantClosed(t, map[string]string{"no-data": "condition_changed"})
 }
@@ -489,7 +490,7 @@ func TestAConnectorOnlyChangeOfTheFirstConditionIsNoChange(t *testing.T) {
 		plan.StrategyFacts = derivedFacts(t, current)
 		fixture.plans.facts["10"] = plan
 		fixture.noData("no-data", 8, "ip")
-		fixture.withFacts(t, "no-data", derivedFacts(t, before))
+		fixture.withEventFacts(t, "no-data", derivedFacts(t, before), true)
 		fixture.step()
 		fixture.wantClosed(t, want)
 	}
@@ -507,7 +508,7 @@ func TestMissingOrUnknownFactsAreSkippedAndCounted(t *testing.T) {
 	fixture.threshold("no-facts", 8, "critical", "ip")
 	fixture.threshold("other-schema", 8, "critical", "ip")
 	record := fixture.link.records["other-schema"]
-	record.StrategyFacts = json.RawMessage(`{"schema":"v2","metric_digest":"x","condition_md5":"y"}`)
+	record.StrategyFacts = json.RawMessage(`{"schema":"v3","metric_digest":"x","condition_md5":"y"}`)
 	fixture.link.records["other-schema"] = record
 	fixture.threshold("no-facts-dimension-dropped", 8, "critical", "ip", "device")
 	fixture.step()
@@ -523,4 +524,111 @@ func TestMissingOrUnknownFactsAreSkippedAndCounted(t *testing.T) {
 	if stats := fixture.loop.Stats(); stats[editclose.OutcomeFactsMissing] != 3 || stats[editclose.OutcomeFactsUnknownSchema] != 2 {
 		t.Fatalf("stats %+v, want the remembered decisions counted with their notes", stats)
 	}
+}
+
+func groupedFacts(t *testing.T, fields []string, noDataFields []string) *contract.StrategyFactsV2 {
+	t.Helper()
+	facts, err := contract.DeriveStrategyFactsV2([]json.RawMessage{json.RawMessage(cpuQuery)},
+		contract.StrategyGrouping{Fields: fields, NoData: true, NoDataFields: noDataFields})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return facts
+}
+
+// withEventFacts gives the alert's record the facts its opening event
+// carried: the Plan's, with the grouping of the event's own series.
+func (fixture *editFixture) withEventFacts(t *testing.T, id string, plan *contract.StrategyFactsV2, noData bool) {
+	t.Helper()
+	facts := plan.ForEvent(noData)
+	fixture.withFacts(t, id, &facts)
+}
+
+// A dimension added to the grouping closes the alerts whose facts state the
+// grouping they were raised under, threshold and no-data alike.
+func TestADimensionAddedToTheGroupingClosesTheAlertsThatCarryFacts(t *testing.T) {
+	fixture := newEditFixture()
+	plan := editPlan()
+	plan.DimensionFields = []string{"device", "ip", "nic"}
+	plan.NoDataAggDimension = []string{"device", "ip"}
+	plan.StrategyFacts = groupedFacts(t, plan.DimensionFields, plan.NoDataAggDimension)
+	fixture.plans.facts["10"] = plan
+	raisedUnder := groupedFacts(t, []string{"ip", "device"}, []string{"ip"})
+	fixture.threshold("threshold", 8, "critical", "ip", "device")
+	fixture.withEventFacts(t, "threshold", raisedUnder, false)
+	fixture.noData("no-data", 8, "ip")
+	fixture.withEventFacts(t, "no-data", raisedUnder, true)
+	fixture.step()
+	fixture.wantClosed(t, map[string]string{"threshold": "dimensions_changed", "no-data": "dimensions_changed"})
+}
+
+// The same key set listed in another order is no change.
+func TestAReorderedGroupingIsNoChange(t *testing.T) {
+	fixture := newEditFixture()
+	plan := editPlan()
+	plan.DimensionFields = []string{"device", "ip"}
+	plan.StrategyFacts = groupedFacts(t, []string{"device", "ip"}, []string{"ip"})
+	fixture.plans.facts["10"] = plan
+	fixture.threshold("threshold", 8, "critical", "ip", "device")
+	fixture.withEventFacts(t, "threshold", groupedFacts(t, []string{"ip", "device"}, []string{"ip"}), false)
+	fixture.step()
+	fixture.wantClosed(t, map[string]string{})
+	if fixture.loop.Stats()[editclose.OutcomeKept] != 1 {
+		t.Fatalf("stats %+v, want the alert kept", fixture.loop.Stats())
+	}
+}
+
+// Without facts, a dimension added is not decided and is counted; a
+// dimension removed still closes by the alert's own dimension names.
+func TestWithoutFactsOnlyARemovedDimensionCloses(t *testing.T) {
+	added := newEditFixture()
+	plan := editPlan()
+	plan.DimensionFields = []string{"device", "ip", "nic"}
+	plan.StrategyFacts = groupedFacts(t, plan.DimensionFields, []string{"ip"})
+	added.plans.facts["10"] = plan
+	added.threshold("threshold", 8, "critical", "ip", "device")
+	added.step()
+	added.wantClosed(t, map[string]string{})
+	if stats := added.loop.Stats(); stats[editclose.OutcomeKept] != 1 || stats[editclose.OutcomeFactsMissing] != 1 {
+		t.Fatalf("stats %+v, want the alert kept and counted facts_missing", stats)
+	}
+
+	removed := newEditFixture()
+	plan.DimensionFields = []string{"ip"}
+	plan.StrategyFacts = groupedFacts(t, plan.DimensionFields, []string{"ip"})
+	removed.plans.facts["10"] = plan
+	removed.threshold("threshold", 8, "critical", "ip", "device")
+	removed.step()
+	removed.wantClosed(t, map[string]string{"threshold": "dimensions_changed"})
+}
+
+// A strategy whose conditions hold a key the publisher injects is not closed
+// on a condition change: the digest moves with the publisher's own state
+// too. The skip is counted. A change of conditions the user wrote alone still
+// closes the no-data alerts.
+func TestAConditionChangeOverAnInjectedKeyIsSkippedAndCounted(t *testing.T) {
+	diskQuery := func(types string) string {
+		return `{"metric_id":"bk_monitor.system.disk.in_use","agg_condition":[{"key":"device_type","method":"neq","value":[` + types + `]},` +
+			`{"key":"mount_point","method":"eq","value":["/"],"condition":"and"}]}`
+	}
+	fixture := newEditFixture()
+	plan := editPlan()
+	plan.StrategyFacts = derivedFacts(t, diskQuery(`"tmpfs","overlay"`))
+	fixture.plans.facts["10"] = plan
+	fixture.noData("no-data", 8, "ip")
+	fixture.withEventFacts(t, "no-data", derivedFacts(t, diskQuery(`"tmpfs"`)), true)
+	fixture.step()
+	fixture.wantClosed(t, map[string]string{})
+	if stats := fixture.loop.Stats(); stats[editclose.OutcomeConditionInjected] != 1 || stats[editclose.OutcomeKept] != 1 {
+		t.Fatalf("stats %+v, want the alert kept and counted condition_injected", stats)
+	}
+
+	userOnly := newEditFixture()
+	plan.StrategyFacts = derivedFacts(t, `{"metric_id":"bk_monitor.system.disk.in_use","agg_condition":[{"key":"mount_point","method":"eq","value":["/data"]}]}`)
+	userOnly.plans.facts["10"] = plan
+	userOnly.noData("no-data", 8, "ip")
+	userOnly.withEventFacts(t, "no-data",
+		derivedFacts(t, `{"metric_id":"bk_monitor.system.disk.in_use","agg_condition":[{"key":"mount_point","method":"eq","value":["/"]}]}`), true)
+	userOnly.step()
+	userOnly.wantClosed(t, map[string]string{"no-data": "condition_changed"})
 }

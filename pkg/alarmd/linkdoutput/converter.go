@@ -168,12 +168,13 @@ type wireExtraData struct {
 	// strategy with named outputs, absent from every other message.
 	DetectionSnapshot json.RawMessage `json:"detection_snapshot,omitempty"`
 	// StrategyFacts is the configuration the event was decided under
-	// (contract.StrategyFactsV1: schema, metric_digest, condition_md5), on
-	// every event of a Plan that has it. The link keeps an alert's
+	// (contract.StrategyFactsV2: schema, metric_digest, condition_md5,
+	// dimension_digest - the grouping of this event's series, the no-data
+	// one for a no-data event), on every event of a Plan that has it. The link keeps an alert's
 	// extra_data from its opening event, so on the alert these are the
 	// facts of the revision that raised it, which the edit close compares
 	// with the current revision's.
-	StrategyFacts *contract.StrategyFactsV1 `json:"strategy_facts,omitempty"`
+	StrategyFacts *contract.StrategyFactsV2 `json:"strategy_facts,omitempty"`
 }
 
 type wireEvent struct {
@@ -300,7 +301,6 @@ func (converter *Converter) Convert(event *contract.TriggerEventV1) (Event, erro
 			SignalType:          event.SignalType,
 			EvaluationFamily:    evaluationFamilyMetricAlgorithm,
 			DetectionSnapshot:   event.DetectionSnapshot,
-			StrategyFacts:       event.StrategyFacts,
 		},
 	}
 	if begin := primary.DecisionWindow.Trigger.AnomalyBeginTime; begin > 0 {
@@ -310,6 +310,10 @@ func (converter *Converter) Convert(event *contract.TriggerEventV1) (Event, erro
 		// alert look like it started again every round. The consumer takes
 		// the start from the trigger it opened the alert on.
 		message.ExtraData.AnomalyBeginTime = wireTime(begin)
+	}
+	if event.StrategyFacts != nil {
+		facts := event.StrategyFacts.ForEvent(noData)
+		message.ExtraData.StrategyFacts = &facts
 	}
 	if noData {
 		// No value, on purpose. The synthetic point a no-data round produces

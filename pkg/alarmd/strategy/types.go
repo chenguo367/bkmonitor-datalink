@@ -605,12 +605,12 @@ type CompiledPlan struct {
 	noData           *contract.NoDataConfigV1
 	noDataLevel      *CompiledLevel
 	globalBusiness   bool
-	strategyFacts    *contract.StrategyFactsV1
+	strategyFacts    *contract.StrategyFactsV2
 }
 
 // StrategyFacts is the Plan's frozen strategy facts
 // (contract.EvaluationPlanV2.StrategyFacts), nil where it has none.
-func (p *CompiledPlan) StrategyFacts() *contract.StrategyFactsV1 {
+func (p *CompiledPlan) StrategyFacts() *contract.StrategyFactsV2 {
 	if p == nil || p.strategyFacts == nil {
 		return nil
 	}

@@ -32,14 +32,14 @@ func factsPlan(tenant string, revision int64, fields []string, levels ...uint32)
 func TestStrategyPlanFactsAreTheFrozenPlans(t *testing.T) {
 	plan := factsPlan("t", 9, []string{"ip", "device"}, 2, 1)
 	plan.Plan.NoData = &contract.NoDataConfigV1{Continuous: 5, AggDimension: []string{"ip"}, Level: 2}
-	plan.Plan.StrategyFacts = &contract.StrategyFactsV1{Schema: "v1", MetricDigest: "m", ConditionMD5: "c"}
+	plan.Plan.StrategyFacts = &contract.StrategyFactsV2{Schema: "v2", MetricDigest: "m", ConditionMD5: "c"}
 	index := buildStrategyIndex(SnapshotPublicationRef{SnapshotRevision: "rev"}, []QueryGroup{{Identity: "qg", Plans: []FrozenPlan{plan}}},
 		[]ObjectDisposition{{SourceID: "7", Scope: "PLAN", Disposition: DispositionAccepted}})
 	facts, found := index.planFacts("t", "7")
 	want := StrategyPlanFacts{Revision: 9, DimensionFields: []string{"device", "ip"}, HasOutputIdentity: true,
 		Levels: []contract.LevelDefinitionV2{{LevelID: 1}, {LevelID: 2}}, LevelsWhole: true,
 		NoData: true, NoDataAggDimension: []string{"ip"}, Agree: true,
-		StrategyFacts: &contract.StrategyFactsV1{Schema: "v1", MetricDigest: "m", ConditionMD5: "c"}}
+		StrategyFacts: &contract.StrategyFactsV2{Schema: "v2", MetricDigest: "m", ConditionMD5: "c"}}
 	if !found || !reflect.DeepEqual(facts, want) {
 		t.Fatalf("facts %+v found %v, want %+v", facts, found, want)
 	}

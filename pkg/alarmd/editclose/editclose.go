@@ -27,18 +27,22 @@
 //
 //   - metric_changed: the strategy's metrics are not the ones the alert
 //     was raised under. Read from the strategy facts the opening event
-//     carried (contract.StrategyFactsV1) against the current Plans'.
-//   - dimensions_changed: the alert carries a dimension the current Plans no
-//     longer tell series apart by - a grouping dimension removed or renamed.
-//     The output identity the alert's fingerprint is built from is what is
-//     compared, minus the dimensions this process adds beside the strategy's
-//     own (the no-data tag and the host identity CMDB fills in). A
-//     dimension added to the grouping is not decided: the record omits a
-//     grouping dimension the series did not carry, so an alert lacking one
-//     of the current dimensions may be either. A Plan grouping by every
-//     dimension its series carries (dynamic dimensions) is not decided
-//     either. A no-data alert is compared against the no-data grouping, the
-//     dimensions its group was reduced to.
+//     carried (contract.StrategyFactsV2) against the current Plans'.
+//   - dimensions_changed: the grouping dimensions are not the ones the alert
+//     was raised under - one added, removed or renamed. Where the alert's
+//     strategy facts state its grouping (dimension_digest), that digest is
+//     compared with the current Plans' (contract.GroupingDigest of the key
+//     set the fingerprint is built from: the output identity fields, or the
+//     no-data agg_dimension for a no-data alert). Where they do not - an
+//     alert opened before events carried it, or a Plan grouping by every
+//     dimension its series carries (dynamic dimensions) - only a dimension
+//     removed or renamed is decided, from the alert's own dimension names:
+//     the alert carries one the current grouping no longer names, minus the
+//     dimensions this process adds beside the strategy's own (the no-data
+//     tag and the host identity CMDB fills in). A dimension added is then
+//     not decided: the record omits a grouping dimension the series did not
+//     carry, so an alert lacking one of the current dimensions may be
+//     either. Dynamic dimensions are not compared at all.
 //   - level_removed: a threshold alert whose level is no longer among the
 //     Plans' Levels. Decided only when every Level the strategy declares is
 //     detected (a refused Level is not a removed one) and only for the
@@ -47,17 +51,20 @@
 //   - condition_changed: a no-data alert whose strategy's filter conditions
 //     are not the ones it was raised under, by the platform's own condition
 //     digest (contract.AggConditionMD5), from the strategy facts as above. A
-//     threshold alert is not closed on a condition change.
+//     threshold alert is not closed on a condition change, and neither is an
+//     alert whose conditions, or the current ones, may hold a condition the
+//     publisher added rather than the user (condition_injected).
 //   - no_data_disabled: a no-data alert of a strategy that no longer
 //     configures no-data detection. A strategy that configures it and whose
 //     Plans do not attach it is not switched off and is not decided.
 //
-// metric_changed and condition_changed are decided only for an alert whose
-// strategy facts carry a schema this build reads (v1), against Plans that
-// carry facts too. An alert without them - every alert opened before events
-// carried them - or with another schema is not decided by those two rules,
-// for good, and is counted (facts_missing, facts_unknown_schema,
-// plan_facts_missing) beside whatever the other rules decided.
+// The strategy facts are read only when the alert's carry a schema this
+// build reads (v2) and the Plans carry facts too. An alert without them -
+// every alert opened before events carried them - or with another schema is
+// not decided by metric_changed and condition_changed, for good, and its
+// grouping only by the removed-or-renamed check; it is counted
+// (facts_missing, facts_unknown_schema, plan_facts_missing) beside whatever
+// the other rules decided.
 //
 // Every candidate that is not closed is counted under the word that kept
 // it, so a still-firing alert whose group survived the edit is a reading
@@ -123,6 +130,11 @@ const (
 	OutcomeFactsUnknownSchema = "facts_unknown_schema"
 	// OutcomePlanFactsMissing is a current Plan without strategy facts.
 	OutcomePlanFactsMissing = "plan_facts_missing"
+	// OutcomeConditionInjected is a no-data alert whose condition digest
+	// differs from the current Plans' while either side's conditions may
+	// hold one the publisher added (contract.InjectedConditionKeys):
+	// condition_changed is not decided for it.
+	OutcomeConditionInjected = "condition_injected"
 )
 
 // Decisions is every word Decide returns as its decision.
@@ -131,7 +143,7 @@ var Decisions = []string{OutcomeCurrentRevision, OutcomeRevisionAhead, OutcomeRe
 	OutcomeMetricChanged, OutcomeConditionChanged, OutcomeDimensionsChanged, OutcomeLevelRemoved, OutcomeNoDataDisabled}
 
 // Notes is every word Decide returns as its note.
-var Notes = []string{OutcomeFactsMissing, OutcomeFactsUnknownSchema, OutcomePlanFactsMissing}
+var Notes = []string{OutcomeFactsMissing, OutcomeFactsUnknownSchema, OutcomePlanFactsMissing, OutcomeConditionInjected}
 
 // Closes reports whether a decision is a close.
 func Closes(decision string) bool {
@@ -154,7 +166,7 @@ type Plan struct {
 	NoDataDimensions  []string
 	NoDataSuspended   bool
 	// Facts is the Plans' strategy facts, nil where they have none.
-	Facts *contract.StrategyFactsV1
+	Facts *contract.StrategyFactsV2
 }
 
 // Key is the plan's facts as one comparable word: two Plans with the same
@@ -173,7 +185,8 @@ func (plan Plan) Key() string {
 	b.WriteString(strings.Join(plan.NoDataDimensions, ","))
 	b.WriteString("|" + strconv.FormatBool(plan.NoDataSuspended) + "|")
 	if plan.Facts != nil {
-		b.WriteString(plan.Facts.Schema + ":" + plan.Facts.MetricDigest + ":" + plan.Facts.ConditionMD5)
+		b.WriteString(plan.Facts.Schema + ":" + plan.Facts.MetricDigest + ":" + plan.Facts.ConditionMD5 + ":" +
+			plan.Facts.DimensionDigest + ":" + plan.Facts.NoDataDimensionDigest + ":" + strconv.FormatBool(plan.Facts.ConditionInjected))
 	}
 	return b.String()
 }
@@ -232,11 +245,16 @@ func Decide(plan Plan, alert Alert) (decision, note string) {
 		return OutcomeMetricChanged, note
 	}
 	if noData {
-		if plan.NoData && carriesDroppedDimension(alert.DimensionKeys, plan.NoDataDimensions) {
+		if plan.NoData && groupingChanged(facts, planGrouping(plan.Facts, true), alert.DimensionKeys, plan.NoDataDimensions, false) {
 			return OutcomeDimensionsChanged, note
 		}
 		if facts != nil && facts.ConditionMD5 != plan.Facts.ConditionMD5 {
-			return OutcomeConditionChanged, note
+			if !facts.ConditionInjected && !plan.Facts.ConditionInjected {
+				return OutcomeConditionChanged, note
+			}
+			// The digest moves with conditions the publisher added as well:
+			// not a change anyone can be shown to have made.
+			note = OutcomeConditionInjected
 		}
 		if !plan.NoData {
 			if plan.NoDataSuspended {
@@ -246,7 +264,7 @@ func Decide(plan Plan, alert Alert) (decision, note string) {
 		}
 		return OutcomeKept, note
 	}
-	if !plan.DynamicDimensions && carriesDroppedDimension(alert.DimensionKeys, plan.DimensionFields) {
+	if groupingChanged(facts, planGrouping(plan.Facts, false), alert.DimensionKeys, plan.DimensionFields, plan.DynamicDimensions) {
 		return OutcomeDimensionsChanged, note
 	}
 	return levelVerdict(plan, alert.Severity), note
@@ -254,15 +272,15 @@ func Decide(plan Plan, alert Alert) (decision, note string) {
 
 // comparableFacts is the alert's strategy facts when they and the Plans'
 // can be compared, or the note that says why not.
-func comparableFacts(plan Plan, alert Alert) (*contract.StrategyFactsV1, string) {
-	if plan.Facts == nil || plan.Facts.Schema != contract.StrategyFactsSchemaV1 {
+func comparableFacts(plan Plan, alert Alert) (*contract.StrategyFactsV2, string) {
+	if plan.Facts == nil || plan.Facts.Schema != contract.StrategyFactsSchemaV2 {
 		return nil, OutcomePlanFactsMissing
 	}
 	if len(alert.Facts) == 0 {
 		return nil, OutcomeFactsMissing
 	}
-	var facts contract.StrategyFactsV1
-	if json.Unmarshal(alert.Facts, &facts) != nil || facts.Schema != contract.StrategyFactsSchemaV1 ||
+	var facts contract.StrategyFactsV2
+	if json.Unmarshal(alert.Facts, &facts) != nil || facts.Schema != contract.StrategyFactsSchemaV2 ||
 		facts.MetricDigest == "" || facts.ConditionMD5 == "" {
 		return nil, OutcomeFactsUnknownSchema
 	}
@@ -289,6 +307,17 @@ func alertFamily(alert Alert) (noData, known bool) {
 		return false, !tagged
 	}
 	return false, false
+}
+
+// groupingChanged decides the grouping rule: by the digests when the
+// alert's facts and the Plans' both state one (current is the Plans'), and
+// otherwise by the removed-or-renamed check over the alert's dimension
+// names, which a dynamic grouping skips.
+func groupingChanged(facts *contract.StrategyFactsV2, current string, keys, grouping []string, dynamic bool) bool {
+	if facts != nil && facts.DimensionDigest != "" && current != "" {
+		return facts.DimensionDigest != current
+	}
+	return !dynamic && carriesDroppedDimension(keys, grouping)
 }
 
 // carriesDroppedDimension reports whether the alert has a dimension the
@@ -328,4 +357,16 @@ func levelVerdict(plan Plan, severity string) string {
 		return OutcomeSeverityUnmapped
 	}
 	return OutcomeLevelRemoved
+}
+
+// planGrouping is the Plans' grouping digest for a threshold or a no-data
+// alert, empty where the Plans state none.
+func planGrouping(facts *contract.StrategyFactsV2, noData bool) string {
+	if facts == nil {
+		return ""
+	}
+	if noData {
+		return facts.NoDataDimensionDigest
+	}
+	return facts.DimensionDigest
 }

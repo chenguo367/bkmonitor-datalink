@@ -2732,7 +2732,11 @@ func compilePlan(
 		// Nil when the query configs cannot be read the way the platform
 		// compares them: the events carry no facts, and the edit close names
 		// their alerts facts_missing rather than deciding on a guess.
-		plan.StrategyFacts, _ = contract.DeriveStrategyFactsV1(item.QueryConfigs)
+		grouping := contract.StrategyGrouping{Fields: dataset.IdentityFields, Dynamic: dataset.DynamicDimensions, NoData: plan.NoData != nil}
+		if plan.NoData != nil {
+			grouping.NoDataFields = plan.NoData.AggDimension
+		}
+		plan.StrategyFacts, _ = contract.DeriveStrategyFactsV2(item.QueryConfigs, grouping)
 	}
 	scheduleSpec, refusal, err := planScheduleSpec(sourceID, plan, step.Seconds)
 	if err != nil {

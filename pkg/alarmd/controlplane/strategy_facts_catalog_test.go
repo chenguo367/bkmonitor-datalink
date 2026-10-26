@@ -13,7 +13,7 @@ import (
 // strategyFactsDocument is the first test strategy with its query config's
 // metric_id and agg_condition set, and its snapshot revision when one is
 // given.
-func strategyFactsDocument(t *testing.T, revision string, queryConfig map[string]json.RawMessage) json.RawMessage {
+func strategyFactsDocument(t *testing.T, revision string, queryConfig map[string]json.RawMessage, item ...map[string]json.RawMessage) json.RawMessage {
 	t.Helper()
 	payload, err := os.ReadFile("testdata/two_threshold_strategies.json")
 	if err != nil {
@@ -26,6 +26,11 @@ func strategyFactsDocument(t *testing.T, revision string, queryConfig map[string
 	document := documents[0]
 	if revision != "" {
 		document["strategy_revision"] = json.RawMessage(revision)
+	}
+	for _, fields := range item {
+		for key, value := range fields {
+			document["items"].([]any)[0].(map[string]any)[key] = value
+		}
 	}
 	query := document["items"].([]any)[0].(map[string]any)["query_configs"].([]any)[0].(map[string]any)
 	for key, value := range queryConfig {
@@ -66,8 +71,11 @@ func TestAPlanFreezesItsStrategyFacts(t *testing.T) {
 	queryConfig := map[string]json.RawMessage{"metric_id": json.RawMessage(`"bk_monitor.system.cpu.usage"`),
 		"agg_condition": json.RawMessage(`[{"key":"ip","value":["192.0.2.1"],"method":"eq","condition":"and"}]`)}
 	plan := strategyFactsPlan(t, strategyFactsDocument(t, "7", queryConfig))
-	// The platform's md5s of these query configs (contract's golden vectors).
-	want := contract.StrategyFactsV1{Schema: "v1", MetricDigest: "3815df5a36678b1d738aa6f9a1522549", ConditionMD5: "92811130e44a4e5eb434d4dd5acbfdaa"}
+	// The platform's md5s of these query configs (contract's golden vectors),
+	// and the md5 of ["host"], the grouping the test dataset identifies
+	// series by; the strategy detects no no-data.
+	want := contract.StrategyFactsV2{Schema: "v2", MetricDigest: "3815df5a36678b1d738aa6f9a1522549", ConditionMD5: "92811130e44a4e5eb434d4dd5acbfdaa",
+		DimensionDigest: "f8110ed86ce585651a6e4dd7acda8018"}
 	if plan.Plan.StrategyFacts == nil || *plan.Plan.StrategyFacts != want {
 		t.Fatalf("strategy facts = %+v, want %+v", plan.Plan.StrategyFacts, want)
 	}
@@ -80,5 +88,21 @@ func TestAPlanFreezesItsStrategyFacts(t *testing.T) {
 	unnamed := strategyFactsPlan(t, strategyFactsDocument(t, "7", map[string]json.RawMessage{"metric_id": nil}))
 	if unnamed.Plan.StrategyFacts != nil {
 		t.Fatalf("a query config without a metric_id froze facts %+v", unnamed.Plan.StrategyFacts)
+	}
+}
+
+// A Plan that detects no-data freezes the digest of its no-data grouping
+// beside its own.
+func TestAPlanFreezesItsNoDataGrouping(t *testing.T) {
+	queryConfig := map[string]json.RawMessage{"metric_id": json.RawMessage(`"bk_monitor.system.cpu.usage"`)}
+	plan := strategyFactsPlan(t, strategyFactsDocument(t, "7", queryConfig, map[string]json.RawMessage{
+		"no_data_config": json.RawMessage(`{"is_enabled":true,"continuous":5,"agg_dimension":["tags.host"],"level":2}`)}))
+	if plan.Plan.NoData == nil {
+		t.Fatalf("the Plan detects no no-data: %+v", plan.Plan)
+	}
+	// md5 of ["host"] for both: the tags. prefix is read away.
+	if facts := plan.Plan.StrategyFacts; facts == nil || facts.DimensionDigest != "f8110ed86ce585651a6e4dd7acda8018" ||
+		facts.NoDataDimensionDigest != "f8110ed86ce585651a6e4dd7acda8018" {
+		t.Fatalf("strategy facts = %+v, want the threshold and no-data groupings", facts)
 	}
 }

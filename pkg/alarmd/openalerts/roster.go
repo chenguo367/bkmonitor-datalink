@@ -182,7 +182,7 @@ type AlertRecord struct {
 	// the record names none.
 	EvaluationFamily string
 	// StrategyFacts is extra_data.strategy_facts as the opening event wrote
-	// it (contract.StrategyFactsV1), unparsed: nil when the record has none,
+	// it (contract.StrategyFactsV2), unparsed: nil when the record has none,
 	// and whether its schema is one this build reads is the reader's to say.
 	StrategyFacts json.RawMessage
 }
