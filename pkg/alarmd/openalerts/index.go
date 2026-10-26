@@ -242,7 +242,7 @@ func NewIndex(options IndexOptions) (*Cache, error) {
 		return nil, errors.New("alarmd openalerts: invalid index unavailable policy")
 	}
 	cache := &Cache{now: options.Now, policy: options.Policy, maxLocal: options.MaxLocalEntries,
-		added:     map[member]stamped{},
+		added: map[member]stamped{}, recovered: map[member]stamped{},
 		refreshes: map[string]uint64{}, noticesRefused: map[NoticeRefusal]uint64{}, unavailable: map[UnavailableReason]uint64{}, lookups: map[Answer]uint64{}, ownLookups: map[Answer]uint64{},
 		gateSince: options.Now(),
 		index:     &indexState{options: options, entries: map[StrategyKey]*indexEntry{}, wake: make(chan struct{}, 1), consoleWake: make(chan struct{}, 1), opened: map[member]ownRecord{}},
@@ -313,6 +313,11 @@ func (cache *Cache) SetTracked(keys []StrategyKey) error {
 	for m := range cache.index.opened {
 		if _, exists := unique[m.key]; !exists {
 			cache.leaveOpen(m, DepartureUntracked)
+		}
+	}
+	for m := range cache.recovered {
+		if _, exists := unique[m.key]; !exists {
+			delete(cache.recovered, m)
 		}
 	}
 	cache.index.order = cache.index.order[:0]
@@ -394,6 +399,11 @@ func (cache *Cache) Untrack(keys ...StrategyKey) {
 		for m := range cache.index.opened {
 			if m.key == key {
 				cache.leaveOpen(m, DepartureUntracked)
+			}
+		}
+		for m := range cache.recovered {
+			if m.key == key {
+				delete(cache.recovered, m)
 			}
 		}
 	}
@@ -980,6 +990,11 @@ func (cache *Cache) applyCalibration(job indexJob, started time.Time, result Rec
 			cache.leaveSent(m, DepartureNotResent)
 		}
 	}
+	for m, s := range cache.recovered {
+		if m.key == job.key && s.at.Before(started) {
+			delete(cache.recovered, m)
+		}
+	}
 	cache.pruneOpened(job.key, entry, started)
 }
 
@@ -1102,6 +1117,7 @@ func (cache *Cache) calibrated(entry *indexEntry, now time.Time) bool {
 
 func (cache *Cache) indexContains(m member, now time.Time, count bool) bool {
 	entry := cache.index.entries[m.key]
+	lapsed := cache.recoveryLapsed(entry, m, now)
 	answer := AnswerSelfMaintained
 	present := false
 	// unread is a set with no current read to answer from - past the stale
@@ -1142,7 +1158,7 @@ func (cache *Cache) indexContains(m member, now time.Time, count bool) bool {
 			present = true
 		}
 	}
-	if added, ok := cache.added[m]; ok && (entry == nil || !cache.calibrated(entry, now) || now.Sub(added.at) <= cache.index.options.LocalRetention || !added.at.Before(entry.calibratedStarted)) {
+	if added, ok := cache.added[m]; ok && !lapsed && (entry == nil || !cache.calibrated(entry, now) || now.Sub(added.at) <= cache.index.options.LocalRetention || !added.at.Before(entry.calibratedStarted)) {
 		present = true
 		answer = AnswerRecentlySent
 	}
@@ -1154,6 +1170,37 @@ func (cache *Cache) indexContains(m member, now time.Time, count bool) bool {
 		cache.countLookup(answer)
 	}
 	return present
+}
+
+// recoveryLapsed is whether this process's record of what it sent (added)
+// has stopped answering the fingerprint held, while the strategy's set has
+// no current calibration: this process's RECOVERY of it was taken more
+// than a grace ago (the calibration interval, as expireRecovered waits)
+// with no ABNORMAL since, and the set's own read, where there is a current
+// one, does not carry it. A healthy series says RECOVERY every cycle;
+// without this, once the link closed the alert the record kept every
+// cycle's RECOVERY passing for as long as no complete calibration came, an
+// orphan each time. Within the grace the RECOVERY passes: the alert may
+// stand at another Level, whose own RECOVERY is to come.
+//
+// Only added lapses. What a calibration named missing from the set is the
+// link's own positive answer that the alert is active, and only another
+// positive answer of the link lifts it - a calibration that no longer names
+// it - never time; the record of what this process opened keeps its own
+// grace (expireRecovered). A current calibration, and the set's read
+// carrying the fingerprint, answer for it themselves. Called with the lock
+// held.
+func (cache *Cache) recoveryLapsed(entry *indexEntry, m member, now time.Time) bool {
+	recovered, ok := cache.recovered[m]
+	if !ok || now.Sub(recovered.at) <= cache.index.options.ReconcileInterval || cache.calibrated(entry, now) {
+		return false
+	}
+	if entry != nil && !cache.stale(entry, now) {
+		if _, member := entry.index[m.fingerprint]; member {
+			return false
+		}
+	}
+	return true
 }
 
 func (cache *Cache) Snapshot(key StrategyKey) StrategySnapshot {

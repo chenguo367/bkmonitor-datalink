@@ -220,6 +220,15 @@ type Cache struct {
 	maxLocal int
 
 	added map[member]stamped
+	// recovered is when the broker took this process's first RECOVERY of a
+	// tracked alert since its last ABNORMAL. While a trusted set has no
+	// current calibration, added - this process's record of what it sent -
+	// never refreshes; a recovery taken a grace ago lets it go
+	// (recoveryLapsed). What a calibration named missing is the link's word
+	// and is not let go by time. A complete calibration of the strategy takes its
+	// alerts out, as it judges them itself. Bounded by maxLocal, the oldest
+	// first out, counted as evicted.
+	recovered map[member]stamped
 
 	evictions uint64
 	// sentDepartures and openDepartures count why alerts left added and
@@ -274,7 +283,9 @@ func (cache *Cache) Contains(tenantID, strategyID, fingerprint string) bool {
 // an ABNORMAL opens the fingerprint in the copy - among what was sent
 // recently, and in the record of what this process opened - and a RECOVERY
 // only starts the grace after which that record lets the alert go
-// (expireRecovered); it hides nothing from the gate. The consumer closes an alert only at
+// (expireRecovered), and, for a set with no current calibration, the grace
+// after which this process's record of the send stops answering held for
+// it (recoveryLapsed); within the grace it hides nothing from the gate. The consumer closes an alert only at
 // the Level it stands at and takes any other RECOVERY as an orphan, which
 // it records and otherwise ignores; whether the alert is still open is the
 // set's word while the set is trusted, and the record of what this process
@@ -318,11 +329,39 @@ func (cache *Cache) Acknowledged(events []contract.TriggerEventV1) {
 		case contract.TriggerEventAbnormal:
 			cache.added[m] = stamped{at: now}
 			cache.noteOpened(m, now)
+			delete(cache.recovered, m)
 		case contract.TriggerEventRecovery:
 			cache.noteRecovered(m, now)
+			if _, ok := cache.recovered[m]; !ok {
+				cache.recovered[m] = stamped{at: now}
+			}
 		}
 	}
 	cache.boundLocal()
+	cache.boundRecovered()
+}
+
+// boundRecovered keeps recovered inside maxLocal by letting the oldest go:
+// such an alert answers as it did before there was a record. Called with the
+// lock held.
+func (cache *Cache) boundRecovered() {
+	over := len(cache.recovered) - cache.maxLocal
+	if over <= 0 {
+		return
+	}
+	type aged struct {
+		m  member
+		at time.Time
+	}
+	all := make([]aged, 0, len(cache.recovered))
+	for m, s := range cache.recovered {
+		all = append(all, aged{m: m, at: s.at})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].at.Before(all[j].at) })
+	for _, entry := range all[:over] {
+		delete(cache.recovered, entry.m)
+		cache.evictions++
+	}
 }
 
 // boundLocal keeps added inside maxLocal by evicting the oldest. Called with
