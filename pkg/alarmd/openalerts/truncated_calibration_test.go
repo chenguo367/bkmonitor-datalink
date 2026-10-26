@@ -5,6 +5,7 @@ package openalerts
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -19,6 +20,8 @@ type truncatedFixture struct {
 	cache   *Cache
 	options IndexOptions
 	answer  Reconciliation
+	// readErr, when set, fails every read of the set after the first.
+	readErr error
 }
 
 func newTruncatedFixture(t *testing.T) *truncatedFixture {
@@ -26,7 +29,12 @@ func newTruncatedFixture(t *testing.T) *truncatedFixture {
 	f := &truncatedFixture{c: &clock{at: time.Unix(1700000000, 0)}}
 	f.options = indexOptions(f.c)
 	f.options.Facts = confirmedFacts()
-	f.options.Source = setReaderFunc(func(context.Context, StrategyKey) ([]string, error) { return []string{"theirs"}, nil })
+	f.options.Source = setReaderFunc(func(context.Context, StrategyKey) ([]string, error) {
+		if f.readErr != nil {
+			return nil, f.readErr
+		}
+		return []string{"theirs"}, nil
+	})
 	calls := 0
 	f.options.Reconciler = reconcilerFunc(func(context.Context, StrategyKey) (Reconciliation, error) {
 		calls++
@@ -108,7 +116,8 @@ func TestACutCalibrationJudgesOnlyWhatItLists(t *testing.T) {
 	if held, judged := f.cache.Holds(keyA, "listed"); !held || !judged {
 		t.Fatalf("Holds(listed) = %v, %v; want a judged member", held, judged)
 	}
-	for _, fingerprint := range []string{"ours", "elsewhere"} {
+	// "theirs" is in the set as read, and not listed by the cut answer.
+	for _, fingerprint := range []string{"ours", "elsewhere", "theirs"} {
 		if held, judged := f.cache.Holds(keyA, fingerprint); held || judged {
 			t.Fatalf("Holds(%s) = %v, %v; a cut answer judged what it did not list", fingerprint, held, judged)
 		}
@@ -134,6 +143,54 @@ func TestACutCalibrationJudgesOnlyWhatItLists(t *testing.T) {
 	}
 	if _, judged := g.cache.Holds(keyA, "listed"); judged {
 		t.Fatal("an aged cut calibration still judged")
+	}
+}
+
+// A redis_only row in a cut answer suppresses nothing: a suppression is a
+// "not held" judgement, which an answer the link marked incomplete must never
+// make - least of all while an earlier complete calibration is still fresh
+// and the set honours it. The same row in a complete answer does suppress.
+func TestACutAnswerNeverSuppresses(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		truncated          bool
+		wantHeld, wantJudg bool
+	}{
+		{"cut: still held", true, true, true},
+		{"complete: suppressed", false, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newTruncatedFixture(t)
+			f.answer = Reconciliation{EventSourceID: "source", Truncated: tc.truncated, Suppressed: []string{"theirs"}}
+			f.recalibrate(f.options.LocalRetention + time.Second)
+			if held, judged := f.cache.Holds(keyA, "theirs"); held != tc.wantHeld || judged != tc.wantJudg {
+				t.Fatalf("Holds(theirs) = %v, %v; want %v, %v", held, judged, tc.wantHeld, tc.wantJudg)
+			}
+		})
+	}
+}
+
+// A cut answer does not keep an old set from going stale. Past the bound the
+// set's last real read says nothing about now, and the gate answers by its
+// policy (index_stale); a cut answer refreshing that age would have the gate
+// answer "absent" from old set content instead - a not-held judgement made
+// from what the cut answer did not list.
+func TestACutAnswerDoesNotKeepAnOldSetFresh(t *testing.T) {
+	f := newTruncatedFixture(t)
+	f.readErr = errors.New("set unreadable")
+	f.answer = listedOnly()
+	f.recalibrate(f.cache.index.staleAfter() + time.Second)
+	before := f.cache.Stats().Lookups
+	f.cache.Contains(keyA.TenantID, keyA.StrategyID, "nobody")
+	after := f.cache.Stats().Lookups
+	if after[AnswerIndexStale] != before[AnswerIndexStale]+1 || after[AnswerIndexAbsent] != before[AnswerIndexAbsent] {
+		t.Fatalf("lookups %v -> %v; want the gate to answer index_stale, not index_absent", before, after)
+	}
+	if held, judged := f.cache.Holds(keyA, "listed"); !held || !judged {
+		t.Fatalf("Holds(listed) = %v, %v; the cut answer's own listing still judges held", held, judged)
+	}
+	if alerts := f.cache.ActiveAlerts(keyA); len(alerts) != 1 || alerts[0].AlertID != "l" {
+		t.Fatalf("active alerts %+v, want the listed one even with the set stale", alerts)
 	}
 }
 

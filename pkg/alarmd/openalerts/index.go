@@ -48,10 +48,13 @@ type indexEntry struct {
 	dirtySince                                   time.Time
 	indexReadAt, calibratedAt, calibratedStarted time.Time
 	// partialAt is when the last truncated calibration (Reconciliation.
-	// Truncated) was applied. It never moves calibratedAt: a truncated answer
-	// adds to the sets and lists alerts to close, and judges only what it
-	// lists (partial).
-	partialAt                             time.Time
+	// Truncated) was applied. It never moves calibratedAt and never keeps a
+	// set from going stale: a truncated answer adds to the sets and lists
+	// alerts to close, and judges held only for what it lists (partial).
+	partialAt time.Time
+	// partialListed is the fingerprints the last truncated calibration
+	// listed active: the only ones it judges held.
+	partialListed                         map[string]struct{}
 	lastReadAttempt, lastReconcileAttempt time.Time
 	index, missing, suppressed            map[string]struct{}
 	// tooLarge is the last refusal of this set for its size, nil when the
@@ -974,13 +977,17 @@ func (cache *Cache) applyCalibration(job indexJob, started time.Time, result Rec
 }
 
 // applyTruncatedCalibration applies an answer the link cut or this reader
-// capped. What it lists is real and only added: a member joins the set, a
-// fingerprint missing from the link's set joins missing, one the set holds
-// without an active alert joins suppressed, and a listed alert is what the
-// closes act on. Nothing is taken out, nothing this process sent or opened is
-// let go, and calibratedAt does not move: what it does not list may still be
-// open, so it never stands in for a complete calibration (pruneOpened, the
-// recent-send release, a judged "not held"). Called with the lock held.
+// capped. What it lists as active is real and only added: a member joins the
+// set (and leaves suppressed, where an earlier answer put it), a fingerprint
+// missing from the link's set joins missing, and a listed alert is what the
+// closes act on. Its redis_only rows are not applied: a suppression is a
+// "not held" judgement, and an answer the link marked incomplete is no
+// evidence that anything is closed - while an earlier complete calibration is
+// still fresh, setCarries would honour it. Nothing is taken out, nothing this
+// process sent or opened is let go, and calibratedAt does not move: what it
+// does not list may still be open, so it never stands in for a complete
+// calibration (pruneOpened, the recent-send release, a judged "not held").
+// Called with the lock held.
 func (cache *Cache) applyTruncatedCalibration(job indexJob, result Reconciliation) {
 	entry := job.entry
 	next := *entry
@@ -998,10 +1005,6 @@ func (cache *Cache) applyTruncatedCalibration(job indexJob, result Reconciliatio
 		next.index[value] = struct{}{}
 		delete(next.missing, value)
 	}
-	for _, value := range result.Suppressed {
-		next.index[value] = struct{}{}
-		next.suppressed[value] = struct{}{}
-	}
 	next.alerts = append([]Alert(nil), result.Alerts...)
 	if !cache.admitEntry(job.key, &next) {
 		entry.reason = "capacity"
@@ -1009,6 +1012,10 @@ func (cache *Cache) applyTruncatedCalibration(job indexJob, result Reconciliatio
 		return
 	}
 	next.partialAt = cache.now()
+	next.partialListed = make(map[string]struct{}, len(result.Alerts))
+	for _, alert := range result.Alerts {
+		next.partialListed[alert.Fingerprint] = struct{}{}
+	}
 	next.reason = "calibration_truncated"
 	*entry = next
 	cache.index.eventSourceID = result.EventSourceID
@@ -1078,9 +1085,6 @@ func (cache *Cache) stale(entry *indexEntry, now time.Time) bool {
 	last := entry.indexReadAt
 	if entry.calibratedAt.After(last) {
 		last = entry.calibratedAt
-	}
-	if entry.partialAt.After(last) {
-		last = entry.partialAt
 	}
 	return !last.IsZero() && now.Sub(last) > cache.index.staleAfter()
 }
@@ -1207,11 +1211,11 @@ func (cache *Cache) Holds(key StrategyKey, fingerprint string) (held, judged boo
 	}
 	if !cache.calibrated(entry, now) {
 		// After a truncated calibration only a held answer is a judgement,
-		// and only from the link's own sets (what it listed, or what the set
-		// reads carry), not from what this process sent: what it did not
+		// and only for an alert that answer listed active - not from older
+		// set content, not from what this process sent: what it did not
 		// list may still be open.
-		if cache.partial(entry, now) && !cache.stale(entry, now) {
-			held := cache.setCarries(entry, fingerprint, now)
+		if cache.partial(entry, now) {
+			_, held := entry.partialListed[fingerprint]
 			return held, held
 		}
 		return false, false
@@ -1273,7 +1277,10 @@ func (cache *Cache) ActiveAlerts(key StrategyKey) []Alert {
 	// alert, and closing the ones a close is due for is what shrinks a set
 	// too large to be answered whole. A caller must not read an alert's
 	// absence here as closed.
-	if !cache.calibrated(entry, cache.now()) && !cache.partial(entry, cache.now()) {
+	if !cache.calibrated(entry, cache.now()) {
+		if cache.partial(entry, cache.now()) {
+			return append([]Alert(nil), entry.alerts...)
+		}
 		return nil
 	}
 	result := make([]Alert, 0, len(entry.alerts))
