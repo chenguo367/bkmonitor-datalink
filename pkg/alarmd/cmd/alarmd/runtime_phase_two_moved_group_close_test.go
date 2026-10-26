@@ -59,9 +59,11 @@ func (fixture *closePathsFixture) groupOutcomes(qg execution.QueryGroupIdentity,
 
 // moveStrategyOutOfItsGroup opens the bundle with A1 open under revision 1,
 // waits until the inactive close has read the strategy's Query Group, and
-// publishes revision 2 on the host grouping with its window shift later. It
-// answers the old Query Group and the window's origin.
-func moveStrategyOutOfItsGroup(t *testing.T, shift time.Duration) (*closePathsFixture, execution.QueryGroupIdentity, time.Time) {
+// publishes revision 2 on the host grouping with its window shift later,
+// activated editAt after revision 1 (zero: in the same second; negative: on
+// a clock stepped back). It answers the old Query Group and the window's
+// origin.
+func moveStrategyOutOfItsGroup(t *testing.T, shift, editAt time.Duration) (*closePathsFixture, execution.QueryGroupIdentity, time.Time) {
 	t.Helper()
 	fixture := startClosePathsFixture(t)
 	origin := fixture.start
@@ -78,8 +80,7 @@ func moveStrategyOutOfItsGroup(t *testing.T, shift time.Duration) (*closePathsFi
 	if len(before) != 1 {
 		t.Fatalf("revision 1 runs in %v, want one Query Group", before)
 	}
-	// The edit is activated at a later boundary than revision 1.
-	fixture.life.clock.Store(origin.Add(3 * time.Minute).UnixMilli())
+	fixture.life.clock.Store(origin.Add(editAt).UnixMilli())
 	fixture.start = origin.Add(shift)
 	if edited := fixture.publish(2, []string{"bk_target_ip", "bk_target_cloud_id"}, false, nil); edited.Revision != 2 {
 		t.Fatalf("the publication carries %+v, want revision 2", edited)
@@ -95,14 +96,21 @@ func moveStrategyOutOfItsGroup(t *testing.T, shift time.Duration) (*closePathsFi
 }
 
 // heldAcrossSteps waits until the inactive close has failed to read the old
-// Query Group under its moved lease twice more: at least one whole step of
-// the loop ran at this time, past the read, through every Plan it judges.
+// Query Group under its moved lease twice more - at least one whole step of
+// the loop ran at this time, past the read, through every Plan it judges -
+// or until the old Query Group has drained and left the bundle, when it
+// judges nothing. A close sent ends the wait too, so a case that should
+// send none fails on it rather than on the deadline.
 func (fixture *closePathsFixture) heldAcrossSteps(old execution.QueryGroupIdentity) {
 	fixture.t.Helper()
 	from := fixture.groupOutcomes(old, closeOutcomeUnavailable)
 	fixture.waitFor("the inactive close reads the old Query Group again", func() bool {
 		fixture.copy.RequestCalibration()
-		return fixture.groupOutcomes(old, closeOutcomeUnavailable) >= from+2
+		owned := false
+		for _, qg := range fixture.ownedGroups() {
+			owned = owned || qg == old
+		}
+		return fixture.groupOutcomes(old, closeOutcomeUnavailable) >= from+2 || !owned || len(fixture.closes()) > 0
 	}, func() string {
 		return "unavailable=" + strconv.Itoa(fixture.groupOutcomes(old, closeOutcomeUnavailable)-from)
 	})
@@ -121,7 +129,7 @@ func wantClosesUnderRevision(t *testing.T, closes []linkdoutput.CloseRequest, re
 }
 
 func TestAStrategyEditedOutOfItsQueryGroupIsNotClosedOnItsOldRevision(t *testing.T) {
-	fixture, old, origin := moveStrategyOutOfItsGroup(t, 30*time.Minute)
+	fixture, old, origin := moveStrategyOutOfItsGroup(t, 30*time.Minute, 3*time.Minute)
 	// Revision 1's window ended at origin+20m; revision 2's runs from
 	// origin+20m to origin+50m.
 	fixture.life.clock.Store(origin.Add(30 * time.Minute).UnixMilli())
@@ -142,7 +150,7 @@ func TestAStrategyEditedOutOfItsQueryGroupIsNotClosedOnItsOldRevision(t *testing
 // nothing, so the set's members stand in for the strategy's alerts. The old
 // Query Group's revision 1 addresses no member while revision 2 is in effect.
 func TestAStrategyEditedOutOfItsQueryGroupIsNotClosedFromTheSetOnItsOldRevision(t *testing.T) {
-	fixture, old, origin := moveStrategyOutOfItsGroup(t, 90*time.Minute)
+	fixture, old, origin := moveStrategyOutOfItsGroup(t, 90*time.Minute, 3*time.Minute)
 	key := closePathsKey()
 	fixture.console.fail(true)
 	fixture.waitFor("the copy is refused a calibration", func() bool {
