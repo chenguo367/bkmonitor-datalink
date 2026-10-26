@@ -163,9 +163,15 @@ type effectiveMaintenance struct {
 	byGroup              map[execution.QueryGroupIdentity][]openalerts.StrategyKey
 	refs                 map[openalerts.StrategyKey]int
 	calibrationRequested map[openalerts.StrategyKey]time.Time
-	// ACK suppresses only immediate repeat sends. It never deletes the
-	// external member or declares Linkd closed; reconciliation confirms that.
-	sent         map[string]time.Time
+	// sent holds back a repeat of a close the broker acknowledged. It never
+	// deletes the external member or declares Linkd closed; reconciliation
+	// confirms that. A close of a listed alert is held a minute, which the
+	// calibration its send requests answers within. A close addressed from
+	// the index set is held until a read of that strategy's set lands after
+	// the send (pruneSent), and at most the set's stale bound, past which the
+	// set no longer stands in: what the set listed before the send is no
+	// evidence the alert is still open after it. Bounded by LocalEntries.
+	sent         map[string]sentClose
 	groups       map[execution.QueryGroupIdentity]*maintenanceGroup
 	readCursor   execution.QueryGroupIdentity
 	planCursor   map[execution.QueryGroupIdentity]int
@@ -372,7 +378,7 @@ func (m *effectiveMaintenance) step(ctx context.Context) {
 		m.groups = make(map[execution.QueryGroupIdentity]*maintenanceGroup)
 	}
 	if m.sent == nil {
-		m.sent = make(map[string]time.Time)
+		m.sent = make(map[string]sentClose)
 	}
 	for qg := range m.byGroup {
 		if _, keep := owned[qg]; !keep {
@@ -393,11 +399,7 @@ func (m *effectiveMaintenance) step(ctx context.Context) {
 	m.bundle.mu.RUnlock()
 
 	now := m.bundle.dependencies.Now()
-	for key, at := range m.sent {
-		if now.Sub(at) >= time.Minute {
-			delete(m.sent, key)
-		}
-	}
+	m.pruneSent(now)
 	groups := make([]execution.QueryGroupIdentity, 0, len(owned))
 	for qg := range owned {
 		groups = append(groups, qg)
@@ -937,7 +939,7 @@ func (m *effectiveMaintenance) sendClose(ctx context.Context, qg execution.Query
 		}
 		for _, request := range batch {
 			if len(m.sent) < m.capacity.LocalEntries {
-				m.sent[key.TenantID+"\x00"+m.sourceID+"\x00"+request.AlertInstanceID] = now
+				m.sent[key.TenantID+"\x00"+m.sourceID+"\x00"+request.AlertInstanceID] = sentClose{at: now, key: key, fromSet: fromSet}
 			}
 		}
 		m.requestCalibration(key, now)
@@ -1139,6 +1141,41 @@ func (m *effectiveMaintenance) releaseGroupLocked(qg execution.QueryGroupIdentit
 	delete(m.byGroup, qg)
 	delete(m.planCursor, qg)
 	delete(m.legacyCursor, qg)
+}
+
+// sentClose is one close the broker acknowledged: when, for which
+// strategy, and whether it was addressed from the strategy's index set.
+type sentClose struct {
+	at      time.Time
+	key     openalerts.StrategyKey
+	fromSet bool
+}
+
+// pruneSent lets go of the sends whose repeat is no longer held back: a
+// listed alert's a minute after its send; one addressed from the index set
+// once a read of its strategy's set has landed after the send - a read that
+// still carries the member is fresh evidence and closes it again - or once
+// the set's stale bound, a minute at least, has passed. Held a minute only,
+// a set's members were sent again by the step after it whenever the copy
+// had not read the set since: the same closes twice, a minute apart.
+func (m *effectiveMaintenance) pruneSent(now time.Time) {
+	snapshots := map[openalerts.StrategyKey]openalerts.StrategySnapshot{}
+	for id, sent := range m.sent {
+		if !sent.fromSet {
+			if now.Sub(sent.at) >= time.Minute {
+				delete(m.sent, id)
+			}
+			continue
+		}
+		snapshot, read := snapshots[sent.key]
+		if !read {
+			snapshot = m.cache.Snapshot(sent.key)
+			snapshots[sent.key] = snapshot
+		}
+		if snapshot.IndexReadAt.After(sent.at) || now.Sub(sent.at) >= max(snapshot.StaleAfter, time.Minute) {
+			delete(m.sent, id)
+		}
+	}
 }
 
 func (m *effectiveMaintenance) requestCalibration(key openalerts.StrategyKey, at time.Time) {
