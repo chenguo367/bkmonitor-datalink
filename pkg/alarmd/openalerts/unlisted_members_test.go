@@ -130,3 +130,44 @@ func TestUnlistedMembersStandInOnlyWhereTheReconcileGaveNoRows(t *testing.T) {
 		})
 	}
 }
+
+// The stand-in follows the set's own reads. An alert a cut reconcile named
+// missing from the set, still active then, is not carried on once the set
+// is read again: after the link closes it, nothing would take it out, and
+// every step would close it again (seen live, once a minute for an hour).
+// A set read that still carries a fingerprint keeps answering it.
+func TestUnlistedMembersFollowTheSetsReadsNotACutReconcilesMissing(t *testing.T) {
+	cut := func(f *unlistedFixture) {
+		f.reconcile = func() (Reconciliation, error) {
+			return Reconciliation{EventSourceID: "source", Truncated: true, Members: []string{"m3"}, Missing: []string{"m3"},
+				Alerts: []Alert{{AlertID: "a3", EventSourceID: "source", Fingerprint: "m3"}}}, nil
+		}
+		f.round(0)
+		f.reconcile = func() (Reconciliation, error) { return Reconciliation{EventSourceID: "source", Truncated: true}, nil }
+	}
+	t.Run("the set read empty", func(t *testing.T) {
+		f := newUnlistedFixture(t)
+		f.members = nil
+		cut(f)
+		for step := 1; step <= 3; step++ {
+			// Past IndexInterval: each step reads the set again.
+			f.round(time.Hour + time.Minute)
+			members, ok := f.cache.UnlistedMembers(keyA)
+			held, heldOK := f.cache.UnlistedHolds(keyA, "m3")
+			if !ok || len(members) != 0 || !heldOK || held {
+				t.Fatalf("step %d answered %v %v / %v %v; want an empty set answering nothing (snapshot %+v)", step, members, ok, held, heldOK, f.cache.Snapshot(keyA))
+			}
+		}
+	})
+	t.Run("the set read still carrying it", func(t *testing.T) {
+		f := newUnlistedFixture(t)
+		f.members = []string{"m3"}
+		cut(f)
+		f.round(time.Hour + time.Minute)
+		members, ok := f.cache.UnlistedMembers(keyA)
+		held, heldOK := f.cache.UnlistedHolds(keyA, "m3")
+		if !ok || len(members) != 1 || members[0] != "m3" || !heldOK || !held {
+			t.Fatalf("answered %v %v / %v %v; want [m3] (snapshot %+v)", members, ok, held, heldOK, f.cache.Snapshot(keyA))
+		}
+	})
+}

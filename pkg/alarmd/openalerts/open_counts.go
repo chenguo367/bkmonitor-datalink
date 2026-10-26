@@ -9,7 +9,10 @@
 
 package openalerts
 
-import "time"
+import (
+	"sort"
+	"time"
+)
 
 // OpenCounts is, for every strategy this copy tracks, how many open alerts its
 // set holds as the gate reads it, calibration applied -- a loaded set with no
@@ -50,6 +53,12 @@ func (cache *Cache) OpenCounts() (map[StrategyKey]int, []StrategyKey) {
 // stale, not refused for its size - and only for a trusted copy; anywhere
 // else ok is false and nothing is to be decided from the answer. Where the
 // reconcile gave rows, ok is false too: the rows answer, not the members.
+//
+// The members are the set's own last read and nothing else. What a cut
+// reconcile named missing from the set, and what this process sent, are
+// left to the recovery gate: no set read takes them out, so a stand-in that
+// carried them would close the same alerts again every step after the link
+// had closed them and emptied the set.
 
 // UnlistedMembers is the strategy's members when its alerts are not listed
 // and its set stands in for them.
@@ -59,10 +68,16 @@ func (cache *Cache) UnlistedMembers(key StrategyKey) (members []string, ok bool)
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	if !cache.membersStandIn(cache.index.entries[key], cache.now()) {
+	entry := cache.index.entries[key]
+	if !cache.membersStandIn(entry, cache.now()) {
 		return nil, false
 	}
-	return cache.indexMembers(key), true
+	members = make([]string, 0, len(entry.index))
+	for value := range entry.index {
+		members = append(members, value)
+	}
+	sort.Strings(members)
+	return members, true
 }
 
 // UnlistedMemberCount is how many members UnlistedMembers answers.
@@ -78,11 +93,12 @@ func (cache *Cache) UnlistedHolds(key StrategyKey, fingerprint string) (held, ok
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	now := cache.now()
-	if !cache.membersStandIn(cache.index.entries[key], now) {
+	entry := cache.index.entries[key]
+	if !cache.membersStandIn(entry, cache.now()) {
 		return false, false
 	}
-	return cache.indexContains(member{key: key, fingerprint: fingerprint}, now, false), true
+	_, held = entry.index[fingerprint]
+	return held, true
 }
 
 // membersStandIn is whether the entry's members stand in for its alerts.
