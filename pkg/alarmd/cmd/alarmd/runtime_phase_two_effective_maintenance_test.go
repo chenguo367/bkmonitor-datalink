@@ -46,10 +46,12 @@ func (c *maintenanceTestCatalog) CurrentPlans(ctx context.Context, _ execution.Q
 }
 
 // maintenanceTestIndex answers the copy's reads with alerts; own, when set,
-// is the source its calibration names as this deployment's.
+// is the source its calibration names as this deployment's. reconcileErr,
+// when set, fails every calibration: the set is read and never calibrated.
 type maintenanceTestIndex struct {
-	alerts []openalerts.Alert
-	own    string
+	alerts       []openalerts.Alert
+	own          string
+	reconcileErr error
 }
 
 func (s maintenanceTestIndex) ReadSet(context.Context, openalerts.StrategyKey) ([]string, error) {
@@ -60,6 +62,9 @@ func (s maintenanceTestIndex) ReadSet(context.Context, openalerts.StrategyKey) (
 	return members, nil
 }
 func (s maintenanceTestIndex) Reconcile(ctx context.Context, key openalerts.StrategyKey) (openalerts.Reconciliation, error) {
+	if s.reconcileErr != nil {
+		return openalerts.Reconciliation{}, s.reconcileErr
+	}
 	members, _ := s.ReadSet(ctx, key)
 	return openalerts.Reconciliation{EventSourceID: s.own, Members: members, Alerts: s.alerts}, nil
 }
@@ -176,7 +181,8 @@ func newMaintenanceTestFixtureFrom(t *testing.T, snapshot string, at time.Time, 
 	go func() { defer close(done); _ = cache.Run(ctx) }()
 	t.Cleanup(func() { cancel(); <-done })
 	deadline := testwait.Deadline(t)
-	for !cache.Snapshot(key).Calibrated {
+	// A failing calibration is waited for until it has failed once.
+	for snapshot := cache.Snapshot(key); !snapshot.Calibrated && (source.reconcileErr == nil || snapshot.Reason != "calibration_failed"); snapshot = cache.Snapshot(key) {
 		if time.Now().After(deadline) {
 			t.Fatal("cache did not calibrate")
 		}

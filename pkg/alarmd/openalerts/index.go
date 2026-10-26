@@ -1295,8 +1295,20 @@ func (cache *Cache) OwnEventSourceID() string {
 }
 
 func (cache *Cache) ActiveAlerts(key StrategyKey) []Alert {
+	alerts, _ := cache.ListActiveAlerts(key)
+	return alerts
+}
+
+// ListActiveAlerts is ActiveAlerts with whether the strategy's alerts were
+// listed at all. listed is true for a set with a current calibration, its
+// alerts possibly none - nothing to close - and for a truncated calibration
+// that listed at least one alert. It is false for a set not calibrated, a
+// calibration past its age, a failed one, and a truncated one that listed
+// nothing: the alerts to close are not known, and an empty answer there is
+// not "none open".
+func (cache *Cache) ListActiveAlerts(key StrategyKey) (alerts []Alert, listed bool) {
 	if cache == nil {
-		return nil
+		return nil, false
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
@@ -1306,10 +1318,10 @@ func (cache *Cache) ActiveAlerts(key StrategyKey) []Alert {
 	// too large to be answered whole. A caller must not read an alert's
 	// absence here as closed.
 	if !cache.calibrated(entry, cache.now()) {
-		if cache.partial(entry, cache.now()) {
-			return append([]Alert(nil), entry.alerts...)
+		if cache.partial(entry, cache.now()) && len(entry.alerts) > 0 {
+			return append([]Alert(nil), entry.alerts...), true
 		}
-		return nil
+		return nil, false
 	}
 	result := make([]Alert, 0, len(entry.alerts))
 	for _, alert := range entry.alerts {
@@ -1317,7 +1329,7 @@ func (cache *Cache) ActiveAlerts(key StrategyKey) []Alert {
 			result = append(result, alert)
 		}
 	}
-	return result
+	return result, true
 }
 
 func (cache *Cache) indexStats() Stats {

@@ -49,7 +49,10 @@ func newEffectiveCloseCollector() *effectiveCloseCollector {
 				"before a send found active again, its batch not sent while the Query Group's other Plans go on "+
 				"(effective_time_unknown counts the same recheck finding the time unreadable); close_business_unknown "+
 				"counts alerts of a global business Plan whose record names no business they were filed under, not "+
-				"closed that round. Every cell exists from the "+
+				"closed that round; evidence_unavailable is a Plan outside its effective time whose open alerts could not "+
+				"be listed because its set has no current calibration (never calibrated, past its age, failing, or "+
+				"truncated with nothing listed), once per Plan per step - a calibrated set with no alerts is not "+
+				"counted. Every cell exists from the "+
 				"start so a zero is a reading and not an absence.", []string{"outcome"}, nil),
 	}
 }

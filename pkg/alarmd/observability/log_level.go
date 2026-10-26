@@ -109,7 +109,7 @@ var warnDecisionReasons = makeReasonSet([]ReasonCode{"unexplained", "freeze_fail
 // or a wait.
 var warnMaintenanceReasons = makeReasonSet([]ReasonCode{
 	"close_precheck_failed", "close_send_failed", "maintenance_plan_uncompilable",
-	"close_identity_invalid", "unavailable", "unsupported_runner",
+	"close_identity_invalid", "unavailable", "unsupported_runner", "evidence_unavailable",
 })
 
 // warnAbsentCloseReasons are absent-strategy close outcomes that could not

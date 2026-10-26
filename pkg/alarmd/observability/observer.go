@@ -3859,6 +3859,14 @@ const (
 	// event source could not be read and none has been read yet, by this
 	// loop or by the open-alert copy. One per step.
 	EffectiveCloseSourceUnknown ReasonCode = "source_unknown"
+	// EffectiveCloseEvidenceUnavailable is a Plan outside its effective time
+	// whose open alerts could not be listed: its set in the open-alert copy
+	// has no current calibration - never calibrated, past its age, the
+	// calibration failing, or a truncated one that listed nothing. Not
+	// "nothing to close": a calibrated set with no alerts is not counted.
+	// The absent-strategy close's word for the same condition. One per Plan,
+	// per step that finds it inactive.
+	EffectiveCloseEvidenceUnavailable ReasonCode = "evidence_unavailable"
 )
 
 // EffectiveCloseOutcomes is every outcome, for the metric to pre-create each
@@ -3869,6 +3877,7 @@ var EffectiveCloseOutcomes = []ReasonCode{
 	EffectiveCloseEffectiveTimeUnknown, EffectiveCloseLegacyUnavailable, EffectiveCloseUnavailable, EffectiveCloseUnsupportedRunner,
 	EffectiveCloseViewNotExecutable, EffectiveCloseCalendarDeletionUnsettled, EffectiveCloseBoundaryActive,
 	EffectiveCloseBusinessUnknown, EffectiveCloseSourceLastKnown, EffectiveCloseSourceUnknown,
+	EffectiveCloseEvidenceUnavailable,
 }
 
 // Maintenance details are bounded log reasons, not new metric label dimensions.

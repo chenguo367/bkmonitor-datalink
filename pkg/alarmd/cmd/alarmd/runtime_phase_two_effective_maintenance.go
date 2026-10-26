@@ -111,6 +111,7 @@ const (
 	closeOutcomeBusinessUnknown      = string(observability.EffectiveCloseBusinessUnknown)
 	closeOutcomeSourceLastKnown      = string(observability.EffectiveCloseSourceLastKnown)
 	closeOutcomeSourceUnknown        = string(observability.EffectiveCloseSourceUnknown)
+	closeOutcomeEvidenceUnavailable  = string(observability.EffectiveCloseEvidenceUnavailable)
 )
 
 // maintenanceGroup is what the loop knows about one owned Query Group from
@@ -754,7 +755,16 @@ func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.Q
 			continue
 		}
 		key := openalerts.StrategyKey{TenantID: plan.Identity.TenantID, StrategyID: plan.Identity.StrategyID}
-		alerts := m.cache.ActiveAlerts(key)
+		alerts, listed := m.cache.ListActiveAlerts(key)
+		if !listed {
+			// The set has no current calibration: its alerts to close cannot
+			// be listed, which is not "none open". Counted once per Plan each
+			// step that finds it inactive, until a calibration lists them.
+			m.requestCalibration(key, at)
+			m.observeTrace(ctx, observability.TraceFields{QueryGroupKey: string(qg), StrategyID: plan.Identity.StrategyID},
+				closeOutcomeEvidenceUnavailable, errInactiveAlertsUnlisted, 0)
+			continue
+		}
 		known := make(map[string]bool, len(alerts))
 		for _, alert := range alerts {
 			known[alert.Fingerprint] = true
@@ -924,6 +934,9 @@ var (
 	// again, or not readable, at the send. Both are that Plan's alone.
 	errCloseBoundaryActive = errors.New("inactive close: the Plan is active again at the send")
 	errCloseTimeUnknown    = errors.New("inactive close: the Plan's effective time is unknown at the send")
+	// The Plan is inactive and the open-alert copy holds no current
+	// calibration of its strategy's set to list the alerts to close.
+	errInactiveAlertsUnlisted = errors.New("inactive close: the strategy's open alerts cannot be listed, its set has no current calibration")
 )
 
 // planRecheckRefused reports a send the recheck of its own Plan refused:
