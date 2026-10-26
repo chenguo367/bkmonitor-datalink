@@ -76,6 +76,10 @@ type editStrategyClose struct {
 	// remembered is the decisions that closed nothing, by alert.
 	remembered map[editAlertKey]editMemory
 	wasLeader  bool
+	// recoveries is the fleet's record of the recoveries alarmd sent (L40):
+	// a close is held back on a recovery of its fingerprint sent after the
+	// listing it was decided from began.
+	recoveries *openalerts.Recoveries
 	countsMu   sync.Mutex
 	counts     map[string]uint64
 }
@@ -201,6 +205,7 @@ func (loop *editStrategyClose) closeStrategy(ctx context.Context, key absentaler
 		loop.count(editclose.OutcomePlanUnrevisioned, 1)
 		return true
 	}
+	listedAt := loop.bundle.dependencies.Now()
 	reconciliation, err := loop.link.Reconcile(ctx, openalerts.StrategyKey{TenantID: key.TenantID, StrategyID: key.StrategyID})
 	if err != nil {
 		// This strategy waits for a later round; the others go on.
@@ -269,6 +274,7 @@ func (loop *editStrategyClose) closeStrategy(ctx context.Context, key absentaler
 		loop.observe(ctx, editclose.OutcomeBusinessUnknown, errors.New("an alert's record names no business to file its close under"), unknownBusiness)
 	}
 	loop.count(editclose.OutcomeReadDeferred, deferred)
+	closes = loop.holdReopened(ctx, key, closes, listedAt)
 	for start := 0; start < len(closes); start += editCloseAlertBatch {
 		batch := closes[start:min(len(closes), start+editCloseAlertBatch)]
 		if err := loop.writer.WriteCloseBatch(ctx, batch); err != nil {
@@ -313,4 +319,34 @@ func (loop *editStrategyClose) observe(ctx context.Context, outcome string, err 
 		Component: observability.ComponentControlPlane, Stage: observability.StageStrategyEditClose,
 		Result: observability.ResultDegraded, ReasonCode: observability.ReasonCode(outcome),
 		Counts: observability.Counts{Events: int64(count)}, Err: err})
+}
+
+// holdReopened is the closes without the ones a reopen overtook (L40): a
+// recovery of the fingerprint was sent after the listing began and an
+// ABNORMAL of it after that - the listed alert may have ended and the
+// fingerprint's active alert be the new one the close would end - or the
+// record could not be read. A recovery alone holds nothing: an alert at a
+// Level the edit removed hears one every cycle while the series is healthy
+// at the Levels kept, an orphan at the link. The alert record read
+// since does not settle it: the close goes by fingerprint, not by the id
+// read. Held, a close is decided again next round.
+func (loop *editStrategyClose) holdReopened(ctx context.Context, key absentalerts.Key, closes []linkdoutput.CloseRequest,
+	listedAt time.Time) []linkdoutput.CloseRequest {
+	if loop.recoveries == nil || len(closes) == 0 {
+		return closes
+	}
+	fingerprints := make([]string, 0, len(closes))
+	for _, request := range closes {
+		fingerprints = append(fingerprints, request.Fingerprint)
+	}
+	held := loop.recoveries.Held(ctx, key.TenantID, key.StrategyID, fingerprints, listedAt)
+	kept := closes[:0]
+	for _, request := range closes {
+		if word, hold := held[request.Fingerprint]; hold {
+			loop.count(word, 1)
+			continue
+		}
+		kept = append(kept, request)
+	}
+	return kept
 }

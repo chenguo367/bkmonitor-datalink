@@ -415,6 +415,12 @@ func openProductionControlRoleBundle(
 		closeLoop := newAbsentStrategyClose(bundle, core.Reconciler, linkd.Console, events)
 		closeLoop.documents, _ = core.StrategySource.(controlplane.StrategyDocumentPresence)
 		closeLoop.edits = newEditStrategyClose(bundle, core.Reconciler, linkd.Console, events)
+		recoveries, err := linkdRecoveries(cfg, redisForCaller(runtimeClient, redisfailure.CallerLinkd))
+		if err != nil {
+			return nil, err
+		}
+		closeLoop.edits.recoveries = recoveries
+		recorder.SetRecoveryRecordSource(recoveryRecordCounts(recoveries))
 		recorder.SetEditCloseSource(closeLoop.edits.Stats)
 		absentPage.bind(closeLoop)
 		bundle.dependencies.RunAbsentClose = closeLoop.run

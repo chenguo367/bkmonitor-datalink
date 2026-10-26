@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdoutput"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 )
 
 // indexedSet is a copy whose set cannot be judged - the link's reconcile
@@ -100,5 +101,27 @@ func TestAMemberThatLeftTheIndexSetBeforeTheStepIsNotClosed(t *testing.T) {
 	f.want(t, "left the set", map[string]uint64{OutcomeUnconfirmed: 1, OutcomeSetUnavailable: 1})
 	if sent := f.writer.sent(); len(sent) != 0 {
 		t.Fatalf("sent %+v, want nothing", sent)
+	}
+}
+
+// Every close passes the guard before it is sent, told whether it was
+// addressed from the index set: one it holds back is counted under its
+// word, kept and not sent; the rest go.
+func TestEveryClosePassesTheGuard(t *testing.T) {
+	held, passed := fp(1), fp(2)
+	f := newFixture(indexedSet(held, passed), nil)
+	var asked []bool
+	f.closer.BindGuard(func(_ context.Context, _ openalerts.StrategyKey, fingerprint string, fromSet bool) string {
+		asked = append(asked, fromSet)
+		if fingerprint == held {
+			return OutcomeReopenedSinceRead
+		}
+		return ""
+	})
+	f.slot(1700000000, drop(held, 0), drop(passed, 0))
+	f.slot(1700000060, drop(held, 0), drop(passed, 0))
+	f.want(t, "guarded", map[string]uint64{OutcomeUnconfirmed: 2, OutcomeCloseSent: 1, OutcomeIndexSetCloseSent: 1, OutcomeReopenedSinceRead: 1})
+	if sent := f.writer.sent(); len(sent) != 1 || sent[0].Fingerprint != passed || len(asked) != 2 || !asked[0] || !asked[1] {
+		t.Fatalf("sent %+v, guard asked %v; want only the passed close, both asked as from the set", sent, asked)
 	}
 }

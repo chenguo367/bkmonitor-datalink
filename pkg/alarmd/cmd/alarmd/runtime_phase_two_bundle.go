@@ -764,6 +764,11 @@ func openProductionPhaseTwoBundleAssembly(
 		return nil, err
 	}
 	openAlertCopy := linkd.Cache
+	recoveries, err := linkdRecoveries(cfg, redisForCaller(runtimeClient, redisfailure.CallerLinkd))
+	if err != nil {
+		return nil, err
+	}
+	recorder.SetRecoveryRecordSource(recoveryRecordCounts(recoveries))
 	recorder.SetOpenAlertSetSource(openAlertCopy.Stats)
 	recorder.SetActivationRebuildSource(repository.ActivationRebuildCounts)
 	recorder.SetTimelineRepairSource(repository.TimelineRepairCounts)
@@ -796,7 +801,7 @@ func openProductionPhaseTwoBundleAssembly(
 		ExecutionEvidence: slotAppliedMarks,
 		// Linked only with the link's Console: without it the copy is never
 		// read and can never judge, and the worker keeps no no-data end index.
-		OpenAlerts: &openAlertCopyPort{cache: openAlertCopy, linked: cfg.PhaseTwo.Linkd.ConsoleURL != ""},
+		OpenAlerts: &openAlertCopyPort{cache: openAlertCopy, linked: cfg.PhaseTwo.Linkd.ConsoleURL != "", recoveries: recoveries},
 		// The horizon the platform settings copy resolves now, read per Slot:
 		// runtime state lives at most this long past a series' last write.
 		StateHorizon: func() int64 { return platformSettings.Current().NoDataTrackingHorizonSeconds },
@@ -1265,7 +1270,7 @@ func openProductionPhaseTwoBundleAssembly(
 	flights.OnTurnedAwayReleased(bundle.noticeFlightReleased)
 	bundle.workerPorts = workerPorts
 	bundle.cmdbIndex = cmdbIndex
-	maintenance := &effectiveMaintenance{bundle: bundle, catalog: catalog, cache: openAlertCopy, writer: events,
+	maintenance := &effectiveMaintenance{bundle: bundle, catalog: catalog, cache: openAlertCopy, writer: events, recoveries: recoveries,
 		capacity: linkdBudget, legacy: legacyTime.Provider(), legacyCache: legacyTime}
 	// One memory of which business each alert was filed under, for every
 	// close that carries a global business Plan's alert.
@@ -1285,7 +1290,7 @@ func openProductionPhaseTwoBundleAssembly(
 	}
 	bundle.dependencies.RunEffectiveTime = maintenance.run
 	maintenanceReadings.bind(maintenance)
-	bindTargetScopeClose(bundle, scopeClose, openAlertCopy, events, alertBusinesses, recorder)
+	bindTargetScopeClose(bundle, scopeClose, openAlertCopy, recoveries, events, alertBusinesses, recorder)
 	openAlertFacts := withTargetScopeClose(openAlertSetFactsSource(openAlertCopy, external.Now), scopeClose)
 	// The control leader's difference against the strategies that no longer
 	// exist. It runs on every replica's loop and does nothing on a follower;
@@ -1298,6 +1303,7 @@ func openProductionPhaseTwoBundleAssembly(
 		absentClose.documents, _ = strategySource.(controlplane.StrategyDocumentPresence)
 		absentClose.businesses = alertBusinesses
 		absentClose.edits = newEditStrategyClose(bundle, reconciler, linkd.Console, events)
+		absentClose.edits.recoveries = recoveries
 		recorder.SetEditCloseSource(absentClose.edits.Stats)
 		absentPage.bind(absentClose)
 		bundle.dependencies.RunAbsentClose = absentClose.run
@@ -1697,7 +1703,12 @@ func maxDuration(values ...time.Duration) time.Duration {
 // openAlertCopyPort adapts the process copy to the worker's port: the
 // worker speaks in Plan identities, the copy in strategy keys.
 type openAlertCopyPort struct {
-	cache         *openalerts.Cache
+	cache *openalerts.Cache
+	// recoveries takes every acknowledged reopen - an ABNORMAL after a
+	// RECOVERY of the fingerprint - into the fleet's record (L40); nil
+	// without the link's Console, where no close is decided from the link's
+	// evidence.
+	recoveries    *openalerts.Recoveries
 	registerOwned func(execution.QueryGroupIdentity, []execution.PlanIdentity)
 	// linked is whether the deployment has the link's Console, the only way
 	// the copy is ever read (execution.OpenAlertLink).
@@ -1732,6 +1743,38 @@ func (port openAlertCopyPort) TrackPlans(qg execution.QueryGroupIdentity, plans 
 
 func (port openAlertCopyPort) Acknowledged(events []contract.TriggerEventV1) {
 	port.cache.Acknowledged(events)
+	noteReopens(port.recoveries, events, time.Now())
+}
+
+// noteReopens gives the record the RECOVERY and ABNORMAL events the sink
+// acknowledged, in order: only what reaches the link - not a compatibility
+// envelope, not an event without a fingerprint. The record remembers the
+// recoveries in this process and writes only a reopen, so an
+// acknowledgement waits on Redis only when its batch holds one (at most one
+// per RECOVERY sent), never for a steady stream of either. A failure is
+// counted on the record (note_failed) and holds nothing: the record only
+// ever holds closes back.
+func noteReopens(recoveries *openalerts.Recoveries, events []contract.TriggerEventV1, at time.Time) {
+	if recoveries == nil {
+		return
+	}
+	sent := make([]openalerts.Sent, 0, len(events))
+	for _, event := range events {
+		recovery := event.EventKind == contract.TriggerEventRecovery
+		if !recovery && event.EventKind != contract.TriggerEventAbnormal {
+			continue
+		}
+		if event.DedupeMD5 == "" || event.StrategyRef == nil || event.LegacyOutput != nil {
+			continue
+		}
+		sent = append(sent, openalerts.Sent{TenantID: event.TenantID, StrategyID: event.PlanRef.StrategyID, Fingerprint: event.DedupeMD5, Recovery: recovery})
+	}
+	if len(sent) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = recoveries.Note(ctx, at, sent)
 }
 
 // openAlertSetFactsSource is what this replica publishes about its copy. The

@@ -47,6 +47,9 @@ type indexEntry struct {
 	dirty, readGeneration                        uint64
 	dirtySince                                   time.Time
 	indexReadAt, calibratedAt, calibratedStarted time.Time
+	// indexReadStarted is when the read indexReadAt finished began, no
+	// later: what the set says is as of then.
+	indexReadStarted time.Time
 	// partialAt is when the last truncated calibration (Reconciliation.
 	// Truncated) was applied. It never moves calibratedAt and never keeps a
 	// set from going stale: a truncated answer adds to the sets and lists
@@ -575,6 +578,9 @@ type indexJob struct {
 	key        StrategyKey
 	entry      *indexEntry
 	generation uint64
+	// started is when the round that read it was planned, no later than
+	// the read began (EvidenceStarted).
+	started time.Time
 }
 
 // calibrationSamples is how many calibration durations the capacity is read
@@ -677,7 +683,7 @@ func (cache *Cache) jobs(calibration bool) []indexJob {
 			}
 			entry.lastReadAttempt = now
 		}
-		result = append(result, indexJob{key: key, entry: entry, generation: entry.dirty})
+		result = append(result, indexJob{key: key, entry: entry, generation: entry.dirty, started: now})
 	}
 	return result
 }
@@ -907,6 +913,7 @@ func (cache *Cache) applyIndex(job indexJob, members []string, err error) {
 		return
 	}
 	next.indexReadAt = cache.now()
+	next.indexReadStarted = job.started
 	next.readGeneration = job.generation
 	if next.dirty == job.generation {
 		next.dirtySince = time.Time{}

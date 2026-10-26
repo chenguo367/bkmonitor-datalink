@@ -61,7 +61,10 @@ func newEffectiveCloseCollector() *effectiveCloseCollector {
 				"members because the set had no current calibration to list them; close_already_sent counts, by "+
 				"alert, closes held back because this process sent them and their evidence was not read since - a "+
 				"listed alert's within a minute, one from the index set until a read of the set lands after the send, "+
-				"at most the set's stale bound. Every cell exists from the "+
+				"at most the set's stale bound; reopened_since_read and recovery_unknown count, by alert, closes held "+
+				"back because a recovery of the fingerprint was sent after the listing or set they were decided from "+
+				"was read and an ABNORMAL of it after that, or the record of reopens could not be read. Every cell "+
+				"exists from the "+
 				"start so a zero is a reading and not an absence.", []string{"outcome"}, nil),
 	}
 }

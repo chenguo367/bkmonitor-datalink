@@ -128,3 +128,23 @@ func newLinkdIndex(cfg config.Config, client redis.UniversalClient, connection c
 	location.mu.Unlock()
 	return linkdIndex{Cache: cache, Source: binding.source, Alerts: reconciler, Console: console, Location: location}, nil
 }
+
+// linkdRecoveries is the fleet's record of the reopens alarmd sent (L40)
+// in the runtime Redis, for a deployment with the link's Console, the only
+// one that closes from the link's evidence; nil without it.
+func linkdRecoveries(cfg config.Config, runtime redis.UniversalClient) (*openalerts.Recoveries, error) {
+	if cfg.PhaseTwo.Linkd.ConsoleURL == "" {
+		return nil, nil
+	}
+	return openalerts.NewRecoveries(runtime, cfg.Redis.StatePrefix)
+}
+
+// recoveryRecordCounts reads the record's counts for the metric, zeros
+// without one.
+func recoveryRecordCounts(recoveries *openalerts.Recoveries) func() map[string]uint64 {
+	return func() map[string]uint64 {
+		stats := recoveries.Stats()
+		return map[string]uint64{"noted": stats.Noted, "note_failed": stats.NoteFailed, "read_failed": stats.ReadFailed,
+			"forgotten": stats.Forgotten}
+	}
+}

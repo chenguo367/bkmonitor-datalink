@@ -125,13 +125,20 @@ const (
 	// rows to list the alert by, and the set, read fresh, carries its
 	// fingerprint, which the close carries as the alert's id.
 	OutcomeIndexSetCloseSent = "index_set_close_sent"
+	// OutcomeReopenedSinceRead and OutcomeRecoveryUnknown count closes the
+	// guard (BindGuard) held back before the send: a recovery of the
+	// fingerprint was sent after the evidence the close was decided from
+	// was read and an ABNORMAL of it after that (L40), or the record of
+	// reopens could not be read. Kept, and decided again at the next step.
+	OutcomeReopenedSinceRead = "reopened_since_read"
+	OutcomeRecoveryUnknown   = "recovery_unknown"
 )
 
 // Outcomes lists every outcome, for the metric that pre-creates them.
 var Outcomes = []string{OutcomeCloseSent, OutcomeUnconfirmed, OutcomeCacheUnavailable, OutcomeNotMember,
 	OutcomeSetUnavailable, OutcomeProducerForeign, OutcomeSendFailed, OutcomeMemoryFull, OutcomeFingerprintUnsupported,
 	OutcomeStaleDeferred, OutcomeIndefinite, OutcomeIdentityInvalid, OutcomeObservationExpired, OutcomeBusinessUnknown,
-	OutcomeSupersededCloseSent, OutcomeIndexSetCloseSent}
+	OutcomeSupersededCloseSent, OutcomeIndexSetCloseSent, OutcomeReopenedSinceRead, OutcomeRecoveryUnknown}
 
 // The bounds of what the facts carry.
 const (
@@ -268,7 +275,9 @@ type Closer struct {
 	// business is where a global business strategy's close finds its
 	// alert's business; nil, and such a close is not sent.
 	business AlertBusiness
-	entries  map[entryKey]*entry
+	// guard checks each close before it is sent; nil, and none is held.
+	guard   Guard
+	entries map[entryKey]*entry
 	// decided remembers what was closed or would have been, so the Slots
 	// that keep turning the same series away before the link's set catches
 	// up do not decide it again.
@@ -306,6 +315,18 @@ func New(options Options) *Closer {
 func (closer *Closer) Bind(set OpenSet, writer Writer) {
 	closer.mu.Lock()
 	closer.set, closer.writer = set, writer
+	closer.mu.Unlock()
+}
+
+// Guard is the check before a close is sent: it answers the outcome word
+// that holds the close back, empty to send it. fromSet says the close was
+// addressed from the index set rather than from the listing.
+type Guard func(ctx context.Context, key openalerts.StrategyKey, fingerprint string, fromSet bool) string
+
+// BindGuard attaches the check before a close is sent.
+func (closer *Closer) BindGuard(guard Guard) {
+	closer.mu.Lock()
+	closer.guard = guard
 	closer.mu.Unlock()
 }
 
@@ -479,7 +500,7 @@ func (closer *Closer) Step(ctx context.Context) {
 			confirmed = append(confirmed, ek)
 		}
 	}
-	set, writer, after, business := closer.set, closer.writer, closer.after, closer.business
+	set, writer, after, business, guard := closer.set, closer.writer, closer.after, closer.business, closer.guard
 	closer.mu.Unlock()
 	if len(confirmed) == 0 {
 		return
@@ -569,6 +590,12 @@ func (closer *Closer) Step(ctx context.Context) {
 				continue
 			}
 			request.BusinessID = read
+		}
+		if guard != nil {
+			if word := guard(ctx, ek.key, ek.fingerprint, fromSet[ek]); word != "" {
+				closer.count(ek.key, word, 1)
+				continue
+			}
 		}
 		batch = append(batch, request)
 		decided = append(decided, ek)

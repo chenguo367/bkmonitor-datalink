@@ -168,6 +168,8 @@ var redisCommandNames = map[string]struct{}{
 	"setnx": {}, "hsetnx": {},
 	"scard": {}, "sscan": {},
 	"type": {}, "hexists": {}, "hstrlen": {}, "hkeys": {},
+	// The fleet's record of recoveries (openalerts.Recoveries): a recovery's score.
+	"zscore": {},
 }
 
 type redisCallMetrics struct {

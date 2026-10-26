@@ -464,6 +464,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["alarmd_observer_panics_total"] = "variableLabels: {observer}"
 	expected["alarmd_absent_strategy_close_total"] = "variableLabels: {outcome}"
 	expected["alarmd_strategy_edit_close_total"] = "variableLabels: {outcome}"
+	expected["alarmd_recovery_record_total"] = "variableLabels: {outcome}"
 	expected["alarmd_target_scope_close_total"] = "variableLabels: {outcome}"
 	expected["alarmd_absent_strategy_difference"] = "variableLabels: {side}"
 	expected["alarmd_absent_strategy_round_total"] = "variableLabels: {disposition}"
@@ -1103,6 +1104,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("observer_panics_total")] = len(observability.ObserverNames)
 	bounds[fqName("absent_strategy_close_total")] = len(absentalerts.Outcomes)
 	bounds[fqName("strategy_edit_close_total")] = len(editclose.Outcomes)
+	bounds[fqName("recovery_record_total")] = len(openalerts.RecoveryRecordOutcomes)
 	bounds[fqName("target_scope_close_total")] = len(scopeclose.Outcomes)
 	bounds[fqName("absent_strategy_round_total")] = len(absentalerts.Refusals)
 	bounds[fqName("absent_strategy_difference")] = len(differenceSides)

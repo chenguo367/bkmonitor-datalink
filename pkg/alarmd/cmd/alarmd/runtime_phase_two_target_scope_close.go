@@ -68,12 +68,15 @@ func targetScopeCloseFor(cfg config.Config, now func() time.Time) (*scopeclose.C
 // bindTargetScopeClose binds the close to the open alert copy and the
 // producer, its counts to the metric and its loop to the bundle. Nothing is
 // wired for a nil close.
-func bindTargetScopeClose(bundle *phaseTwoWorkerBundle, closer *scopeclose.Closer, cache *openalerts.Cache,
+func bindTargetScopeClose(bundle *phaseTwoWorkerBundle, closer *scopeclose.Closer, cache *openalerts.Cache, recoveries *openalerts.Recoveries,
 	writer scopeclose.Writer, businesses *openalerts.AlertBusinesses, recorder *metric.Recorder) {
 	if closer == nil {
 		return
 	}
 	closer.Bind(scopeclose.CacheSet(cache), writer)
+	if recoveries != nil {
+		closer.BindGuard(recoveryGuard(cache, recoveries))
+	}
 	if businesses != nil {
 		closer.BindAlertBusiness(businesses.Of)
 	}
@@ -136,4 +139,19 @@ func targetScopeCloseFacts(facts scopeclose.Facts) *fleet.TargetScopeCloseFacts 
 			PendingSample: row.PendingSample, DecidedSample: row.DecidedSample})
 	}
 	return result
+}
+
+// recoveryGuard holds back a scope close a reopen overtook (L40): a
+// recovery of its fingerprint sent after the evidence the close was decided
+// from - the listing, or the index set standing in for it - was read, and
+// an ABNORMAL of it after that.
+func recoveryGuard(cache *openalerts.Cache, recoveries *openalerts.Recoveries) scopeclose.Guard {
+	return func(ctx context.Context, key openalerts.StrategyKey, fingerprint string, fromSet bool) string {
+		listed, index := cache.EvidenceStarted(key)
+		readStarted := listed
+		if fromSet {
+			readStarted = index
+		}
+		return recoveries.Held(ctx, key.TenantID, key.StrategyID, []string{fingerprint}, readStarted)[fingerprint]
+	}
 }

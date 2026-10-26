@@ -44,6 +44,9 @@ func newTargetScopeCloseCollector() *targetScopeCloseCollector {
 				"business they were filed under, or addressed from the index set, which names none, kept for the next "+
 				"step; index_set_close_sent counts, among close_sent, the closes addressed by fingerprint from the "+
 				"strategy's index set, read fresh, because the link's reconcile gave no rows to list the alert by; "+
+				"reopened_since_read and recovery_unknown count closes held back before the send, kept for the next "+
+				"step: a recovery of the fingerprint was sent after the listing or index set they were decided from was "+
+				"read and an ABNORMAL of it after that, or the record of reopens could not be read; "+
 				"superseded_identity_close_sent counts, among close_sent, "+
 				"the closes of alerts a series opened under the fingerprint of its own address before its alert identity "+
 				"read CMDB's (reason superseded_identity). Such an offer is made for every series whose host overlay moves "+

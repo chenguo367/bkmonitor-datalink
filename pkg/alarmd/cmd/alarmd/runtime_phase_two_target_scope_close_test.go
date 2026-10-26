@@ -199,7 +199,7 @@ func TestTheTargetScopeCloseIsNotWiredWithoutTheLinkConsole(t *testing.T) {
 	}
 	recorder := metric.NewRecorder(metric.BuildInfo{})
 	bundle := &phaseTwoWorkerBundle{}
-	bindTargetScopeClose(bundle, closer, nil, &maintenanceTestWriter{}, nil, recorder)
+	bindTargetScopeClose(bundle, closer, nil, nil, &maintenanceTestWriter{}, nil, recorder)
 	if bundle.dependencies.RunTargetScopeClose != nil {
 		t.Fatal("a loop was wired without a Console")
 	}
@@ -228,7 +228,7 @@ func TestTheTargetScopeCloseIsNotWiredWithoutTheLinkConsole(t *testing.T) {
 	if closer == nil || sink == nil {
 		t.Fatal("with a Console the close was not built")
 	}
-	bindTargetScopeClose(bundle, closer, nil, &maintenanceTestWriter{}, nil, recorder)
+	bindTargetScopeClose(bundle, closer, nil, nil, &maintenanceTestWriter{}, nil, recorder)
 	if bundle.dependencies.RunTargetScopeClose == nil {
 		t.Fatal("with a Console no loop was wired")
 	}

@@ -133,3 +133,22 @@ func (cache *Cache) membersStandIn(entry *indexEntry, now time.Time) bool {
 	}
 	return !entry.indexReadAt.IsZero() && entry.tooLarge == nil && !cache.stale(entry, now)
 }
+
+// EvidenceStarted is when what answers for the strategy's alerts was read,
+// at the latest: the current calibration that lists them (listed), and the
+// index read whose members stand in for them (index); zero where there is
+// none. A close decided from one is held back on a recovery sent after
+// that read began (Recoveries.Since): the alert the read named may have
+// ended, and the fingerprint's next alert be one the close would end.
+func (cache *Cache) EvidenceStarted(key StrategyKey) (listed, index time.Time) {
+	if cache == nil {
+		return time.Time{}, time.Time{}
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	entry := cache.index.entries[key]
+	if entry == nil {
+		return time.Time{}, time.Time{}
+	}
+	return entry.calibratedStarted, entry.indexReadStarted
+}

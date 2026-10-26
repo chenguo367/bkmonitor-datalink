@@ -114,6 +114,8 @@ const (
 	closeOutcomeEvidenceUnavailable  = string(observability.EffectiveCloseEvidenceUnavailable)
 	closeOutcomeIndexSetAcked        = string(observability.EffectiveCloseIndexSetAcked)
 	closeOutcomeAlreadySent          = string(observability.EffectiveCloseAlreadySent)
+	closeOutcomeReopenedSinceRead    = string(observability.EffectiveCloseReopenedSinceRead)
+	closeOutcomeRecoveryUnknown      = string(observability.EffectiveCloseRecoveryUnknown)
 )
 
 // maintenanceGroup is what the loop knows about one owned Query Group from
@@ -183,7 +185,11 @@ type effectiveMaintenance struct {
 	// the send (pruneSent), and at most the set's stale bound, past which the
 	// set no longer stands in: what the set listed before the send is no
 	// evidence the alert is still open after it. Bounded by LocalEntries.
-	sent         map[string]sentClose
+	sent map[string]sentClose
+	// recoveries is the fleet's record of the recoveries alarmd sent (L40),
+	// nil without the link's Console: a close is held back on a recovery of
+	// its fingerprint sent after its evidence was read.
+	recoveries   *openalerts.Recoveries
 	groups       map[execution.QueryGroupIdentity]*maintenanceGroup
 	readCursor   execution.QueryGroupIdentity
 	planCursor   map[execution.QueryGroupIdentity]int
@@ -889,6 +895,7 @@ func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.Q
 			m.observeTrace(ctx, observability.TraceFields{QueryGroupKey: string(qg), StrategyID: plan.Identity.StrategyID},
 				closeOutcomeAlreadySent, nil, already)
 		}
+		batch = m.holdReopened(ctx, qg, plan, key, batch, fromSet)
 		if len(batch) == 0 {
 			continue
 		}
@@ -1276,4 +1283,51 @@ func cliMaintenanceOperation(source *maintenanceSource) obchannel.Operation {
 				Limitations: []string{"Use meta.answered_by to identify this process: each replica maintains the Query Groups it owns, and another replica's outcomes are read by targeting it.",
 					"Counts and outcomes are this process's since it started: first_at is when this process first saw the Query Group under the word, not when the condition began. first_error is the text at first_at and error the latest, which has been the text since error_since: read a time only with its own text. At most 32 Query Groups are kept per word, the one seen longest ago giving way; each error's text is cut to 256 bytes."}}
 		}}
+}
+
+// holdReopened is the batch without the closes a reopen overtook (L40):
+// any process sent a recovery for the fingerprint after the evidence the
+// close was decided from - the listing, or the index set standing in for
+// it - was read, and an ABNORMAL of it after that (reopened_since_read),
+// or the record could not be read
+// (recovery_unknown, every close held). A held close is decided again from
+// the next read; nothing is lost but time.
+func (m *effectiveMaintenance) holdReopened(ctx context.Context, qg execution.QueryGroupIdentity, plan controlplane.MaintenancePlan,
+	key openalerts.StrategyKey, batch []linkdoutput.CloseRequest, fromSet bool) []linkdoutput.CloseRequest {
+	if m.recoveries == nil || len(batch) == 0 {
+		return batch
+	}
+	listed, index := m.cache.EvidenceStarted(key)
+	readStarted := listed
+	if fromSet {
+		readStarted = index
+	}
+	fingerprints := make([]string, 0, len(batch))
+	for _, request := range batch {
+		fingerprints = append(fingerprints, request.Fingerprint)
+	}
+	held := m.recoveries.Held(ctx, key.TenantID, key.StrategyID, fingerprints, readStarted)
+	if len(held) == 0 {
+		return batch
+	}
+	reopened, unknown := 0, 0
+	kept := batch[:0]
+	for _, request := range batch {
+		switch held[request.Fingerprint] {
+		case openalerts.HeldReopenedSinceRead:
+			reopened++
+		case openalerts.HeldRecoveryUnknown:
+			unknown++
+		default:
+			kept = append(kept, request)
+		}
+	}
+	trace := observability.TraceFields{QueryGroupKey: string(qg), StrategyID: plan.Identity.StrategyID}
+	if reopened > 0 {
+		m.observeTrace(ctx, trace, closeOutcomeReopenedSinceRead, nil, reopened)
+	}
+	if unknown > 0 {
+		m.observeTrace(ctx, trace, closeOutcomeRecoveryUnknown, errors.New("the record of reopens could not be read"), unknown)
+	}
+	return kept
 }

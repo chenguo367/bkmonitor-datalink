@@ -3886,6 +3886,15 @@ const (
 	// send, at most the set's stale bound. The listing or set still names the
 	// alert only because it was read before the link closed it.
 	EffectiveCloseAlreadySent ReasonCode = "close_already_sent"
+	// EffectiveCloseReopenedSinceRead counts, by alert, a close held back
+	// because a recovery for its fingerprint was sent after the listing or
+	// the index set it was decided from was read, and an ABNORMAL of it after
+	// that: the alert may have ended and a new one opened under it, which
+	// the close would end (L40). Decided again from the next read.
+	EffectiveCloseReopenedSinceRead ReasonCode = "reopened_since_read"
+	// EffectiveCloseRecoveryUnknown counts, by alert, closes held back
+	// because the fleet's record of reopens could not be read.
+	EffectiveCloseRecoveryUnknown ReasonCode = "recovery_unknown"
 )
 
 // EffectiveCloseOutcomes is every outcome, for the metric to pre-create each
@@ -3897,6 +3906,7 @@ var EffectiveCloseOutcomes = []ReasonCode{
 	EffectiveCloseViewNotExecutable, EffectiveCloseCalendarDeletionUnsettled, EffectiveCloseBoundaryActive,
 	EffectiveCloseBusinessUnknown, EffectiveCloseSourceLastKnown, EffectiveCloseSourceUnknown,
 	EffectiveCloseEvidenceUnavailable, EffectiveCloseIndexSetAcked, EffectiveCloseAlreadySent,
+	EffectiveCloseReopenedSinceRead, EffectiveCloseRecoveryUnknown,
 }
 
 // Maintenance details are bounded log reasons, not new metric label dimensions.
