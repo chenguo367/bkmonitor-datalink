@@ -2331,7 +2331,7 @@ var SELECTOR_REASON = {
   model_representation_unresolved: '按模型实例（model_inst_id）给出的静态成员，主机缓存里查不到对应主机身份——不是主机模型，或缓存没带规范身份字段',
   tenant_mismatch: '分组不是计划所属租户的（或没写租户）：按地址（ip_cloud）选的目标只读本租户的分组',
   address_unresolved: '这些主机在主机缓存里都没有本租户的目标地址（target_address）：写入方还没按完整地址刷新，或是别的租户的主机；不是空目标',
-  address_ambiguous: '有成员所在的地址被本租户另一台主机共用，地址指不出是哪台，这些成员不计入'
+  address_ambiguous: '有成员所在的地址被本租户另一台主机共用，地址指不出是哪台：纳入的这些成员不计入；排除的则排除整个地址，共用它的主机一并排除'
 };
 function targetResolutionWords(resolution) {
   var parts = [RESOLUTION_STATE[resolution.state] || resolution.state];

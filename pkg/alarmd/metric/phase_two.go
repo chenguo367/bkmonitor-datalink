@@ -487,7 +487,8 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"canonical identity on its records. A group whose writer states member_list [] is OKEmpty. The last three are ip_cloud plans: " +
 				"tenant_mismatch is a referenced group of another tenant, address_unresolved a selector none of " +
 				"whose hosts has an address inside the plan's tenant yet, address_ambiguous members left out " +
-				"because another host of the tenant shares their address. An unavailable exclusion blocks the whole " +
+				"because another host of the tenant shares their address (on an exclude, OK: the shared address is " +
+				"excluded, and with it every host at it). An unavailable exclusion blocks the whole " +
 				"target; excluded_absent is a normal no-op from a complete host snapshot.",
 		}, []string{"kind", "state", "reason"}),
 		targetExcludedAbsentMembers: prometheus.NewCounter(prometheus.CounterOpts{
@@ -1809,7 +1810,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		{targetplan.SelectorKindExclude, string(targetplan.SelectorUnavailable), targetplan.ReasonReadFailed},
 		{targetplan.SelectorKindExclude, string(targetplan.SelectorUnavailable), targetplan.ReasonStale},
 		{targetplan.SelectorKindExclude, string(targetplan.SelectorUnavailable), targetplan.ReasonAddressUnresolved},
-		{targetplan.SelectorKindExclude, string(targetplan.SelectorUnavailable), targetplan.ReasonAddressAmbiguous},
+		{targetplan.SelectorKindExclude, string(targetplan.SelectorOK), targetplan.ReasonAddressAmbiguous},
 		{targetplan.SelectorKindExclude, string(targetplan.SelectorOK), targetplan.ReasonExcludedAbsent},
 		{targetplan.SelectorKindExclude, string(targetplan.SelectorOKEmpty), targetplan.ReasonExcludedAbsent},
 	} {
