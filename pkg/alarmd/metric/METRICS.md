@@ -11,7 +11,7 @@ this file and the CLI's metrics.list carry the whole Help.
 
 Labels: `outcome`
 
-What the control leader's difference against disabled or deleted strategies decided, by outcome. Counted per strategy except close_sent, send_failed, producer_foreign, producer_unknown and business_unknown, which count alerts. close_decided counts decisions and close_sent counts what went out, acknowledged by the broker; neither says the link closed anything, which absent.list reads per strategy as the alerts its reconcile still lists active after an earlier send. identity_unknown and revision_unknown are strategies decided and not sent because no business or revision could be found for them; business_unknown are alerts of a global business strategy not closed that round because their record names no business they were filed under. Why a whole round decided nothing is absent_strategy_round_total, not a cell here. Every cell exists from the start so a zero is a reading and not an absence.
+What the control leader's difference against disabled or deleted strategies decided, by outcome. Counted per strategy except close_sent, send_failed, producer_foreign, producer_unknown and business_unknown, which count alerts. close_decided counts decisions and close_sent counts what went out, acknowledged by the broker; neither says the link closed anything, which absent.list reads per strategy as the alerts its reconcile still lists active after an earlier send. identity_unknown and revision_unknown are strategies decided and not sent because no business or revision could be found for them; business_unknown are alerts of a global business strategy not closed that round because their record names no business they were filed under. evidence_truncated is a strategy whose alerts the link answered incomplete or past 10000 rows / 5000 active alerts: the alerts it listed are closed as usual and the rest wait for a later round. Why a whole round decided nothing is absent_strategy_round_total, not a cell here. Every cell exists from the start so a zero is a reading and not an absence.
 
 ## alarmd_absent_strategy_difference
 
@@ -1333,7 +1333,7 @@ Fingerprints this process sent that were dropped from the copy to stay inside it
 
 Labels: `answer`
 
-Lookups by how they were answered. index_member and index_absent are the consumer's index; recently_sent is a fingerprint the index does not carry yet that this process sent ABNORMAL for within its lag, the copy's word and not the consumer's; self_maintained and passed_through are the unavailable policy answering, and which of the two appears is the policy in force. index_stale is a set read once whose last successful read or calibration is older than 3 x (the index interval + ceil(tracked strategies / read batch) x the refresh interval), answered by the same policy as a set never read; the bound grows with the strategies tracked, so it differs between deployments.
+Lookups by how they were answered. index_member and index_absent are the consumer's index; recently_sent is a fingerprint the index does not carry yet that this process sent ABNORMAL for within its lag, the copy's word and not the consumer's; self_maintained and passed_through are the unavailable policy answering, and which of the two appears is the policy in force. index_stale is a set read once whose last successful read or calibration (complete or truncated) is older than 3 x (the index interval + ceil(tracked strategies / read batch) x the refresh interval), answered by the same policy as a set never read; the bound grows with the strategies tracked, so it differs between deployments.
 
 ## alarmd_open_alert_set_notices_refused_total
 
@@ -1345,7 +1345,7 @@ Change notices on the link's channel this process dropped, by why: oversized (pa
 
 Labels: `result`
 
-Refreshes by result: index (a strategy's index read), authoritative (a calibration completed), unavailable (either failed). A flat line is the refresh loop not running.
+Refreshes by result: index (a strategy's index read), authoritative (a calibration completed), truncated (a calibration whose answer the link marked incomplete or that passed this process's caps of 10000 rows or 5000 active alerts: what it listed is added and its alerts are closed where due, nothing unlisted is taken as gone, and it is asked again on the calibration cadence), unavailable (either failed). A flat line is the refresh loop not running.
 
 ## alarmd_open_alert_set_tracked_strategies
 

@@ -233,6 +233,13 @@ const (
 	// from the link, so there is nothing to address a close to. Per
 	// strategy.
 	OutcomeEvidenceUnavailable = "evidence_unavailable"
+	// OutcomeEvidenceTruncated: the strategy's alerts were read, and the
+	// link's answer was incomplete or past the reader's caps
+	// (openalerts.Reconciliation.Truncated). The alerts it listed are closed
+	// as usual and the rest are left for a later round, when the strategy is
+	// decided again; when none listed is this deployment's, that is not "it
+	// has none of ours". Per strategy, beside its other outcomes.
+	OutcomeEvidenceTruncated = "evidence_truncated"
 	// OutcomeCloseSent: an alert the broker acknowledged a close for. Per
 	// alert, where OutcomeCloseDecided counts strategies. Sent, not closed:
 	// the link closes the alert or does not, and an alert it left open is
@@ -262,7 +269,7 @@ const (
 // Outcomes is the closed list, for the metric that reports every cell.
 var Outcomes = []string{OutcomeCloseDecided, OutcomeWithinGrace, OutcomeUnconfirmed,
 	OutcomeDeferred, OutcomeIndexUnreadable, OutcomeIdentityUnknown, OutcomeRevisionUnknown, OutcomeBusinessUnknown,
-	OutcomeEvidenceUnavailable, OutcomeCloseSent, OutcomeSendFailed,
+	OutcomeEvidenceUnavailable, OutcomeEvidenceTruncated, OutcomeCloseSent, OutcomeSendFailed,
 	OutcomeNotLeader, OutcomeMemoryFull, OutcomeProducerForeign, OutcomeProducerUnknown}
 
 // Counts is what the round measured. The denominators are reported with

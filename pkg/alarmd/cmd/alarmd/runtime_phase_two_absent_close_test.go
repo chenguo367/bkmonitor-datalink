@@ -50,6 +50,9 @@ type absentTestLink struct {
 	failAfter int
 	alerts    []openalerts.Alert
 	alertsErr error
+	// truncated marks the reconcile answer cut (openalerts.Reconciliation.
+	// Truncated): alerts is then the part received.
+	truncated bool
 	records   map[string]openalerts.AlertRecord
 	reads     int
 	// perRound, when set, is how many pages a round has time for: the page
@@ -82,7 +85,7 @@ func (link *absentTestLink) Reconcile(context.Context, openalerts.StrategyKey) (
 	if link.alertsErr != nil {
 		return openalerts.Reconciliation{}, link.alertsErr
 	}
-	return openalerts.Reconciliation{EventSourceID: "native", Alerts: link.alerts}, nil
+	return openalerts.Reconciliation{EventSourceID: "native", Alerts: link.alerts, Truncated: link.truncated}, nil
 }
 
 func (link *absentTestLink) AlertRecord(_ context.Context, _, alertID string) (openalerts.AlertRecord, error) {
@@ -530,6 +533,27 @@ func TestInvalidRosterRowsAreCountedAndTheWalkStillCloses(t *testing.T) {
 	}
 	if got := fixture.loop.Difference()["roster_invalid"]; got != 3 {
 		t.Fatalf("roster_invalid = %d, want the 3 rows the walk skipped", got)
+	}
+}
+
+// A strategy whose alerts the link answered cut still has the alerts it
+// listed closed, and says the answer was cut. When none listed is ours, the
+// page does not say the strategy has none of ours: the rest were not read.
+func TestACutAnswerClosesWhatItListsAndSaysItWasCut(t *testing.T) {
+	fixture := newAbsentFixture(t, []openalerts.Alert{nativeAlert("alert-1", "0123456789abcdef0123456789abcdef")})
+	fixture.link.truncated = true
+	fixture.mature(context.Background())
+	stats := fixture.loop.Stats()
+	if len(fixture.writer.batches) != 1 || stats[absentalerts.OutcomeCloseSent] != 1 || stats[absentalerts.OutcomeEvidenceTruncated] != 1 {
+		t.Fatalf("a cut answer did not close what it listed and count the cut: batches %d, stats %+v", len(fixture.writer.batches), stats)
+	}
+
+	foreign := newAbsentFixture(t, []openalerts.Alert{{AlertID: "theirs", EventSourceID: "another-source", Fingerprint: "1123456789abcdef0123456789abcdef"}})
+	foreign.link.truncated = true
+	foreign.mature(context.Background())
+	execution := absentRowOf(t, readAbsentPage(t, foreign.loop, fleet.AbsentCandidateQuery{}), "10").Execution
+	if len(foreign.writer.batches) != 0 || execution == nil || execution.Word != absentalerts.OutcomeEvidenceTruncated {
+		t.Fatalf("a cut answer with nothing of ours listed reads as %+v (batches %d), want evidence_truncated", execution, len(foreign.writer.batches))
 	}
 }
 

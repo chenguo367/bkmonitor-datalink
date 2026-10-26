@@ -460,6 +460,15 @@ func (loop *absentStrategyClose) closeStrategy(ctx context.Context, absent absen
 	}
 	loop.count(absentalerts.OutcomeProducerForeign, foreign)
 	loop.count(absentalerts.OutcomeProducerUnknown, unknown)
+	if reconciliation.Truncated {
+		// The listed alerts are closed below; the rest wait for the round
+		// that decides this strategy again.
+		loop.count(absentalerts.OutcomeEvidenceTruncated, 1)
+		if len(own) == 0 {
+			execution.word = absentalerts.OutcomeEvidenceTruncated
+			return execution
+		}
+	}
 	if len(own) == 0 {
 		// Nothing of this deployment's to close, so nothing to address and no
 		// record to read; what the catalog remembers is still the answer to

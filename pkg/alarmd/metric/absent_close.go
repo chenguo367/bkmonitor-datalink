@@ -46,7 +46,9 @@ func newAbsentCloseCollector() *absentCloseCollector {
 				"per strategy as the alerts its reconcile still lists active after an earlier send. "+
 				"identity_unknown and revision_unknown are strategies decided and not sent because no business or "+
 				"revision could be found for them; business_unknown are alerts of a global business strategy not "+
-				"closed that round because their record names no business they were filed under. Why a whole round "+
+				"closed that round because their record names no business they were filed under. evidence_truncated "+
+				"is a strategy whose alerts the link answered incomplete or past 10000 rows / 5000 active alerts: "+
+				"the alerts it listed are closed as usual and the rest wait for a later round. Why a whole round "+
 				"decided nothing is "+
 				"absent_strategy_round_total, not a cell here. Every cell exists from the start so a zero is a "+
 				"reading and not an absence.", []string{"outcome"}, nil),
