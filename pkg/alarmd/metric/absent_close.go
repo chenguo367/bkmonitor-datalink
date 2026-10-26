@@ -53,8 +53,7 @@ func newAbsentCloseCollector() *absentCloseCollector {
 		roundIs: prometheus.NewDesc(prometheus.BuildFQName("", metricSubsystem, "absent_strategy_round_total"),
 			"How each round of the difference ended: none is a round that decided, and the rest name the fact "+
 				"that was not good enough to decide on - link_unavailable (the alert link's roster could not be "+
-				"read), link_unhealthy (the link says its own set maintenance is failing or has not succeeded "+
-				"recently), snapshot_unusable (the source was not observed this round), snapshot_empty and "+
+				"read), snapshot_unusable (the source was not observed this round), snapshot_empty and "+
 				"snapshot_stale. Rounds, not strategies. none is the denominator the outcome family is read against.",
 			[]string{"disposition"}, nil),
 		sides: prometheus.NewDesc(prometheus.BuildFQName("", metricSubsystem, "absent_strategy_difference"),
@@ -65,8 +64,10 @@ func newAbsentCloseCollector() *absentCloseCollector {
 				"the strategies the catalog let go and still knows the business of. "+
 				"Each age is reported beside its bound - snapshot_age_seconds beside max_snapshot_age_seconds, "+
 				"link_health_age_seconds (since the link's last successful discovery) beside "+
-				"max_link_health_age_seconds - so a refused round can be read as the side falling behind rather "+
-				"than as a bound that does not fit. link_pending is the link's own refresh backlog.",
+				"max_link_health_age_seconds, past which the health page calls the link's maintenance stale - so a "+
+				"refused round, or a roster that stopped growing, can be read as the side falling behind rather "+
+				"than as a bound that does not fit. The link's age never refuses a round: an old roster can only "+
+				"miss a strategy. link_pending is the link's own refresh backlog.",
 			[]string{"side"}, nil),
 	}
 }

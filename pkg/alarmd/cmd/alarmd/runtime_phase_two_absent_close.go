@@ -61,11 +61,13 @@ const absentCloseAlertBatch = 64
 // not label them.
 const absentCloseIdentityReads = 3
 
-// absentCloseMaxLinkHealthAge is how long ago the link's last successful
-// full discovery may be. The link runs one a minute by default and retries a
-// failure within seconds, so a quarter of an hour without one is a
-// maintenance process that has stopped, not one that is slow.
-const absentCloseMaxLinkHealthAge = 15 * time.Minute
+// linkHealthMaxAge is how long ago the link's last successful full
+// discovery may be before the health page calls its maintenance stale. The
+// link runs one a minute by default and retries a failure within seconds, so
+// a quarter of an hour without one is a maintenance process that has
+// stopped, not one that is slow. The close does not read it: a stale roster
+// can only miss a strategy (absentalerts' package doc).
+const linkHealthMaxAge = 15 * time.Minute
 
 // absentStrategyClose closes the unrecovered alerts of strategies that no
 // longer exist. See package absentalerts for what the difference is and
@@ -108,8 +110,9 @@ type absentStrategyClose struct {
 type absentRoundSizes struct {
 	counts absentalerts.Counts
 	// snapshotAge and linkAge are how old the two sides were, reported
-	// beside their bounds so that a stale or unhealthy round can be read as
-	// the side falling behind rather than as a bound that does not fit.
+	// beside their bounds so that a stale snapshot or a link whose
+	// maintenance stopped can be read as the side falling behind rather than
+	// as a bound that does not fit.
 	snapshotAge, linkAge int
 	rosterPages          int
 	rosterComplete       bool
@@ -158,7 +161,6 @@ func newAbsentStrategyClose(bundle *phaseTwoWorkerBundle, control absentCloseCon
 			// source is slower than whatever number was written here. Five
 			// reads' worth of slack.
 			MaxSnapshotAge:     5 * controlplane.SourceFullReadInterval,
-			MaxLinkHealthAge:   absentCloseMaxLinkHealthAge,
 			MaxCloseStrategies: 8,
 		},
 		counts:     make(map[string]uint64),
@@ -206,7 +208,7 @@ func (loop *absentStrategyClose) Difference() map[string]int {
 		"candidates": last.counts.Candidates, "snapshot_strategies": last.counts.SnapshotStrategies,
 		"remembered_identities": last.identities,
 		"snapshot_age_seconds":  last.snapshotAge, "max_snapshot_age_seconds": int(loop.bounds.MaxSnapshotAge / time.Second),
-		"link_health_age_seconds": last.linkAge, "max_link_health_age_seconds": int(loop.bounds.MaxLinkHealthAge / time.Second),
+		"link_health_age_seconds": last.linkAge, "max_link_health_age_seconds": int(linkHealthMaxAge / time.Second),
 		"link_pending": last.linkPending,
 	}
 }
@@ -369,7 +371,6 @@ func (loop *absentStrategyClose) readRoster(ctx context.Context, round *absental
 		if pages == 0 {
 			health = page.Health
 			round.LinkRead = true
-			round.LinkLastSuccess, round.LinkError = health.LastSuccess, health.Error
 		}
 		pages++
 		loop.walk.pages++

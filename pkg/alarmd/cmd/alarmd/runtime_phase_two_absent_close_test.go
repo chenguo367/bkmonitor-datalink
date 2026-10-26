@@ -469,20 +469,53 @@ func TestAnUnreachableLinkRefusesTheRoundByName(t *testing.T) {
 	}
 }
 
-// The link's own health, read off the same response as the roster.
-func TestALinkWhoseMaintenanceFailedRefusesTheRound(t *testing.T) {
-	fixture := newAbsentFixture(t, []openalerts.Alert{nativeAlert("alert-1", "0123456789abcdef0123456789abcdef")})
-	fixture.link.pages[0].Health.Error = "discovery_failed"
-	ctx := context.Background()
-	fixture.loop.step(ctx)
-	fixture.now = fixture.now.Add(absentCloseGrace + time.Minute)
-	fixture.control.snapshot = liveSnapshot("observation-two", fixture.now, 100)
-	fixture.loop.step(ctx)
-	if len(fixture.writer.batches) != 0 || fixture.loop.Rounds()[absentalerts.RefusalLinkUnhealthy] != 2 {
-		t.Fatalf("an unhealthy link was decided on: %+v", fixture.loop.Rounds())
+// A link that says its own maintenance is failing, never succeeded or is
+// behind still has its roster decided on: absence comes from the snapshot,
+// an old roster can only miss a strategy, and a close for an alert already
+// gone is a no-op on the link. Refusing here once deadlocked a deployment:
+// one strategy's flood of alerts broke the link's maintenance, and the close
+// that would have removed the flood was refused every round. The roster in
+// each case still lists strategy 10, which the snapshot no longer does.
+func TestALinkWhoseMaintenanceIsUnhealthyStillHasItsRosterClosed(t *testing.T) {
+	cases := []struct {
+		name   string
+		health func(*openalerts.LinkHealth, time.Time)
+		word   string
+	}{
+		{"latest discovery failed", func(h *openalerts.LinkHealth, _ time.Time) { h.Error = "discovery_failed" },
+			absentalerts.LinkDiscoveryFailing},
+		{"never succeeded", func(h *openalerts.LinkHealth, _ time.Time) { h.LastSuccess = time.Time{} },
+			absentalerts.LinkDiscoveryNeverSucceeded},
+		{"last success an hour ago", func(h *openalerts.LinkHealth, now time.Time) { h.LastSuccess = now.Add(-time.Hour) },
+			absentalerts.LinkDiscoveryStale},
 	}
-	if fixture.loop.Difference()["link_health_age_seconds"] == 0 {
-		t.Fatal("the refused round did not say how old the link's last success was")
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fixture := newAbsentFixture(t, []openalerts.Alert{nativeAlert("alert-1", "0123456789abcdef0123456789abcdef")})
+			ctx := context.Background()
+			// Both rounds read the unhealthy link: the first starts the grace,
+			// the second, past it under a new observation, decides.
+			for round := 0; round < 2; round++ {
+				if round == 1 {
+					fixture.now = fixture.now.Add(absentCloseGrace + time.Minute)
+					fixture.control.snapshot = liveSnapshot("observation-two", fixture.now, 100)
+				}
+				for i := range fixture.link.pages {
+					c.health(&fixture.link.pages[i].Health, fixture.now)
+				}
+				health := fixture.link.pages[0].Health
+				if word := absentalerts.LinkHealthWord(health.LastSuccess, health.Error, fixture.now, linkHealthMaxAge); word != c.word {
+					t.Fatalf("round %d does not read the link word the case names: %q, want %q", round, word, c.word)
+				}
+				fixture.loop.step(ctx)
+			}
+			if fixture.loop.Rounds()[absentalerts.RefusalNone] != 2 {
+				t.Fatalf("a round with an unhealthy link did not decide: %+v", fixture.loop.Rounds())
+			}
+			if len(fixture.writer.batches) != 1 || fixture.loop.Stats()[absentalerts.OutcomeCloseSent] != 1 {
+				t.Fatalf("strategy 10's alert was not closed: batches %+v, stats %+v", fixture.writer.batches, fixture.loop.Stats())
+			}
+		})
 	}
 }
 

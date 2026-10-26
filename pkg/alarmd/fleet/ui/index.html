@@ -1678,7 +1678,7 @@ var CONSOLE_STATE = {
   not_configured: '未配置告警链路 Console（phase_two.linkd.console_url）：集合校准、已停用/删除策略的告警关闭都不运行',
   not_called: '已配置，本副本还没调用过',
   unreadable: '已配置但读不到：两项关闭每轮都在尝试、都没成',
-  link_unhealthy: '读得到，但 linkd 自报集合维护不健康：已停用/删除策略的关闭每轮拒绝（link_unhealthy）',
+  link_unhealthy: '读得到，但 linkd 自报集合维护不健康：名册可能缺策略，已停用/删除策略的关闭照常按名册执行、可能漏关（link_unhealthy）',
   reachable: '可达'
 };
 var CONSOLE_OP = { roster: '名册', reconcile: '校准对账', alert_record: '单条告警记录', event_source: '事件源键规则', alert_read: '运维告警查询' };

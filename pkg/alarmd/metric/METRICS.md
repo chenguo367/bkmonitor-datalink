@@ -17,13 +17,13 @@ What the control leader's difference against disabled or deleted strategies deci
 
 Labels: `side`
 
-The sizes the last round decided on: roster_strategies is the strategies the alert link listed with an unrecovered alert, roster_unreadable the ones it listed and could not read, roster_pages and roster_complete how far the walk of its roster got, candidates the difference itself, snapshot_strategies the strategy cache it was judged against, remembered_identities the strategies the catalog let go and still knows the business of. Each age is reported beside its bound - snapshot_age_seconds beside max_snapshot_age_seconds, link_health_age_seconds (since the link's last successful discovery) beside max_link_health_age_seconds - so a refused round can be read as the side falling behind rather than as a bound that does not fit. link_pending is the link's own refresh backlog.
+The sizes the last round decided on: roster_strategies is the strategies the alert link listed with an unrecovered alert, roster_unreadable the ones it listed and could not read, roster_pages and roster_complete how far the walk of its roster got, candidates the difference itself, snapshot_strategies the strategy cache it was judged against, remembered_identities the strategies the catalog let go and still knows the business of. Each age is reported beside its bound - snapshot_age_seconds beside max_snapshot_age_seconds, link_health_age_seconds (since the link's last successful discovery) beside max_link_health_age_seconds, past which the health page calls the link's maintenance stale - so a refused round, or a roster that stopped growing, can be read as the side falling behind rather than as a bound that does not fit. The link's age never refuses a round: an old roster can only miss a strategy. link_pending is the link's own refresh backlog.
 
 ## alarmd_absent_strategy_round_total
 
 Labels: `disposition`
 
-How each round of the difference ended: none is a round that decided, and the rest name the fact that was not good enough to decide on - link_unavailable (the alert link's roster could not be read), link_unhealthy (the link says its own set maintenance is failing or has not succeeded recently), snapshot_unusable (the source was not observed this round), snapshot_empty and snapshot_stale. Rounds, not strategies. none is the denominator the outcome family is read against.
+How each round of the difference ended: none is a round that decided, and the rest name the fact that was not good enough to decide on - link_unavailable (the alert link's roster could not be read), snapshot_unusable (the source was not observed this round), snapshot_empty and snapshot_stale. Rounds, not strategies. none is the denominator the outcome family is read against.
 
 ## alarmd_access_inplace_held_input_bytes
 
@@ -931,7 +931,7 @@ Failed calls to the alert link's Console, by operation and class: the transport'
 
 Labels: `state`
 
-The alert link's Console as this replica last saw it, one cell per state and 1 on the current one: not_configured (the deployment names no Console, so neither the open alert set's calibration nor the close of disabled or deleted strategies' alerts runs; by design on a deployment whose events all go the Python-compatible way), not_called, unreadable (the latest call of some operation failed), link_unhealthy (the Console answered and the link says its own set maintenance is failing, never succeeded or is behind; the close refuses every round), reachable, and off_role, a cell on every process: 1 on one with neither the control nor the worker role (the rest 0), else 0.
+The alert link's Console as this replica last saw it, one cell per state and 1 on the current one: not_configured (the deployment names no Console, so neither the open alert set's calibration nor the close of disabled or deleted strategies' alerts runs; by design on a deployment whose events all go the Python-compatible way), not_called, unreadable (the latest call of some operation failed), link_unhealthy (the Console answered and the link says its own set maintenance is failing, never succeeded or is behind; its roster may then miss strategies the close would take, and the close still runs on what it lists), reachable, and off_role, a cell on every process: 1 on one with neither the control nor the worker role (the rest 0), else 0.
 
 ## alarmd_live_query_reserve_seconds
 
