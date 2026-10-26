@@ -25,8 +25,10 @@ import (
 type maintenanceTestCatalog struct {
 	plans        []controlplane.MaintenancePlan
 	uncompilable int
-	reads        int
-	err          error
+	// until is the end of the Segment the Plans are read from, zero open.
+	until execution.EvaluationTime
+	reads int
+	err   error
 	// took, when set, is the read's cost, answered against the caller's
 	// deadline.
 	took func(context.Context) error
@@ -42,7 +44,7 @@ func (c *maintenanceTestCatalog) CurrentPlans(ctx context.Context, _ execution.Q
 	if c.err != nil {
 		return controlplane.MaintenancePlans{}, c.err
 	}
-	return controlplane.MaintenancePlans{Plans: c.plans, Uncompilable: c.uncompilable}, nil
+	return controlplane.MaintenancePlans{Plans: c.plans, Uncompilable: c.uncompilable, Until: c.until}, nil
 }
 
 // maintenanceTestIndex answers the copy's reads with alerts; own, when set,

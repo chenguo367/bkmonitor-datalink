@@ -122,6 +122,9 @@ const (
 type maintenanceGroup struct {
 	contentScope     string
 	timelineRevision uint64
+	// until is the end of the Segment the Plans were read from, zero while
+	// it was open (controlplane.MaintenancePlans.Until).
+	until execution.EvaluationTime
 	// legacy are the Plans on a schedule with no frozen snapshot, whose
 	// calendar and timezone entries this replica keeps warm.
 	legacy []controlplane.MaintenancePlan
@@ -133,6 +136,15 @@ type maintenanceGroup struct {
 	// name, each true when at least one snapshot holds it present. See
 	// settleCalendarDeletions.
 	calendars map[int64]bool
+}
+
+// current reports whether the Plans the group holds are the Query Group's
+// at now: read under the lease its owner holds (content scope and timeline
+// revision), and from a Segment that has not ended by now. A nil group has
+// none.
+func (group *maintenanceGroup) current(scope string, revision uint64, now time.Time) bool {
+	return group != nil && group.contentScope == scope && group.timelineRevision == revision &&
+		(group.until == 0 || execution.EvaluationTime(now.Unix()) < group.until)
 }
 
 type effectiveMaintenance struct {
@@ -420,7 +432,7 @@ func (m *effectiveMaintenance) step(ctx context.Context) {
 		if !accepting {
 			continue
 		}
-		if known := m.groups[qg]; known == nil || known.contentScope != scope || known.timelineRevision != revision {
+		if known := m.groups[qg]; !known.current(scope, revision, now) {
 			stale = append(stale, qg)
 		}
 	}
@@ -466,9 +478,11 @@ func (m *effectiveMaintenance) step(ctx context.Context) {
 		// (counted unavailable above), and the Plans of the old read are the
 		// edited strategy's previous revision, whose effective time is not
 		// the strategy's any more. They are judged again once a read under
-		// the current lease lands.
-		if scope, revision, accepting := runner.maintenanceLease(); !accepting ||
-			known.contentScope != scope || known.timelineRevision != revision {
+		// the current lease lands. So with Plans read from a Segment that has
+		// ended since: a cutover can close a Segment at a boundary ahead of
+		// this clock, and a read before that boundary still answers the
+		// Segment's Plans under the lease that already names the cutover.
+		if scope, revision, accepting := runner.maintenanceLease(); !accepting || !known.current(scope, revision, now) {
 			continue
 		}
 		m.closeInactive(ctx, qg, runner, known.closable, deletions, sourceErr)
@@ -698,7 +712,7 @@ func (m *effectiveMaintenance) readGroup(ctx context.Context, qg execution.Query
 	if err := m.registerKeys(qg, keys, true); err != nil {
 		return err
 	}
-	known := &maintenanceGroup{contentScope: scope, timelineRevision: revision}
+	known := &maintenanceGroup{contentScope: scope, timelineRevision: revision, until: read.Until}
 	for _, plan := range read.Plans {
 		plan.Compiled.EffectiveTimeCalendars(func(id int64, deleted bool) {
 			if known.calendars == nil {

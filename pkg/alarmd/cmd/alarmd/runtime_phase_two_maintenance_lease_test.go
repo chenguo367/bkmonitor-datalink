@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 )
 
@@ -54,6 +56,48 @@ func TestTheInactiveCloseHoldsPlansReadUnderALeaseThatMoved(t *testing.T) {
 			f.m.step(ctx)
 			if len(f.writer.batches) != 1 || len(f.writer.batches[0]) != 1 {
 				t.Fatalf("closed %v once the Plans were read under the current lease, want the one alert", f.writer.batches)
+			}
+		})
+	}
+}
+
+// The Plans are judged only inside the Segment they were read from. Read at
+// 16:59 from a Segment a cutover closes at 17:10, under a lease that does not
+// move again: at 17:30, out of the effective window, they are read again
+// rather than judged, and the read finding no Segment closes nothing; read
+// from an open Segment, or one ending after 17:30, they close the alert.
+func TestTheInactiveCloseJudgesPlansOnlyInsideTheSegmentTheyWereReadFrom(t *testing.T) {
+	ends := func(hour, minute int) execution.EvaluationTime {
+		return execution.EvaluationTime(maintenanceTime(hour, minute).Unix())
+	}
+	for _, tc := range []struct {
+		name   string
+		until  execution.EvaluationTime
+		closes bool
+	}{
+		{"ended before the judgement", ends(17, 10), false},
+		{"ending after the judgement", ends(18, 0), true},
+		{"open", 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newMaintenanceTestFixture(t, maintenanceReadySnapshot, maintenanceTime(16, 59), []openalerts.Alert{maintenanceAlert("native", "critical")})
+			catalog := f.m.catalog.(*maintenanceTestCatalog)
+			catalog.until = tc.until
+			ctx := context.Background()
+			f.m.step(ctx)
+			if catalog.reads != 1 || len(f.writer.batches) != 0 {
+				t.Fatalf("inside the window: reads %d, batches %v, want one read and no close", catalog.reads, f.writer.batches)
+			}
+			// The Query Group is retired at the Segment's end: a read past it
+			// finds no Plan.
+			catalog.err = errors.New("schedule unavailable")
+			f.advance(31 * time.Minute)
+			f.m.step(ctx)
+			if got := len(f.writer.batches) == 1; got != tc.closes {
+				t.Fatalf("closed %v at 17:30 with Plans read from a Segment ending %d, want a close %v", f.writer.batches, tc.until, tc.closes)
+			}
+			if wantReads := map[bool]int{false: 2, true: 1}[tc.closes]; catalog.reads != wantReads {
+				t.Fatalf("reads %d, want %d", catalog.reads, wantReads)
 			}
 		})
 	}

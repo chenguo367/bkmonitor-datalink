@@ -76,6 +76,11 @@ func TestASameBoundaryCutoverMovesPastTheOpenSegments(t *testing.T) {
 			if segment := fixture.openSegment(t, untouched.Identity, 60); segment.End == nil || *segment.End != 61 {
 				t.Fatalf("the leaving Query Group's Segment = %+v, want closed at 61", segment)
 			}
+			// A maintenance read before the boundary answers the old Plans
+			// with the Segment's end, past which they are not judged.
+			if read, err := fixture.runtime.CurrentPlans(fixture.ctx, untouched.Identity, 60); err != nil || len(read.Plans) == 0 || read.Until != 61 {
+				t.Fatalf("the leaving Query Group's Plans at 60 = (%d Plans until %d, %v), want its Plans until 61", len(read.Plans), read.Until, err)
+			}
 			if _, err := fixture.runtime.ReadFrozenSchedule(fixture.ctx, untouched.Identity, 61); !errors.Is(err, controlplane.ErrScheduleUnavailable) {
 				t.Fatalf("the leaving Query Group's schedule at 61 = %v, want none", err)
 			}
