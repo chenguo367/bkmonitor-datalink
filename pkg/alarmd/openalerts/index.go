@@ -1228,15 +1228,25 @@ func (cache *Cache) Holds(key StrategyKey, fingerprint string) (held, judged boo
 // question a caller asks once before asking Holds per fingerprint, so that
 // a strategy with nothing open costs one lookup rather than one per record.
 // A fingerprint this process sent and the set has not read yet is not
-// counted; the next read of the set carries it.
+// counted; the next read of the set carries it. After a truncated
+// calibration the count is the alerts that answer listed active - a floor,
+// since what it did not list may still be open - and judged only when it
+// lists some: a truncated answer never says a set is empty.
 func (cache *Cache) MemberCount(key StrategyKey) (count int, judged bool) {
 	if cache == nil {
 		return 0, false
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
+	now := cache.now()
 	entry := cache.index.entries[key]
-	if !cache.index.ready || !cache.trusted() || !cache.calibrated(entry, cache.now()) {
+	if !cache.index.ready || !cache.trusted() {
+		return 0, false
+	}
+	if !cache.calibrated(entry, now) {
+		if cache.partial(entry, now) && len(entry.partialListed) > 0 {
+			return len(entry.partialListed), true
+		}
 		return 0, false
 	}
 	return len(entry.index) + len(entry.missing), true

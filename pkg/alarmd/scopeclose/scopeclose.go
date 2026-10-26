@@ -25,7 +25,9 @@
 //     answer is cache_unavailable, never a reason to close;
 //   - the strategy's open set could be judged at all: calibrated, and
 //     confirmed by the link's Console (where it is, how it is keyed);
-//     otherwise set_unavailable;
+//     otherwise set_unavailable. A truncated calibration judges only the
+//     alerts it lists, held; the rest of that strategy's records are
+//     set_unavailable, never not_member;
 //   - the fingerprint is in the set (not_member otherwise) and the alert is
 //     this deployment's (producer_foreign otherwise);
 //   - two different Slots turned the same fingerprint away. One Slot is a
@@ -309,7 +311,10 @@ func (closer *Closer) BindAlertBusiness(business AlertBusiness) {
 // worth a fingerprint each: "" when the strategy has open alerts to judge
 // against, and otherwise the outcome all of them are counted under in bulk
 // - set_unavailable when the copy cannot say, not_member when the set is
-// empty, which on a filtered wide table is nearly every strategy.
+// empty, which on a filtered wide table is nearly every strategy. A strategy
+// whose fresh calibration was truncated and lists alerts is cleared: its
+// records are judged one by one, the listed ones held and the rest waiting.
+// The answer is the strategy's own; another's set says nothing of it.
 func (closer *Closer) Screen(key openalerts.StrategyKey) string {
 	closer.mu.Lock()
 	set := closer.set
