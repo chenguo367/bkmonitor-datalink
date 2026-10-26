@@ -53,7 +53,9 @@ func newEffectiveCloseCollector() *effectiveCloseCollector {
 				"were addressed from the index set, which names none - not closed that round; evidence_unavailable is "+
 				"a Plan outside its effective time whose open alerts could not be listed because its set has no current "+
 				"calibration (never calibrated, past its age, failing, or truncated with nothing listed) and its index "+
-				"set was not read fresh either, once per Plan per step - a calibrated set with no alerts is not counted; "+
+				"set was not read fresh either, or its index set stands in while an earlier reconcile named alerts active and "+
+				"missing from the set, which the set's members do not carry and are not closed from it, once per Plan per "+
+				"step - a calibrated set with no alerts is not counted; "+
 				"index_set_close_acked counts, among close_acked, alerts closed by fingerprint from the index set's "+
 				"members because the set had no current calibration to list them; index_set_group_draining is such a "+
 				"Plan whose set was held back instead, its Query Group in the current active set and in the draining "+

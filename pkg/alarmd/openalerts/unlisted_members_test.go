@@ -171,3 +171,55 @@ func TestUnlistedMembersFollowTheSetsReadsNotACutReconcilesMissing(t *testing.T)
 		}
 	})
 }
+
+// What the stand-in leaves out is counted, not lost: a fingerprint a cut
+// reconcile named missing from the set, which the set's last read does not
+// carry, answers in UnlistedMissing for as long as the set stands in; one
+// the set's read carries is a member and not counted twice. Where the
+// reconcile's rows answer, UnlistedMissing answers nothing, as
+// UnlistedMembers does: the listing closes a missing alert itself.
+func TestUnlistedMissingCountsWhatTheStandInLeavesOut(t *testing.T) {
+	named := func(f *unlistedFixture) {
+		f.reconcile = func() (Reconciliation, error) {
+			return Reconciliation{EventSourceID: "source", Truncated: true, Members: []string{"m3"}, Missing: []string{"m3"},
+				Alerts: []Alert{{AlertID: "a3", EventSourceID: "source", Fingerprint: "m3"}}}, nil
+		}
+		f.round(0)
+	}
+	t.Run("listed by the cut answer", func(t *testing.T) {
+		f := newUnlistedFixture(t)
+		f.members = nil
+		named(f)
+		if count, ok := f.cache.UnlistedMissing(keyA); ok || count != 0 {
+			t.Fatalf("UnlistedMissing = %d, %v while the cut answer lists the alert; want nothing", count, ok)
+		}
+		if alerts, listed := f.cache.ListActiveAlerts(keyA); !listed || len(alerts) != 1 || alerts[0].Fingerprint != "m3" {
+			t.Fatalf("ListActiveAlerts = %+v, %v; want m3 listed", alerts, listed)
+		}
+	})
+	t.Run("the set read without it", func(t *testing.T) {
+		f := newUnlistedFixture(t)
+		f.members = nil
+		named(f)
+		f.reconcile = func() (Reconciliation, error) { return Reconciliation{EventSourceID: "source", Truncated: true}, nil }
+		for step := 1; step <= 3; step++ {
+			f.round(time.Hour + time.Minute)
+			count, ok := f.cache.UnlistedMissing(keyA)
+			members, membersOK := f.cache.UnlistedMembers(keyA)
+			if !ok || count != 1 || !membersOK || len(members) != 0 {
+				t.Fatalf("step %d: UnlistedMissing = %d, %v, members %v %v; want m3 counted and not a member (snapshot %+v)",
+					step, count, ok, members, membersOK, f.cache.Snapshot(keyA))
+			}
+		}
+	})
+	t.Run("the set read carrying it", func(t *testing.T) {
+		f := newUnlistedFixture(t)
+		f.members = []string{"m3"}
+		named(f)
+		f.reconcile = func() (Reconciliation, error) { return Reconciliation{EventSourceID: "source", Truncated: true}, nil }
+		f.round(time.Hour + time.Minute)
+		if count, ok := f.cache.UnlistedMissing(keyA); !ok || count != 0 {
+			t.Fatalf("UnlistedMissing = %d, %v; want 0, the set's member is closed from the set", count, ok)
+		}
+	})
+}

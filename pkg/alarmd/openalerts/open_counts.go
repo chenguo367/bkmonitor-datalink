@@ -101,6 +101,30 @@ func (cache *Cache) UnlistedHolds(key StrategyKey, fingerprint string) (held, ok
 	return held, true
 }
 
+// UnlistedMissing is, where UnlistedMembers answers, how many fingerprints
+// the strategy's last reconcile named active and missing from the set that
+// the set's own last read does not carry: alerts the stand-in leaves out. A
+// listing closes them (setCarries answers a missing one held); the stand-in
+// cannot, since nothing takes a fingerprint out of missing while the
+// reconcile stays cut, and a caller counts them rather than lose them.
+func (cache *Cache) UnlistedMissing(key StrategyKey) (count int, ok bool) {
+	if cache == nil {
+		return 0, false
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	entry := cache.index.entries[key]
+	if !cache.membersStandIn(entry, cache.now()) {
+		return 0, false
+	}
+	for value := range entry.missing {
+		if _, member := entry.index[value]; !member {
+			count++
+		}
+	}
+	return count, true
+}
+
 // membersStandIn is whether the entry's members stand in for its alerts.
 // Called with the lock held.
 func (cache *Cache) membersStandIn(entry *indexEntry, now time.Time) bool {

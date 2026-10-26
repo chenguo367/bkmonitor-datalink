@@ -794,6 +794,13 @@ func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.Q
 				continue
 			}
 			alerts, fromSet = membersAsAlerts(members, m.sourceID), true
+			if missing, ok := m.cache.UnlistedMissing(key); ok && missing > 0 {
+				// Alerts a reconcile named active and missing from the set
+				// are not closed from it (openalerts.UnlistedMissing): they
+				// wait for a listing, counted meanwhile as alerts not listed.
+				m.observeTrace(ctx, observability.TraceFields{QueryGroupKey: string(qg), StrategyID: plan.Identity.StrategyID},
+					closeOutcomeEvidenceUnavailable, fmt.Errorf("%w: %d", errIndexSetMissingUnlisted, missing), 0)
+			}
 		} else {
 			known := make(map[string]bool, len(alerts))
 			for _, alert := range alerts {
@@ -981,6 +988,9 @@ var (
 	// The Query Group is in the current active set and in the draining
 	// projection at once (productionPhaseTwoControl.CurrentAndDraining).
 	errIndexSetGroupDraining = errors.New("inactive close: the index set does not stand in for a Query Group that is current and draining at once")
+	// The set stands in, and an earlier reconcile named alerts active and
+	// missing from it, which the set's members do not carry.
+	errIndexSetMissingUnlisted = errors.New("inactive close: alerts a reconcile named missing from the index set are not closed from it until a reconcile lists them")
 	// A global business Plan's close carries each alert's business, read
 	// from the alert's record; a member of the set has none to read.
 	errSetMemberBusinessUnknown = errors.New("inactive close: the alerts are addressed from the index set, which names no business for a global business Plan")

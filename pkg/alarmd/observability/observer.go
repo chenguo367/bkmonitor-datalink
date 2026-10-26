@@ -3865,8 +3865,12 @@ const (
 	// calibration failing, or a truncated one that listed nothing. Not
 	// "nothing to close": a calibrated set with no alerts is not counted,
 	// and neither is a set whose members, read fresh, stand in for its
-	// alerts (index_set_close_acked). The absent-strategy close's word for
-	// the same condition. One per Plan, per step that finds it inactive.
+	// alerts (index_set_close_acked) - unless an earlier reconcile named
+	// alerts active and missing from that set, which its members do not
+	// carry and the stand-in does not close: the Plan is counted here as
+	// well, the alerts waiting for a reconcile that lists them. The
+	// absent-strategy close's word for the same condition. One per Plan, per
+	// step that finds it inactive.
 	EffectiveCloseEvidenceUnavailable ReasonCode = "evidence_unavailable"
 	// EffectiveCloseIndexSetAcked counts, among close_acked, the alerts
 	// closed from the strategy's index set: its alerts not listed (no
