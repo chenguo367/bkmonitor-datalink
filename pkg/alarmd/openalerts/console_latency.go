@@ -30,6 +30,18 @@ const (
 	// take: p90 is where requests already are, and four times it lets a slow
 	// answer finish without the deadline becoming the usual end of a request.
 	consoleDeadlineTail = 4
+	// consoleDeadlineFloor is the least one request is given once the tail
+	// is trusted: the time the Console itself gives each of its own reads.
+	// The admin serving the link's API bounds every store query it makes
+	// for a request by its query timeout, 5000 ms unless configured
+	// (LINKD_CONSOLE_TIMEOUT_MILLISECONDS, the admin's linkd module
+	// config.ts:774, passed as the Elasticsearch query timeout,
+	// elasticsearch.ts:202,257,308,369). A deadline below it cuts an answer
+	// the Console is still within its own budget to give: a tail of quick
+	// answers (a p90 of 20 ms made 80 ms) cut the first slow but healthy
+	// read, and the cut never entered the tail it was cut by - only the
+	// coverage, or a later run of slow answers, would lift it (L44).
+	consoleDeadlineFloor = 5 * time.Second
 )
 
 // ConsoleLatency is the durations of a Console client's latest requests,
@@ -48,6 +60,9 @@ type ConsoleLatency struct {
 	// that did not resolve, a reset -- which say nothing of how long the
 	// Console takes and are kept out of the samples.
 	unanswered uint64
+	// floor replaces consoleDeadlineFloor when set: only a test of how the
+	// tail moves the deadline lowers it below the Console's own budget.
+	floor time.Duration
 }
 
 // NoteUnanswered counts one request that failed before any answer and before
@@ -80,9 +95,10 @@ func (latency *ConsoleLatency) Observe(took time.Duration) {
 
 // Deadline is one request's deadline for work whose own deadline is coverage
 // (calibration: the calibration interval; the absent-close round: the next
-// tick): consoleDeadlineTail times the p90 of the latest requests, never more
-// than coverage, past which waiting gains the work nothing. Before
-// consoleLatencyColdStart requests are timed it is coverage itself.
+// tick): consoleDeadlineTail times the p90 of the latest requests, never
+// less than consoleDeadlineFloor and never more than coverage, past which
+// waiting gains the work nothing. Before consoleLatencyColdStart requests
+// are timed it is coverage itself.
 func (latency *ConsoleLatency) Deadline(coverage time.Duration) time.Duration {
 	latency.mu.Lock()
 	sorted := append([]time.Duration(nil), latency.samples...)
@@ -92,7 +108,11 @@ func (latency *ConsoleLatency) Deadline(coverage time.Duration) time.Duration {
 	}
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
 	p90 := sorted[(len(sorted)*9+9)/10-1]
-	return min(coverage, consoleDeadlineTail*p90)
+	floor := consoleDeadlineFloor
+	if latency.floor > 0 {
+		floor = latency.floor
+	}
+	return min(coverage, max(floor, consoleDeadlineTail*p90))
 }
 
 type requestCoverageKey struct{}

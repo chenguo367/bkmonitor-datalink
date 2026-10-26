@@ -87,6 +87,29 @@ func TestTheConsoleDeadlineIsDerivedFromItsOwnRequests(t *testing.T) {
 	}
 }
 
+// A tail of quick answers does not cut a slower one the Console is still
+// within its own budget to give: the deadline is never below the admin's
+// query timeout, whatever four times the p90 is, and still never past the
+// coverage (L44: a 20 ms p90 made an 80 ms deadline).
+func TestTheConsoleDeadlineIsNeverBelowTheConsolesOwnBudget(t *testing.T) {
+	latency := &ConsoleLatency{}
+	for index := 0; index < consoleLatencySamples; index++ {
+		latency.Observe(20 * time.Millisecond)
+	}
+	if deadline := latency.Deadline(30 * time.Minute); deadline != 5*time.Second {
+		t.Fatalf("a 20 ms tail: deadline %v, want the Console's own 5 s budget", deadline)
+	}
+	if deadline := latency.Deadline(2 * time.Second); deadline != 2*time.Second {
+		t.Fatalf("deadline %v past a 2 s coverage, want the coverage", deadline)
+	}
+	for index := 0; index < consoleLatencySamples; index++ {
+		latency.Observe(1800 * time.Millisecond)
+	}
+	if deadline := latency.Deadline(30 * time.Minute); deadline != 4*1800*time.Millisecond {
+		t.Fatalf("a 1.8 s tail: deadline %v, want four times it, above the floor", deadline)
+	}
+}
+
 // Each request of a call is bounded on its own: a reconciliation whose keying
 // read and reconcile request go to a Console that never answers ends after
 // two request deadlines, not at the call's, and both cut requests are timed.
@@ -103,6 +126,9 @@ func TestEachConsoleRequestHasItsOwnDeadline(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 	reader := classReader(t, server.URL, server.Client(), nil)
+	// The tail alone sets the deadline here, below the floor a Console's
+	// own budget sets (TestTheConsoleDeadlineIsNeverBelowTheConsolesOwnBudget).
+	reader.Latency().floor = time.Millisecond
 	for index := 0; index < consoleLatencyColdStart; index++ {
 		reader.Latency().Observe(10 * time.Millisecond)
 	}
@@ -248,6 +274,9 @@ func TestACalibrationRequestEndsAtTheConsolesTail(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 	reader := classReader(t, server.URL, server.Client(), nil)
+	// The tail alone sets the deadline here, below the floor a Console's
+	// own budget sets (TestTheConsoleDeadlineIsNeverBelowTheConsolesOwnBudget).
+	reader.Latency().floor = time.Millisecond
 	for index := 0; index < consoleLatencyColdStart; index++ {
 		reader.Latency().Observe(10 * time.Millisecond)
 	}
@@ -334,6 +363,7 @@ func TestFastFailuresDoNotPullTheConsoleDeadlineDown(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 	reader := classReader(t, server.URL, server.Client(), nil)
+	reader.Latency().floor = time.Millisecond
 	for index := 0; index < consoleLatencyColdStart; index++ {
 		reader.Latency().Observe(100 * time.Millisecond)
 	}
