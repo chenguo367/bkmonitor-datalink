@@ -30,7 +30,7 @@ type absentCloseCollector struct {
 
 // differenceSides is the closed list of denominators, so every one of them
 // has a cell from the first scrape.
-var differenceSides = []string{"roster_strategies", "roster_unreadable", "roster_pages", "roster_complete",
+var differenceSides = []string{"roster_strategies", "roster_unreadable", "roster_invalid", "roster_pages", "roster_complete",
 	"candidates", "snapshot_strategies", "remembered_identities",
 	"snapshot_age_seconds", "max_snapshot_age_seconds", "link_health_age_seconds", "max_link_health_age_seconds",
 	"link_pending"}
@@ -58,7 +58,8 @@ func newAbsentCloseCollector() *absentCloseCollector {
 			[]string{"disposition"}, nil),
 		sides: prometheus.NewDesc(prometheus.BuildFQName("", metricSubsystem, "absent_strategy_difference"),
 			"The sizes the last round decided on: roster_strategies is the strategies the alert link listed "+
-				"with an unrecovered alert, roster_unreadable the ones it listed and could not read, roster_pages "+
+				"with an unrecovered alert, roster_unreadable the ones it listed and could not read, roster_invalid "+
+				"the rows its walk skipped as naming no strategy of this binding (a smaller roster, never a failed page), roster_pages "+
 				"and roster_complete how far the walk of its roster got, candidates the difference itself, "+
 				"snapshot_strategies the strategy cache it was judged against, remembered_identities "+
 				"the strategies the catalog let go and still knows the business of. "+

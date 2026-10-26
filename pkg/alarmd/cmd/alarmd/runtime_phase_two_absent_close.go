@@ -115,6 +115,7 @@ type absentRoundSizes struct {
 	// as a bound that does not fit.
 	snapshotAge, linkAge int
 	rosterPages          int
+	rosterInvalid        int
 	rosterComplete       bool
 	linkPending          int
 	identities           int
@@ -204,7 +205,7 @@ func (loop *absentStrategyClose) Difference() map[string]int {
 	last := loop.last
 	return map[string]int{
 		"roster_strategies": last.counts.Roster, "roster_unreadable": last.counts.RosterUnreadable,
-		"roster_pages": last.rosterPages, "roster_complete": boolSide(last.rosterComplete),
+		"roster_pages": last.rosterPages, "roster_invalid": last.rosterInvalid, "roster_complete": boolSide(last.rosterComplete),
 		"candidates": last.counts.Candidates, "snapshot_strategies": last.counts.SnapshotStrategies,
 		"remembered_identities": last.identities,
 		"snapshot_age_seconds":  last.snapshotAge, "max_snapshot_age_seconds": int(loop.bounds.MaxSnapshotAge / time.Second),
@@ -292,7 +293,7 @@ func (loop *absentStrategyClose) step(ctx context.Context) {
 	}
 	var health openalerts.LinkHealth
 	var unreadable []absentalerts.Key
-	health, unreadable, sizes.rosterPages = loop.readRoster(ctx, &round)
+	health, unreadable, sizes.rosterPages, sizes.rosterInvalid = loop.readRoster(ctx, &round)
 	sizes.rosterComplete, sizes.linkPending = round.RosterComplete, health.PendingCount
 	if !health.LastSuccess.IsZero() {
 		sizes.linkAge = int(now.Sub(health.LastSuccess) / time.Second)
@@ -330,6 +331,9 @@ type rosterWalk struct {
 	pages      int
 	roster     map[absentalerts.Key]int
 	unreadable map[absentalerts.Key]struct{}
+	// invalid is how many rows the walk's pages skipped as naming no
+	// strategy of this binding (openalerts.RosterPage.Invalid).
+	invalid int
 }
 
 func newRosterWalk() *rosterWalk {
@@ -346,8 +350,9 @@ func newRosterWalk() *rosterWalk {
 // what this walk has read so far, incomplete. A failure after the first page
 // ends the round's part of the walk, which the next round carries on; a
 // smaller roster can only cost closes. The strategies the link listed and
-// could not read come back in key order, for the candidate page to name.
-func (loop *absentStrategyClose) readRoster(ctx context.Context, round *absentalerts.Round) (openalerts.LinkHealth, []absentalerts.Key, int) {
+// could not read come back in key order, for the candidate page to name,
+// beside how many rows the decided walk skipped as invalid.
+func (loop *absentStrategyClose) readRoster(ctx context.Context, round *absentalerts.Round) (openalerts.LinkHealth, []absentalerts.Key, int, int) {
 	if reader, ok := loop.link.(eventSourceReader); ok {
 		_, _ = reader.EventSource(ctx)
 	}
@@ -374,6 +379,7 @@ func (loop *absentStrategyClose) readRoster(ctx context.Context, round *absental
 		}
 		pages++
 		loop.walk.pages++
+		loop.walk.invalid += page.Invalid
 		for _, row := range page.Rows {
 			key := absentalerts.Key{TenantID: row.TenantID, StrategyID: row.StrategyID}
 			switch {
@@ -417,7 +423,7 @@ func (loop *absentStrategyClose) readRoster(ctx context.Context, round *absental
 	}
 	round.RosterUnreadable = len(keys)
 	sort.Slice(keys, func(i, j int) bool { return absentalerts.LessKey(keys[i], keys[j]) })
-	return health, keys, pages
+	return health, keys, pages, decided.invalid
 }
 
 // closeStrategy reads the strategy's active alerts from the link and closes

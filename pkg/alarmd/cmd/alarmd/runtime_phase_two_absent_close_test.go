@@ -519,6 +519,20 @@ func TestALinkWhoseMaintenanceIsUnhealthyStillHasItsRosterClosed(t *testing.T) {
 	}
 }
 
+// Rows the link listed that name no strategy of this binding are skipped by
+// the reader and counted; the walk they came in still closes what it read.
+func TestInvalidRosterRowsAreCountedAndTheWalkStillCloses(t *testing.T) {
+	fixture := newAbsentFixture(t, []openalerts.Alert{nativeAlert("alert-1", "0123456789abcdef0123456789abcdef")})
+	fixture.link.pages[0].Invalid, fixture.link.pages[1].Invalid = 2, 1
+	fixture.mature(context.Background())
+	if len(fixture.writer.batches) != 1 || fixture.loop.Stats()[absentalerts.OutcomeCloseSent] != 1 {
+		t.Fatalf("strategy 10 was not closed beside invalid rows: %+v", fixture.loop.Stats())
+	}
+	if got := fixture.loop.Difference()["roster_invalid"]; got != 3 {
+		t.Fatalf("roster_invalid = %d, want the 3 rows the walk skipped", got)
+	}
+}
+
 // A walk that fails after its first page is incomplete, says so, and still
 // decides on what it read - which here does not include strategy 10.
 func TestAWalkThatBreaksOffIsReportedAndDecidesOnWhatItRead(t *testing.T) {
