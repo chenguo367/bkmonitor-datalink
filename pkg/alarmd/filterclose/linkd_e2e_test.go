@@ -293,3 +293,36 @@ func TestTheFilterCloseAgainstTheLinksHandlersUnderFaults(t *testing.T) {
 		t.Fatalf("the faults did not all happen: %v", nonZero(stats))
 	}
 }
+
+// A per-series close against the link's own handlers: the filter by
+// fingerprint, bounded to the alerts opened by the decision's moment
+// (range create_at lte), closes the series' alert opened before it and
+// leaves the one opened after it, though both carry fingerprints it names.
+func TestAPerSeriesCloseAgainstTheLinksOwnHandlers(t *testing.T) {
+	h := startLinkdHarness(t)
+	closer, client := closerOn(t, h)
+	fingerprintOf := func(id string) string {
+		query, _ := json.Marshal(map[string]any{"term": map[string]any{"alert_id": id}})
+		page, err := client.Search(context.Background(), "tenant-a", query, "", 1)
+		if err != nil || len(page.Items) != 1 || page.Items[0].Fingerprint == "" {
+			t.Fatalf("search %s: %v %+v", id, err, page)
+		}
+		return page.Items[0].Fingerprint
+	}
+	before := h.open(decisionAt(4, factsOf("m4"), 1, false))
+	time.Sleep(10 * time.Millisecond)
+	decidedAt := time.Now()
+	time.Sleep(10 * time.Millisecond)
+	after := h.open(decisionAt(4, factsOf("m4"), 2, false))
+	word := closer.Fingerprints(context.Background(), testScope, []string{fingerprintOf(before), fingerprintOf(after)}, DecisionScope, 4,
+		decidedAt)
+	if word != OutcomeJobDone {
+		t.Fatalf("word %s (stats %v)", word, nonZero(closer.Stats()))
+	}
+	if status, closes := h.state(before); status != "closed" || closes != 1 {
+		t.Fatalf("opened before the decision: %s, closed %d", status, closes)
+	}
+	if status, _ := h.state(after); status != "active" {
+		t.Fatalf("opened after the decision: %s, want active", status)
+	}
+}

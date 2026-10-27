@@ -12,7 +12,8 @@
 // its alert search, filtered close and single close handlers
 // (controlplane/api). Two pieces are the harness's own, because the link
 // serves them only over Elasticsearch storage: the search reader evaluates
-// the query clauses alarmd sends (bool, term, terms, exists) over the
+// the query clauses alarmd sends (bool, term, terms, exists, range on
+// create_at) over the
 // repository's alerts, and the closer runs the processor's CloseAlert and
 // classifies its errors as the link's AlertCloser does
 // (internal/lifecycle/process/close.go:251-273), with no lease or KAC
@@ -211,6 +212,46 @@ func matches(query json.RawMessage, alert map[string]any) (bool, error) {
 				}
 				return false, nil
 			}
+		case "range":
+			// Elasticsearch's range on a date_nanos field (alert-search.md
+			// "可查询字段"); the harness ranges create_at only, the field
+			// alarmd bounds.
+			var fields map[string]map[string]string
+			if json.Unmarshal(body, &fields) != nil || len(fields) != 1 || fields["create_at"] == nil {
+				return false, errClause
+			}
+			text, _ := alert["create_at"].(string)
+			created, err := time.Parse(time.RFC3339Nano, text)
+			if err != nil {
+				return false, nil
+			}
+			for op, bound := range fields["create_at"] {
+				at, err := time.Parse(time.RFC3339Nano, bound)
+				if err != nil {
+					return false, errClause
+				}
+				switch op {
+				case "gte":
+					if created.Before(at) {
+						return false, nil
+					}
+				case "gt":
+					if !created.After(at) {
+						return false, nil
+					}
+				case "lte":
+					if created.After(at) {
+						return false, nil
+					}
+				case "lt":
+					if !created.Before(at) {
+						return false, nil
+					}
+				default:
+					return false, errClause
+				}
+			}
+			return true, nil
 		case "exists":
 			var field struct {
 				Field string `json:"field"`
