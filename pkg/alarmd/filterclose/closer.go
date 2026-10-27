@@ -1,0 +1,526 @@
+// Tencent is pleased to support the open source community by making
+// 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
+// Copyright (C) 2017-2026 Tencent. All rights reserved.
+// Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at http://opensource.org/licenses/MIT
+// Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
+// an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
+// specific language governing permissions and limitations under the License.
+
+// Package filterclose closes the alerts a strategy decision ended through
+// the alert link's own search and close by filter (Linkd
+// b7e5beddf docs/reference/contracts/alert-search.md, alert-close.md),
+// called by alarmd's control leader with the link's management token.
+//
+// A decision is about a set of alerts the link can select: a strategy's
+// alerts (absent, inactive), one (version, facts digest, family) bucket of
+// them (an edit), the older versions' alerts at a removed level, the
+// alerts of removed targets. alarmd decides; the link selects and closes.
+// Every filter is under its tenant, alarmd's event source and the strategy
+// (Scope; the link adds only the tenant and status=active), and nothing is
+// sent with a filter that does not carry all three.
+//
+// What has to hold before anything is closed:
+//
+//   - a dry run of the filter matches no more than an expectation from a
+//     source independent of the search - alarmd's own count of the
+//     strategy's open alerts, the link Console's roster, the removed
+//     targets times the series per target, or a fixed ceiling from measured
+//     sizes - plus a margin; otherwise the job is refused and counted;
+//   - each decision has one command (operation id, reason, effective_at),
+//     stored in the runtime Redis with the decision and sent byte for byte
+//     on every request and retry, after a restart and on another leader;
+//   - closes are by the link's alert id. The link mints a new id for each
+//     opening (b7e5beddf internal/lifecycle/id.go:35-36, plan.go:409-417),
+//     and a close of an id that already ended answers already_closed or
+//     invalid_transition, so no close ends an alert that reopened since;
+//   - a failure of the search or of a whole request decides nothing: it is
+//     counted and the next round decides again.
+//
+// The edit decision relies on the link keeping an alert's labels as its
+// opening event wrote them (b7e5beddf internal/lifecycle/plan.go:417,
+// Labels: event.Labels.Clone(); no lifecycle path assigns them again). That
+// is the link's implementation, not a stated contract. The dependency is
+// fail-safe: every close, the retries included, goes through the
+// decision's filter, so an alert whose label moved is not selected - a
+// changed label can only mean fewer closes.
+package filterclose
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdmanage"
+)
+
+// Link is the link's management API (linkdmanage.Client).
+type Link interface {
+	Search(ctx context.Context, tenantID string, query json.RawMessage, after string, limit int) (linkdmanage.SearchPage, error)
+	CloseByFilter(ctx context.Context, command []byte, tenantID string, filter json.RawMessage, after string, limit int,
+		dryRun bool) (linkdmanage.FilterPage, error)
+	CloseOne(ctx context.Context, alertID string, command []byte) (bool, error)
+}
+
+// Expectation is how many alerts a job's filter may match, and where that
+// number came from. The source is never the search the job runs.
+type Expectation struct {
+	Count  int
+	Source string
+}
+
+// The expectation sources.
+const (
+	// ExpectOwnRecords is alarmd's own count of the strategy's open alerts,
+	// read from its copy of the link's index sets (openalerts.OpenCounts).
+	ExpectOwnRecords = "own_records"
+	// ExpectRoster is the link Console's roster count of the strategy's
+	// unrecovered alerts, the last one the leader read.
+	ExpectRoster = "roster"
+	// ExpectTargets is the removed targets times the series one target
+	// carries.
+	ExpectTargets = "removed_targets"
+	// ExpectDecidedIDs is the alerts a round decided one by one: the filter
+	// names their ids, so it cannot match more.
+	ExpectDecidedIDs = "decided_ids"
+	// ExpectFixedCeiling is FixedCeiling, where none of the above answers.
+	ExpectFixedCeiling = "fixed_ceiling"
+)
+
+// FixedCeiling is the expectation where no independent count exists. The
+// largest strategy measured on the test environment held about 36,000
+// active alerts (2026-10, the 2b readings); a bucket past this is refused
+// and counted, never closed on a guess.
+const FixedCeiling = 50000
+
+// expectSlack is the least margin over an expectation: the count it comes
+// from is read at another moment than the dry run, and alerts open between.
+const expectSlack = 20
+
+// allowed is the most a dry run may match: the count plus a tenth, at
+// least expectSlack; the fixed ceiling as it is.
+func (expect Expectation) allowed() int {
+	if expect.Source == ExpectFixedCeiling {
+		return expect.Count
+	}
+	return expect.Count + max(expect.Count/10, expectSlack)
+}
+
+func (expect Expectation) word() string {
+	switch expect.Source {
+	case ExpectOwnRecords:
+		return OutcomeExpectOwnRecords
+	case ExpectRoster:
+		return OutcomeExpectRoster
+	case ExpectTargets:
+		return OutcomeExpectTargets
+	case ExpectDecidedIDs:
+		return OutcomeExpectDecidedIDs
+	}
+	return OutcomeExpectFixedCeiling
+}
+
+// Job is one decision's filter, run in a round.
+type Job struct {
+	Filter Filter
+	// Decision, Version, Digest and Revision are the decision: its word, the
+	// version and facts digest it is about (empty where it is not version-
+	// or bucket-scoped), and the strategy's current revision.
+	Decision string
+	Version  string
+	Digest   string
+	Revision int64
+	Expect   Expectation
+	// Reason is the close reason the link records, at most 256 bytes.
+	Reason string
+	// Recheck is what a pending retry checks still names the alert; the
+	// job's filter when zero. A target batch names its strategy instead: a
+	// pending item does not carry the whole batch.
+	Recheck Filter
+}
+
+// pageLimit is the filtered close's page: the link's own default, so one
+// request's closes stay inside its ten-second budget at up to 100 ms an
+// alert; whatever it does not reach answers 504 not_attempted and is found
+// again. The dry run reads the link's largest page.
+const pageLimit = 100
+
+// unsupportedRecheck is how long a link that answered 501, 404 or 405 is
+// left on the existing paths before it is asked again: an upgrade of the
+// link is noticed within it.
+const unsupportedRecheck = 10 * time.Minute
+
+// Options configure a Closer.
+type Options struct {
+	Link     Link
+	Commands *Commands
+	Pending  *Pending
+	Now      func() time.Time
+}
+
+// Closer runs jobs and retries kept items. It is safe for concurrent use.
+type Closer struct {
+	link     Link
+	commands *Commands
+	pending  *Pending
+	now      func() time.Time
+
+	mu sync.Mutex
+	// progress is, per job filter, its dry run's cursor while it runs, then
+	// how many matches it checked and how many items have been processed
+	// since: closes stop at the checked count, and a new dry run checks
+	// again. Held per term (Forget); a new leader checks again.
+	progress         map[string]*progress
+	unsupportedUntil time.Time
+	counts           map[string]uint64
+	// buckets is the edit close's per-alert walk, per bucket, within the
+	// term.
+	buckets map[string]string
+}
+
+// progress is one filter's state in the term: the dry run's cursor and
+// count until it finishes, then the count it checked and the items
+// processed since.
+type progress struct {
+	dryAfter           string
+	dryCount           int
+	checked, processed int
+}
+
+func New(options Options) (*Closer, error) {
+	if options.Link == nil || options.Commands == nil || options.Pending == nil {
+		return nil, errors.New("alarmd filterclose: the link, command store and pending store are required")
+	}
+	now := options.Now
+	if now == nil {
+		now = time.Now
+	}
+	return &Closer{link: options.Link, commands: options.Commands, pending: options.Pending, now: now,
+		progress: map[string]*progress{}, counts: map[string]uint64{}, buckets: map[string]string{}}, nil
+}
+
+// InForce says whether a caller should take this path: false for a nil
+// Closer, and within unsupportedRecheck of the link answering that it
+// cannot serve it. A caller that gets OutcomeLinkUnsupported from a job
+// takes its existing path for that decision.
+func (closer *Closer) InForce() bool {
+	if closer == nil {
+		return false
+	}
+	closer.mu.Lock()
+	defer closer.mu.Unlock()
+	return !closer.now().Before(closer.unsupportedUntil)
+}
+
+// Forget drops the term's progress: a new term checks every job again.
+func (closer *Closer) Forget() {
+	closer.mu.Lock()
+	closer.progress = map[string]*progress{}
+	closer.buckets = map[string]string{}
+	closer.mu.Unlock()
+}
+
+// Stats is every outcome's count.
+func (closer *Closer) Stats() map[string]uint64 {
+	counts := make(map[string]uint64, len(Outcomes))
+	if closer == nil {
+		for _, outcome := range Outcomes {
+			counts[outcome] = 0
+		}
+		return counts
+	}
+	closer.mu.Lock()
+	defer closer.mu.Unlock()
+	for _, outcome := range Outcomes {
+		counts[outcome] = closer.counts[outcome]
+	}
+	return counts
+}
+
+func (closer *Closer) count(outcome string, n int) {
+	if n <= 0 || outcome == "" {
+		return
+	}
+	closer.mu.Lock()
+	closer.counts[outcome] += uint64(n)
+	closer.mu.Unlock()
+}
+
+// failed is the word for a request that did not answer 200, counted.
+func (closer *Closer) failed(err error) string {
+	word := OutcomeLinkFailed
+	switch status := linkdmanage.Status(err); {
+	case linkdmanage.Unsupported(err):
+		closer.mu.Lock()
+		closer.unsupportedUntil = closer.now().Add(unsupportedRecheck)
+		closer.mu.Unlock()
+		word = OutcomeLinkUnsupported
+	case status == http.StatusTooManyRequests:
+		word = OutcomeLinkBusy
+	case status >= 400 && status < 500:
+		word = OutcomeLinkRefused
+	case errors.Is(err, linkdmanage.ErrBodyTooLarge), errors.Is(err, linkdmanage.ErrInvalidRequest):
+		word = OutcomeLinkRefused
+	}
+	closer.count(word, 1)
+	return word
+}
+
+func filterKey(filter Filter) string {
+	sum := sha256.Sum256(filter.body)
+	return hex.EncodeToString(sum[:16])
+}
+
+// Run runs one job: the dry run against the expectation where the term has
+// not checked this filter yet, then closes page by page, at most as many
+// items as the dry run matched, until the filter runs out or the round
+// does. It returns the job's word.
+//
+// Every page starts from the filter's head again on a new round: an alert
+// closed no longer matches status=active, so the head is what is left. An
+// item the link did not close for certain (busy, not attempted, version
+// conflict) is found again that way and sent the same command; an item
+// whose close may have been saved is kept and retried by id
+// (RetryPending).
+func (closer *Closer) Run(ctx context.Context, job Job) string {
+	if requireScope(job.Filter) != nil {
+		closer.count(OutcomeFilterRefused, 1)
+		return OutcomeFilterRefused
+	}
+	scope := job.Filter.scope
+	key := decisionKey(scope, job.Version, job.Digest, job.Decision, job.Revision)
+	command, err := closer.commands.Resolve(ctx, key, scope.TenantID, job.Reason, closer.now())
+	if err != nil {
+		closer.count(OutcomeCommandUnavailable, 1)
+		return OutcomeCommandUnavailable
+	}
+	closer.count(job.Expect.word(), 1)
+	progressKey := key + ":" + filterKey(job.Filter)
+	closer.mu.Lock()
+	state := closer.progress[progressKey]
+	if state == nil || (state.checked > 0 && state.processed >= state.checked) {
+		state = &progress{}
+		closer.progress[progressKey] = state
+	}
+	closer.mu.Unlock()
+	if state.checked == 0 {
+		allowed := job.Expect.allowed()
+		matched, word := closer.dryRun(ctx, job, state, allowed+1)
+		if word != "" {
+			// The pages read so far are kept: the next round goes on from
+			// the cursor rather than needing every page in one go.
+			return word
+		}
+		switch {
+		case matched > allowed:
+			closer.forgetProgress(progressKey)
+			closer.count(OutcomeExpectExceeded, 1)
+			return OutcomeExpectExceeded
+		case matched == 0:
+			closer.forgetProgress(progressKey)
+			closer.count(OutcomeNothingMatched, 1)
+			return OutcomeNothingMatched
+		}
+		closer.mu.Lock()
+		state.checked = matched
+		closer.mu.Unlock()
+	}
+	after := ""
+	for state.processed < state.checked {
+		if ctx.Err() != nil {
+			closer.count(OutcomeJobIncomplete, 1)
+			return OutcomeJobIncomplete
+		}
+		page, err := closer.link.CloseByFilter(ctx, command.Bytes, scope.TenantID, job.Filter.body, after,
+			min(pageLimit, state.checked-state.processed), false)
+		if err != nil {
+			return closer.failed(err)
+		}
+		closer.items(ctx, job, command, page.Items)
+		closer.mu.Lock()
+		state.processed += len(page.Items)
+		closer.mu.Unlock()
+		if page.Next == "" || len(page.Items) == 0 {
+			closer.forgetProgress(progressKey)
+			closer.count(OutcomeJobDone, 1)
+			return OutcomeJobDone
+		}
+		after = page.Next
+	}
+	// The checked count is spent and the filter still matches: the next
+	// round runs a new dry run before any further close.
+	closer.forgetProgress(progressKey)
+	closer.count(OutcomeJobIncomplete, 1)
+	return OutcomeJobIncomplete
+}
+
+func (closer *Closer) forgetProgress(key string) {
+	closer.mu.Lock()
+	delete(closer.progress, key)
+	closer.mu.Unlock()
+}
+
+// dryRun counts the filter's active matches, up to limit, carrying on
+// from where the term's last dry run of the filter stopped.
+func (closer *Closer) dryRun(ctx context.Context, job Job, state *progress, limit int) (int, string) {
+	for {
+		page, err := closer.link.CloseByFilter(ctx, nil, job.Filter.scope.TenantID, job.Filter.body, state.dryAfter, linkdmanage.MaxLimit, true)
+		if err != nil {
+			return 0, closer.failed(err)
+		}
+		closer.mu.Lock()
+		state.dryCount += len(page.Items)
+		state.dryAfter = page.Next
+		matched := state.dryCount
+		closer.mu.Unlock()
+		if matched >= limit || page.Next == "" || len(page.Items) == 0 {
+			return matched, ""
+		}
+	}
+}
+
+// items counts a page's results and keeps the ones whose close may have
+// been saved.
+func (closer *Closer) items(ctx context.Context, job Job, command Command, items []linkdmanage.Item) {
+	recheck := job.Recheck
+	if recheck.body == nil {
+		recheck = job.Filter
+	}
+	for _, item := range items {
+		switch {
+		case item.Status == http.StatusOK && item.AlreadyClosed:
+			closer.count(OutcomeItemAlreadyClosed, 1)
+		case item.Status == http.StatusOK:
+			closer.count(OutcomeItemClosed, 1)
+		case item.Status == http.StatusConflict:
+			switch item.ErrorCode {
+			case linkdmanage.ConflictInvalidTransition:
+				closer.count(OutcomeItemEndedOtherwise, 1)
+			case linkdmanage.ConflictVersion:
+				closer.count(OutcomeItemRederived, 1)
+			case linkdmanage.ConflictSourceUnpublished:
+				closer.count(OutcomeItemSourceUnpublished, 1)
+			default:
+				closer.count(OutcomeItemConflictUnknown, 1)
+			}
+		case item.Status == http.StatusTooManyRequests,
+			item.Status == http.StatusGatewayTimeout && item.ErrorCode == "not_attempted":
+			closer.count(OutcomeItemRederived, 1)
+		case item.Status >= 500:
+			scope := job.Filter.scope
+			err := closer.pending.Keep(ctx, pendingItem{TenantID: scope.TenantID, EventSourceID: scope.EventSourceID, StrategyID: scope.StrategyID,
+				AlertID: item.AlertID, OperationID: command.ID, Command: command.Bytes, Recheck: recheck.body, FirstAt: closer.now().Unix()})
+			switch {
+			case err == nil:
+				closer.count(OutcomeItemPending, 1)
+			case errors.Is(err, errPendingFull):
+				closer.count(OutcomeItemPendingFull, 1)
+			default:
+				closer.count(OutcomeItemPendingLost, 1)
+			}
+		default:
+			closer.count(OutcomeItemRefused, 1)
+		}
+	}
+}
+
+// RetryPending retries up to n kept items by id, each with its own
+// command, once the decision's filter still names its alert (any status:
+// an alert whose close was saved is closed, and the retry completes its
+// outputs). A whole-request failure of the link ends the pass.
+func (closer *Closer) RetryPending(ctx context.Context, n int) {
+	items, unreadable, err := closer.pending.Next(ctx, n)
+	closer.count(OutcomePendingUnreadable, unreadable)
+	if err != nil {
+		closer.count(OutcomePendingUnavailable, 1)
+		return
+	}
+	for _, item := range items {
+		if ctx.Err() != nil {
+			return
+		}
+		if item.expired(closer.now()) {
+			closer.drop(ctx, item, OutcomePendingGivenUp)
+			continue
+		}
+		recheck, err := withAlertID(Filter{scope: Scope{TenantID: item.TenantID, EventSourceID: item.EventSourceID, StrategyID: item.StrategyID},
+			body: item.Recheck}, item.AlertID)
+		if err != nil {
+			closer.drop(ctx, item, OutcomePendingUnreadable)
+			continue
+		}
+		page, err := closer.link.Search(ctx, item.TenantID, recheck.body, "", 1)
+		if err != nil {
+			closer.failed(err)
+			return
+		}
+		if len(page.Items) == 0 || page.Items[0].AlertID != item.AlertID {
+			closer.drop(ctx, item, OutcomePendingLeftDecision)
+			continue
+		}
+		already, err := closer.link.CloseOne(ctx, item.AlertID, item.Command)
+		switch status := linkdmanage.Status(err); {
+		case err == nil && already:
+			closer.drop(ctx, item, OutcomePendingAlreadyClosed)
+		case err == nil:
+			closer.drop(ctx, item, OutcomePendingClosed)
+		case status == http.StatusConflict:
+			switch linkdmanage.ConflictKind(err) {
+			case linkdmanage.ConflictInvalidTransition:
+				closer.drop(ctx, item, OutcomePendingEndedOther)
+			case linkdmanage.ConflictSourceUnpublished:
+				closer.drop(ctx, item, OutcomeItemSourceUnpublished)
+			case linkdmanage.ConflictVersion:
+				closer.again(ctx, item)
+			default:
+				// A 409 whose text names no kind this build knows: counted,
+				// and retried within the item's bounds.
+				closer.count(OutcomeItemConflictUnknown, 1)
+				closer.again(ctx, item)
+			}
+		case status == http.StatusNotFound:
+			closer.drop(ctx, item, OutcomePendingNotFound)
+		case status == http.StatusTooManyRequests:
+			closer.again(ctx, item)
+			return
+		case status == 0 || status >= 500:
+			closer.again(ctx, item)
+		default:
+			closer.drop(ctx, item, OutcomePendingRefused)
+		}
+	}
+}
+
+func (closer *Closer) drop(ctx context.Context, item pendingItem, outcome string) {
+	if err := closer.pending.Done(ctx, item); err != nil {
+		closer.count(OutcomePendingUnavailable, 1)
+		return
+	}
+	closer.count(outcome, 1)
+}
+
+func (closer *Closer) again(ctx context.Context, item pendingItem) {
+	if err := closer.pending.Again(ctx, item); err != nil {
+		closer.count(OutcomePendingUnavailable, 1)
+		return
+	}
+	closer.count(OutcomePendingRetryFailed, 1)
+}
+
+// PendingSize is how many items are kept, for the metric; -1 when the
+// store cannot say.
+func (closer *Closer) PendingSize(ctx context.Context) int64 {
+	if closer == nil {
+		return 0
+	}
+	size, err := closer.pending.Size(ctx)
+	if err != nil {
+		return -1
+	}
+	return size
+}
