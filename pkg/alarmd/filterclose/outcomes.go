@@ -110,6 +110,10 @@ const (
 	// The edit close's own.
 	OutcomeBucketsTruncated = "buckets_truncated"
 	OutcomeDigestMismatch   = "digest_mismatch"
+	// OutcomeFamilyMismatch is a bucket's sample whose no-data tag and
+	// extra_data.evaluation_family disagree: no decision for the bucket.
+	// A per-alert decision answers edit_family_unknown for such an alert.
+	OutcomeFamilyMismatch   = "family_mismatch"
 	OutcomeSampleUnreadable = "sample_unreadable"
 	// OutcomeAlertsRead, OutcomeAlertsTruncated and OutcomeAlertDecidedClose
 	// are also the alert-by-alert close's of a strategy with no record.
@@ -131,7 +135,7 @@ var Outcomes = append([]string{
 	OutcomePendingRetryFailed, OutcomePendingGivenUp, OutcomePendingRefused, OutcomePendingUnreadable, OutcomePendingUnavailable,
 	OutcomeExpectTargets, OutcomeExpectDecidedIDs, OutcomeExpectOwnRecord,
 	OutcomeRecordMissing, OutcomeRecordTruncated, OutcomeRecordUnavailable, OutcomeRecordPruned, OutcomeRecordPruneFailed,
-	OutcomeBucketsTruncated, OutcomeDigestMismatch, OutcomeSampleUnreadable, OutcomeAlertsRead, OutcomeAlertsTruncated,
+	OutcomeBucketsTruncated, OutcomeDigestMismatch, OutcomeFamilyMismatch, OutcomeSampleUnreadable, OutcomeAlertsRead, OutcomeAlertsTruncated,
 	OutcomeAlertDecidedClose, OutcomeAbsentTruncated,
 }, editWords()...)
 

@@ -348,6 +348,10 @@ func (link *fakeLink) wire(alert *fakeAlert) linkdmanage.Alert {
 	for name, value := range alert.dimensions {
 		dimensions[name], _ = json.Marshal(value)
 	}
+	if _, tagged := alert.dimensions[contract.NoDataDimensionTag]; tagged {
+		// The link keeps the tag as alarmd writes it: the JSON boolean true.
+		dimensions[contract.NoDataDimensionTag] = json.RawMessage("true")
+	}
 	return linkdmanage.Alert{AlertID: alert.id, TenantID: alert.tenant, EventSourceID: alert.source, Status: alert.status,
 		Severity: alert.severity, Labels: labels, Dimensions: dimensions, ExtraData: alert.extra}
 }

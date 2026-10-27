@@ -29,7 +29,8 @@ func newLinkdFilterCloseCollector() *outcomeCounterCollector {
 			"retry of a kept item: pending_closed, pending_already_closed, pending_ended_otherwise, "+
 			"pending_left_decision (the decision's filter no longer names the alert: dropped, not closed), "+
 			"pending_not_found, pending_retry_failed, pending_given_up, pending_refused, pending_unreadable, "+
-			"pending_unavailable. The edit close's own: buckets_truncated, digest_mismatch, sample_unreadable, "+
+			"pending_unavailable. The edit close's own: buckets_truncated, digest_mismatch, family_mismatch (a sample whose "+
+			"no-data tag and evaluation_family disagree: no decision), sample_unreadable, "+
 			"and edit_<word> for each edit decision and note; alerts_read, alerts_truncated, alert_decided_close are the "+
 			"edit close's and the alert-by-alert close's of a strategy with no record; absent_truncated (a tenant's "+
 			"discovery stopped at its per-round bound). "+

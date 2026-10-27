@@ -307,6 +307,12 @@ func (closer *Closer) Edit(ctx context.Context, input EditInput) (string, int) {
 		if bucket.NoData {
 			family = "no_data"
 		}
+		if sampleFamily(samples[i]) != family {
+			// The tag says one family and extra_data.evaluation_family
+			// another: the sample does not say which the bucket is.
+			closer.count(OutcomeFamilyMismatch, 1)
+			continue
+		}
 		decision, note := editclose.DecideGroup(plan, editclose.Group{Revision: revision, Family: family, Facts: facts})
 		closer.count("edit_"+decision, 1)
 		closer.count("edit_"+note, 1)
@@ -479,6 +485,16 @@ func bucketOf(alert linkdmanage.Alert) (Bucket, bool) {
 type extraData struct {
 	EvaluationFamily string          `json:"evaluation_family"`
 	StrategyFacts    json.RawMessage `json:"strategy_facts"`
+}
+
+// sampleFamily is the alert's extra_data.evaluation_family, empty when
+// unreadable.
+func sampleFamily(alert linkdmanage.Alert) string {
+	var extra extraData
+	if json.Unmarshal(alert.ExtraData, &extra) != nil {
+		return ""
+	}
+	return extra.EvaluationFamily
 }
 
 func sampleFacts(alert linkdmanage.Alert) (contract.StrategyFactsV2, bool) {
