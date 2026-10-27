@@ -227,7 +227,7 @@ func TestAnInactiveCloseIsCountedOnItsQueryGroupAndRefusedOnceItIsNotHeld(t *tes
 	f.m.bundle.mu.Unlock()
 	f.matchAgain("late")
 	word, err := f.m.sendClose(context.Background(), queryGroup, f.runner, f.m.catalog.(*maintenanceTestCatalog).plans[0],
-		inactiveKey{tenantID: "tenant-a", strategyID: "123", revision: 4})
+		inactiveKey{tenantID: "tenant-a", strategyID: "123", revision: 4}, f.at)
 	if word != "" || !errors.Is(err, errClosePrecheck) || !errors.Is(err, errCloseNotHeld) || len(f.closed()) != 1 {
 		t.Fatalf("a close for a Query Group no longer held: word=%q err=%v closes=%d, want refused before the send",
 			word, err, len(f.closed()))

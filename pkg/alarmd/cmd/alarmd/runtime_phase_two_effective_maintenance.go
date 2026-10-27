@@ -652,10 +652,12 @@ type inactiveKey struct {
 	revision             int64
 }
 
-// inactiveClose is what the link's filter did for one inactiveKey in this
-// inactive period: when a step first settled it, and whether the one
-// confirming pass after inactiveConfirmAfter has run.
+// inactiveClose is one inactiveKey's inactive period: when a step first
+// found it inactive (the period's close decision, filterclose's command
+// key), when a step first settled it (zero until then), and whether the
+// one confirming pass after inactiveConfirmAfter has run.
 type inactiveClose struct {
+	since     time.Time
 	settledAt time.Time
 	confirmed bool
 }
@@ -711,8 +713,15 @@ func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.Q
 			}
 			continue
 		}
-		if done, ok := m.inactiveClosed[key]; ok && (done.confirmed || at.Sub(done.settledAt) < inactiveConfirmAfter) {
+		done, ok := m.inactiveClosed[key]
+		if ok && !done.settledAt.IsZero() && (done.confirmed || at.Sub(done.settledAt) < inactiveConfirmAfter) {
 			continue
+		}
+		if !ok && len(m.inactiveClosed) < m.capacity.LocalEntries {
+			// The period's first sighting: its start names the period's
+			// close decision.
+			done = inactiveClose{since: at}
+			m.inactiveClosed[key] = done
 		}
 		trace := observability.TraceFields{QueryGroupKey: string(qg), StrategyID: plan.Identity.StrategyID}
 		if err := deletions.held(plan.Compiled); err != nil {
@@ -728,7 +737,14 @@ func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.Q
 			continue
 		}
 		m.stepJobs++
-		word, err := m.sendClose(ctx, qg, runner, plan, key)
+		since := done.since
+		if since.IsZero() {
+			// Past the memory's bound the period is not remembered: each
+			// minute is its own decision, effective_at never before an
+			// alert the close selects.
+			since = at.Truncate(time.Minute)
+		}
+		word, err := m.sendClose(ctx, qg, runner, plan, key, since)
 		if planRecheckRefused(err) {
 			continue
 		}
@@ -740,10 +756,12 @@ func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.Q
 		switch word {
 		case filterclose.OutcomeJobDone, filterclose.OutcomeNothingMatched:
 			if done, ok := m.inactiveClosed[key]; ok {
-				done.confirmed = true
+				if done.settledAt.IsZero() {
+					done.settledAt = at
+				} else {
+					done.confirmed = true
+				}
 				m.inactiveClosed[key] = done
-			} else if len(m.inactiveClosed) < m.capacity.LocalEntries {
-				m.inactiveClosed[key] = inactiveClose{settledAt: at}
 			}
 		}
 	}
@@ -775,7 +793,7 @@ func (m *effectiveMaintenance) pruneInactiveClosed() {
 // busy, the owner check refusing, the Plan active again or its effective
 // time unreadable at the recheck, the link not settling it.
 func (m *effectiveMaintenance) sendClose(ctx context.Context, qg execution.QueryGroupIdentity, runner maintenanceRunner, plan controlplane.MaintenancePlan,
-	key inactiveKey) (string, error) {
+	key inactiveKey, since time.Time) (string, error) {
 	// Counted in flight on the Query Group's lifecycle, as a Slot is: a
 	// handover waits for the close before releasing the lease it is under.
 	lifecycle, owned := m.bundle.enterOwnedWork(qg)
@@ -845,7 +863,7 @@ func (m *effectiveMaintenance) sendClose(ctx context.Context, qg execution.Query
 	// The expectation is alarmd's own record of the version's open
 	// episodes (filterclose.Closer.Inactive).
 	word := m.filter.closer.Inactive(job, m.filter.scope(absentalerts.Key{TenantID: key.tenantID, StrategyID: key.strategyID}), strconv.FormatInt(key.revision, 10),
-		key.revision)
+		key.revision, since)
 	trace := observability.TraceFields{QueryGroupKey: string(qg), StrategyID: key.strategyID}
 	switch word {
 	case filterclose.OutcomeJobDone, filterclose.OutcomeJobIncomplete, filterclose.OutcomeJobDoneRederived:

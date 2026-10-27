@@ -142,6 +142,10 @@ type Job struct {
 	Digest   string
 	Revision int64
 	Expect   Expectation
+	// Batch is what the decision names beyond its filter's series (the
+	// inactive period); the filter's own series or targets are added to
+	// the decision's key by their builder.
+	Batch string
 	// Reason is the close reason the link records, at most 256 bytes.
 	Reason string
 	// Recheck is what a pending retry checks still names the alert; the
@@ -342,7 +346,7 @@ func (closer *Closer) Run(ctx context.Context, job Job) string {
 		return OutcomeFilterRefused
 	}
 	scope := job.Filter.scope
-	key := decisionKey(scope, job.Version, job.Digest, job.Decision, job.Revision)
+	key := decisionKey(scope, job.Version, job.Digest, job.Decision, job.Batch+job.Filter.batch, job.Revision)
 	command, err := closer.commands.Resolve(ctx, key, scope.TenantID, job.Reason, closer.now())
 	if err != nil {
 		closer.count(OutcomeCommandUnavailable, 1)

@@ -49,12 +49,15 @@ type commandFields struct {
 }
 
 // decisionKey is what one decision is: the strategy, the version and
-// facts digest it is about, the decision, and the revision it was taken
-// against. The same decision taken again - the next round, another leader
-// - has the same key.
-func decisionKey(scope Scope, version, digest, decision string, revision int64) string {
+// facts digest it is about, the decision, what it names besides (batch: the
+// series or targets of a per-series close, the inactive period of an
+// inactive close), and the revision it was taken against. The same
+// decision taken again - the next round, another leader - has the same
+// key; another batch of the same decision, or the next inactive period,
+// has its own, and with it its own command and effective_at.
+func decisionKey(scope Scope, version, digest, decision, batch string, revision int64) string {
 	sum := sha256.Sum256([]byte(strings.Join([]string{scope.TenantID, scope.EventSourceID, scope.StrategyID, version, digest, decision,
-		strconv.FormatInt(revision, 10)}, "\x00")))
+		batch, strconv.FormatInt(revision, 10)}, "\x00")))
 	return hex.EncodeToString(sum[:16])
 }
 

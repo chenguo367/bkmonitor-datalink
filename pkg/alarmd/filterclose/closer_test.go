@@ -153,15 +153,15 @@ func TestAnInactiveCloseCountsOnlyItsVersionsEntries(t *testing.T) {
 	h.opened(t, "41", "3", nil, fingerprints(0, 25)...)
 	h.opened(t, "41", "4", nil, fingerprints(100, 100)...)
 	closer := h.closer(t)
-	if word := closer.Inactive(context.Background(), testScope, "3", 3); word != OutcomeExpectExceeded {
+	if word := closer.Inactive(context.Background(), testScope, "3", 3, fakeOpenedAt); word != OutcomeExpectExceeded {
 		t.Fatalf("word %s, want expect_exceeded", word)
 	}
 	h.opened(t, "41", "3", nil, fingerprints(25, 5)...)
-	if word := closer.Inactive(context.Background(), testScope, "3", 3); word != OutcomeJobDone {
+	if word := closer.Inactive(context.Background(), testScope, "3", 3, fakeOpenedAt); word != OutcomeJobDone {
 		t.Fatalf("word %s, want job_done", word)
 	}
 	// Nothing left at version 3: its entries are pruned, version 4's kept.
-	if word := closer.Inactive(context.Background(), testScope, "3", 3); word != OutcomeNothingMatched {
+	if word := closer.Inactive(context.Background(), testScope, "3", 3, fakeOpenedAt); word != OutcomeNothingMatched {
 		t.Fatalf("word %s", word)
 	}
 	record, err := h.record(t).Load(context.Background(), openepisodes.Key{TenantID: "tenant-a", StrategyID: "41"})
@@ -190,7 +190,7 @@ func TestWithoutARecordEachAlertIsDecidedAndClosedByItsID(t *testing.T) {
 		h.link.add(&fakeAlert{id: alertID(i), labels: map[string]string{"strategy_id": "41", "strategy_version": version}})
 	}
 	closer := h.closer(t)
-	if word := closer.Inactive(context.Background(), testScope, "3", 3); word != OutcomeJobDone {
+	if word := closer.Inactive(context.Background(), testScope, "3", 3, fakeOpenedAt); word != OutcomeJobDone {
 		t.Fatalf("word %s, want job_done (stats %v)", word, nonZero(closer.Stats()))
 	}
 	for i := 0; i < 30; i++ {
@@ -302,7 +302,7 @@ func TestALinkThatCannotSearchIsFilteredCloseUnsupported(t *testing.T) {
 	if !closer.Unsupported() || warned != 1 {
 		t.Fatalf("unsupported %v, warned %d", closer.Unsupported(), warned)
 	}
-	if word := closer.Inactive(context.Background(), testScope, "3", 3); word != OutcomeUnsupported {
+	if word := closer.Inactive(context.Background(), testScope, "3", 3, fakeOpenedAt); word != OutcomeUnsupported {
 		t.Fatalf("word %s", word)
 	}
 	if word, _ := closer.Edit(context.Background(), EditInput{Scope: testScope, Plan: currentPlan()}); word != OutcomeUnsupported {
@@ -330,7 +330,7 @@ func TestADecisionsCommandIsTheSameBytesAcrossProcesses(t *testing.T) {
 	h := newHarness(t)
 	first, second := h.closer(t), h.closer(t)
 	at := time.Unix(1_800_000_000, 0)
-	key := decisionKey(testScope, "4", strings.Repeat("a", 32), "metric_changed", 5)
+	key := decisionKey(testScope, "4", strings.Repeat("a", 32), "metric_changed", "", 5)
 	a, err := first.commands.Resolve(context.Background(), key, "tenant-a", "reason", at)
 	if err != nil {
 		t.Fatal(err)
@@ -464,10 +464,10 @@ func TestAJobWithItemsLeftToFindAgainIsNotSettled(t *testing.T) {
 				return ""
 			}
 			closer := h.closer(t)
-			if word := closer.Inactive(context.Background(), testScope, "3", 3); word != OutcomeJobDoneRederived {
+			if word := closer.Inactive(context.Background(), testScope, "3", 3, fakeOpenedAt); word != OutcomeJobDoneRederived {
 				t.Fatalf("word %s, want job_done_rederived (stats %v)", word, nonZero(closer.Stats()))
 			}
-			if word := closer.Inactive(context.Background(), testScope, "3", 3); word != OutcomeJobDone {
+			if word := closer.Inactive(context.Background(), testScope, "3", 3, fakeOpenedAt); word != OutcomeJobDone {
 				t.Fatalf("second word %s, want job_done (stats %v)", word, nonZero(closer.Stats()))
 			}
 			if h.link.alert(alertID(4)).closes != 1 {
@@ -486,7 +486,7 @@ func TestAJobWithItemsLeftToFindAgainIsNotSettled(t *testing.T) {
 		return ""
 	}
 	closer := h.closer(t)
-	if word := closer.Inactive(context.Background(), testScope, "3", 3); word != OutcomeJobDoneRederived {
+	if word := closer.Inactive(context.Background(), testScope, "3", 3, fakeOpenedAt); word != OutcomeJobDoneRederived {
 		t.Fatalf("per-alert word %s, want job_done_rederived (stats %v)", word, nonZero(closer.Stats()))
 	}
 }
@@ -522,5 +522,68 @@ func TestASeriesCloseLeavesAnAlertOpenedAfterItsDecision(t *testing.T) {
 		if got := h.link.alert(id).closes; got != want {
 			t.Fatalf("%s closed %d, want %d", id, got, want)
 		}
+	}
+}
+
+// Another batch of one per-series decision, and the next inactive period
+// of a version, is its own decision: its own command, effective at its own
+// moment, not at the first batch's or period's - an alert opened after
+// that moment would end before it began. The same batch again keeps its
+// command.
+func TestEachBatchAndPeriodHasItsOwnCommand(t *testing.T) {
+	h := newHarness(t)
+	// In the past: the link refuses an effective_at ahead of its clock.
+	now := time.Now().Add(-4 * time.Hour).Truncate(time.Second)
+	commands, _ := NewCommands(h.redis.Client(), h.prefix)
+	pending, _ := NewPending(h.redis.Client(), h.prefix, MaxPending)
+	closer, err := New(Options{Link: h.client, Commands: commands, Pending: pending, Record: h.record(t), Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := func(id string) fakeCommand {
+		var fields fakeCommand
+		if err := json.Unmarshal([]byte(h.link.alert(id).endOperation), &fields); err != nil {
+			t.Fatalf("%s: %v", id, err)
+		}
+		return fields
+	}
+	for i, fingerprint := range []string{"f1", "f2", "f3"} {
+		h.link.add(&fakeAlert{id: alertID(i), fingerprint: fingerprint, labels: map[string]string{"strategy_id": "41"}})
+	}
+	if word := closer.Fingerprints(context.Background(), testScope, []string{"f1"}, DecisionScope, 7, fakeDecidedAt); word != OutcomeJobDone {
+		t.Fatalf("word %s", word)
+	}
+	now = now.Add(time.Hour)
+	if word := closer.Fingerprints(context.Background(), testScope, []string{"f2"}, DecisionScope, 7, fakeDecidedAt); word != OutcomeJobDone {
+		t.Fatalf("word %s", word)
+	}
+	first, second := command(alertID(0)), command(alertID(1))
+	if first.OperationID == second.OperationID || second.EffectiveAt != now.UTC().Format(time.RFC3339) {
+		t.Fatalf("second batch %+v, first %+v", second, first)
+	}
+	// The first batch again, an hour on: its command, its effective_at.
+	h.link.add(&fakeAlert{id: alertID(9), fingerprint: "f1", labels: map[string]string{"strategy_id": "41"}})
+	if word := closer.Fingerprints(context.Background(), testScope, []string{"f1"}, DecisionScope, 7, fakeDecidedAt); word != OutcomeJobDone {
+		t.Fatalf("word %s", word)
+	}
+	if again := command(alertID(9)); again != first {
+		t.Fatalf("the same batch again %+v, first %+v", again, first)
+	}
+
+	for i := 20; i < 22; i++ {
+		h.link.add(&fakeAlert{id: alertID(i), labels: map[string]string{"strategy_id": "41", "strategy_version": "3"}})
+	}
+	h.opened(t, "41", "3", nil, fingerprints(0, 2)...)
+	period := now
+	if word := closer.Inactive(context.Background(), testScope, "3", 3, period); word != OutcomeJobDone {
+		t.Fatalf("word %s", word)
+	}
+	h.link.add(&fakeAlert{id: alertID(30), labels: map[string]string{"strategy_id": "41", "strategy_version": "3"}})
+	now = now.Add(2 * time.Hour)
+	if word := closer.Inactive(context.Background(), testScope, "3", 3, now); word != OutcomeJobDone {
+		t.Fatalf("word %s", word)
+	}
+	if a, b := command(alertID(20)), command(alertID(30)); a.OperationID == b.OperationID || b.EffectiveAt != now.UTC().Format(time.RFC3339) {
+		t.Fatalf("next period %+v, first period %+v", b, a)
 	}
 }

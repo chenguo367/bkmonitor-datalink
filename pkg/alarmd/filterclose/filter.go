@@ -10,6 +10,8 @@
 package filterclose
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"sort"
@@ -71,6 +73,16 @@ func (scope Scope) validate() error {
 type Filter struct {
 	scope Scope
 	body  json.RawMessage
+	// batch names the series or targets of a per-series or per-target
+	// filter, in the decision's key: another batch of one decision is
+	// another command, with its own effective_at.
+	batch string
+}
+
+// batchOf is a digest of what a per-series or per-target filter names.
+func batchOf(prefix string, encoded []byte) string {
+	sum := sha256.Sum256(encoded)
+	return prefix + hex.EncodeToString(sum[:16])
 }
 
 // Scope is the filter's scope.
@@ -220,7 +232,13 @@ func FingerprintFilter(scope Scope, fingerprints []string, decidedAt time.Time) 
 	if err != nil {
 		return Filter{}, err
 	}
-	return build(scope, []any{terms(fieldPrint, sorted(fingerprints)), bound}, nil)
+	built, err := build(scope, []any{terms(fieldPrint, sorted(fingerprints)), bound}, nil)
+	if err != nil {
+		return Filter{}, err
+	}
+	encoded, _ := json.Marshal(sorted(fingerprints))
+	built.batch = batchOf("fingerprints:", encoded)
+	return built, nil
 }
 
 // LevelFilter is the threshold alerts of the given versions at a level the
@@ -357,6 +375,8 @@ func TargetFilters(scope Scope, targets []Target, decidedAt time.Time) ([]Filter
 		if err != nil {
 			return err
 		}
+		encoded, _ := json.Marshal(batch)
+		built.batch = batchOf("targets:", encoded)
 		filters = append(filters, built)
 		batch, clauses, size = nil, 0, 0
 		return nil

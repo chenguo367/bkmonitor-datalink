@@ -122,10 +122,17 @@ func (closer *Closer) Fingerprints(ctx context.Context, scope Scope, fingerprint
 
 // Inactive closes the strategy's alerts outside its effective time; version
 // non-empty closes only the alerts opened at it, where the decision is the
-// version's alone. The expectation is the record's entries of the version
+// version's alone. since is when the caller first found this inactive
+// period: each period is its own decision, with its own command, so a
+// later period does not close its alerts at an earlier period's
+// effective_at. The expectation is the record's entries of the version
 // (every entry without one); without a record, each alert whose own
 // strategy_version label is the version is closed by its id.
-func (closer *Closer) Inactive(ctx context.Context, scope Scope, version string, revision int64) string {
+func (closer *Closer) Inactive(ctx context.Context, scope Scope, version string, revision int64, since time.Time) string {
+	if since.IsZero() {
+		closer.count(OutcomeFilterRefused, 1)
+		return OutcomeFilterRefused
+	}
 	filter, err := StrategyFilter(scope)
 	match, decide := everyEntry, labelIs("strategy_id", scope.StrategyID)
 	if version != "" {
@@ -137,6 +144,7 @@ func (closer *Closer) Inactive(ctx context.Context, scope Scope, version string,
 		return OutcomeFilterRefused
 	}
 	return closer.recorded(ctx, Job{Filter: filter, Decision: DecisionInactive, Version: version, Revision: revision,
+		Batch:  "since:" + strconv.FormatInt(since.Unix(), 10),
 		Reason: fmt.Sprintf("alarmd: strategy %s outside its effective time", scope.StrategyID)}, match, decide)
 }
 

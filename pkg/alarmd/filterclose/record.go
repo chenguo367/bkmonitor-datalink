@@ -165,6 +165,7 @@ func (closer *Closer) perAlert(ctx context.Context, job Job, decide func(linkdma
 			continue
 		}
 		batchWord := closer.Run(ctx, Job{Filter: byID, Decision: job.Decision, Version: job.Version, Digest: job.Digest, Revision: job.Revision,
+			Batch:  job.Batch + job.Filter.batch,
 			Expect: Expectation{Count: len(batch), Source: ExpectDecidedIDs}, Reason: job.Reason, Recheck: recheck})
 		if batchWord == OutcomeUnsupported {
 			return batchWord

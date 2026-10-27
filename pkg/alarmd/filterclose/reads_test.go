@@ -141,7 +141,7 @@ func TestClosesStopAtWhatTheDryRunChecked(t *testing.T) {
 		link.sorted = nil
 	}
 	closer := h.closer(t)
-	if word := closer.Inactive(context.Background(), testScope, "3", 3); word != OutcomeJobIncomplete {
+	if word := closer.Inactive(context.Background(), testScope, "3", 3, fakeOpenedAt); word != OutcomeJobIncomplete {
 		t.Fatalf("word %s, want job_incomplete (stats %v)", word, nonZero(closer.Stats()))
 	}
 	closed := 0

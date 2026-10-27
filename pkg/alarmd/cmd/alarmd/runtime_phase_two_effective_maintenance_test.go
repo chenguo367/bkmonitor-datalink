@@ -262,8 +262,23 @@ func TestEffectiveMaintenanceClosesOncePerInactivePeriodAndConfirmsOnce(t *testi
 	f.m.step(context.Background())
 	f.at = maintenanceTime(18, 0)
 	f.m.step(context.Background())
-	if closes := f.closed(); len(closes) != 3 {
+	closes := f.closed()
+	if len(closes) != 3 {
 		t.Fatalf("closes %d in the next inactive period, want 3", len(closes))
+	}
+	// Each period is its own decision: the next period's close is its own
+	// command, not the first period's with its effective_at (the stored
+	// command outlives the fake clock's hours in the test Redis, as it
+	// would a second window inside the command's life).
+	type command struct {
+		OperationID string `json:"operation_id"`
+	}
+	var first, confirming, next command
+	_ = json.Unmarshal([]byte(closes[0]), &first)
+	_ = json.Unmarshal([]byte(closes[1]), &confirming)
+	_ = json.Unmarshal([]byte(closes[2]), &next)
+	if first.OperationID == "" || confirming.OperationID != first.OperationID || next.OperationID == first.OperationID {
+		t.Fatalf("commands: first %+v, confirming %+v, next period %+v", first, confirming, next)
 	}
 
 	g := newMaintenanceTestFixture(t, maintenanceReadySnapshot, maintenanceTime(8, 0), maintenanceMatches)
