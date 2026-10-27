@@ -41,6 +41,9 @@ const (
 	OutcomeLinkFailed         = "link_failed"
 	OutcomeCommandUnavailable = "command_unavailable"
 	OutcomeFilterRefused      = "filter_refused"
+	// OutcomeTargetListTooLarge is a scope close whose current targets do
+	// not fit one filter (ScopeFilter): nothing is sent, no part of it.
+	OutcomeTargetListTooLarge = "target_list_too_large"
 
 	// Each item of a filtered close.
 	OutcomeItemClosed        = "item_closed"
@@ -110,7 +113,7 @@ const (
 // Outcomes is every outcome, the edit decisions' words among them.
 var Outcomes = append([]string{
 	OutcomeJobDone, OutcomeJobIncomplete, OutcomeNothingMatched, OutcomeExpectExceeded, OutcomeUnsupported, OutcomeLinkBusy,
-	OutcomeLinkRefused, OutcomeLinkFailed, OutcomeCommandUnavailable, OutcomeFilterRefused,
+	OutcomeLinkRefused, OutcomeLinkFailed, OutcomeCommandUnavailable, OutcomeFilterRefused, OutcomeTargetListTooLarge,
 	OutcomeItemClosed, OutcomeItemAlreadyClosed, OutcomeItemEndedOtherwise, OutcomeItemSourceUnpublished, OutcomeItemConflictUnknown,
 	OutcomeItemRederived, OutcomeItemPending, OutcomeItemPendingFull, OutcomeItemPendingLost, OutcomeItemRefused,
 	OutcomePendingClosed, OutcomePendingAlreadyClosed, OutcomePendingEndedOther, OutcomePendingLeftDecision, OutcomePendingNotFound,

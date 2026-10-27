@@ -60,7 +60,11 @@ const (
 	StageAbsentStrategyClose = "absent_strategy_close"
 	// StageStrategyEditClose is the control leader's close of the alerts an
 	// edit of their strategy orphaned (package editclose).
-	StageStrategyEditClose    = "strategy_edit_close"
+	StageStrategyEditClose = "strategy_edit_close"
+	// StageStrategyScopeClose is the control leader's close of a strategy's
+	// alerts outside its current target scope, on its start and on each
+	// change of the scope.
+	StageStrategyScopeClose   = "strategy_scope_close"
 	StageLegacyPodCache       = "legacy_pod_cache"
 	StageSnapshotRefreshed    = "snapshot_refreshed"
 	StageSnapshotUnavailable  = "snapshot_unavailable"
@@ -3685,6 +3689,8 @@ var phaseTwoComponentStages = []ComponentStage{
 	// The edit close, for the same reason: its own family
 	// (strategy_edit_close_total) has a cell per outcome.
 	{ComponentControlPlane, StageStrategyEditClose},
+	// The strategy scope close, for the same reason: strategy_scope_close_total.
+	{ComponentControlPlane, StageStrategyScopeClose},
 	{ComponentControlPlane, StageSnapshotRefreshed}, {ComponentControlPlane, StageSnapshotUnavailable},
 	{ComponentControlPlane, StageActivationFailed},
 	// A failed write of the leader's control facts. It was written as
@@ -3903,6 +3909,11 @@ func editCloseReasons() []ReasonCode {
 	return reasons
 }
 
+// StrategyScopeCloseReasons are the words the control leader's strategy
+// scope close writes its lines with (StageStrategyScopeClose).
+var StrategyScopeCloseReasons = []ReasonCode{"snapshot_unavailable", "link_unavailable", "publication_unavailable",
+	"member_unreadable", "target_list_too_large"}
+
 var contractClassReasons = []ReasonCode{
 	ReasonContractDeterministic, ReasonContractRetryable, ReasonContractCoverage,
 }
@@ -4018,7 +4029,7 @@ var allResourceReasons = joinReasons(
 // allLogReasons is every reason NormalizeReason can return: the limiter keeps
 // a bucket for each, and refuses a reason it has none for, so a catalogue
 // NormalizeReason accepts and this list leaves out has its lines dropped.
-var allLogReasons = joinReasons(unclassifiedReasons, []ReasonCode{ReasonTraceExportFailed}, resourceOnlyReasons, activationFailureReasons, ViewStreamReasons, SchedulerDecisionReasons, SlotPathReasons, effectiveMaintenanceReasons, AbsentCloseReasons, EditCloseReasons, CompletionAttributionReasons, AdmissionFailureReasons, NoDataStallReasons, contractClassReasons, []ReasonCode{ReasonHeldBySupplement, ReasonHeldByMaintenance, ReasonSlotCancelled}, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
+var allLogReasons = joinReasons(unclassifiedReasons, []ReasonCode{ReasonTraceExportFailed}, resourceOnlyReasons, activationFailureReasons, ViewStreamReasons, SchedulerDecisionReasons, SlotPathReasons, effectiveMaintenanceReasons, AbsentCloseReasons, EditCloseReasons, StrategyScopeCloseReasons, CompletionAttributionReasons, AdmissionFailureReasons, NoDataStallReasons, contractClassReasons, []ReasonCode{ReasonHeldBySupplement, ReasonHeldByMaintenance, ReasonSlotCancelled}, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
 
 var componentStageSet = makeComponentStageSet(allComponentStages)
 var metricComponentStageSet = makeComponentStageSet(metricComponentStages)
@@ -4034,6 +4045,7 @@ var schedulerDecisionReasonSet = makeReasonSet(SchedulerDecisionReasons)
 var effectiveMaintenanceReasonSet = makeReasonSet(effectiveMaintenanceReasons)
 var absentCloseReasonSet = makeReasonSet(AbsentCloseReasons)
 var editCloseReasonSet = makeReasonSet(EditCloseReasons)
+var strategyScopeCloseReasonSet = makeReasonSet(StrategyScopeCloseReasons)
 var contractObservationReasons, contractObservationReasonSet, contractObservationMetricReasonByCode = loadContractObservationReasons()
 
 func makeComponentStageSet(values []ComponentStage) map[ComponentStage]struct{} {

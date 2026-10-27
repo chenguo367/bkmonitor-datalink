@@ -71,6 +71,9 @@ type absentStrategyClose struct {
 	// read one, and after the term ends). Nil where it is not wired.
 	edits        *editStrategyClose
 	lastSnapshot map[absentalerts.Key]struct{}
+	// scopes is the strategy scope close, run after the edit close over
+	// the same snapshot. Nil where it is not wired.
+	scopes *strategyScopeClose
 	// filter is the link's search and close by filter: the discovery of
 	// the strategies the link holds alerts for, and every close.
 	filter *filterRoute
@@ -192,6 +195,9 @@ func (loop *absentStrategyClose) run(ctx context.Context) {
 		loop.step(ctx)
 		if loop.edits != nil {
 			loop.edits.step(ctx, loop.lastSnapshot)
+		}
+		if loop.scopes != nil {
+			loop.scopes.step(ctx, loop.lastSnapshot)
 		}
 		if loop.leading() {
 			loop.filter.retryPending(ctx)

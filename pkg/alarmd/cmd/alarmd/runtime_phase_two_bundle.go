@@ -1251,6 +1251,11 @@ func openProductionPhaseTwoBundleAssembly(
 		absentClose.documents, _ = strategySource.(controlplane.StrategyDocumentPresence)
 		absentClose.edits = newEditStrategyClose(bundle, reconciler, route)
 		recorder.SetEditCloseSource(absentClose.edits.Stats)
+		// Beside the replicas' own target scope close (bindTargetScopeClose
+		// above): the leader's close of each strategy's alerts outside its
+		// current targets, on its start and on each change of the scope.
+		absentClose.scopes = newStrategyScopeClose(bundle, reconciler, targetResolver, route)
+		recorder.SetStrategyScopeCloseSource(scopeCloseOutcomes, absentClose.scopes.Stats)
 		absentPage.bind(absentClose)
 		bundle.dependencies.RunAbsentClose = absentClose.run
 		recorder.SetAbsentCloseSource(absentClose.Stats, absentClose.Rounds, absentClose.Difference)

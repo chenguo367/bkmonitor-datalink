@@ -16,7 +16,8 @@ func newLinkdFilterCloseCollector() *outcomeCounterCollector {
 			"dry run's count was spent), nothing_matched, expect_exceeded (the dry run matched more than the independent "+
 			"expectation allows; nothing closed), filter_close_unsupported (501/404/405: nothing closes the decision), "+
 			"link_busy (429), link_refused (another 4xx), link_failed (timeout, 5xx, transport), command_unavailable, "+
-			"filter_refused; where the job's expectation came from: expect_own_record (alarmd's own record of the episodes it "+
+			"filter_refused, target_list_too_large (a scope close whose current targets do not fit one request: not "+
+			"sent, never cut); where the job's expectation came from: expect_own_record (alarmd's own record of the episodes it "+
 			"opened), expect_removed_targets, expect_decided_ids; the record's: record_missing (no record: decided alert "+
 			"by alert), record_truncated, record_unavailable (read failed: nothing decided), record_pruned (entries "+
 			"removed after their decision found nothing), record_prune_failed. Per item: item_closed, "+
@@ -58,4 +59,24 @@ func (r *Recorder) SetOpenEpisodeRecordSource(words []string, outcomes func() ma
 		return
 	}
 	r.phaseTwo.openEpisodeRecord.set(words, outcomes)
+}
+
+func newStrategyScopeCloseCollector() *outcomeCounterCollector {
+	return newOutcomeCounterCollector("strategy_scope_close_total",
+		"The control leader's strategy scope close (on its start and on each change of a strategy's target scope, one "+
+			"close by filter of the strategy's alerts outside its current targets), by outcome: not_leader, "+
+			"publication_unavailable, snapshot_unavailable, link_unavailable (no link control plane or no target "+
+			"resolver), plans_disagree (the strategy's Plans carry different target plans), resolution_incomplete (the "+
+			"target did not resolve Complete with its exclusions: nothing closed), member_unreadable, scope_unchanged, "+
+			"round_full (past the round's strategies), close_run, scope_settled (the close's word ends the decision until "+
+			"the scope changes). The close's own word is in linkd_filter_close_total. Every cell exists from the start.")
+}
+
+// SetStrategyScopeCloseSource binds the strategy scope close's counts.
+// Safe before or after registration; a nil recorder is a no-op.
+func (r *Recorder) SetStrategyScopeCloseSource(words []string, outcomes func() map[string]uint64) {
+	if r == nil || r.phaseTwo.strategyScopeClose == nil {
+		return
+	}
+	r.phaseTwo.strategyScopeClose.set(words, outcomes)
 }

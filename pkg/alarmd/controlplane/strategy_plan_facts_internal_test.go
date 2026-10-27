@@ -93,3 +93,34 @@ func TestStrategyPlanFactsWithoutAPublicationAreUnavailable(t *testing.T) {
 		t.Fatalf("available %v found %v, want a publication without the strategy", available, found)
 	}
 }
+
+// A strategy's target is its Plans' target plan, with the revision and the
+// evaluation period; Plans with different target plans disagree; a Plan
+// without one answers found with no plan; another tenant is not found.
+func TestStrategyTargetIsThePlansTargetPlan(t *testing.T) {
+	targetPlan := &contract.TargetPlanV1{SchemaVersion: 1, Rule: contract.TargetPlanRuleIPCloud,
+		Identity:   contract.TargetPlanIdentityV1{Dimensions: []string{"bk_target_ip", "bk_target_cloud_id"}, Address: true},
+		StaticKeys: []string{"192.0.2.1|0"}}
+	plan := factsPlan("t", 9, nil, 1)
+	plan.Plan.TargetPlan = targetPlan
+	plan.Plan.StrategyIR.ExecutionSemantics.EvaluationInterval = 60
+	index := buildStrategyIndex(SnapshotPublicationRef{}, []QueryGroup{{Identity: "qg", Plans: []FrozenPlan{plan}}}, nil)
+	target, found := index.target("t", "7")
+	if !found || target.Plan != targetPlan || target.Revision != 9 || target.Interval.Seconds() != 60 || !target.Agree {
+		t.Fatalf("target %+v found %v", target, found)
+	}
+	if _, found := index.target("other", "7"); found {
+		t.Fatal("another tenant's strategy was answered")
+	}
+	other := factsPlan("t", 9, nil, 1)
+	other.Plan.TargetPlan = &contract.TargetPlanV1{SchemaVersion: 1, Rule: contract.TargetPlanRuleIPCloud,
+		Identity: targetPlan.Identity, StaticKeys: []string{"192.0.2.2|0"}}
+	split := buildStrategyIndex(SnapshotPublicationRef{}, []QueryGroup{{Identity: "a", Plans: []FrozenPlan{plan}}, {Identity: "b", Plans: []FrozenPlan{other}}}, nil)
+	if target, _ := split.target("t", "7"); target.Agree {
+		t.Fatal("Plans with different target plans read as agreeing")
+	}
+	whole := buildStrategyIndex(SnapshotPublicationRef{}, []QueryGroup{{Identity: "qg", Plans: []FrozenPlan{factsPlan("t", 9, nil, 1)}}}, nil)
+	if target, found := whole.target("t", "7"); !found || target.Plan != nil {
+		t.Fatalf("a whole-business strategy: %+v found %v", target, found)
+	}
+}
