@@ -266,3 +266,22 @@ func TestEachItemIsCountedByItsKind(t *testing.T) {
 		t.Fatalf("kept %v, want the three 5xx other than not_attempted", ids)
 	}
 }
+
+// A close decided per series closes the strategy's active alerts of those
+// fingerprints and no other, under a command of its own decision.
+func TestAPerSeriesCloseClosesOnlyItsFingerprints(t *testing.T) {
+	h := newHarness(t)
+	for i, fingerprint := range []string{"f1", "f2", "f3"} {
+		h.link.add(&fakeAlert{id: alertID(i), fingerprint: fingerprint, labels: map[string]string{"strategy_id": "41"}})
+	}
+	h.link.add(&fakeAlert{id: "other", fingerprint: "f1", labels: map[string]string{"strategy_id": "42"}})
+	closer := h.closer(t)
+	if word := closer.Fingerprints(context.Background(), testScope, []string{"f1", "f2"}, "target_out_of_scope", 7); word != OutcomeJobDone {
+		t.Fatalf("word %s", word)
+	}
+	for id, want := range map[string]int{alertID(0): 1, alertID(1): 1, alertID(2): 0, "other": 0} {
+		if h.link.alert(id).closes != want {
+			t.Fatalf("%s closed %d, want %d", id, h.link.alert(id).closes, want)
+		}
+	}
+}

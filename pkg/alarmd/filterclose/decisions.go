@@ -43,6 +43,26 @@ func (closer *Closer) Absent(ctx context.Context, scope Scope, decision string, 
 		Reason: fmt.Sprintf("alarmd: strategy %s %s", scope.StrategyID, decision)})
 }
 
+// Fingerprints closes the strategy's active alerts of the given
+// fingerprints under one decision (a close reason and its detail): the
+// series a caller decided one by one. The expectation is the fingerprints
+// themselves - one active alert each at most.
+func (closer *Closer) Fingerprints(ctx context.Context, scope Scope, fingerprints []string, decision string, revision int64) string {
+	filter, err := FingerprintFilter(scope, fingerprints)
+	if err != nil {
+		closer.count(OutcomeFilterRefused, 1)
+		return OutcomeFilterRefused
+	}
+	strategy, err := StrategyFilter(scope)
+	if err != nil {
+		closer.count(OutcomeFilterRefused, 1)
+		return OutcomeFilterRefused
+	}
+	return closer.Run(ctx, Job{Filter: filter, Decision: decision, Revision: revision, Recheck: strategy,
+		Expect: Expectation{Count: len(fingerprints), Source: ExpectDecidedIDs},
+		Reason: fmt.Sprintf("alarmd: strategy %s %s", scope.StrategyID, decision)})
+}
+
 // Inactive closes the strategy's alerts outside its effective time; version
 // non-empty closes only the alerts opened at it, where the decision is the
 // version's alone.

@@ -26,6 +26,7 @@ const (
 	fieldTenant  = "bk_tenant_id"
 	fieldSource  = "event_source_id"
 	fieldAlertID = "alert_id"
+	fieldPrint   = "fingerprint"
 	fieldStatus  = "status"
 	fieldLevel   = "severity"
 	labelID      = "labels.strategy_id"
@@ -190,6 +191,16 @@ func alertsFilter(scope Scope, bucket Bucket, ids []string) (Filter, error) {
 	}
 	filter, mustNot := bucket.clauses()
 	return build(scope, append(filter, terms(fieldAlertID, ids)), mustNot)
+}
+
+// FingerprintFilter is the strategy's alerts of the given fingerprints: a
+// close decided per series (a target out of scope, an inactive strategy's
+// listed alerts), each fingerprint naming at most one active alert.
+func FingerprintFilter(scope Scope, fingerprints []string) (Filter, error) {
+	if len(fingerprints) == 0 || len(fingerprints) > maxTargetClauses {
+		return Filter{}, errors.New("alarmd filterclose: 1 to 500 fingerprints")
+	}
+	return build(scope, []any{terms(fieldPrint, sorted(fingerprints))}, nil)
 }
 
 // LevelFilter is the threshold alerts of the given versions at a level the

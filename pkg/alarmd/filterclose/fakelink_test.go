@@ -72,9 +72,9 @@ type fakeLink struct {
 }
 
 type fakeAlert struct {
-	id, tenant, source, status, severity string
-	labels, dimensions                   map[string]string
-	extra                                json.RawMessage
+	id, tenant, source, status, severity, fingerprint string
+	labels, dimensions                                map[string]string
+	extra                                             json.RawMessage
 	// closes counts saved closes; endOperation is the saved command.
 	closes       int
 	endOperation string
@@ -118,6 +118,8 @@ func (alert *fakeAlert) field(name string) (string, bool) {
 		return alert.source, true
 	case name == fieldAlertID:
 		return alert.id, true
+	case name == fieldPrint:
+		return alert.fingerprint, alert.fingerprint != ""
 	case name == fieldStatus:
 		return alert.status, true
 	case name == fieldLevel:
