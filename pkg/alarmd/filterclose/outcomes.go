@@ -50,6 +50,10 @@ const (
 	// OutcomeTargetListTooLarge is a scope close whose current targets do
 	// not fit one filter (ScopeFilter): nothing is sent, no part of it.
 	OutcomeTargetListTooLarge = "target_list_too_large"
+	// OutcomePageLost is a real close page whose whole answer was lost
+	// (timeout, reset, 5xx): its candidates, read by the dry run sent just
+	// before it, are kept to be retried by id (item_pending each).
+	OutcomePageLost = "page_lost"
 
 	// Each item of a filtered close.
 	OutcomeItemClosed        = "item_closed"
@@ -120,7 +124,7 @@ const (
 var Outcomes = append([]string{
 	OutcomeJobDone, OutcomeJobDoneRederived, OutcomeJobIncomplete, OutcomeNothingMatched, OutcomeExpectExceeded, OutcomeUnsupported, OutcomeLinkBusy,
 	OutcomeLinkRefused, OutcomeLinkFailed, OutcomeCommandUnavailable, OutcomeFilterRefused, OutcomeTargetListTooLarge,
-	OutcomeItemClosed, OutcomeItemAlreadyClosed, OutcomeItemEndedOtherwise, OutcomeItemSourceUnpublished, OutcomeItemConflictUnknown,
+	OutcomePageLost, OutcomeItemClosed, OutcomeItemAlreadyClosed, OutcomeItemEndedOtherwise, OutcomeItemSourceUnpublished, OutcomeItemConflictUnknown,
 	OutcomeItemRederived, OutcomeItemPending, OutcomeItemPendingFull, OutcomeItemPendingLost, OutcomeItemRefused,
 	OutcomePendingClosed, OutcomePendingAlreadyClosed, OutcomePendingEndedOther, OutcomePendingLeftDecision, OutcomePendingNotFound,
 	OutcomePendingRetryFailed, OutcomePendingGivenUp, OutcomePendingRefused, OutcomePendingUnreadable, OutcomePendingUnavailable,

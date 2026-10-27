@@ -254,7 +254,8 @@ func TestEffectiveMaintenanceClosesOncePerInactivePeriodAndConfirmsOnce(t *testi
 	f.matchAgain("later")
 	f.advance(10 * time.Minute)
 	f.m.step(context.Background())
-	if requests := f.stub.requests("/api/v1/alerts/close"); len(f.closed()) != 2 || len(requests) != 4 {
+	// Two passes, each a dry run, the page's dry run and the close.
+	if requests := f.stub.requests("/api/v1/alerts/close"); len(f.closed()) != 2 || len(requests) != 6 {
 		t.Fatalf("requests %d (closes %d) after the confirming pass, want the version left alone", len(requests), len(f.closed()))
 	}
 	// Active again, then inactive: a new period.

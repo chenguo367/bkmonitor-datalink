@@ -397,9 +397,22 @@ func (closer *Closer) Run(ctx context.Context, job Job) string {
 			closer.count(OutcomeJobIncomplete, 1)
 			return OutcomeJobIncomplete
 		}
-		page, err := closer.link.CloseByFilter(ctx, command.Bytes, scope.TenantID, job.Filter.body, after,
-			min(pageLimit, state.checked-state.processed), false)
+		limit := min(pageLimit, state.checked-state.processed)
+		// The page's candidates first, by a dry run of the same request: a
+		// real page whose answer is lost leaves its items unknown, and an
+		// item whose close was saved but whose outputs failed no longer
+		// matches active, so no filter finds it again (Linkd
+		// ec55128e7 pkg/linkd/docs/reference/contracts/alert-close.md:
+		// 133-135). Those ids are kept and retried by id.
+		candidates, err := closer.link.CloseByFilter(ctx, nil, scope.TenantID, job.Filter.body, after, limit, true)
 		if err != nil {
+			return closer.failed(err)
+		}
+		page, err := closer.link.CloseByFilter(ctx, command.Bytes, scope.TenantID, job.Filter.body, after, limit, false)
+		if err != nil {
+			if status := linkdmanage.Status(err); status == 0 || status >= 500 {
+				closer.keepLost(ctx, job, command, candidates.Items)
+			}
 			return closer.failed(err)
 		}
 		rederived += closer.items(ctx, job, command, page.Items)
@@ -451,13 +464,38 @@ func (closer *Closer) dryRun(ctx context.Context, job Job, state *progress, limi
 	}
 }
 
-// items counts a page's results, keeps the ones whose close may have been
-// saved, and returns how many came back certainly not closed.
-func (closer *Closer) items(ctx context.Context, job Job, command Command, items []linkdmanage.Item) int {
+// keepLost keeps the candidates of a real page whose answer was lost, to
+// be retried by id: each is counted as its keep's item outcome, the page
+// once as OutcomePageLost.
+func (closer *Closer) keepLost(ctx context.Context, job Job, command Command, candidates []linkdmanage.Item) {
+	closer.count(OutcomePageLost, 1)
+	for _, candidate := range candidates {
+		closer.keep(ctx, job, command, candidate.AlertID)
+	}
+}
+
+// keep keeps one item whose close may have been saved, counted.
+func (closer *Closer) keep(ctx context.Context, job Job, command Command, alertID string) {
 	recheck := job.Recheck
 	if recheck.body == nil {
 		recheck = job.Filter
 	}
+	scope := job.Filter.scope
+	err := closer.pending.Keep(ctx, pendingItem{TenantID: scope.TenantID, EventSourceID: scope.EventSourceID, StrategyID: scope.StrategyID,
+		AlertID: alertID, OperationID: command.ID, Command: command.Bytes, Recheck: recheck.body, FirstAt: closer.now().Unix()})
+	switch {
+	case err == nil:
+		closer.count(OutcomeItemPending, 1)
+	case errors.Is(err, errPendingFull):
+		closer.count(OutcomeItemPendingFull, 1)
+	default:
+		closer.count(OutcomeItemPendingLost, 1)
+	}
+}
+
+// items counts a page's results, keeps the ones whose close may have been
+// saved, and returns how many came back certainly not closed.
+func (closer *Closer) items(ctx context.Context, job Job, command Command, items []linkdmanage.Item) int {
 	rederived := 0
 	for _, item := range items {
 		switch {
@@ -482,17 +520,7 @@ func (closer *Closer) items(ctx context.Context, job Job, command Command, items
 			closer.count(OutcomeItemRederived, 1)
 			rederived++
 		case item.Status >= 500:
-			scope := job.Filter.scope
-			err := closer.pending.Keep(ctx, pendingItem{TenantID: scope.TenantID, EventSourceID: scope.EventSourceID, StrategyID: scope.StrategyID,
-				AlertID: item.AlertID, OperationID: command.ID, Command: command.Bytes, Recheck: recheck.body, FirstAt: closer.now().Unix()})
-			switch {
-			case err == nil:
-				closer.count(OutcomeItemPending, 1)
-			case errors.Is(err, errPendingFull):
-				closer.count(OutcomeItemPendingFull, 1)
-			default:
-				closer.count(OutcomeItemPendingLost, 1)
-			}
+			closer.keep(ctx, job, command, item.AlertID)
 		default:
 			closer.count(OutcomeItemRefused, 1)
 		}

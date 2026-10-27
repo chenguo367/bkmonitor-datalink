@@ -587,3 +587,42 @@ func TestEachBatchAndPeriodHasItsOwnCommand(t *testing.T) {
 		t.Fatalf("next period %+v, first period %+v", b, a)
 	}
 }
+
+// A real close page whose answer is lost leaves its items unknown; an
+// item whose close was saved with its outputs failed no longer matches
+// active, so no filter finds it again. The candidates the dry run just
+// before the page read are kept and retried by id: the item's outputs are
+// completed, and every other candidate answers already closed.
+func TestALostPageKeepsItsCandidatesForTheRetry(t *testing.T) {
+	h := newHarness(t)
+	for i := 0; i < 10; i++ {
+		h.link.add(&fakeAlert{id: alertID(i), labels: map[string]string{"strategy_id": "41", "strategy_version": "3"}})
+	}
+	h.opened(t, "41", "3", nil, fingerprints(0, 10)...)
+	h.link.itemFault = func(id string, n int) string {
+		if id == alertID(3) && n == 0 {
+			return "uncertain_saved"
+		}
+		return ""
+	}
+	h.link.loseAnswer = func(n int) bool { return n == 1 }
+	closer := h.closer(t)
+	if word := closer.Inactive(context.Background(), testScope, "3", 3, fakeOpenedAt); word != OutcomeLinkFailed {
+		t.Fatalf("word %s, want link_failed (stats %v)", word, nonZero(closer.Stats()))
+	}
+	if stats := closer.Stats(); stats[OutcomePageLost] != 1 || stats[OutcomeItemPending] != 10 {
+		t.Fatalf("stats %v, want the page's ten candidates kept", nonZero(stats))
+	}
+	if h.link.alert(alertID(3)).completed {
+		t.Fatal("the fault did not leave the outputs unfinished")
+	}
+	closer.RetryPending(context.Background(), 100)
+	for i := 0; i < 10; i++ {
+		if alert := h.link.alert(alertID(i)); alert.closes != 1 || !alert.completed {
+			t.Fatalf("%s closes %d completed %v (stats %v)", alert.id, alert.closes, alert.completed, nonZero(closer.Stats()))
+		}
+	}
+	if stats := closer.Stats(); stats[OutcomePendingAlreadyClosed] != 10 || closer.PendingSize(context.Background()) != 0 {
+		t.Fatalf("stats %v", nonZero(stats))
+	}
+}

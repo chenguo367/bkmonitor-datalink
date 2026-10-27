@@ -18,7 +18,8 @@ func newLinkdFilterCloseCollector() *outcomeCounterCollector {
 			"expectation allows; nothing closed), filter_close_unsupported (501/404/405: nothing closes the decision), "+
 			"link_busy (429), link_refused (another 4xx), link_failed (timeout, 5xx, transport), command_unavailable, "+
 			"filter_refused, target_list_too_large (a scope close whose current targets do not fit one request: not "+
-			"sent, never cut); where the job's expectation came from: expect_own_record (alarmd's own record of the episodes it "+
+			"sent, never cut), page_lost (a real close page whose answer was lost: the candidates its dry run read just "+
+			"before are kept to retry by id); where the job's expectation came from: expect_own_record (alarmd's own record of the episodes it "+
 			"opened), expect_removed_targets, expect_decided_ids; the record's: record_missing (no record: decided alert "+
 			"by alert), record_truncated, record_unavailable (read failed: nothing decided), record_pruned (entries "+
 			"removed after their decision found nothing), record_prune_failed. Per item: item_closed, "+

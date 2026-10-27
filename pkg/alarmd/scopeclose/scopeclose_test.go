@@ -232,9 +232,10 @@ func TestARemovedTargetIsClosedByItsPairsAndASeriesWithoutOneByFingerprint(t *te
 	confirm(closer, Drop{Fingerprint: "fp-target", Target: hostTarget("192.0.2.10")})
 	closer.Step(context.Background())
 
+	// The check's dry run, the page's own (its candidates), the close.
 	dry, real := link.sent()
-	if len(dry) != 1 || len(real) != 1 {
-		t.Fatalf("dry runs %d, closes %d; want one each", len(dry), len(real))
+	if len(dry) != 2 || len(real) != 1 {
+		t.Fatalf("dry runs %d, closes %d; want two and one", len(dry), len(real))
 	}
 	fields, groups := termsOf(t, real[0].Filter)
 	for _, want := range []string{"bk_tenant_id=" + testTenant, "event_source_id=" + testSource, "labels.strategy_id=" + testStrategy,
@@ -304,7 +305,7 @@ func TestADryRunPastTheTargetsExpectationClosesNothing(t *testing.T) {
 	link.set(2, 0)
 	closer.Step(context.Background())
 	dry, real = link.sent()
-	if len(dry) != 2 || len(real) != 1 {
+	if len(dry) != 3 || len(real) != 1 {
 		t.Fatalf("inside the expectation: dry runs %d, closes %d", len(dry), len(real))
 	}
 	if stats := closer.Stats(); stats[OutcomeCloseSent] != 1 || stats[OutcomeTargetCloseSent] != 1 {

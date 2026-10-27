@@ -71,6 +71,11 @@ type fakeLink struct {
 	// beforeClose runs when a filtered close (not a dry run) arrives,
 	// before it selects its candidates, under the lock.
 	beforeClose func(link *fakeLink)
+	// loseAnswer, when it returns true for a real close (its number among
+	// them), runs the close and then answers 502 with no items: the
+	// answer lost after the closes were saved.
+	loseAnswer func(n int) bool
+	realCloses int
 	// closeBodies is every filtered close's (not a dry run's) filter.
 	closeBodies []string
 	unsupported bool
@@ -486,6 +491,11 @@ func (link *fakeLink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		alerts, next := link.page(input.TenantID, input.Filter, true, input.After, input.Limit)
 		page := linkdmanage.FilterPage{Items: []linkdmanage.Item{}, Next: next, DryRun: input.DryRun}
+		lost := false
+		if !input.DryRun {
+			link.realCloses++
+			lost = link.loseAnswer != nil && link.loseAnswer(link.realCloses)
+		}
 		for i, alert := range alerts {
 			item := linkdmanage.Item{AlertID: alert.id, Status: http.StatusOK}
 			switch {
@@ -502,6 +512,10 @@ func (link *fakeLink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				page.Failed++
 			}
 			page.Items = append(page.Items, item)
+		}
+		if lost {
+			http.Error(w, "upstream answer lost", http.StatusBadGateway)
+			return
 		}
 		_ = json.NewEncoder(w).Encode(page)
 	case "close_one":

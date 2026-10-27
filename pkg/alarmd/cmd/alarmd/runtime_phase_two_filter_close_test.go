@@ -50,7 +50,8 @@ func TestTheEditCloseTakesTheLinksSearch(t *testing.T) {
 }
 
 // An absent strategy's alerts close through the link's filter: a dry run,
-// then the close, carrying the strategy-change command.
+// then the page's own dry run (its candidates, kept should its answer be
+// lost) and the close, carrying the strategy-change command.
 func TestAnAbsentStrategyClosesThroughTheLinksFilter(t *testing.T) {
 	stub := &stubControlPlane{bodies: map[string][]string{}, matches: []string{"alert-1", "alert-2"}}
 	bundle := &phaseTwoWorkerBundle{dependencies: phaseTwoWorkerBundleDependencies{Now: time.Now}}
@@ -58,8 +59,9 @@ func TestAnAbsentStrategyClosesThroughTheLinksFilter(t *testing.T) {
 	key := absentalerts.Key{TenantID: "system", StrategyID: "10"}
 	execution := loop.closeStrategy(context.Background(), absentalerts.Absent{Key: key}, time.Now())
 	closes := stub.requests("/api/v1/alerts/close")
-	if execution.word != filterclose.OutcomeJobDone || !execution.sent || len(closes) != 2 ||
-		!strings.Contains(closes[0], `"dry_run":true`) || !strings.Contains(closes[1], `"operation_source":"strategy_change"`) {
+	if execution.word != filterclose.OutcomeJobDone || !execution.sent || len(closes) != 3 ||
+		!strings.Contains(closes[0], `"dry_run":true`) || !strings.Contains(closes[1], `"dry_run":true`) ||
+		!strings.Contains(closes[2], `"operation_source":"strategy_change"`) {
 		t.Fatalf("word %s sent %v, requests %v", execution.word, execution.sent, closes)
 	}
 }
