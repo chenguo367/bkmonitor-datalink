@@ -411,7 +411,9 @@ func (closer *Closer) Run(ctx context.Context, job Job) string {
 		page, err := closer.link.CloseByFilter(ctx, command.Bytes, scope.TenantID, job.Filter.body, after, limit, false)
 		if err != nil {
 			if status := linkdmanage.Status(err); status == 0 || status >= 500 {
-				closer.keepLost(ctx, job, command, candidates.Items)
+				// Kept even when the round's own context ended the page:
+				// the closes may have been saved all the same.
+				closer.keepLost(context.WithoutCancel(ctx), job, command, candidates.Items)
 			}
 			return closer.failed(err)
 		}
