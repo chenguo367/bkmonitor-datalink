@@ -41,12 +41,14 @@ type Pending struct {
 	cursor uint64
 }
 
-// MaxPending bounds the hash. An entry is about 700 bytes (the command,
-// the decision's re-check filter, ids), so the bound is about 35 MB, and
-// it is only reached by a link answering result_uncertain on tens of
-// thousands of closes; past it an item is not kept, counted, and its
-// alert's outputs are left to the link.
-const MaxPending = 50000
+// MaxPending bounds the hash. An entry is about 1 KB, measured: a 954-byte
+// value (the command 297 bytes, held base64; the bucket's re-check filter
+// 328) and a 47-byte field, plus Redis' own per-field overhead - so the
+// bound is about 22 MB of the runtime Redis. It is reached only by a link
+// answering result_uncertain on tens of thousands of closes; past it an
+// item is not kept, counted, and its alert's outputs are left to the link.
+// The bound is global, not per strategy: at 10k strategies it is the same.
+const MaxPending = 20000
 
 // The bounds one item is retried within: attempts, and age from its first
 // failure. Past either it is dropped and counted.
