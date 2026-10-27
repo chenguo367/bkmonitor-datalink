@@ -55,8 +55,19 @@ const (
 	// round.
 	scopeCloseResolutionIncomplete = "resolution_incomplete"
 	scopeCloseMemberUnreadable     = "member_unreadable"
-	scopeCloseUnchanged            = "scope_unchanged"
-	scopeCloseRoundFull            = "round_full"
+	// scopeCloseEmpty is a strategy whose target resolved Complete with no
+	// member: nothing is closed. A filter with no current target would
+	// select every alert of the strategy that carries the target's
+	// dimensions, and the record does not stop it (each entry with a
+	// target is outside an empty scope, so the expectation covers them
+	// all).
+	scopeCloseEmpty = "scope_empty"
+	// scopeCloseUnconfirmed is a scope read once: it closes only when the
+	// next round reads the same one, as the worker side closes only on a
+	// second rejected Slot.
+	scopeCloseUnconfirmed = "scope_unconfirmed"
+	scopeCloseUnchanged   = "scope_unchanged"
+	scopeCloseRoundFull   = "round_full"
 	// scopeCloseSent is a strategy whose close was run; its word is
 	// filterclose's (linkd_filter_close_total).
 	scopeCloseSent = "close_run"
@@ -67,7 +78,7 @@ const (
 
 var scopeCloseOutcomes = []string{scopeCloseNotLeader, scopeClosePublicationUnavailable, scopeCloseSnapshotUnavailable,
 	scopeCloseLinkUnavailable, scopeClosePlansDisagree, scopeCloseResolutionIncomplete, scopeCloseMemberUnreadable,
-	scopeCloseUnchanged, scopeCloseRoundFull, scopeCloseSent, scopeCloseSettled}
+	scopeCloseEmpty, scopeCloseUnconfirmed, scopeCloseUnchanged, scopeCloseRoundFull, scopeCloseSent, scopeCloseSettled}
 
 // strategyTargets is what the loop asks the control plane
 // (controlplane.SourceReconciler).
@@ -81,8 +92,10 @@ type strategyScopeClose struct {
 	plans    strategyTargets
 	resolver worker.TargetResolver
 	filter   *filterRoute
-	// closed is, per strategy, the scope digest this term closed for.
+	// closed is, per strategy, the scope digest this term closed for;
+	// seen the digest the last round read, waiting for its second read.
 	closed    map[absentalerts.Key]string
+	seen      map[absentalerts.Key]string
 	wasLeader bool
 	countsMu  sync.Mutex
 	counts    map[string]uint64
@@ -91,7 +104,7 @@ type strategyScopeClose struct {
 func newStrategyScopeClose(bundle *phaseTwoWorkerBundle, plans strategyTargets, resolver worker.TargetResolver,
 	filter *filterRoute) *strategyScopeClose {
 	return &strategyScopeClose{bundle: bundle, plans: plans, resolver: resolver, filter: filter,
-		closed: map[absentalerts.Key]string{}, counts: map[string]uint64{}}
+		closed: map[absentalerts.Key]string{}, seen: map[absentalerts.Key]string{}, counts: map[string]uint64{}}
 }
 
 // Stats is every outcome's count.
@@ -140,7 +153,7 @@ func (loop *strategyScopeClose) step(ctx context.Context, snapshot map[absentale
 	defer cancel()
 	if !loop.leading() {
 		if loop.wasLeader {
-			loop.closed = map[absentalerts.Key]string{}
+			loop.closed, loop.seen = map[absentalerts.Key]string{}, map[absentalerts.Key]string{}
 		}
 		loop.wasLeader = false
 		loop.count(scopeCloseNotLeader, 1)
@@ -158,6 +171,11 @@ func (loop *strategyScopeClose) step(ctx context.Context, snapshot map[absentale
 	for key := range loop.closed {
 		if _, held := snapshot[key]; !held {
 			delete(loop.closed, key)
+		}
+	}
+	for key := range loop.seen {
+		if _, held := snapshot[key]; !held {
+			delete(loop.seen, key)
 		}
 	}
 	keys := make([]absentalerts.Key, 0, len(snapshot))
@@ -193,9 +211,19 @@ func (loop *strategyScopeClose) step(ctx context.Context, snapshot map[absentale
 			loop.observe(ctx, scopeCloseMemberUnreadable, key.StrategyID, 1)
 			continue
 		}
+		if len(current) == 0 {
+			delete(loop.seen, key)
+			loop.observe(ctx, scopeCloseEmpty, key.StrategyID, 1)
+			continue
+		}
 		digest := scopeDigest(identity, resolution.Members())
 		if loop.closed[key] == digest {
 			loop.count(scopeCloseUnchanged, 1)
+			continue
+		}
+		if loop.seen[key] != digest {
+			loop.seen[key] = digest
+			loop.count(scopeCloseUnconfirmed, 1)
 			continue
 		}
 		if sent >= scopeCloseStrategies {

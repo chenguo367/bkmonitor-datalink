@@ -3912,7 +3912,7 @@ func editCloseReasons() []ReasonCode {
 // StrategyScopeCloseReasons are the words the control leader's strategy
 // scope close writes its lines with (StageStrategyScopeClose).
 var StrategyScopeCloseReasons = []ReasonCode{"snapshot_unavailable", "link_unavailable", "publication_unavailable",
-	"member_unreadable", "target_list_too_large"}
+	"member_unreadable", "scope_empty", "target_list_too_large"}
 
 var contractClassReasons = []ReasonCode{
 	ReasonContractDeterministic, ReasonContractRetryable, ReasonContractCoverage,

@@ -86,11 +86,25 @@ func (fixture *scopeFixture) opened(t *testing.T, n int, ip string) {
 	fixture.recorded.acknowledge(t, event)
 }
 
+// confirmedStep runs the two rounds a scope closes on: the first reads it,
+// the second reads the same and sends.
+func (fixture *scopeFixture) confirmedStep(t *testing.T) {
+	t.Helper()
+	sent := fixture.closes()
+	unconfirmed := fixture.loop.Stats()[scopeCloseUnconfirmed]
+	fixture.loop.step(context.Background(), fixture.snapshot)
+	if fixture.closes() != sent || fixture.loop.Stats()[scopeCloseUnconfirmed] != unconfirmed+1 {
+		t.Fatalf("a scope read once sent %d requests, stats %v", fixture.closes()-sent, fixture.loop.Stats())
+	}
+	fixture.loop.step(context.Background(), fixture.snapshot)
+}
+
 func (fixture *scopeFixture) closes() int {
 	return len(fixture.link.requests("/api/v1/alerts/close"))
 }
 
-// On the leader's start the scope close sends once per strategy: the alert
+// On the leader's start the scope close sends once per strategy, on the
+// second round that reads the same scope: the alert
 // of a removed target closes, the current target's and an alert without
 // the target's dimensions stay. An unchanged scope sends nothing; a
 // changed one sends again, and the alert without the dimensions still
@@ -104,7 +118,7 @@ func TestTheScopeCloseSendsOnStartAndOnEachChange(t *testing.T) {
 	fixture.opened(t, 1, "192.0.2.9")
 	fixture.opened(t, 2, "192.0.2.1")
 	fixture.opened(t, 3, "192.0.2.2")
-	fixture.loop.step(context.Background(), fixture.snapshot)
+	fixture.confirmedStep(t)
 	if got := fixture.link.closed(); len(got) != 1 || got["removed"] != 1 {
 		t.Fatalf("closed %v, want removed only", got)
 	}
@@ -114,7 +128,7 @@ func TestTheScopeCloseSendsOnStartAndOnEachChange(t *testing.T) {
 		t.Fatalf("an unchanged scope sent %d requests, stats %v", fixture.closes()-sent, fixture.loop.Stats())
 	}
 	fixture.resolver.members = []string{"192.0.2.1|0"}
-	fixture.loop.step(context.Background(), fixture.snapshot)
+	fixture.confirmedStep(t)
 	if got := fixture.link.closed(); len(got) != 2 || got["leaving"] != 1 || got["current"] != 0 || got["aggregated"] != 0 {
 		t.Fatalf("closed %v after the scope changed", got)
 	}
@@ -131,7 +145,7 @@ func TestTheScopeCloseIsRefusedPastTheRecord(t *testing.T) {
 	for i := 0; i < 21; i++ {
 		fixture.alert(fmt.Sprintf("removed-%02d", i), fmt.Sprintf("198.51.100.%d", i))
 	}
-	fixture.loop.step(context.Background(), fixture.snapshot)
+	fixture.confirmedStep(t)
 	if len(fixture.link.closed()) != 0 || fixture.recorded.route.closer.Stats()[filterclose.OutcomeExpectExceeded] != 1 {
 		t.Fatalf("closed %v, stats %v", fixture.link.closed(), fixture.recorded.route.closer.Stats())
 	}
@@ -146,7 +160,7 @@ func TestATooLargeOrIncompleteScopeSendsNothing(t *testing.T) {
 	}
 	fixture := newScopeFixture(t, members...)
 	fixture.alert("removed", "192.0.2.9")
-	fixture.loop.step(context.Background(), fixture.snapshot)
+	fixture.confirmedStep(t)
 	if fixture.closes() != 0 || len(fixture.link.requests("/api/v1/alerts/search")) != 0 ||
 		fixture.recorded.route.closer.Stats()[filterclose.OutcomeTargetListTooLarge] != 1 {
 		t.Fatalf("requests %d, stats %v", fixture.closes(), fixture.recorded.route.closer.Stats())
@@ -157,5 +171,28 @@ func TestATooLargeOrIncompleteScopeSendsNothing(t *testing.T) {
 	incomplete.loop.step(context.Background(), incomplete.snapshot)
 	if incomplete.closes() != 0 || incomplete.loop.Stats()[scopeCloseResolutionIncomplete] != 1 {
 		t.Fatalf("an incomplete resolution sent %d, stats %v", incomplete.closes(), incomplete.loop.Stats())
+	}
+}
+
+// A target that resolves Complete with no member closes nothing, counted
+// scope_empty, however many rounds read it: the record would not stop it,
+// since every entry with a target is outside an empty scope. The same
+// strategy with a member closes the removed target's alert by the pairs.
+func TestAnEmptyScopeClosesNothing(t *testing.T) {
+	fixture := newScopeFixture(t)
+	fixture.alert("removed", "192.0.2.9")
+	fixture.alert("kept", "192.0.2.1")
+	fixture.opened(t, 1, "192.0.2.9")
+	fixture.opened(t, 2, "192.0.2.1")
+	for i := 0; i < 3; i++ {
+		fixture.loop.step(context.Background(), fixture.snapshot)
+	}
+	if fixture.closes() != 0 || fixture.loop.Stats()[scopeCloseEmpty] != 3 {
+		t.Fatalf("an empty scope sent %d requests, stats %v", fixture.closes(), fixture.loop.Stats())
+	}
+	fixture.resolver.members = []string{"192.0.2.1|0"}
+	fixture.confirmedStep(t)
+	if got := fixture.link.closed(); len(got) != 1 || got["removed"] != 1 {
+		t.Fatalf("closed %v, want removed only", got)
 	}
 }

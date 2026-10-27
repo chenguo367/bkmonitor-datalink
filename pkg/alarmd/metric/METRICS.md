@@ -1991,7 +1991,7 @@ What the control leader's close of alerts orphaned by an edit of their strategy 
 
 Labels: `outcome`
 
-The control leader's strategy scope close (on its start and on each change of a strategy's target scope, one close by filter of the strategy's alerts outside its current targets), by outcome: not_leader, publication_unavailable, snapshot_unavailable, link_unavailable (no link control plane or no target resolver), plans_disagree (the strategy's Plans carry different target plans), resolution_incomplete (the target did not resolve Complete with its exclusions: nothing closed), member_unreadable, scope_unchanged, round_full (past the round's strategies), close_run, scope_settled (the close's word ends the decision until the scope changes). The close's own word is in linkd_filter_close_total. Every cell exists from the start.
+The control leader's strategy scope close (on its start and on each change of a strategy's target scope, one close by filter of the strategy's alerts outside its current targets), by outcome: not_leader, publication_unavailable, snapshot_unavailable, link_unavailable (no link control plane or no target resolver), plans_disagree (the strategy's Plans carry different target plans), resolution_incomplete (the target did not resolve Complete with its exclusions: nothing closed), member_unreadable, scope_empty (resolved Complete with no member: nothing closed), scope_unconfirmed (a scope read once: it closes when the next round reads the same), scope_unchanged, round_full (past the round's strategies), close_run, scope_settled (the close's word ends the decision until the scope changes). The close's own word is in linkd_filter_close_total. Every cell exists from the start.
 
 ## alarmd_target_excluded_absent_members_total
 
