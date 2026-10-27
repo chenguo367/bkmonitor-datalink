@@ -115,6 +115,7 @@ func startRoundsFixture(t *testing.T, options roundsOptions) *roundsFixture {
 	}
 	ctx := context.Background()
 	cfg := validGoAccessRuntimeConfig()
+	cfg.PhaseTwo.Linkd.ControlPlane = quietLinkControlPlane(t)
 	if options.hosts {
 		followsSeedHosts(t, ctx, redisClient, cfg.PlatformKeyPrefix())
 	}
