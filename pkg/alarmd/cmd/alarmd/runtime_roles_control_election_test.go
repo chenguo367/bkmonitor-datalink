@@ -37,12 +37,18 @@ import (
 // process opens its own role runtime, which writes the instance record the
 // others read, and its own bundle, which contends for the lease on its
 // reconcile tick. Leases are judged on the Redis server's clock, so the lease
-// TTLs are scaled to real seconds (3 s TTL, 1 s renewal, a tenth of
-// production); instance records are judged on the injected clock and keep the
-// production 60 s TTL, which is both T and the handback window. The test
-// drives every reconcile tick itself.
+// TTLs are scaled to real seconds (3 s, a tenth of production); instance
+// records are judged on the injected clock and keep the production 60 s TTL,
+// which is both T and the handback window. The test drives every reconcile
+// tick itself.
 
 const electionPeriod = int64(300)
+
+// electionRenewInterval is the lease renewals' real-clock cadence. Each round
+// moves the injected clock past the leases' deadlines and waits for the
+// renewals to restate them (awaitRenewals), so a round costs up to one
+// interval of real time; the 3 s TTLs still outlast many missed renewals.
+const electionRenewInterval = 100 * time.Millisecond
 
 // electionProcess is one process of the fixture: its role runtime, its bundle
 // and what it counts.
@@ -178,18 +184,30 @@ func (fixture *electionFixture) awaitRenewals() {
 	testwait.Until(fixture.t, "every held lease restated past the moved clock by its renewal", fixture.leasesRunPastNow)
 }
 
-// awaitControlLeaseFree waits for a dead Control Leader's lease to run out on
-// the Redis server's clock, which the fixture cannot move: the free lease is
-// what the case goes on to contend for.
+// awaitControlLeaseFree lets a dead Control Leader's lease run out on the
+// Redis server's clock: the free lease is what the case goes on to contend
+// for. A real redis-server has no clock a test can set, so, as the ownership
+// package's elapseOnRedis does, the lease's deadline is moved back to the
+// server's now; the owner and epoch stay, so the next Leader still comes
+// under the next epoch. A renewal the dead process had in flight can restate
+// the deadline once more, so it is moved again until the lease reads free.
 func (fixture *electionFixture) awaitControlLeaseFree() {
 	fixture.t.Helper()
-	store, err := ownership.NewRedisStoreWithClient(fixture.redis, productionPhaseTwoPrefix(fixture.prefix, "ownership"))
+	prefix := productionPhaseTwoPrefix(fixture.prefix, "ownership")
+	store, err := ownership.NewRedisStoreWithClient(fixture.redis, prefix)
 	if err != nil {
 		fixture.t.Fatal(err)
 	}
+	lease := prefix + ":{" + ownership.ControlHashTag(ownership.ControlLeaderIdentity) + "}:ownership"
 	testwait.Until(fixture.t, "the dead Control Leader's lease running out on the Redis clock", func() bool {
-		_, live, err := store.ReadActiveControlLeader(fixture.ctx)
-		return err == nil && !live
+		owner, live, err := store.ReadActiveControlLeader(fixture.ctx)
+		if err != nil {
+			return false
+		}
+		if live {
+			_ = fixture.redis.HIncrBy(fixture.ctx, lease, "deadline_ms", -owner.Deadline.Sub(owner.ObservedAt).Milliseconds()).Err()
+		}
+		return !live
 	})
 }
 
@@ -236,9 +254,9 @@ func (fixture *electionFixture) configFor(name string, selected roles.Set) confi
 	cfg.PhaseTwo.Worker.RegistrationTTL = config.Duration(60 * time.Second)
 	cfg.PhaseTwo.Worker.RegistrationRenewInterval = config.Duration(time.Second)
 	cfg.PhaseTwo.Ownership.ControlLeaderTTL = config.Duration(fixture.controlLeaderTTL)
-	cfg.PhaseTwo.Ownership.ControlLeaderRenewInterval = config.Duration(time.Second)
+	cfg.PhaseTwo.Ownership.ControlLeaderRenewInterval = config.Duration(electionRenewInterval)
 	cfg.PhaseTwo.Ownership.LeaseTTL = config.Duration(3 * time.Second)
-	cfg.PhaseTwo.Ownership.LeaseRenewInterval = config.Duration(time.Second)
+	cfg.PhaseTwo.Ownership.LeaseRenewInterval = config.Duration(electionRenewInterval)
 	if !selected.Has(roles.Worker) && len(selected) != 0 {
 		cfg.PhaseTwo.Coordinator.MaxEvents++ // a control process's resources differ from a Worker's
 	}
