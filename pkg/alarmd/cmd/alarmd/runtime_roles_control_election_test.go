@@ -144,8 +144,8 @@ func (fixture *electionFixture) advance(step time.Duration) {
 // leasesRunPastNow reports whether every lease a live process holds runs past
 // the injected clock by its own reckoning: the Control Leader's authority,
 // and each Query Group session that still admits work. Those deadlines are
-// what the processes check, and their renewal loops restate them each second
-// of real time from the injected clock.
+// what the processes check, and their renewal loops restate them every
+// electionRenewInterval of real time from the injected clock.
 func (fixture *electionFixture) leasesRunPastNow() bool {
 	now := fixture.now()
 	for _, process := range fixture.alive() {
