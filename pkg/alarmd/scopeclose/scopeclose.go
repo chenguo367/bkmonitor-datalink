@@ -192,8 +192,9 @@ type OpenSet interface {
 // Link is the link's close by filter (filterclose.Closer).
 type Link interface {
 	RemovedTargets(ctx context.Context, scope filterclose.Scope, targets []filterclose.Target, seriesPerTarget int, revision int64,
-		decision string) []string
-	Fingerprints(ctx context.Context, scope filterclose.Scope, fingerprints []string, decision string, revision int64) string
+		decision string, decidedAt time.Time) []string
+	Fingerprints(ctx context.Context, scope filterclose.Scope, fingerprints []string, decision string, revision int64,
+		decidedAt time.Time) string
 }
 
 // Options bound the close.
@@ -534,6 +535,15 @@ func (closer *Closer) closeGroup(ctx context.Context, link Link, source string, 
 	}
 	var words []string
 	closer.mu.Lock()
+	// The decision was read when the group's entries were last observed
+	// rejected; the earliest of them bounds the close, so an alert a series
+	// opened after its own last rejection (back in scope) is not selected.
+	var decidedAt time.Time
+	for _, ek := range keys {
+		if e := closer.entries[ek]; e != nil && (decidedAt.IsZero() || e.lastSeen.Before(decidedAt)) {
+			decidedAt = e.lastSeen
+		}
+	}
 	if g.byTarget {
 		targets := make([]filterclose.Target, 0, len(keys))
 		series := 1
@@ -543,7 +553,7 @@ func (closer *Closer) closeGroup(ctx context.Context, link Link, source string, 
 			series = max(series, len(e.series))
 		}
 		closer.mu.Unlock()
-		words = link.RemovedTargets(ctx, scope, targets, series, g.revision, decision)
+		words = link.RemovedTargets(ctx, scope, targets, series, g.revision, decision, decidedAt)
 	} else {
 		fingerprints := make([]string, 0, len(keys))
 		for _, ek := range keys {
@@ -553,7 +563,7 @@ func (closer *Closer) closeGroup(ctx context.Context, link Link, source string, 
 		}
 		closer.mu.Unlock()
 		sort.Strings(fingerprints)
-		words = []string{link.Fingerprints(ctx, scope, fingerprints, decision, g.revision)}
+		words = []string{link.Fingerprints(ctx, scope, fingerprints, decision, g.revision, decidedAt)}
 	}
 	settled, unsupported := len(words) > 0, false
 	for _, word := range words {

@@ -47,12 +47,14 @@ type recordedCloses struct {
 	decisions    []string
 }
 
-func (w *recordedCloses) RemovedTargets(_ context.Context, _ filterclose.Scope, targets []filterclose.Target, _ int, _ int64, decision string) []string {
+func (w *recordedCloses) RemovedTargets(_ context.Context, _ filterclose.Scope, targets []filterclose.Target, _ int, _ int64, decision string,
+	_ time.Time) []string {
 	w.decisions = append(w.decisions, decision)
 	return []string{filterclose.OutcomeJobDone}
 }
 
-func (w *recordedCloses) Fingerprints(_ context.Context, _ filterclose.Scope, fingerprints []string, decision string, _ int64) string {
+func (w *recordedCloses) Fingerprints(_ context.Context, _ filterclose.Scope, fingerprints []string, decision string, _ int64,
+	_ time.Time) string {
 	for range fingerprints {
 		w.decisions = append(w.decisions, decision)
 	}

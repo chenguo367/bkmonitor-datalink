@@ -14,6 +14,7 @@ import (
 	"errors"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
@@ -29,6 +30,9 @@ const (
 	fieldPrint   = "fingerprint"
 	fieldStatus  = "status"
 	fieldLevel   = "severity"
+	// fieldCreated is when the link opened the alert (date_nanos,
+	// alert-search.md "可查询字段").
+	fieldCreated = "create_at"
 	labelID      = "labels.strategy_id"
 	labelVersion = "labels.strategy_version"
 	labelDigest  = "labels.strategy_facts_digest"
@@ -82,6 +86,15 @@ func term(field, value string) object { return object{"term": object{field: valu
 func terms(field string, values []string) object { return object{"terms": object{field: values}} }
 
 func exists(field string) object { return object{"exists": object{"field": field}} }
+
+// openedBy is the alerts the link opened at or before at: a decision read
+// at that moment is not about an alert opened after it.
+func openedBy(at time.Time) (object, error) {
+	if at.IsZero() {
+		return nil, errors.New("alarmd filterclose: a per-series close names the moment its decision was read")
+	}
+	return object{"range": object{fieldCreated: object{"lte": at.UTC().Format(time.RFC3339Nano)}}}, nil
+}
 
 // build is the one builder: the scope's terms, then the clauses.
 func build(scope Scope, filter, mustNot []any) (Filter, error) {
@@ -193,14 +206,21 @@ func alertsFilter(scope Scope, bucket Bucket, ids []string) (Filter, error) {
 	return build(scope, append(filter, terms(fieldAlertID, ids)), mustNot)
 }
 
-// FingerprintFilter is the strategy's alerts of the given fingerprints: a
-// close decided per series (a target out of scope, an inactive strategy's
-// listed alerts), each fingerprint naming at most one active alert.
-func FingerprintFilter(scope Scope, fingerprints []string) (Filter, error) {
+// FingerprintFilter is the strategy's alerts of the given fingerprints
+// opened at or before decidedAt: a close decided per series (a target out
+// of scope) at that moment, each fingerprint naming at most one active
+// alert. A fingerprint names the series, not one opening of it: without
+// the bound, an alert the series opened again after the decision (its
+// target back in scope) would be selected and closed too.
+func FingerprintFilter(scope Scope, fingerprints []string, decidedAt time.Time) (Filter, error) {
 	if len(fingerprints) == 0 || len(fingerprints) > maxTargetClauses {
 		return Filter{}, errors.New("alarmd filterclose: 1 to 500 fingerprints")
 	}
-	return build(scope, []any{terms(fieldPrint, sorted(fingerprints))}, nil)
+	bound, err := openedBy(decidedAt)
+	if err != nil {
+		return Filter{}, err
+	}
+	return build(scope, []any{terms(fieldPrint, sorted(fingerprints)), bound}, nil)
 }
 
 // LevelFilter is the threshold alerts of the given versions at a level the
@@ -316,10 +336,16 @@ const (
 	maxTargetBodyBytes = 512 << 10
 )
 
-// TargetFilters are the strategy's alerts of the removed targets, cut into
-// filters within the clause and body bounds; each target's keys all match,
-// the targets of one filter are alternatives (bool.should, at least one).
-func TargetFilters(scope Scope, targets []Target) ([]Filter, error) {
+// TargetFilters are the strategy's alerts of the removed targets opened at
+// or before decidedAt, cut into filters within the clause and body bounds;
+// each target's keys all match, the targets of one filter are alternatives
+// (bool.should, at least one). The bound is FingerprintFilter's: an alert
+// of a target back in scope, opened after the decision, is not selected.
+func TargetFilters(scope Scope, targets []Target, decidedAt time.Time) ([]Filter, error) {
+	bound, err := openedBy(decidedAt)
+	if err != nil {
+		return nil, err
+	}
 	var filters []Filter
 	var batch []any
 	clauses, size := 0, 0
@@ -327,7 +353,7 @@ func TargetFilters(scope Scope, targets []Target) ([]Filter, error) {
 		if len(batch) == 0 {
 			return nil
 		}
-		built, err := build(scope, []any{object{"bool": object{"should": batch, "minimum_should_match": 1}}}, nil)
+		built, err := build(scope, []any{bound, object{"bool": object{"should": batch, "minimum_should_match": 1}}}, nil)
 		if err != nil {
 			return err
 		}

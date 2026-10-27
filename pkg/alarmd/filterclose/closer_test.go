@@ -37,7 +37,7 @@ func TestEveryFilterCarriesTenantSourceAndStrategy(t *testing.T) {
 		"level":       func() (Filter, error) { return LevelFilter(testScope, []string{"3", "4"}, []string{"info"}) },
 		"enumeration": func() (Filter, error) { return enumerationFilter(testScope, "5", []Bucket{{Version: "4"}}) },
 		"targets": func() (Filter, error) {
-			filters, err := TargetFilters(testScope, []Target{{"bk_target_ip": "192.0.2.1"}})
+			filters, err := TargetFilters(testScope, []Target{{"bk_target_ip": "192.0.2.1"}}, fakeDecidedAt)
 			if err != nil {
 				return Filter{}, err
 			}
@@ -260,7 +260,8 @@ func TestARemovedMultiKeyTargetClosesOnlyItsOwnAlerts(t *testing.T) {
 	}
 	closer := h.closer(t)
 	words := closer.RemovedTargets(context.Background(), testScope, []Target{
-		{"bk_target_ip": "192.0.2.1", "bk_target_cloud_id": "1"}, {"bk_target_ip": "192.0.2.2", "bk_target_cloud_id": "0"}}, 1, 7, DecisionScope)
+		{"bk_target_ip": "192.0.2.1", "bk_target_cloud_id": "1"}, {"bk_target_ip": "192.0.2.2", "bk_target_cloud_id": "0"}}, 1, 7, DecisionScope,
+		fakeDecidedAt)
 	if len(words) != 1 || words[0] != OutcomeJobDone {
 		t.Fatalf("words %v", words)
 	}
@@ -271,7 +272,7 @@ func TestARemovedMultiKeyTargetClosesOnlyItsOwnAlerts(t *testing.T) {
 	for i := range targets {
 		targets[i] = Target{"bk_target_ip": "192.0.2." + strings.Repeat("9", 1+i%3), "bk_target_cloud_id": strings.Repeat("1", 1+i%50)}
 	}
-	filters, err := TargetFilters(testScope, targets)
+	filters, err := TargetFilters(testScope, targets, fakeDecidedAt)
 	if err != nil || len(filters) < 2 {
 		t.Fatalf("%d filters, %v", len(filters), err)
 	}
@@ -432,7 +433,7 @@ func TestAPerSeriesCloseClosesOnlyItsFingerprints(t *testing.T) {
 	}
 	h.link.add(&fakeAlert{id: "other", fingerprint: "f1", labels: map[string]string{"strategy_id": "42"}})
 	closer := h.closer(t)
-	if word := closer.Fingerprints(context.Background(), testScope, []string{"f1", "f2"}, "target_out_of_scope", 7); word != OutcomeJobDone {
+	if word := closer.Fingerprints(context.Background(), testScope, []string{"f1", "f2"}, "target_out_of_scope", 7, fakeDecidedAt); word != OutcomeJobDone {
 		t.Fatalf("word %s", word)
 	}
 	for id, want := range map[string]int{alertID(0): 1, alertID(1): 1, alertID(2): 0, "other": 0} {
@@ -487,5 +488,39 @@ func TestAJobWithItemsLeftToFindAgainIsNotSettled(t *testing.T) {
 	closer := h.closer(t)
 	if word := closer.Inactive(context.Background(), testScope, "3", 3); word != OutcomeJobDoneRederived {
 		t.Fatalf("per-alert word %s, want job_done_rederived (stats %v)", word, nonZero(closer.Stats()))
+	}
+}
+
+// A close decided per series or per target is about the alerts opened by
+// the moment its decision was read: an alert the series opened again after
+// it (the target back in scope) is not selected, and one opened before is.
+// A close that names no such moment sends nothing.
+func TestASeriesCloseLeavesAnAlertOpenedAfterItsDecision(t *testing.T) {
+	h := newHarness(t)
+	h.link.add(&fakeAlert{id: "a-before", fingerprint: "f1", labels: map[string]string{"strategy_id": "41"},
+		dimensions: map[string]string{"bk_target_ip": "192.0.2.1"}})
+	h.link.add(&fakeAlert{id: "b-after", fingerprint: "f2", labels: map[string]string{"strategy_id": "41"},
+		dimensions: map[string]string{"bk_target_ip": "192.0.2.2"}, created: fakeDecidedAt.Add(time.Second)})
+	h.link.add(&fakeAlert{id: "c-at", fingerprint: "f3", labels: map[string]string{"strategy_id": "41"},
+		dimensions: map[string]string{"bk_target_ip": "192.0.2.3"}, created: fakeDecidedAt})
+	closer := h.closer(t)
+	if word := closer.Fingerprints(context.Background(), testScope, []string{"f1", "f2", "f3"}, "target_out_of_scope", 7, time.Time{}); word != OutcomeFilterRefused {
+		t.Fatalf("word %s without a decision time, want filter_refused", word)
+	}
+	if len(h.link.requests) != 0 {
+		t.Fatalf("requests %v", h.link.requests)
+	}
+	if word := closer.Fingerprints(context.Background(), testScope, []string{"f1", "f2"}, "target_out_of_scope", 7, fakeDecidedAt); word != OutcomeJobDone {
+		t.Fatalf("word %s", word)
+	}
+	words := closer.RemovedTargets(context.Background(), testScope, []Target{{"bk_target_ip": "192.0.2.2"}, {"bk_target_ip": "192.0.2.3"}}, 1, 7,
+		DecisionScope, fakeDecidedAt)
+	if len(words) != 1 || words[0] != OutcomeJobDone {
+		t.Fatalf("words %v", words)
+	}
+	for id, want := range map[string]int{"a-before": 1, "b-after": 0, "c-at": 1} {
+		if got := h.link.alert(id).closes; got != want {
+			t.Fatalf("%s closed %d, want %d", id, got, want)
+		}
 	}
 }

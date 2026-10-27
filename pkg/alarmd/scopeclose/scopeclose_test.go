@@ -387,3 +387,27 @@ func TestNoCloseWithoutTheCopysWordAndASecondSlot(t *testing.T) {
 		t.Fatalf("not held / one Slot: stats %v, requests %d", stats, len(link.requests))
 	}
 }
+
+// The close is bounded to the alerts opened by the moment the entry was
+// last observed rejected, the moment its decision was read; not the
+// moment the step sends it.
+func TestTheCloseIsBoundedToTheLastObservation(t *testing.T) {
+	for _, drop := range []Drop{{Fingerprint: "fp-1", Target: hostTarget("192.0.2.40")}, {Fingerprint: "fp-2"}} {
+		closer, link, now := newScopeHarness(t, knownSet{drop.Fingerprint: true})
+		link.set(1, 0)
+		observed := *now
+		confirm(closer, drop)
+		*now = now.Add(time.Second)
+		closer.Step(context.Background())
+		dry, real := link.sent()
+		if len(dry) == 0 || len(real) != 1 {
+			t.Fatalf("dry runs %d, closes %d", len(dry), len(real))
+		}
+		want := `{"range":{"create_at":{"lte":"` + observed.UTC().Format(time.RFC3339Nano) + `"}}}`
+		for _, request := range append(dry, real...) {
+			if !strings.Contains(string(request.Filter), want) {
+				t.Fatalf("filter %s does not carry %s", request.Filter, want)
+			}
+		}
+	}
+}

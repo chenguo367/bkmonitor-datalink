@@ -33,10 +33,13 @@
 //   - each decision has one command (operation id, reason, effective_at),
 //     stored in the runtime Redis with the decision and sent byte for byte
 //     on every request and retry, after a restart and on another leader;
-//   - closes are by the link's alert id. The link mints a new id for each
+//   - a retry is by the link's alert id. The link mints a new id for each
 //     opening (b7e5beddf internal/lifecycle/id.go:35-36, plan.go:409-417),
 //     and a close of an id that already ended answers already_closed or
-//     invalid_transition, so no close ends an alert that reopened since;
+//     invalid_transition, so no retry ends an alert that reopened since. A
+//     filter that names series (fingerprints, targets) is bounded to the
+//     alerts opened by the moment its decision was read (create_at), so it
+//     does not select a reopening either;
 //   - a failure of the search or of a whole request decides nothing: it is
 //     counted and the next round decides again.
 //

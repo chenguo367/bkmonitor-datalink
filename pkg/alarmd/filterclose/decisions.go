@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/editclose"
@@ -98,11 +99,13 @@ func (closer *Closer) AbsentStrategies(ctx context.Context, tenantID, eventSourc
 }
 
 // Fingerprints closes the strategy's active alerts of the given
-// fingerprints under one decision (a close reason and its detail): the
-// series a caller decided one by one. The expectation is the fingerprints
-// themselves - one active alert each at most.
-func (closer *Closer) Fingerprints(ctx context.Context, scope Scope, fingerprints []string, decision string, revision int64) string {
-	filter, err := FingerprintFilter(scope, fingerprints)
+// fingerprints opened at or before decidedAt under one decision (a close
+// reason and its detail): the series a caller decided one by one, read at
+// decidedAt. The expectation is the fingerprints themselves - one active
+// alert each at most.
+func (closer *Closer) Fingerprints(ctx context.Context, scope Scope, fingerprints []string, decision string, revision int64,
+	decidedAt time.Time) string {
+	filter, err := FingerprintFilter(scope, fingerprints, decidedAt)
 	if err != nil {
 		closer.count(OutcomeFilterRefused, 1)
 		return OutcomeFilterRefused
@@ -138,12 +141,13 @@ func (closer *Closer) Inactive(ctx context.Context, scope Scope, version string,
 }
 
 // RemovedTargets closes the alerts of targets removed from the strategy's
-// scope under a decision (DecisionScope, or another target-addressed one),
-// batch by batch; each batch's expectation is its targets times
-// seriesPerTarget. It returns the words of the batches in order.
+// scope, opened at or before decidedAt, under a decision (DecisionScope,
+// or another target-addressed one) read at decidedAt, batch by batch; each
+// batch's expectation is its targets times seriesPerTarget. It returns the
+// words of the batches in order.
 func (closer *Closer) RemovedTargets(ctx context.Context, scope Scope, targets []Target, seriesPerTarget int, revision int64,
-	decision string) []string {
-	filters, err := TargetFilters(scope, targets)
+	decision string, decidedAt time.Time) []string {
+	filters, err := TargetFilters(scope, targets, decidedAt)
 	if err != nil {
 		closer.count(OutcomeFilterRefused, 1)
 		return []string{OutcomeFilterRefused}

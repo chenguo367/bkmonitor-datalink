@@ -42,7 +42,7 @@ import (
 // another, a single close's errors as text. Its query evaluator covers
 // what alarmd sends: bool (filter, must_not, should with
 // minimum_should_match), term, terms, exists, every value compared as the
-// keyword the link indexes.
+// keyword the link indexes, and range on create_at (date_nanos).
 //
 // Faults are injected per request or per item, and every close is counted
 // per alert, so a test can say each alert was closed exactly once.
@@ -80,6 +80,8 @@ type fakeAlert struct {
 	id, tenant, source, status, severity, fingerprint string
 	labels, dimensions                                map[string]string
 	extra                                             json.RawMessage
+	// created is when the link opened it; add sets fakeOpenedAt when zero.
+	created time.Time
 	// closes counts saved closes; endOperation is the saved command.
 	closes       int
 	endOperation string
@@ -104,9 +106,19 @@ func (link *fakeLink) add(alert *fakeAlert) {
 	if alert.source == "" {
 		alert.source = "built_in_bk"
 	}
+	if alert.created.IsZero() {
+		alert.created = fakeOpenedAt
+	}
 	link.alerts[alert.id] = alert
 	link.sorted = nil
 }
+
+// fakeOpenedAt is when an alert that names no other was opened; a test's
+// decisions are read after it (fakeDecidedAt).
+var (
+	fakeOpenedAt  = time.Unix(1_700_000_000, 0)
+	fakeDecidedAt = fakeOpenedAt.Add(time.Hour)
+)
 
 func (link *fakeLink) alert(id string) fakeAlert {
 	link.mu.Lock()
@@ -129,6 +141,8 @@ func (alert *fakeAlert) field(name string) (string, bool) {
 		return alert.status, true
 	case name == fieldLevel:
 		return alert.severity, alert.severity != ""
+	case name == fieldCreated:
+		return alert.created.UTC().Format(time.RFC3339Nano), !alert.created.IsZero()
 	case strings.HasPrefix(name, "labels."):
 		value, ok := alert.labels[strings.TrimPrefix(name, "labels.")]
 		return value, ok
@@ -181,6 +195,49 @@ func (link *fakeLink) compile(query json.RawMessage) func(*fakeAlert) bool {
 				return func(alert *fakeAlert) bool {
 					got, ok := alert.field(name)
 					return ok && set[got]
+				}
+			}
+		case "range":
+			var fields map[string]map[string]string
+			if json.Unmarshal(body, &fields) != nil || len(fields) != 1 {
+				link.t.Errorf("range %s is not one field's bounds", body)
+				return never
+			}
+			for name, bounds := range fields {
+				if name != fieldCreated {
+					link.t.Errorf("range on %s, the fake ranges create_at only", name)
+					return never
+				}
+				return func(alert *fakeAlert) bool {
+					for op, text := range bounds {
+						at, err := time.Parse(time.RFC3339Nano, text)
+						if err != nil {
+							link.t.Errorf("range bound %q: %v", text, err)
+							return false
+						}
+						switch op {
+						case "lte":
+							if alert.created.After(at) {
+								return false
+							}
+						case "lt":
+							if !alert.created.Before(at) {
+								return false
+							}
+						case "gte":
+							if alert.created.Before(at) {
+								return false
+							}
+						case "gt":
+							if !alert.created.After(at) {
+								return false
+							}
+						default:
+							link.t.Errorf("range operator %s", op)
+							return false
+						}
+					}
+					return true
 				}
 			}
 		case "exists":
