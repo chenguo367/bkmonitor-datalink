@@ -1270,8 +1270,16 @@ func openProductionPhaseTwoBundleAssembly(
 	flights.OnTurnedAwayReleased(bundle.noticeFlightReleased)
 	bundle.workerPorts = workerPorts
 	bundle.cmdbIndex = cmdbIndex
-	maintenance := &effectiveMaintenance{bundle: bundle, catalog: catalog, cache: openAlertCopy, writer: events, recoveries: recoveries,
-		capacity: linkdBudget, legacy: legacyTime.Provider(), legacyCache: legacyTime}
+	// The link's close by filter, where its control plane is named: the
+	// inactive and scope closes send through it, and the control leader's
+	// absent and edit closes decide through it.
+	filterCloser, err := newFilterCloser(cfg, redisForCaller(runtimeClient, redisfailure.CallerLinkd), external.Now, recorder)
+	if err != nil {
+		return nil, err
+	}
+	route := newFilterRoute(cfg, filterCloser, linkd.Cache)
+	maintenance := &effectiveMaintenance{bundle: bundle, catalog: catalog, cache: openAlertCopy, writer: withFilterClose(route, events), recoveries: recoveries,
+		capacity: linkdBudget, legacy: legacyTime.Provider(), legacyCache: legacyTime, filter: route}
 	// One memory of which business each alert was filed under, for every
 	// close that carries a global business Plan's alert.
 	var alertBusinesses *openalerts.AlertBusinesses
@@ -1290,7 +1298,7 @@ func openProductionPhaseTwoBundleAssembly(
 	}
 	bundle.dependencies.RunEffectiveTime = maintenance.run
 	maintenanceReadings.bind(maintenance)
-	bindTargetScopeClose(bundle, scopeClose, openAlertCopy, recoveries, events, alertBusinesses, recorder)
+	bindTargetScopeClose(bundle, scopeClose, openAlertCopy, recoveries, route, withFilterClose(route, events), alertBusinesses, recorder)
 	openAlertFacts := withTargetScopeClose(openAlertSetFactsSource(openAlertCopy, external.Now), scopeClose)
 	// The control leader's difference against the strategies that no longer
 	// exist. It runs on every replica's loop and does nothing on a follower;
@@ -1304,6 +1312,8 @@ func openProductionPhaseTwoBundleAssembly(
 		absentClose.businesses = alertBusinesses
 		absentClose.edits = newEditStrategyClose(bundle, reconciler, linkd.Console, events)
 		absentClose.edits.recoveries = recoveries
+		absentClose.filter = route
+		absentClose.edits.filter = absentClose.filter
 		recorder.SetEditCloseSource(absentClose.edits.Stats)
 		absentPage.bind(absentClose)
 		bundle.dependencies.RunAbsentClose = absentClose.run

@@ -194,7 +194,10 @@ type effectiveMaintenance struct {
 	// recoveries is the fleet's record of the recoveries alarmd sent (L40),
 	// nil without the link's Console: a close is held back on a recovery of
 	// its fingerprint sent after its evidence was read.
-	recoveries   *openalerts.Recoveries
+	recoveries *openalerts.Recoveries
+	// filter is the link's close by filter the writer sends through while
+	// it is in force; nil without the link's control plane.
+	filter       *filterRoute
 	groups       map[execution.QueryGroupIdentity]*maintenanceGroup
 	readCursor   execution.QueryGroupIdentity
 	planCursor   map[execution.QueryGroupIdentity]int
@@ -1342,7 +1345,10 @@ func cliMaintenanceOperation(source *maintenanceSource) obchannel.Operation {
 // the next read; nothing is lost but time.
 func (m *effectiveMaintenance) holdReopened(ctx context.Context, qg execution.QueryGroupIdentity, plan controlplane.MaintenancePlan,
 	key openalerts.StrategyKey, batch []linkdoutput.CloseRequest, fromSet bool) []linkdoutput.CloseRequest {
-	if m.recoveries == nil || len(batch) == 0 {
+	if m.recoveries == nil || len(batch) == 0 || m.filter.inForce() {
+		// Closed through the link's filter, each close ends the alert id
+		// active now and no other: a reopen since the listing is not
+		// reached, so the record of reopens is not consulted (L40).
 		return batch
 	}
 	listed, index := m.cache.EvidenceStarted(key)

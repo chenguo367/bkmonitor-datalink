@@ -10,6 +10,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/absentalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/filterclose"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdoutput"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -109,6 +110,9 @@ type absentStrategyClose struct {
 	// after the term ends). Nil where it is not wired.
 	edits      *editStrategyClose
 	lastRoster map[absentalerts.Key]int
+	// filter is the link's close by filter, which the decisions take while
+	// it is in force; nil where the link's control plane is not named.
+	filter *filterRoute
 }
 
 // absentRoundSizes is what the last round read, beside what it decided on.
@@ -251,6 +255,9 @@ func (loop *absentStrategyClose) run(ctx context.Context) {
 		if loop.edits != nil {
 			loop.edits.step(ctx, loop.lastRoster)
 		}
+		if loop.leading() {
+			loop.filter.retryPending(ctx)
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -277,6 +284,7 @@ func (loop *absentStrategyClose) step(ctx context.Context) {
 			loop.table.forget()
 			loop.walk, loop.walked = nil, nil
 			loop.lastRoster = nil
+			loop.filter.forget()
 		}
 		loop.wasLeader = false
 		loop.count(absentalerts.OutcomeNotLeader, 1)
@@ -443,6 +451,21 @@ func (loop *absentStrategyClose) readRoster(ctx context.Context, round *absental
 // the candidate page.
 func (loop *absentStrategyClose) closeStrategy(ctx context.Context, absent absentalerts.Absent, now time.Time) absentExecution {
 	execution := absentExecution{decidedAt: now}
+	if loop.filter.inForce() {
+		// The link closes the strategy's alerts of this source by filter,
+		// whatever business each was filed under; a link that cannot leaves
+		// the decision to the path below for this round.
+		decision := filterclose.DecisionAbsent
+		if absent.Refused != "" {
+			decision = filterclose.DecisionUnsupported
+		}
+		word := loop.filter.closer.Absent(ctx, loop.filter.scope(absent.Key), decision, absent.Identity.Revision,
+			loop.filter.expect(absent.Key, loop.lastRoster))
+		if word != filterclose.OutcomeLinkUnsupported {
+			execution.word = word
+			return execution
+		}
+	}
 	key := openalerts.StrategyKey{TenantID: absent.Key.TenantID, StrategyID: absent.Key.StrategyID}
 	reconciliation, err := loop.link.Reconcile(ctx, key)
 	if err != nil {

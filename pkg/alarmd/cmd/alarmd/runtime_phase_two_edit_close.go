@@ -11,6 +11,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/absentalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/editclose"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/filterclose"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdoutput"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
@@ -30,7 +31,11 @@ import (
 // survived the edit is read once per change of those facts, not once per
 // round; a process that starts afresh reads it once more.
 const (
-	editCloseStrategies  = 16
+	editCloseStrategies = 16
+	// editFilterStrategies is the round's strategies while the link's close
+	// by filter is in force: a strategy costs one search when no older
+	// version is open, a few more when one is, and no record reads.
+	editFilterStrategies = 256
 	editCloseRecordReads = 500
 	// editCloseRemembered bounds the decision memory. Past it the memory is
 	// dropped whole and filled again from the records.
@@ -82,6 +87,12 @@ type editStrategyClose struct {
 	recoveries *openalerts.Recoveries
 	countsMu   sync.Mutex
 	counts     map[string]uint64
+	// filter is the link's close by filter, which a strategy's edit close
+	// takes while it is in force (filterclose.Closer.Edit); nil where the
+	// link's control plane is not named. It reads no record and keeps no
+	// memory here: each bucket is decided from one sample alert, and an
+	// alert it closes is gone from the next round's search.
+	filter *filterRoute
 }
 
 func newEditStrategyClose(bundle *phaseTwoWorkerBundle, plans editClosePlans, link editCloseLink, writer closeWriter) *editStrategyClose {
@@ -147,9 +158,12 @@ func (loop *editStrategyClose) step(ctx context.Context, roster map[absentalerts
 	keys = append(keys[start:], keys[:start]...)
 	reads := editCloseRecordReads
 	now := loop.bundle.dependencies.Now()
-	examined := 0
+	examined, limit := 0, editCloseStrategies
+	if loop.filter.inForce() {
+		limit = editFilterStrategies
+	}
 	for _, key := range keys {
-		if examined >= editCloseStrategies || ctx.Err() != nil || !loop.leading() {
+		if examined >= limit || ctx.Err() != nil || !loop.leading() {
 			break
 		}
 		facts, available, found := loop.plans.StrategyPlanFacts(key.TenantID, key.StrategyID)
@@ -165,6 +179,14 @@ func (loop *editStrategyClose) step(ctx context.Context, roster map[absentalerts
 			continue
 		}
 		examined++
+		if loop.filter.inForce() {
+			word := loop.filter.closer.Edit(ctx, filterclose.EditInput{Scope: loop.filter.scope(key), Plan: planOf(facts),
+				Expect: loop.filter.expect(key, roster)})
+			if word != filterclose.OutcomeLinkUnsupported {
+				loop.after = key
+				continue
+			}
+		}
 		if !loop.closeStrategy(ctx, key, planOf(facts), &reads, now) {
 			// Out of reads: this strategy is first next round.
 			return

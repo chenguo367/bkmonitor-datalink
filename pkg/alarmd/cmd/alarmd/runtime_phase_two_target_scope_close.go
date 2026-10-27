@@ -69,13 +69,13 @@ func targetScopeCloseFor(cfg config.Config, now func() time.Time) (*scopeclose.C
 // producer, its counts to the metric and its loop to the bundle. Nothing is
 // wired for a nil close.
 func bindTargetScopeClose(bundle *phaseTwoWorkerBundle, closer *scopeclose.Closer, cache *openalerts.Cache, recoveries *openalerts.Recoveries,
-	writer scopeclose.Writer, businesses *openalerts.AlertBusinesses, recorder *metric.Recorder) {
+	route *filterRoute, writer scopeclose.Writer, businesses *openalerts.AlertBusinesses, recorder *metric.Recorder) {
 	if closer == nil {
 		return
 	}
 	closer.Bind(scopeclose.CacheSet(cache), writer)
 	if recoveries != nil {
-		closer.BindGuard(recoveryGuard(cache, recoveries))
+		closer.BindGuard(recoveryGuard(cache, recoveries, route))
 	}
 	if businesses != nil {
 		closer.BindAlertBusiness(businesses.Of)
@@ -145,8 +145,13 @@ func targetScopeCloseFacts(facts scopeclose.Facts) *fleet.TargetScopeCloseFacts 
 // recovery of its fingerprint sent after the evidence the close was decided
 // from - the listing, or the index set standing in for it - was read, and
 // an ABNORMAL of it after that.
-func recoveryGuard(cache *openalerts.Cache, recoveries *openalerts.Recoveries) scopeclose.Guard {
+func recoveryGuard(cache *openalerts.Cache, recoveries *openalerts.Recoveries, route *filterRoute) scopeclose.Guard {
 	return func(ctx context.Context, key openalerts.StrategyKey, fingerprint string, fromSet bool) string {
+		if route.inForce() {
+			// Closed by alert id through the link's filter: a reopen is not
+			// reached (L40), so nothing is held for one.
+			return ""
+		}
 		listed, index := cache.EvidenceStarted(key)
 		readStarted := listed
 		if fromSet {

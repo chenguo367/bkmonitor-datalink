@@ -179,7 +179,7 @@ func TestTheScopeCloseGuardAsksTheRecoveryRecord(t *testing.T) {
 	f := newMaintenanceTestFixtureFrom(t, maintenanceReadySnapshot, maintenanceTime(8, 0), maintenanceTestIndex{trusted: true,
 		reconcileErr: errors.New("reconcile: link answered 503"), members: []string{ourMember}})
 	recoveries := testRecoveries(t)
-	guard := recoveryGuard(f.m.cache, recoveries)
+	guard := recoveryGuard(f.m.cache, recoveries, nil)
 	key := openalerts.StrategyKey{TenantID: "tenant-a", StrategyID: "123"}
 	ctx := testwait.Context(t)
 	noteReopens(recoveries, []contract.TriggerEventV1{sinkEvent("tenant-a", "123", ourMember, contract.TriggerEventRecovery)}, maintenanceTime(8, 0))

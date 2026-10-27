@@ -420,6 +420,12 @@ func openProductionControlRoleBundle(
 			return nil, err
 		}
 		closeLoop.edits.recoveries = recoveries
+		filterCloser, err := newFilterCloser(cfg, redisForCaller(runtimeClient, redisfailure.CallerLinkd), external.Now, recorder)
+		if err != nil {
+			return nil, err
+		}
+		closeLoop.filter = newFilterRoute(cfg, filterCloser, linkd.Cache)
+		closeLoop.edits.filter = closeLoop.filter
 		recorder.SetRecoveryRecordSource(recoveryRecordCounts(recoveries))
 		recorder.SetEditCloseSource(closeLoop.edits.Stats)
 		absentPage.bind(closeLoop)
