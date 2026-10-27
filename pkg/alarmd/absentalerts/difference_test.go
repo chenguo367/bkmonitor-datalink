@@ -4,6 +4,7 @@
 package absentalerts
 
 import (
+	"strconv"
 	"testing"
 	"time"
 )
@@ -16,24 +17,12 @@ func testBounds() Bounds {
 
 func key(id string) Key { return Key{TenantID: "system", StrategyID: id} }
 
-func itoa(value int) string {
-	if value == 0 {
-		return "0"
-	}
-	digits := ""
-	for value > 0 {
-		digits = string(rune('0'+value%10)) + digits
-		value /= 10
-	}
-	return digits
-}
-
 // filled is a snapshot of the given size that lists none of the strategies
 // the tests close.
 func filled(count int) map[Key]struct{} {
 	snapshot := make(map[Key]struct{}, count)
 	for i := 0; i < count; i++ {
-		snapshot[key("live-"+itoa(i))] = struct{}{}
+		snapshot[key("live-"+strconv.Itoa(i))] = struct{}{}
 	}
 	return snapshot
 }
@@ -62,7 +51,7 @@ func ripe(keys ...Key) map[Key]Absence {
 // strategies beside a few live ones.
 func roundFor(roster map[Key]struct{}, absences map[Key]Absence) Round {
 	for i := 0; i < 5; i++ {
-		roster[key("live-"+itoa(i))] = struct{}{}
+		roster[key("live-"+strconv.Itoa(i))] = struct{}{}
 	}
 	members := make(map[Key]int, len(roster))
 	for k := range roster {
@@ -239,7 +228,7 @@ func TestABacklogLargerThanAnyRatioIsStillWorkedOff(t *testing.T) {
 	roster := map[Key]struct{}{}
 	gone := []Key{}
 	for i := 0; i < 100; i++ {
-		k := key("gone-" + itoa(i))
+		k := key("gone-" + strconv.Itoa(i))
 		roster[k] = struct{}{}
 		gone = append(gone, k)
 	}
@@ -365,7 +354,7 @@ func TestTheWalkStartsPastTheLastDecidedStrategy(t *testing.T) {
 	roster := map[Key]struct{}{}
 	gone := []Key{}
 	for i := 1; i <= 6; i++ {
-		k := key("gone-" + itoa(i))
+		k := key("gone-" + strconv.Itoa(i))
 		roster[k] = struct{}{}
 		gone = append(gone, k)
 	}

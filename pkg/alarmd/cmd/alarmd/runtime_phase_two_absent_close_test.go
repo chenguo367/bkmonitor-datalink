@@ -45,12 +45,10 @@ func liveSnapshot(observation string, at time.Time, size int) controlplane.Obser
 	snapshot := controlplane.ObservedSnapshot{Observation: observation, ReadAt: at}
 	for i := 0; i < size; i++ {
 		snapshot.Strategies = append(snapshot.Strategies, controlplane.DepartedStrategy{
-			TenantID: "system", StrategyID: "live-" + itoaAbsent(i), BusinessID: 2})
+			TenantID: "system", StrategyID: "live-" + strconv.Itoa(i), BusinessID: 2})
 	}
 	return snapshot
 }
-
-func itoaAbsent(value int) string { return strconv.Itoa(value) }
 
 type absentTestFixture struct {
 	loop    *absentStrategyClose
@@ -557,7 +555,7 @@ func TestARoundCutWhileClosingResumesAtTheFirstCloseNotExecuted(t *testing.T) {
 		cut, cancel := context.WithCancel(ctx)
 		fixture.link.onClose = func() { cancel() }
 		fixture.now = fixture.now.Add(absentCloseGrace + time.Minute)
-		fixture.control.snapshot = liveSnapshot("observation-"+itoaAbsent(round+2), fixture.now, 100)
+		fixture.control.snapshot = liveSnapshot("observation-"+strconv.Itoa(round+2), fixture.now, 100)
 		before := len(fixture.closeFilters(t))
 		fixture.loop.step(cut)
 		cancel()
