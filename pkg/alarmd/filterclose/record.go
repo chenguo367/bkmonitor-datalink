@@ -48,16 +48,21 @@ func (closer *Closer) readRecord(ctx context.Context, scope Scope) (openepisodes
 	return record, ""
 }
 
-// covered is how many entries the decision covers, an unreadable entry
-// counted in, and the fingerprints match selects - the ones a close that
-// found nothing prunes.
-func covered(record openepisodes.Record, match func(openepisodes.Entry) bool) (int, []string) {
+// covered is how many entries opened from vouch on the decision covers, an
+// unreadable entry counted in, and every entry match selects - the ones a
+// close that found nothing prunes. An entry opened before vouch is not
+// counted: its alert may be older than the record (an episode still open
+// when the record started, written again by its first ABNORMAL since), and
+// the dry run it would count toward reads only alerts opened from vouch.
+func covered(record openepisodes.Record, vouch time.Time, match func(openepisodes.Entry) bool) (int, []string) {
 	n := 0
 	var fingerprints []string
 	for _, entry := range record.Entries {
 		switch {
 		case match(entry):
-			n++
+			if entry.OpenedAt >= vouch.Unix() {
+				n++
+			}
 			fingerprints = append(fingerprints, entry.Fingerprint)
 		case entry.Unreadable:
 			n++
@@ -66,9 +71,21 @@ func covered(record openepisodes.Record, match func(openepisodes.Entry) bool) (i
 	return n, fingerprints
 }
 
-// readSince is the record's start, or the word that ends the job:
-// OutcomeRecordMissing (counted) where the strategy has no record or one
-// without a start, OutcomeRecordUnavailable where the read failed.
+// recordSettle is how long after its start a record vouches for what it
+// holds. A record that starts while episodes are open (the rollout, a
+// Redis loss) is written each such episode again by the first ABNORMAL of
+// it a worker acknowledges after its start - its copy holds no own send
+// of it - which arrives within the strategy's period; such an entry opens
+// at the rewrite, its alert long before. One hour covers periods up to an
+// hour; an episode of a longer period written again after it is counted
+// once though its alert is outside the dry run, widening what is allowed
+// by one as any over-count does.
+const recordSettle = time.Hour
+
+// readSince is the moment from which the record vouches for the alerts
+// the link opened (its start plus recordSettle), or the word that ends the
+// job: OutcomeRecordMissing (counted) where the strategy has no record or
+// one without a start, OutcomeRecordUnavailable where the read failed.
 func (closer *Closer) readSince(ctx context.Context, scope Scope) (time.Time, string) {
 	since, ok, err := closer.record.Since(ctx, recordKey(scope))
 	switch {
@@ -79,7 +96,7 @@ func (closer *Closer) readSince(ctx context.Context, scope Scope) (time.Time, st
 		closer.count(OutcomeRecordMissing, 1)
 		return time.Time{}, OutcomeRecordMissing
 	}
-	return since, ""
+	return since.Add(recordSettle), ""
 }
 
 // recorded runs job over the alerts opened since the record's start
@@ -120,7 +137,7 @@ func (closer *Closer) recorded(ctx context.Context, job Job, match func(openepis
 		if word != "" {
 			return Expectation{}, word
 		}
-		n, fingerprints := covered(record, match)
+		n, fingerprints := covered(record, since, match)
 		prune = fingerprints
 		return Expectation{Count: n, Source: ExpectOwnRecord}, ""
 	}

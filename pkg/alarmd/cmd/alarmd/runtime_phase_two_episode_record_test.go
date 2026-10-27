@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -34,6 +35,12 @@ func newRecordedLinkd(t *testing.T, link *fakeLinkd) recordedLinkd {
 	var cfg config.Config
 	cfg.Redis.StatePrefix = "alarmd-test"
 	cfg.PhaseTwo.Linkd.ControlPlane = config.LinkdControlPlaneConfig{URL: plane.URL, JWTSecret: "example-secret"}
+	// The strategies' records started two hours ago: long enough for each
+	// to vouch for the episodes the test acknowledges now.
+	for _, strategy := range []string{"41", "51"} {
+		server.Client().HSetNX(context.Background(), cfg.Redis.StatePrefix+":openepisodes:v1:system:"+strategy, openepisodes.SinceField,
+			strconv.FormatInt(time.Now().Add(-2*time.Hour).Unix(), 10))
+	}
 	client, err := newLinkdManage(cfg, time.Now)
 	if err != nil || client == nil {
 		t.Fatalf("link client %v (%v)", client, err)

@@ -120,12 +120,14 @@ func (link *fakeLink) add(alert *fakeAlert) {
 
 // fakeOpenedAt is when an alert that names no other was opened; a test's
 // decisions are read after it (fakeDecidedAt).
-// The record a test writes starts before (fakeRecordStart), so it vouches
-// for every alert that names no other opening time.
+// The record a test writes starts at fakeRecordStart, recordSettle and
+// more before its entries (fakeEntryOpened) and the alerts that name no
+// other opening time, so it vouches for them.
 var (
 	fakeOpenedAt    = time.Unix(1_700_000_000, 0)
 	fakeDecidedAt   = fakeOpenedAt.Add(time.Hour)
-	fakeRecordStart = fakeOpenedAt.Add(-time.Hour)
+	fakeRecordStart = fakeOpenedAt.Add(-recordSettle - time.Hour)
+	fakeEntryOpened = fakeOpenedAt.Add(-time.Minute)
 )
 
 func (link *fakeLink) alert(id string) fakeAlert {
@@ -615,12 +617,16 @@ func (h *harness) opened(t *testing.T, strategy, version string, target map[stri
 			event.TargetDimensions = append(event.TargetDimensions, name)
 			event.RecordRef.Dimensions[name], _ = json.Marshal(value)
 		}
-		change, ok := openepisodes.ChangeOf(event, fakeRecordStart)
+		change, ok := openepisodes.ChangeOf(event, fakeEntryOpened)
 		if !ok {
 			t.Fatalf("no change for %s", fingerprint)
 		}
 		changes = append(changes, change)
 	}
+	// The record started at fakeRecordStart, long enough before for it to
+	// vouch for what it holds (recordSettle).
+	h.redis.Client().HSetNX(context.Background(), h.prefix+":openepisodes:v1:"+testScope.TenantID+":"+strategy, openepisodes.SinceField,
+		strconv.FormatInt(fakeRecordStart.Unix(), 10))
 	if err := h.record(t).Apply(context.Background(), changes, nil); err != nil {
 		t.Fatal(err)
 	}

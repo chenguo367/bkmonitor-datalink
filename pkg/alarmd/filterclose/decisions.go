@@ -263,7 +263,8 @@ func (closer *Closer) Edit(ctx context.Context, input EditInput) (string, int) {
 			if recordWord != "" {
 				return Expectation{}, recordWord
 			}
-			n, _ := covered(record, func(entry openepisodes.Entry) bool {
+			vouch, _ := recordSince(ctx)
+			n, _ := covered(record, vouch, func(entry openepisodes.Entry) bool {
 				for _, version := range versions {
 					if entry.Version == version {
 						return true

@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -179,6 +180,10 @@ func closerOn(t *testing.T, h *linkdHarness) (*Closer, *linkdmanage.Client) {
 		t.Fatal(err)
 	}
 	h.record = record
+	// The record started two hours ago, so it vouches for the episodes the
+	// test opens (recordSettle) and the closes check against it.
+	server.Client().HSetNX(context.Background(), "alarmd-e2e:openepisodes:v1:tenant-a:41", openepisodes.SinceField,
+		strconv.FormatInt(time.Now().Add(-2*time.Hour).Unix(), 10))
 	closer, err := New(Options{Link: client, Commands: commands, Pending: pending, Record: record})
 	if err != nil {
 		t.Fatal(err)

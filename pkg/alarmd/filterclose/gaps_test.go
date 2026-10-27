@@ -11,8 +11,10 @@ package filterclose
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdmanage"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openepisodes"
@@ -110,5 +112,53 @@ func TestAnIncompleteBucketWalkPrunesNothing(t *testing.T) {
 	record, err := h.record(t).Load(context.Background(), openepisodes.Key{TenantID: "tenant-a", StrategyID: "41"})
 	if err != nil || len(record.Entries) != 4 || closer.Stats()[OutcomeRecordPruned] != 0 || closer.Stats()[OutcomeSampleUnreadable] != 1 {
 		t.Fatalf("record %+v, %v, stats %v", record, err, nonZero(closer.Stats()))
+	}
+}
+
+// writeEntries writes n entries of strategy 41 at version 3 opened at at,
+// into a record that started at start.
+func writeEntries(t *testing.T, h *harness, start, at time.Time, first, n int) {
+	t.Helper()
+	h.redis.Client().HSetNX(context.Background(), h.prefix+":openepisodes:v1:tenant-a:41", openepisodes.SinceField, strconv.FormatInt(start.Unix(), 10))
+	var changes []openepisodes.Change
+	for _, fingerprint := range fingerprints(first, n) {
+		changes = append(changes, openepisodes.Change{Key: openepisodes.Key{TenantID: "tenant-a", StrategyID: "41"}, Fingerprint: fingerprint,
+			Open: true, Entry: openepisodes.Entry{Version: "3", OpenedAt: at.Unix()}})
+	}
+	if err := h.record(t).Apply(context.Background(), changes, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Episodes still open when a record starts are written again by their
+// first ABNORMAL since: entries opened within recordSettle of the start,
+// their alerts older than it. They do not count toward the dry run of the
+// alerts opened since, so a real over-match among those is still refused;
+// entries opened later count as before.
+func TestEntriesWrittenAgainAtTheRecordsStartDoNotWidenTheExpectation(t *testing.T) {
+	h := newHarness(t)
+	start := fakeOpenedAt.Add(-recordSettle - time.Hour)
+	writeEntries(t, h, start, start.Add(time.Minute), 0, 30)
+	writeEntries(t, h, start, fakeEntryOpened, 100, 5)
+	for i := 0; i < 45; i++ {
+		h.link.add(&fakeAlert{id: alertID(i), labels: map[string]string{"strategy_id": "41", "strategy_version": "3"}})
+	}
+	closer := h.closer(t)
+	if word := closer.Inactive(context.Background(), testScope, "3", 3, fakeOpenedAt); word != OutcomeExpectExceeded {
+		t.Fatalf("word %s, want expect_exceeded: 45 alerts against 5 vouched entries (stats %v)", word, nonZero(closer.Stats()))
+	}
+	if len(h.link.closeBodies) != 0 {
+		t.Fatalf("closes sent: %d", len(h.link.closeBodies))
+	}
+
+	h2 := newHarness(t)
+	writeEntries(t, h2, start, start.Add(time.Minute), 0, 30)
+	writeEntries(t, h2, start, fakeEntryOpened, 100, 5)
+	for i := 0; i < 5; i++ {
+		h2.link.add(&fakeAlert{id: alertID(i), labels: map[string]string{"strategy_id": "41", "strategy_version": "3"}})
+	}
+	closer = h2.closer(t)
+	if word := closer.Inactive(context.Background(), testScope, "3", 3, fakeOpenedAt); word != OutcomeJobDone {
+		t.Fatalf("word %s (stats %v)", word, nonZero(closer.Stats()))
 	}
 }
