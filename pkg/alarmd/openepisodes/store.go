@@ -211,7 +211,13 @@ func (store *Store) Apply(ctx context.Context, changes []Change, refresh []Key) 
 			// The start goes in first, once: a hash this write creates
 			// starts at the write.
 			pipe.HSetNX(ctx, key, SinceField, strconv.FormatInt(change.Entry.OpenedAt, 10))
-			pipe.HSet(ctx, key, change.Fingerprint, value)
+			// An entry already there is the episode's own: the link labels
+			// an alert only when it creates it (Linkd ec55128e7
+			// internal/lifecycle/plan.go:417), so a repeat after a restart
+			// - the copy empty, the version moved on - keeps the version
+			// and opening the episode was written with. A RECOVERY removes
+			// the entry first, so a new episode is written anew.
+			pipe.HSetNX(ctx, key, change.Fingerprint, value)
 		} else {
 			pipe.HDel(ctx, key, change.Fingerprint)
 		}

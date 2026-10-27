@@ -243,3 +243,32 @@ func TestTheRecordStartsAtItsFirstWrite(t *testing.T) {
 		t.Fatalf("record %+v, want started again at %v", record, clk.at)
 	}
 }
+
+// A worker restarted after its strategy moved to a new version sees the
+// still-open episode's ABNORMAL as new (its copy is empty) and writes it
+// again: the entry keeps the version and opening it was written with, as
+// the link keeps the alert's labels from its creation. After a RECOVERY
+// the next opening is written at its own version.
+func TestARepeatAfterARestartKeepsTheEpisodesVersion(t *testing.T) {
+	server := redistest.Start(t)
+	if server == nil {
+		t.Skip("no redis-server")
+	}
+	client := server.Client()
+	clk := &clock{at: time.Unix(1_800_000_000, 0)}
+	newWorker(t, client, clk).acknowledge(t, envelope(contract.TriggerEventAbnormal, 1))
+	clk.at = clk.at.Add(time.Hour)
+	moved := envelope(contract.TriggerEventAbnormal, 1)
+	moved.StrategyRef = &contract.StrategySnapshotRef{TenantID: "tenant-a", StrategyID: 41, Revision: 8}
+	restarted := newWorker(t, client, clk)
+	restarted.acknowledge(t, moved)
+	if record := load(t, client); len(record.Entries) != 1 || record.Entries[0].Version != "7" ||
+		record.Entries[0].OpenedAt != 1_800_000_000 {
+		t.Fatalf("record %+v, want the episode at version 7 as it opened", record)
+	}
+	restarted.acknowledge(t, envelope(contract.TriggerEventRecovery, 1))
+	restarted.acknowledge(t, moved)
+	if record := load(t, client); len(record.Entries) != 1 || record.Entries[0].Version != "8" {
+		t.Fatalf("record %+v, want the new episode at version 8", record)
+	}
+}
