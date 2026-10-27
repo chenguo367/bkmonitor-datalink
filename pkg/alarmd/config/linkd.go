@@ -33,6 +33,76 @@ type LinkdConfig struct {
 	// (resolveCredentials), cleared once read.
 	UsernameFile string `yaml:"username_file"`
 	PasswordFile string `yaml:"password_file"`
+	// ControlPlane is the link's control plane, whose management API the
+	// control leader closes alerts through (package filterclose). Nothing
+	// switches it on: with a control plane and its secret named, the leader
+	// asks it each round, and a link whose storage cannot search (501) or
+	// that does not serve the routes leaves the deployment on its existing
+	// close paths, counted.
+	ControlPlane LinkdControlPlaneConfig `yaml:"control_plane"`
+}
+
+// LinkdControlPlaneConfig is the link's control plane as alarmd reaches it:
+// the API's address and the credential its management routes take - an
+// Internal-Token signed with the link's dispatch JWT secret, which is given
+// by file only (JWTSecretFile) and never written in the file.
+type LinkdControlPlaneConfig struct {
+	// URL is the link control plane's address, without its /api/v1 routes.
+	URL           string `yaml:"url"`
+	JWTSecretFile string `yaml:"jwt_secret_file"`
+	// JWTSecret is resolved from JWTSecretFile (resolveCredentials).
+	JWTSecret string `yaml:"-" json:"-"`
+	// InlineJWTSecret is only here to be refused: the secret is given by
+	// file, never written in the configuration.
+	InlineJWTSecret string `yaml:"jwt_secret" json:"-"`
+	// JWTUsername is the caller's identity in the token; alarmd when unset.
+	JWTUsername string `yaml:"jwt_username"`
+	// EventSourceID is the link's source alarmd writes to; built_in_bk when
+	// unset. Every filter alarmd sends names it: the link scopes a search
+	// to the tenant only.
+	EventSourceID string `yaml:"event_source_id"`
+}
+
+// Configured says the deployment names the link's control plane and its
+// secret. It is where the link is, not a switch: whether its closes are
+// used is the link's answer.
+func (c LinkdControlPlaneConfig) Configured() bool { return c.URL != "" && c.JWTSecret != "" }
+
+// Username is the token's caller identity.
+func (c LinkdControlPlaneConfig) Username() string {
+	if c.JWTUsername == "" {
+		return "alarmd"
+	}
+	return c.JWTUsername
+}
+
+// Source is the link's source alarmd's events arrive under.
+func (c LinkdControlPlaneConfig) Source() string {
+	if c.EventSourceID == "" {
+		return "built_in_bk"
+	}
+	return c.EventSourceID
+}
+
+func (c LinkdControlPlaneConfig) validate() error {
+	if c.InlineJWTSecret != "" {
+		return errors.New("linkd control_plane jwt_secret is given by jwt_secret_file only")
+	}
+	if c.URL == "" {
+		return nil
+	}
+	u, err := url.Parse(c.URL)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return errors.New("linkd control_plane url must be an HTTP service URL without credentials or query")
+	}
+	// No secret is not refused: the leader counts credentials_missing each
+	// round and the deployment stays on its existing close paths.
+	for _, value := range []string{c.Username(), c.Source()} {
+		if strings.TrimSpace(value) != value || strings.ContainsAny(value, "/?#") {
+			return errors.New("linkd control_plane jwt_username and event_source_id must be canonical names")
+		}
+	}
+	return nil
 }
 
 // LinkdCalibrationInterval is how often the copy calibrates against the
@@ -78,6 +148,9 @@ func (c LinkdConfig) Prefix() string {
 }
 
 func (c LinkdConfig) Validate() error {
+	if err := c.ControlPlane.validate(); err != nil {
+		return err
+	}
 	if c.ConsoleURL == "" {
 		if c.Username != "" || c.Password != "" {
 			return errors.New("linkd console_url is required for credentials")
