@@ -14,8 +14,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/admission"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdoutput"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/filterclose"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scopeclose"
 )
 
@@ -32,36 +31,33 @@ func (overlayFuller) Fill(dimensions map[string]json.RawMessage, facts *admissio
 	}
 }
 
-// heldAlerts is the consumer's open alert set as the close reads it: every
-// fingerprint held, each listed as an alert of this deployment's source.
+// heldAlerts is alarmd's copy of the link's active alerts as the close
+// reads it: every fingerprint held.
 type heldAlerts map[string]struct{}
 
-func (heldAlerts) Trusted() bool { return true }
-func (set heldAlerts) MemberCount(openalerts.StrategyKey) (int, bool) {
-	return len(set), true
-}
-func (set heldAlerts) Holds(_ openalerts.StrategyKey, fingerprint string) (bool, bool) {
+func (set heldAlerts) KnowsOpen(string, string) bool { return len(set) > 0 }
+func (set heldAlerts) Known(_, _ string, fingerprint string) (bool, bool) {
 	_, held := set[fingerprint]
 	return held, true
 }
-func (set heldAlerts) ActiveAlerts(openalerts.StrategyKey) []openalerts.Alert {
-	alerts := make([]openalerts.Alert, 0, len(set))
-	for fingerprint := range set {
-		alerts = append(alerts, openalerts.Alert{AlertID: "alert-" + fingerprint, EventSourceID: "own", Fingerprint: fingerprint})
-	}
-	return alerts
+
+// recordedCloses is the link's close by filter, recording each close.
+type recordedCloses struct {
+	fingerprints []string
+	decisions    []string
 }
-func (heldAlerts) OwnEventSourceID() string { return "own" }
 
-// The set is listed whole, so nothing answers from the index set alone.
-func (heldAlerts) UnlistedMemberCount(openalerts.StrategyKey) (int, bool)    { return 0, false }
-func (heldAlerts) UnlistedHolds(openalerts.StrategyKey, string) (bool, bool) { return false, false }
+func (w *recordedCloses) RemovedTargets(_ context.Context, _ filterclose.Scope, targets []filterclose.Target, _ int, _ int64, decision string) []string {
+	w.decisions = append(w.decisions, decision)
+	return []string{filterclose.OutcomeJobDone}
+}
 
-type recordedCloses struct{ sent []linkdoutput.CloseRequest }
-
-func (w *recordedCloses) WriteCloseBatch(_ context.Context, batch []linkdoutput.CloseRequest) error {
-	w.sent = append(w.sent, batch...)
-	return nil
+func (w *recordedCloses) Fingerprints(_ context.Context, _ filterclose.Scope, fingerprints []string, decision string, _ int64) string {
+	for range fingerprints {
+		w.decisions = append(w.decisions, decision)
+	}
+	w.fingerprints = append(w.fingerprints, fingerprints...)
+	return filterclose.OutcomeJobDone
 }
 
 // forwardingSink hands the access path's observations to a real close, as
@@ -69,12 +65,12 @@ func (w *recordedCloses) WriteCloseBatch(_ context.Context, batch []linkdoutput.
 type forwardingSink struct{ closer *scopeclose.Closer }
 
 func (sink forwardingSink) Screen(plan execution.PlanIdentity) string {
-	return sink.closer.Screen(openalerts.StrategyKey{TenantID: plan.TenantID, StrategyID: plan.StrategyID})
+	return sink.closer.Screen(scopeclose.Key{TenantID: plan.TenantID, StrategyID: plan.StrategyID})
 }
 func (sink forwardingSink) Observe(drop ScopeDrop) {
-	sink.closer.Observe(scopeclose.Drop{TenantID: drop.Plan.TenantID, BusinessID: drop.Plan.BusinessID,
-		StrategyID: drop.Plan.StrategyID, Fingerprint: drop.Fingerprint, StrategyRevision: drop.StrategyRevision,
-		GlobalBusiness: drop.GlobalBusiness, Round: drop.Round, IntervalSeconds: drop.IntervalSeconds,
+	sink.closer.Observe(scopeclose.Drop{TenantID: drop.Plan.TenantID,
+		StrategyID: drop.Plan.StrategyID, Fingerprint: drop.Fingerprint, Target: drop.Target, StrategyRevision: drop.StrategyRevision,
+		Round: drop.Round, IntervalSeconds: drop.IntervalSeconds,
 		ReadOffset: drop.ReadOffset, CloseReason: drop.CloseReason})
 }
 func (forwardingSink) Count(ScopeDropReporter, string, int) {}
@@ -110,9 +106,9 @@ func TestARefusedSupersededOfferIsMadeAgainOnTheNextSlot(t *testing.T) {
 	if old == "" {
 		t.Fatal("the fixture record has no fingerprint")
 	}
-	closer.Bind(heldAlerts{old: {}, busyA: {}, busyB: {}}, writer)
+	closer.Bind(heldAlerts{old: {}, busyA: {}, busyB: {}}, writer, "own")
 	busy := func(fingerprint string, round int64) scopeclose.Drop {
-		return scopeclose.Drop{TenantID: plan.TenantID, BusinessID: plan.BusinessID, StrategyID: plan.StrategyID,
+		return scopeclose.Drop{TenantID: plan.TenantID, StrategyID: plan.StrategyID,
 			Fingerprint: fingerprint, StrategyRevision: 3, Round: round}
 	}
 
@@ -129,15 +125,17 @@ func TestARefusedSupersededOfferIsMadeAgainOnTheNextSlot(t *testing.T) {
 	slot(1700000060)
 	slot(1700000120)
 	slot(1700000180)
-	var superseded []linkdoutput.CloseRequest
-	for _, request := range writer.sent {
-		if request.Fingerprint == old {
-			superseded = append(superseded, request)
+	closes := 0
+	for i, fingerprint := range writer.fingerprints {
+		if fingerprint == old {
+			closes++
+			if writer.decisions[i] != scopeclose.DecisionSuperseded {
+				t.Fatalf("the superseded alert was closed under %s", writer.decisions[i])
+			}
 		}
 	}
-	if len(superseded) != 1 || superseded[0].Reason != linkdoutput.CloseReasonSupersededIdentity || superseded[0].AlertInstanceID != "alert-"+old {
-		t.Fatalf("the superseded alert got closes %+v (all sent %+v), want exactly one with reason %s",
-			superseded, writer.sent, linkdoutput.CloseReasonSupersededIdentity)
+	if closes != 1 {
+		t.Fatalf("the superseded alert got %d closes (all %v), want exactly one", closes, writer.fingerprints)
 	}
 	if got := closer.Stats()[scopeclose.OutcomeSupersededCloseSent]; got != 1 {
 		t.Fatalf("superseded_identity_close_sent = %d, want 1", got)

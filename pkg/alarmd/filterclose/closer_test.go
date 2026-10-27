@@ -65,7 +65,7 @@ func TestEveryFilterCarriesTenantSourceAndStrategy(t *testing.T) {
 	}
 	for name, body := range missing {
 		word := closer.Run(context.Background(), Job{Filter: Filter{scope: testScope, body: json.RawMessage(body)}, Decision: DecisionAbsent,
-			Expect: Expectation{Count: 10, Source: ExpectRoster}, Reason: "r"})
+			Expect: Expectation{Count: 10, Source: ExpectDecidedIDs}, Reason: "r"})
 		if word != OutcomeFilterRefused {
 			t.Fatalf("%s: %s", name, word)
 		}
@@ -87,13 +87,13 @@ func TestADryRunPastTheExpectationClosesNothing(t *testing.T) {
 	h.link.add(&fakeAlert{id: "other-source", source: "another", labels: map[string]string{"strategy_id": "41"}})
 	h.link.add(&fakeAlert{id: "other-tenant", tenant: "tenant-b", labels: map[string]string{"strategy_id": "41"}})
 	closer := h.closer(t)
-	if word := closer.Absent(context.Background(), testScope, DecisionAbsent, 3, Expectation{Count: 10, Source: ExpectRoster}); word != OutcomeExpectExceeded {
+	if word := closer.Absent(context.Background(), testScope, DecisionAbsent, 3, Expectation{Count: 10, Source: ExpectDecidedIDs}); word != OutcomeExpectExceeded {
 		t.Fatalf("word %s, want expect_exceeded", word)
 	}
 	if h.link.requests[linkdmanage.RouteCloseFilter] == 0 || h.link.alert(alertID(0)).closes != 0 {
 		t.Fatalf("closed past the expectation: %+v", h.link.alert(alertID(0)))
 	}
-	if word := closer.Absent(context.Background(), testScope, DecisionAbsent, 3, Expectation{Count: 48, Source: ExpectRoster}); word != OutcomeJobDone {
+	if word := closer.Absent(context.Background(), testScope, DecisionAbsent, 3, Expectation{Count: 48, Source: ExpectDecidedIDs}); word != OutcomeJobDone {
 		t.Fatalf("word %s, want job_done", word)
 	}
 	for i := 0; i < 50; i++ {
@@ -124,7 +124,7 @@ func TestARemovedMultiKeyTargetClosesOnlyItsOwnAlerts(t *testing.T) {
 	}
 	closer := h.closer(t)
 	words := closer.RemovedTargets(context.Background(), testScope, []Target{
-		{"bk_target_ip": "192.0.2.1", "bk_target_cloud_id": "1"}, {"bk_target_ip": "192.0.2.2", "bk_target_cloud_id": "0"}}, 1, 7)
+		{"bk_target_ip": "192.0.2.1", "bk_target_cloud_id": "1"}, {"bk_target_ip": "192.0.2.2", "bk_target_cloud_id": "0"}}, 1, 7, DecisionScope)
 	if len(words) != 1 || words[0] != OutcomeJobDone {
 		t.Fatalf("words %v", words)
 	}
@@ -146,23 +146,43 @@ func TestARemovedMultiKeyTargetClosesOnlyItsOwnAlerts(t *testing.T) {
 	}
 }
 
-// A link that cannot search answers 501: the job says so, and the closer is
-// out of force until the recheck, when it asks again.
-func TestALinkThatCannotSearchLeavesTheExistingPath(t *testing.T) {
+// A link that cannot search answers 501: filtered close is unsupported,
+// counted and warned, every job until the recheck answers the same word
+// without a request, and nothing is closed another way. After the recheck
+// it is asked again.
+func TestALinkThatCannotSearchIsFilteredCloseUnsupported(t *testing.T) {
 	h := newHarness(t)
 	h.link.unsupported = true
 	closer := h.closer(t)
+	warned := 0
+	closer.warn = func(error) { warned++ }
 	at := time.Unix(1_800_000_000, 0)
 	closer.now = func() time.Time { return at }
-	if word := closer.Absent(context.Background(), testScope, DecisionAbsent, 3, Expectation{Count: 1, Source: ExpectRoster}); word != OutcomeLinkUnsupported {
+	if word := closer.Absent(context.Background(), testScope, DecisionAbsent, 3, Expectation{Count: 1, Source: ExpectDecidedIDs}); word != OutcomeUnsupported {
 		t.Fatalf("word %s", word)
 	}
-	if closer.InForce() {
-		t.Fatal("in force after a 501")
+	sent := h.link.requests[linkdmanage.RouteCloseFilter] + h.link.requests[linkdmanage.RouteSearch]
+	if !closer.Unsupported() || warned != 1 {
+		t.Fatalf("unsupported %v, warned %d", closer.Unsupported(), warned)
+	}
+	if word := closer.Inactive(context.Background(), testScope, "3", 3, Expectation{Count: 1, Source: ExpectFixedCeiling}); word != OutcomeUnsupported {
+		t.Fatalf("word %s", word)
+	}
+	if word, _ := closer.Edit(context.Background(), EditInput{Scope: testScope, Plan: currentPlan(), Expect: Expectation{Count: 1, Source: ExpectFixedCeiling}}); word != OutcomeUnsupported {
+		t.Fatalf("edit word %s", word)
+	}
+	if got := h.link.requests[linkdmanage.RouteCloseFilter] + h.link.requests[linkdmanage.RouteSearch]; got != sent {
+		t.Fatalf("%d requests inside the recheck", got-sent)
+	}
+	if n := closer.Stats()[OutcomeUnsupported]; n != 3 {
+		t.Fatalf("%s = %d", OutcomeUnsupported, n)
 	}
 	at = at.Add(unsupportedRecheck)
-	if !closer.InForce() {
+	if closer.Unsupported() {
 		t.Fatal("not asked again after the recheck")
+	}
+	if err := closer.Probe(context.Background(), "tenant-a", "built_in_bk"); err == nil || warned != 2 {
+		t.Fatalf("probe %v, warned %d", err, warned)
 	}
 }
 

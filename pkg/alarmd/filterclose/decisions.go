@@ -43,6 +43,58 @@ func (closer *Closer) Absent(ctx context.Context, scope Scope, decision string, 
 		Reason: fmt.Sprintf("alarmd: strategy %s %s", scope.StrategyID, decision)})
 }
 
+// AbsentFound is a strategy the link holds active alerts of this source
+// for that the snapshot does not run, with the version its sample alert
+// carries.
+type AbsentFound struct {
+	StrategyID string
+	Version    string
+}
+
+// MaxAbsentPerRound bounds the searches one tenant's discovery makes in a
+// round, one per strategy found.
+const MaxAbsentPerRound = 64
+
+// AbsentStrategies finds the strategies of the tenant's active alerts of
+// the source that are not among running, each with one search of limit 1
+// that excludes running and the ones found so far: the alert with the
+// smallest id names the next one. It replaces the link Console's roster.
+// A strategy found is only a candidate; whether it is absent long enough
+// to close is the caller's (absentalerts). A failed search ends the walk
+// with its word; what was found before it is returned.
+func (closer *Closer) AbsentStrategies(ctx context.Context, tenantID, eventSourceID string, running []string) ([]AbsentFound, string) {
+	if word := closer.refuseUnsupported(); word != "" {
+		return nil, word
+	}
+	exclude := append([]string(nil), running...)
+	var found []AbsentFound
+	for len(found) < MaxAbsentPerRound {
+		query, err := discoveryFilter(tenantID, eventSourceID, exclude)
+		if err != nil {
+			closer.count(OutcomeFilterRefused, 1)
+			return found, OutcomeFilterRefused
+		}
+		page, err := closer.link.Search(ctx, tenantID, query, "", 1)
+		if err != nil {
+			return found, closer.failed(err)
+		}
+		if len(page.Items) == 0 {
+			return found, ""
+		}
+		strategy, ok := page.Items[0].Label("strategy_id")
+		if !ok || !decimal(strategy) {
+			// An id no term can exclude: the walk would find it again.
+			closer.count(OutcomeSampleUnreadable, 1)
+			return found, ""
+		}
+		version, _ := page.Items[0].Label("strategy_version")
+		found = append(found, AbsentFound{StrategyID: strategy, Version: version})
+		exclude = append(exclude, strategy)
+	}
+	closer.count(OutcomeAbsentTruncated, 1)
+	return found, ""
+}
+
 // Fingerprints closes the strategy's active alerts of the given
 // fingerprints under one decision (a close reason and its detail): the
 // series a caller decided one by one. The expectation is the fingerprints
@@ -80,9 +132,11 @@ func (closer *Closer) Inactive(ctx context.Context, scope Scope, version string,
 }
 
 // RemovedTargets closes the alerts of targets removed from the strategy's
-// scope, batch by batch; each batch's expectation is its targets times
+// scope under a decision (DecisionScope, or another target-addressed one),
+// batch by batch; each batch's expectation is its targets times
 // seriesPerTarget. It returns the words of the batches in order.
-func (closer *Closer) RemovedTargets(ctx context.Context, scope Scope, targets []Target, seriesPerTarget int, revision int64) []string {
+func (closer *Closer) RemovedTargets(ctx context.Context, scope Scope, targets []Target, seriesPerTarget int, revision int64,
+	decision string) []string {
 	filters, err := TargetFilters(scope, targets)
 	if err != nil {
 		closer.count(OutcomeFilterRefused, 1)
@@ -94,7 +148,6 @@ func (closer *Closer) RemovedTargets(ctx context.Context, scope Scope, targets [
 		return []string{OutcomeFilterRefused}
 	}
 	words := make([]string, 0, len(filters))
-	done := 0
 	for _, filter := range filters {
 		var batch struct {
 			Bool struct {
@@ -112,10 +165,9 @@ func (closer *Closer) RemovedTargets(ctx context.Context, scope Scope, targets [
 				n += len(clause.Bool.Should)
 			}
 		}
-		done += n
-		words = append(words, closer.Run(ctx, Job{Filter: filter, Decision: DecisionScope, Revision: revision, Recheck: strategy,
+		words = append(words, closer.Run(ctx, Job{Filter: filter, Decision: decision, Revision: revision, Recheck: strategy,
 			Expect: Expectation{Count: n * max(seriesPerTarget, 1), Source: ExpectTargets},
-			Reason: fmt.Sprintf("alarmd: target removed from strategy %s", scope.StrategyID)}))
+			Reason: fmt.Sprintf("alarmd: strategy %s %s", scope.StrategyID, decision)}))
 	}
 	return words
 }
@@ -146,24 +198,28 @@ type EditInput struct {
 // their ids under the bucket's filter. The threshold alerts of the older
 // versions at a level the current Plans no longer detect are closed by
 // one more filter (level_removed). It returns the first word that ended
-// the strategy's turn early - OutcomeLinkUnsupported is the caller's cue
-// to take its existing path - or empty.
-func (closer *Closer) Edit(ctx context.Context, input EditInput) string {
+// the strategy's turn early - OutcomeUnsupported ends the round - or
+// empty, and how many buckets of other versions it found: none is a
+// strategy no edit close has anything left of.
+func (closer *Closer) Edit(ctx context.Context, input EditInput) (string, int) {
+	if word := closer.refuseUnsupported(); word != "" {
+		return word, 0
+	}
 	plan := input.Plan
 	if plan.Revision <= 0 {
 		closer.count("edit_"+editclose.OutcomeRevisionUnknown, 1)
-		return ""
+		return "", 0
 	}
 	current := strconv.FormatInt(plan.Revision, 10)
 	buckets, samples, word := closer.enumerate(ctx, input.Scope, current)
 	if word != "" {
-		return word
+		return word, 0
 	}
 	var older []string
 	seenOlder := map[string]bool{}
 	for i, bucket := range buckets {
 		if ctx.Err() != nil {
-			return ""
+			return "", len(buckets)
 		}
 		revision, err := strconv.ParseInt(bucket.Version, 10, 64)
 		if err == nil && revision > 0 && revision < plan.Revision && !seenOlder[bucket.Version] {
@@ -171,8 +227,8 @@ func (closer *Closer) Edit(ctx context.Context, input EditInput) string {
 			older = append(older, bucket.Version)
 		}
 		if bucket.Digest == "" {
-			if word := closer.oneByOne(ctx, input, bucket); word == OutcomeLinkUnsupported {
-				return word
+			if word := closer.oneByOne(ctx, input, bucket); word == OutcomeUnsupported {
+				return word, len(buckets)
 			}
 			continue
 		}
@@ -197,8 +253,8 @@ func (closer *Closer) Edit(ctx context.Context, input EditInput) string {
 		closer.count("edit_"+note, 1)
 		switch {
 		case decision == editclose.OutcomeGroupDimensionsUndecided:
-			if word := closer.oneByOne(ctx, input, bucket); word == OutcomeLinkUnsupported {
-				return word
+			if word := closer.oneByOne(ctx, input, bucket); word == OutcomeUnsupported {
+				return word, len(buckets)
 			}
 		case editclose.Closes(decision):
 			filter, err := BucketFilter(input.Scope, bucket)
@@ -207,20 +263,20 @@ func (closer *Closer) Edit(ctx context.Context, input EditInput) string {
 				continue
 			}
 			if word := closer.Run(ctx, Job{Filter: filter, Decision: decision, Version: bucket.Version, Digest: bucket.Digest,
-				Revision: plan.Revision, Expect: input.Expect, Reason: editReason(input.Scope, decision, bucket.Version)}); word == OutcomeLinkUnsupported {
-				return word
+				Revision: plan.Revision, Expect: input.Expect, Reason: editReason(input.Scope, decision, bucket.Version)}); word == OutcomeUnsupported {
+				return word, len(buckets)
 			}
 		}
 	}
 	severities, word := editclose.RemovedSeverities(plan)
 	closer.count("edit_"+word, 1)
 	if len(older) == 0 || len(severities) == 0 {
-		return ""
+		return "", len(buckets)
 	}
 	filter, err := LevelFilter(input.Scope, older, severities)
 	if err != nil {
 		closer.count(OutcomeFilterRefused, 1)
-		return ""
+		return "", len(buckets)
 	}
 	sort.Strings(older)
 	versions := ""
@@ -228,10 +284,10 @@ func (closer *Closer) Edit(ctx context.Context, input EditInput) string {
 		versions += version + ","
 	}
 	if word := closer.Run(ctx, Job{Filter: filter, Decision: editclose.OutcomeLevelRemoved, Version: versions, Revision: plan.Revision,
-		Expect: input.Expect, Reason: editReason(input.Scope, editclose.OutcomeLevelRemoved, "")}); word == OutcomeLinkUnsupported {
-		return word
+		Expect: input.Expect, Reason: editReason(input.Scope, editclose.OutcomeLevelRemoved, "")}); word == OutcomeUnsupported {
+		return word, len(buckets)
 	}
-	return ""
+	return "", len(buckets)
 }
 
 func editReason(scope Scope, decision, version string) string {
@@ -248,6 +304,9 @@ func (closer *Closer) enumerate(ctx context.Context, scope Scope, current string
 	var samples []linkdmanage.Alert
 	for len(buckets) < maxBuckets {
 		filter, err := enumerationFilter(scope, current, buckets)
+		if err == nil {
+			filter, err = activeOnly(filter)
+		}
 		if err != nil {
 			closer.count(OutcomeFilterRefused, 1)
 			return nil, nil, OutcomeFilterRefused
@@ -311,18 +370,23 @@ func (closer *Closer) oneByOne(ctx context.Context, input EditInput, bucket Buck
 		return OutcomeFilterRefused
 	}
 	walkKey := filterKey(filter)
+	read, err := activeOnly(filter)
+	if err != nil {
+		closer.count(OutcomeFilterRefused, 1)
+		return OutcomeFilterRefused
+	}
 	closer.mu.Lock()
 	after := closer.buckets[walkKey]
 	closer.mu.Unlock()
 	decided := map[string][]string{}
-	read := 0
-	for read < maxAlertsPerTurn {
-		page, err := closer.link.Search(ctx, input.Scope.TenantID, filter.body, after, min(linkdmanage.MaxLimit, maxAlertsPerTurn-read))
+	n := 0
+	for n < maxAlertsPerTurn {
+		page, err := closer.link.Search(ctx, input.Scope.TenantID, read.body, after, min(linkdmanage.MaxLimit, maxAlertsPerTurn-n))
 		if err != nil {
 			return closer.failed(err)
 		}
 		for _, alert := range page.Items {
-			read++
+			n++
 			if alert.Status != "active" {
 				continue
 			}
@@ -339,7 +403,7 @@ func (closer *Closer) oneByOne(ctx context.Context, input EditInput, bucket Buck
 			break
 		}
 	}
-	closer.count(OutcomeAlertsRead, read)
+	closer.count(OutcomeAlertsRead, n)
 	if after != "" {
 		closer.count(OutcomeAlertsTruncated, 1)
 	}
@@ -364,7 +428,7 @@ func (closer *Closer) oneByOne(ctx context.Context, input EditInput, bucket Buck
 			word := closer.Run(ctx, Job{Filter: byID, Decision: decision, Version: bucket.Version, Digest: bucket.Digest,
 				Revision: input.Plan.Revision, Expect: Expectation{Count: len(batch), Source: ExpectDecidedIDs},
 				Reason: editReason(input.Scope, decision, bucket.Version), Recheck: filter})
-			if word == OutcomeLinkUnsupported {
+			if word == OutcomeUnsupported {
 				return word
 			}
 		}

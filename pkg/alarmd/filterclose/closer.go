@@ -76,12 +76,6 @@ type Expectation struct {
 
 // The expectation sources.
 const (
-	// ExpectOwnRecords is alarmd's own count of the strategy's open alerts,
-	// read from its copy of the link's index sets (openalerts.OpenCounts).
-	ExpectOwnRecords = "own_records"
-	// ExpectRoster is the link Console's roster count of the strategy's
-	// unrecovered alerts, the last one the leader read.
-	ExpectRoster = "roster"
 	// ExpectTargets is the removed targets times the series one target
 	// carries.
 	ExpectTargets = "removed_targets"
@@ -113,10 +107,6 @@ func (expect Expectation) allowed() int {
 
 func (expect Expectation) word() string {
 	switch expect.Source {
-	case ExpectOwnRecords:
-		return OutcomeExpectOwnRecords
-	case ExpectRoster:
-		return OutcomeExpectRoster
 	case ExpectTargets:
 		return OutcomeExpectTargets
 	case ExpectDecidedIDs:
@@ -151,8 +141,8 @@ type Job struct {
 const pageLimit = 100
 
 // unsupportedRecheck is how long a link that answered 501, 404 or 405 is
-// left on the existing paths before it is asked again: an upgrade of the
-// link is noticed within it.
+// not asked again: every job meanwhile answers OutcomeUnsupported without
+// a request, and an upgrade of the link is noticed within it.
 const unsupportedRecheck = 10 * time.Minute
 
 // Options configure a Closer.
@@ -161,6 +151,10 @@ type Options struct {
 	Commands *Commands
 	Pending  *Pending
 	Now      func() time.Time
+	// Warn is told each time the link answers that it cannot serve the
+	// search or the filtered close: filtered close is unsupported, and
+	// nothing closes the decisions instead.
+	Warn func(error)
 }
 
 // Closer runs jobs and retries kept items. It is safe for concurrent use.
@@ -169,6 +163,7 @@ type Closer struct {
 	commands *Commands
 	pending  *Pending
 	now      func() time.Time
+	warn     func(error)
 
 	mu sync.Mutex
 	// progress is, per job filter, its dry run's cursor while it runs, then
@@ -200,21 +195,44 @@ func New(options Options) (*Closer, error) {
 	if now == nil {
 		now = time.Now
 	}
-	return &Closer{link: options.Link, commands: options.Commands, pending: options.Pending, now: now,
+	return &Closer{link: options.Link, commands: options.Commands, pending: options.Pending, now: now, warn: options.Warn,
 		progress: map[string]*progress{}, counts: map[string]uint64{}, buckets: map[string]string{}}, nil
 }
 
-// InForce says whether a caller should take this path: false for a nil
-// Closer, and within unsupportedRecheck of the link answering that it
-// cannot serve it. A caller that gets OutcomeLinkUnsupported from a job
-// takes its existing path for that decision.
-func (closer *Closer) InForce() bool {
+// Unsupported says the link answered within unsupportedRecheck that it
+// cannot serve the search or the filtered close.
+func (closer *Closer) Unsupported() bool {
 	if closer == nil {
-		return false
+		return true
 	}
 	closer.mu.Lock()
 	defer closer.mu.Unlock()
-	return !closer.now().Before(closer.unsupportedUntil)
+	return closer.now().Before(closer.unsupportedUntil)
+}
+
+// refuseUnsupported counts and answers OutcomeUnsupported while the link
+// is known not to serve the routes; empty otherwise.
+func (closer *Closer) refuseUnsupported() string {
+	if !closer.Unsupported() {
+		return ""
+	}
+	closer.count(OutcomeUnsupported, 1)
+	return OutcomeUnsupported
+}
+
+// Probe asks the link once whether it serves the search: one search of
+// limit 1 under the tenant and this deployment's source. An unsupported
+// answer is warned and counted as any job's; the error is returned.
+func (closer *Closer) Probe(ctx context.Context, tenantID, eventSourceID string) error {
+	query, err := json.Marshal(object{"bool": object{"filter": []any{term(fieldSource, eventSourceID)}}})
+	if err != nil {
+		return err
+	}
+	if _, err := closer.link.Search(ctx, tenantID, query, "", 1); err != nil {
+		closer.failed(err)
+		return err
+	}
+	return nil
 }
 
 // Forget drops the term's progress: a new term checks every job again.
@@ -259,7 +277,10 @@ func (closer *Closer) failed(err error) string {
 		closer.mu.Lock()
 		closer.unsupportedUntil = closer.now().Add(unsupportedRecheck)
 		closer.mu.Unlock()
-		word = OutcomeLinkUnsupported
+		if closer.warn != nil {
+			closer.warn(err)
+		}
+		word = OutcomeUnsupported
 	case status == http.StatusTooManyRequests:
 		word = OutcomeLinkBusy
 	case status >= 400 && status < 500:
@@ -288,6 +309,9 @@ func filterKey(filter Filter) string {
 // whose close may have been saved is kept and retried by id
 // (RetryPending).
 func (closer *Closer) Run(ctx context.Context, job Job) string {
+	if word := closer.refuseUnsupported(); word != "" {
+		return word
+	}
 	if requireScope(job.Filter) != nil {
 		closer.count(OutcomeFilterRefused, 1)
 		return OutcomeFilterRefused
@@ -434,6 +458,9 @@ func (closer *Closer) items(ctx context.Context, job Job, command Command, items
 // an alert whose close was saved is closed, and the retry completes its
 // outputs). A whole-request failure of the link ends the pass.
 func (closer *Closer) RetryPending(ctx context.Context, n int) {
+	if closer.refuseUnsupported() != "" {
+		return
+	}
 	items, unreadable, err := closer.pending.Next(ctx, n)
 	closer.count(OutcomePendingUnreadable, unreadable)
 	if err != nil {

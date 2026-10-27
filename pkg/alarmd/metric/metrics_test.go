@@ -22,16 +22,16 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/absentalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/activecopy"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/cliauth"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/editclose"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/filterclose"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/filterclose"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
@@ -456,10 +456,10 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["alarmd_trigger_recovery_withheld_total"] = "variableLabels: {reason}"
 	expected["alarmd_no_data_end_total"] = "variableLabels: {outcome}"
 	expected["alarmd_trigger_open_alert_gate_total"] = "variableLabels: {outcome}"
-	expected["alarmd_open_alert_set_authoritative_age_seconds"] = "variableLabels: {}"
-	expected["alarmd_open_alert_set_unavailable_total"] = "variableLabels: {reason}"
-	expected["alarmd_open_alert_set_refresh_total"] = "variableLabels: {result}"
-	expected["alarmd_open_alert_set_lookup_total"] = "variableLabels: {answer}"
+	expected["alarmd_active_copy_lookup_total"] = "variableLabels: {answer}"
+	expected["alarmd_active_copy_pass_total"] = "variableLabels: {outcome}"
+	expected["alarmd_active_copy_entries"] = "variableLabels: {kind}"
+	expected["alarmd_active_copy_link_unsupported"] = "variableLabels: {}"
 	expected["alarmd_effective_close_total"] = "variableLabels: {outcome}"
 	expected["alarmd_log_lines_total"] = "variableLabels: {stage,admission}"
 	expected["alarmd_observer_panics_total"] = "variableLabels: {observer}"
@@ -467,15 +467,9 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["alarmd_strategy_edit_close_total"] = "variableLabels: {outcome}"
 	expected["alarmd_no_data_close_requests_total"] = "variableLabels: {outcome}"
 	expected["alarmd_linkd_filter_close_total"] = "variableLabels: {outcome}"
-	expected["alarmd_recovery_record_total"] = "variableLabels: {outcome}"
 	expected["alarmd_target_scope_close_total"] = "variableLabels: {outcome}"
 	expected["alarmd_absent_strategy_difference"] = "variableLabels: {side}"
 	expected["alarmd_absent_strategy_round_total"] = "variableLabels: {disposition}"
-	expected["alarmd_open_alert_set_entries"] = "variableLabels: {kind}"
-	expected["alarmd_open_alert_set_tracked_strategies"] = "variableLabels: {}"
-	expected["alarmd_open_alert_set_evictions_total"] = "variableLabels: {}"
-	expected["alarmd_open_alert_set_notices_refused_total"] = "variableLabels: {reason}"
-	expected["alarmd_linkd_calibration_coverage"] = "variableLabels: {state}"
 	expected["alarmd_fleet_tracker_dropped_total"] = "variableLabels: {what}"
 	expected["alarmd_effective_time_refresh_total"] = "variableLabels: {result}"
 	expected["alarmd_activation_rebuild_total"] = "variableLabels: {outcome}"
@@ -559,15 +553,12 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["alarmd_lookback_permit_refusals_total"] = "variableLabels: {reason}"
 	expected["alarmd_lookback_faults_total"] = "variableLabels: {reason}"
 	expected["alarmd_lookback_plan_total"] = "variableLabels: {outcome}"
-	expected["alarmd_linkd_console_state"] = "variableLabels: {state}"
-	expected["alarmd_linkd_console_calls_total"] = "variableLabels: {op,result}"
 	expected["alarmd_sre_actions_total"] = "variableLabels: {op,result}"
 	expected["alarmd_sre_rollouts_total"] = "variableLabels: {state}"
 	expected["alarmd_sre_rollouts_watched"] = "variableLabels: {}"
 	expected["alarmd_sre_receipts_write_total"] = "variableLabels: {result}"
 	expected["alarmd_cli_auth_total"] = "variableLabels: {event}"
 	expected["alarmd_cli_roster_applied_timestamp_seconds"] = "variableLabels: {}"
-	expected["alarmd_linkd_console_failures_total"] = "variableLabels: {op,class}"
 	expected["alarmd_control_source_retained_stale_revisions_total"] = "variableLabels: {}"
 	expected["alarmd_control_source_last_good_identity_changed_total"] = "variableLabels: {}"
 	expected["alarmd_catalog_query_groups"] = "variableLabels: {source_semantics}"
@@ -1097,11 +1088,11 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("trigger_recovery_withheld_total")] = len(observability.RecoveryWithheldReasons)
 	bounds[fqName("no_data_end_total")] = len(observability.NoDataEndOutcomes)
 	bounds[fqName("trigger_open_alert_gate_total")] = len(observability.OpenAlertGateOutcomes)
-	bounds[fqName("open_alert_set_authoritative_age_seconds")] = 1
-	bounds[fqName("open_alert_set_unavailable_total")] = len(openalerts.UnavailableReasons)
-	bounds[fqName("open_alert_set_refresh_total")] = 3
-	bounds[fqName("open_alert_set_lookup_total")] = len(openalerts.Answers)
 	bounds[fqName("effective_close_total")] = len(observability.EffectiveCloseOutcomes)
+	bounds[fqName("active_copy_lookup_total")] = len(activecopy.Answers)
+	bounds[fqName("active_copy_pass_total")] = len(activecopy.Outcomes)
+	bounds[fqName("active_copy_entries")] = 2
+	bounds[fqName("active_copy_link_unsupported")] = 1
 	// Every stage of the closed list, _other among them, written and limited.
 	bounds[fqName("log_lines_total")] = 2 * len(observability.AllStages())
 	bounds[fqName("observer_panics_total")] = len(observability.ObserverNames)
@@ -1110,16 +1101,10 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// cmd/alarmd noDataCloseOutcomes: eight words.
 	bounds[fqName("no_data_close_requests_total")] = 8
 	bounds[fqName("linkd_filter_close_total")] = len(filterclose.Outcomes)
-	bounds[fqName("recovery_record_total")] = len(openalerts.RecoveryRecordOutcomes)
 	bounds[fqName("target_scope_close_total")] = len(scopeclose.Outcomes)
 	bounds[fqName("absent_strategy_round_total")] = len(absentalerts.Refusals)
 	bounds[fqName("absent_strategy_difference")] = len(differenceSides)
-	bounds[fqName("open_alert_set_entries")] = 3
-	bounds[fqName("open_alert_set_tracked_strategies")] = 1
-	bounds[fqName("open_alert_set_evictions_total")] = 1
-	bounds[fqName("open_alert_set_notices_refused_total")] = len(openalerts.NoticeRefusals)
 	// covered and short.
-	bounds[fqName("linkd_calibration_coverage")] = 2
 	bounds[fqName("fleet_tracker_dropped_total")] = len(fleet.TrackerDroppedKinds)
 	bounds[fqName("effective_time_refresh_total")] = len(strategycache.EffectiveTimeRefreshResults)
 	bounds[fqName("activation_rebuild_total")] = len(controlplane.ActivationRebuildOutcomes)
@@ -1149,8 +1134,6 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		bounds[fqName(name)] = n
 	}
 	// Five states; three operations by two results.
-	bounds[fqName("linkd_console_state")] = len(fleet.LinkdConsoleStates) + 1
-	bounds[fqName("linkd_console_calls_total")] = 6
 	// Eight SRE execution, management, Secret- and ConfigMap-read and image-change operations by six results.
 	bounds[fqName("sre_actions_total")] = 48
 	// Seven final states of an image change; one gauge.
@@ -1161,7 +1144,6 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("cli_auth_total")] = len(cliauth.Counts)
 	bounds[fqName("cli_roster_applied_timestamp_seconds")] = 1
 	// Every Console operation by every failure class.
-	bounds[fqName("linkd_console_failures_total")] = len(openalerts.ConsoleOps) * len(openalerts.ConsoleFailureClasses)
 	bounds[fqName("control_source_retained_stale_revisions_total")] = 1
 	bounds[fqName("control_source_last_good_identity_changed_total")] = 1
 	// The supported data sources, plus other for one the compiler started

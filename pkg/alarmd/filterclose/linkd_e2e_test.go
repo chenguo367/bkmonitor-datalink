@@ -204,7 +204,7 @@ func TestTheFilterCloseAgainstTheLinksOwnHandlers(t *testing.T) {
 	old, current := factsOf("m4"), factsOf("m5")
 	closing := []string{h.open(decisionAt(4, old, 1, false)), h.open(decisionAt(4, old, 2, false)), h.open(decisionAt(4, old, 3, true))}
 	kept := []string{h.open(decisionAt(4, current, 4, false)), h.open(decisionAt(5, current, 5, false)), h.open(decisionAt(5, old, 6, false))}
-	if word := closer.Edit(context.Background(), EditInput{Scope: testScope, Plan: currentPlan(), Expect: Expectation{Count: 6, Source: ExpectRoster}}); word != "" {
+	if word, _ := closer.Edit(context.Background(), EditInput{Scope: testScope, Plan: currentPlan(), Expect: Expectation{Count: 6, Source: ExpectDecidedIDs}}); word != "" {
 		t.Fatalf("word %s, stats %v", word, nonZero(closer.Stats()))
 	}
 	for _, id := range closing {
@@ -218,7 +218,7 @@ func TestTheFilterCloseAgainstTheLinksOwnHandlers(t *testing.T) {
 		}
 	}
 	before := closer.Stats()[OutcomeItemClosed]
-	closer.Edit(context.Background(), EditInput{Scope: testScope, Plan: currentPlan(), Expect: Expectation{Count: 6, Source: ExpectRoster}})
+	closer.Edit(context.Background(), EditInput{Scope: testScope, Plan: currentPlan(), Expect: Expectation{Count: 6, Source: ExpectDecidedIDs}})
 	if closer.Stats()[OutcomeItemClosed] != before || closer.Stats()[OutcomeNothingMatched] == 0 {
 		t.Fatalf("a repeat closed again: %v", nonZero(closer.Stats()))
 	}
@@ -245,7 +245,7 @@ func TestTheFilterCloseAgainstTheLinksHandlersUnderFaults(t *testing.T) {
 	for n := 60; n < 70; n++ {
 		kept = append(kept, h.open(decisionAt(4, current, n, false)))
 	}
-	input := EditInput{Scope: testScope, Plan: currentPlan(), Expect: Expectation{Count: 70, Source: ExpectOwnRecords}}
+	input := EditInput{Scope: testScope, Plan: currentPlan(), Expect: Expectation{Count: 70, Source: ExpectDecidedIDs}}
 	for round := 0; ; round++ {
 		if round == 50 {
 			t.Fatalf("not settled: %v", nonZero(closer.Stats()))

@@ -3,42 +3,17 @@ package config
 import (
 	"errors"
 	"net/url"
-	"os"
 	"strings"
-	"time"
 )
 
-// LinkdConfig is the alert link as this deployment reaches it: the Console's
-// address and its credentials, and nothing else. The link's target - its
-// source, hook, prefix, where its sets are and which sources share them - is
-// read from the Console, which lists exactly one target for a link alarmd
-// reads; nothing is read until the Console names the place.
-//
-// Connection and KeyPrefix are where discovery found the sets, written back
-// once the Console has named them, and are never decoded from the file.
+// LinkdConfig is the alert link as this deployment reaches it: its control
+// plane, whose management API alarmd reads and closes the link's alerts
+// through. Nothing else of the link is read: not its sets, not a Console.
 type LinkdConfig struct {
-	Connection *RedisConnectionConfig `yaml:"-"`
-	KeyPrefix  string                 `yaml:"-"`
-	// ConsoleURL is the root of the link's API, whole: alarmd appends only
-	// each operation's own path (strategy-index/..., alerts/...,
-	// event-sources/...). Where the link serves it is the deployment's to
-	// say - the admin's linkd module at <admin><base_path>/api/modules/linkd.
-	// A URL naming the server
-	// rather than this root is refused at startup discovery (the server's web
-	// page answers there), never read as an empty answer.
-	ConsoleURL string `yaml:"console_url"`
-	Username   string `yaml:"username"`
-	Password   string `yaml:"password"`
-	// UsernameFile and PasswordFile name files holding the credentials
-	// (resolveCredentials), cleared once read.
-	UsernameFile string `yaml:"username_file"`
-	PasswordFile string `yaml:"password_file"`
-	// ControlPlane is the link's control plane, whose management API the
-	// control leader closes alerts through (package filterclose). Nothing
-	// switches it on: with a control plane and its secret named, the leader
-	// asks it each round, and a link whose storage cannot search (501) or
-	// that does not serve the routes leaves the deployment on its existing
-	// close paths, counted.
+	// ControlPlane is the link's control plane: the recovery gate's copy is
+	// refreshed through its search (activecopy), and every close goes
+	// through its filter (filterclose). Without it alarmd reads and closes
+	// nothing at the link, and says so at startup.
 	ControlPlane LinkdControlPlaneConfig `yaml:"control_plane"`
 }
 
@@ -95,8 +70,8 @@ func (c LinkdControlPlaneConfig) validate() error {
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return errors.New("linkd control_plane url must be an HTTP service URL without credentials or query")
 	}
-	// No secret is not refused: the leader counts credentials_missing each
-	// round and the deployment stays on its existing close paths.
+	// No secret is not refused: the deployment reads and closes nothing at
+	// the link, and warns at startup.
 	for _, value := range []string{c.Username(), c.Source()} {
 		if strings.TrimSpace(value) != value || strings.ContainsAny(value, "/?#") {
 			return errors.New("linkd control_plane jwt_username and event_source_id must be canonical names")
@@ -105,75 +80,8 @@ func (c LinkdControlPlaneConfig) validate() error {
 	return nil
 }
 
-// LinkdCalibrationInterval is how often the copy calibrates against the
-// link's full sets, and asks the Console again how they are keyed. A
-// program constant: the deployment knows no better than this how often that
-// should be.
-const LinkdCalibrationInterval = 30 * time.Minute
-
-// The Console's Basic Auth may come from the environment instead of the file,
-// so that a deployment can hand alarmd the same Secret the alert link's own
-// Console is given - its chart keeps the credentials in an existing Secret -
-// rather than restating them in alarmd's configuration.
-const (
-	LinkdConsoleUsernameEnvironment = "ALARMD_LINKD_CONSOLE_USERNAME"
-	LinkdConsolePasswordEnvironment = "ALARMD_LINKD_CONSOLE_PASSWORD"
-)
-
-// resolveCredentialsFromEnvironment fills the Console credentials from the
-// environment. A credential stated in both places is refused: two sources for
-// one secret is a deployment that can rotate one and keep using the other.
-func (c *LinkdConfig) resolveCredentialsFromEnvironment() error {
-	for _, field := range []struct {
-		name  string
-		value *string
-	}{{LinkdConsoleUsernameEnvironment, &c.Username}, {LinkdConsolePasswordEnvironment, &c.Password}} {
-		env, ok := os.LookupEnv(field.name)
-		if !ok || env == "" {
-			continue
-		}
-		if *field.value != "" {
-			return errors.New("linkd console credentials are set both in the file and in " + field.name)
-		}
-		*field.value = env
-	}
-	return nil
-}
-
-func (c LinkdConfig) Prefix() string {
-	if c.KeyPrefix == "" {
-		return "alarmd:open_alerts"
-	}
-	return c.KeyPrefix
-}
-
 func (c LinkdConfig) Validate() error {
-	if err := c.ControlPlane.validate(); err != nil {
-		return err
-	}
-	if c.ConsoleURL == "" {
-		if c.Username != "" || c.Password != "" {
-			return errors.New("linkd console_url is required for credentials")
-		}
-		return nil
-	}
-	u, err := url.Parse(c.ConsoleURL)
-	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return errors.New("linkd console_url must be an HTTP service URL without credentials or query")
-	}
-	// The API root always has a path: no server alarmd reads serves the link's
-	// operations at its own root, where its web page is.
-	if strings.Trim(u.Path, "/") == "" {
-		return errors.New("linkd console_url must name the link's API root, not the server: " +
-			"<admin><base_path>/api/modules/linkd")
-	}
-	// A Basic pair is a Console's own credential. Without one the calls carry
-	// the token the admin hands over (linkdtoken): the admin serving the API
-	// accepts nothing else, and keeps no account for alarmd to configure.
-	if (c.Username == "") != (c.Password == "") {
-		return errors.New("linkd console username and password come together, or neither for the admin's token")
-	}
-	return nil
+	return c.ControlPlane.validate()
 }
 
 type LinkdCapacity struct{ Bytes, Strategies, Members, LocalEntries, ReadBatch, GroupBatch, CloseBatch int }

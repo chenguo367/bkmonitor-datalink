@@ -15,7 +15,6 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/racedetector"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scopeclose"
 )
 
@@ -306,7 +305,7 @@ func (sink *closerSink) Screen(execution.PlanIdentity) string { return "" }
 func (sink *closerSink) Observe(ScopeDrop)                    {}
 func (sink *closerSink) Count(reporter ScopeDropReporter, word string, n int) {
 	sink.calls++
-	sink.closer.Count(openalerts.StrategyKey{TenantID: reporter.Plan.TenantID, StrategyID: reporter.Plan.StrategyID},
+	sink.closer.Count(scopeclose.Key{TenantID: reporter.Plan.TenantID, StrategyID: reporter.Plan.StrategyID},
 		reporter.Instance(), int64(reporter.Slot.EvaluationTime), word, n)
 }
 
@@ -448,29 +447,32 @@ func TestADropCarriesThePeriodAndTheReadOffset(t *testing.T) {
 	}
 }
 
-// A global business Plan files each record under the business it is about,
-// so the close its rejection leads to must carry the alert's business, not
-// the Plan's: the drop says which kind of Plan it came from, and the frozen
-// Plan is where that is read.
-func TestADropSaysWhetherItsPlanIsAGlobalBusinessOne(t *testing.T) {
-	for _, global := range []bool{false, true} {
-		sink := &recordingSink{}
-		output := scopeOutput
-		output.globalBusiness = global
-		adapter, _ := scopeDropAdapter(t, targetChain(), hostPlanContext(true), sink, output)
-		deliverSeries(t, adapter, hostDims("102"))
-		if len(sink.observed) != 1 || sink.observed[0].GlobalBusiness != global {
-			t.Fatalf("global=%v: observed %+v", global, sink.observed)
-		}
+// A drop carries its record's values of the Plan's target identity keys, as
+// the alert carries them: the close is by target. A Plan without a target
+// identity, or a record missing a key, carries none and is closed by its
+// fingerprint.
+func TestADropCarriesItsTargetIdentityValues(t *testing.T) {
+	sink := &recordingSink{}
+	adapter, _ := scopeDropAdapter(t, targetChain(), hostPlanContext(true), sink, scopeOutput)
+	deliverSeries(t, adapter, hostDims("102"))
+	if len(sink.observed) != 1 || len(sink.observed[0].Target) != 1 || sink.observed[0].Target["bk_host_id"] != "102" {
+		t.Fatalf("observed %+v, want the target bk_host_id=102", sink.observed)
 	}
-	identity := execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "2002"}
-	plan := evaluationPlanForStrategy("2002")
-	plan.GlobalBusiness = true
-	compiled := compileEvaluationPlan(t, plan)
-	if !buildPlanOutputs([]execution.DuePlan{{Identity: identity, CompiledPlan: compiled}}, nil)[identity].globalBusiness {
-		t.Fatal("a global business Plan's output did not say so")
+	address := admission.PlanContext{TargetPlan: &admission.TargetPlanContext{
+		Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_target_ip", "bk_target_cloud_id"}, Address: true}}}
+	dims := map[string]json.RawMessage{"bk_target_ip": json.RawMessage(`"192.0.2.7"`), "bk_target_cloud_id": json.RawMessage(`0`)}
+	if got := scopeTarget(address, dims); len(got) != 2 || got["bk_target_ip"] != "192.0.2.7" || got["bk_target_cloud_id"] != "0" {
+		t.Fatalf("address target %v", got)
 	}
-	if buildPlanOutputs([]execution.DuePlan{{Identity: identity, CompiledPlan: compilePlanWithTargetPlan(t, "2002", nil)}}, nil)[identity].globalBusiness {
-		t.Fatal("an ordinary Plan's output said it was a global business one")
+	delete(dims, "bk_target_cloud_id")
+	if got := scopeTarget(address, dims); got != nil {
+		t.Fatalf("a record missing a key named target %v", got)
+	}
+	if got := scopeTarget(admission.PlanContext{}, dims); got != nil {
+		t.Fatalf("a Plan without a target identity named target %v", got)
+	}
+	dims["bk_target_cloud_id"] = json.RawMessage(`{"nested":1}`)
+	if got := scopeTarget(address, dims); got != nil {
+		t.Fatalf("an object value named target %v", got)
 	}
 }

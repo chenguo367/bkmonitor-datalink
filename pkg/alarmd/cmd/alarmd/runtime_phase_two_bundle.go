@@ -13,7 +13,6 @@ import (
 	"net"
 	"net/http"
 	"reflect"
-	"sort"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -21,6 +20,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access"
 	accessuq "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access/uq"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/activecopy"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/admission"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/cmdbcache"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
@@ -36,7 +36,6 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/memoryline"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
@@ -237,22 +236,7 @@ func openProductionPhaseTwoBundleAssembly(
 	if !phaseTwoProductionBudgetsFitPlatform(cfg) {
 		return nil, errors.New("phase-two production budgets overflow provider limits")
 	}
-	// Where the link writes its open alert sets is the link's answer; it is
-	// read before anything connects, so the index, the difference and the
-	// endpoint list all read the one location.
-	linkdTokens, linkdTokenClient, err := openLinkdTokens(cfg, recorder.RedisHook("linkd"), external.Now)
-	if err != nil {
-		return nil, err
-	}
-	linkdTokensClosed := false
-	defer func() {
-		if resultErr != nil && linkdTokenClient != nil && !linkdTokensClosed {
-			resultErr = errors.Join(resultErr, linkdTokenClient.Close())
-		}
-	}()
-	discoverLinkd := withLinkdToken(openalerts.DiscoverTarget, linkdTokenSource(linkdTokens))
-	cfg, linkdDiscovery := adoptLinkdLocation(ctx, cfg, discoverLinkd)
-	logLinkdDiscovery(logger, linkdDiscovery)
+	warnLinkdUnconfigured(cfg, logger)
 	logNoDataGroupBound(logger, cfg)
 	// Phase two limits repeated diagnostics per (reason, Query Group) bucket
 	// and reports suppressed counts; the phase-one per-reason budget hid every
@@ -731,45 +715,17 @@ func openProductionPhaseTwoBundleAssembly(
 	if err != nil {
 		return nil, err
 	}
-	// External facts reuse runtime Redis unless the deployment binds Linkd
-	// elsewhere. A failed index is not a startup dependency of detection.
-	linkdConnection := runtimeConnection
-	linkdClient := redisForCaller(runtimeClient, redisfailure.CallerLinkd)
-	linkdClientOwned := false
-	if cfg.PhaseTwo.Linkd.Connection != nil {
-		linkdConnection = *cfg.PhaseTwo.Linkd.Connection
-		if !reflect.DeepEqual(linkdConnection, runtimeConnection) {
-			linkdClient = redis.NewUniversalClient(productionRedisOptions(linkdConnection))
-			linkdClient.AddHook(recorder.RedisHook("linkd"))
-			linkdClientOwned = true
-			defer func() {
-				if resultErr != nil {
-					_ = linkdClient.Close()
-				}
-			}()
-		}
-	}
-	// A later discovery that finds the link at another held connection opens
-	// a client for it once; the runtime connection keeps the runtime client.
-	openLinkdClient := func(connection config.RedisConnectionConfig) (redis.UniversalClient, bool) {
-		if sameRedisConnection(connection, runtimeConnection) {
-			return redisForCaller(runtimeClient, redisfailure.CallerLinkd), false
-		}
-		client := redis.NewUniversalClient(productionRedisOptions(connection))
-		client.AddHook(recorder.RedisHook("linkd"))
-		return client, true
-	}
-	linkd, err := newLinkdIndex(cfg, linkdClient, linkdConnection, linkdDiscovery, openLinkdClient, linkdTokenSource(linkdTokens), external.Now, logger)
+	// The link's control plane: the copy the recovery gate and the no-data
+	// end read, refreshed through its search, and every close.
+	linkdManage, err := newLinkdManage(cfg, external.Now)
 	if err != nil {
 		return nil, err
 	}
-	openAlertCopy := linkd.Cache
-	recoveries, err := linkdRecoveries(cfg, redisForCaller(runtimeClient, redisfailure.CallerLinkd))
+	openAlertCopy, err := newActiveCopy(cfg, linkdManage, external.Now, logger)
 	if err != nil {
 		return nil, err
 	}
-	recorder.SetRecoveryRecordSource(recoveryRecordCounts(recoveries))
-	recorder.SetOpenAlertSetSource(openAlertCopy.Stats)
+	recorder.SetActiveCopySource(openAlertCopy.Stats)
 	recorder.SetActivationRebuildSource(repository.ActivationRebuildCounts)
 	recorder.SetTimelineRepairSource(repository.TimelineRepairCounts)
 	recorder.SetActivationSkippedTimelinesSource(repository.SkippedTimelinesReading)
@@ -799,9 +755,10 @@ func openProductionPhaseTwoBundleAssembly(
 		Evaluator: evaluator, Admission: admitter, GapGuard: executionStore, Events: events,
 		NoData: executionStore, NoDataEnds: executionStore, NoDataManualCloses: executionStore, Hosts: hostBusiness, State: executionStore, Progress: progressStore, Observer: observer,
 		ExecutionEvidence: slotAppliedMarks,
-		// Linked only with the link's Console: without it the copy is never
-		// read and can never judge, and the worker keeps no no-data end index.
-		OpenAlerts: &openAlertCopyPort{cache: openAlertCopy, linked: cfg.PhaseTwo.Linkd.ConsoleURL != "", recoveries: recoveries},
+		// Linked only with the link's control plane: without it the copy is
+		// never refreshed and can never judge, and the worker keeps no
+		// no-data end index.
+		OpenAlerts: &openAlertCopyPort{copy: openAlertCopy},
 		// The horizon the platform settings copy resolves now, read per Slot:
 		// runtime state lives at most this long past a series' last write.
 		StateHorizon: func() int64 { return platformSettings.Current().NoDataTrackingHorizonSeconds },
@@ -1168,7 +1125,7 @@ func openProductionPhaseTwoBundleAssembly(
 		PublicWindows: fleet.NewPublicWindowsHandler(windowStore, external.Now), RedisFailures: cliRedisFailures(recorder, observer),
 		RedisDialRetries: recorder.ObserveDiagnosticRedisDialRetry, AuthEvents: cliAuthEvents(recorder), RosterApplied: recorder.SetCLIRosterApplied,
 		Lookback: lookbackEngine, LookbackStanding: lookbackState, ReadHolds: readHolds, Maintenance: maintenanceReadings,
-		LinkdConsole: linkd.Console}
+		LinkdSearch: linkdManage, LinkdSource: cfg.PhaseTwo.Linkd.ControlPlane.Source()}
 	var closeCLI func() error
 	var publicRestricted bool
 	var channelBinding *ChannelBinding
@@ -1214,10 +1171,12 @@ func openProductionPhaseTwoBundleAssembly(
 			}
 		},
 		RunOpenAlerts: func(runCtx context.Context) error {
-			// A process whose startup discovery failed keeps asking in the
-			// background, on the same lifetime as the copy it may rebind.
-			go linkd.Location.retry(runCtx, cfg, discoverLinkd, linkdRetryFirst, linkdRetryCeiling)
-			return openAlertCopy.Run(runCtx)
+			if openAlertCopy == nil {
+				<-runCtx.Done()
+				return nil
+			}
+			openAlertCopy.Run(runCtx)
+			return nil
 		},
 		RefreshPlatformSettings: platformSettingsRefresher(platformSettings, hostStatus, recorder),
 		MeasureStores:           census.measure,
@@ -1235,16 +1194,6 @@ func openProductionPhaseTwoBundleAssembly(
 			viewServer.Close()
 			eventsClosed = true
 			closers := []error{events.Shutdown(shutdownCtx), closeCLI(), shutdownTraces(shutdownCtx, traces)}
-			if moved := linkd.Location.OwnedClient(); moved != nil {
-				closers = append(closers, moved.Close())
-			}
-			if linkdClientOwned {
-				closers = append(closers, linkdClient.Close())
-			}
-			if linkdTokenClient != nil {
-				linkdTokensClosed = true
-				closers = append(closers, linkdTokenClient.Close())
-			}
 			if !runtimeClientIsSource {
 				closers = append(closers, runtimeClient.Close())
 			}
@@ -1273,59 +1222,33 @@ func openProductionPhaseTwoBundleAssembly(
 	// The link's close by filter, where its control plane is named: the
 	// inactive and scope closes send through it, and the control leader's
 	// absent and edit closes decide through it.
-	filterCloser, err := newFilterCloser(cfg, redisForCaller(runtimeClient, redisfailure.CallerLinkd), external.Now, recorder)
+	filterCloser, err := newFilterCloser(cfg, linkdManage, redisForCaller(runtimeClient, redisfailure.CallerLinkd), external.Now, recorder, logger)
 	if err != nil {
 		return nil, err
 	}
-	route := newFilterRoute(cfg, filterCloser, linkd.Cache)
-	maintenance := &effectiveMaintenance{bundle: bundle, catalog: catalog, cache: openAlertCopy, writer: withFilterClose(route, events), recoveries: recoveries,
-		capacity: linkdBudget, legacy: legacyTime.Provider(), legacyCache: legacyTime, filter: route}
-	// One memory of which business each alert was filed under, for every
-	// close that carries a global business Plan's alert.
-	var alertBusinesses *openalerts.AlertBusinesses
-	if linkd.Console != nil {
-		alertBusinesses = openalerts.NewAlertBusinesses(linkd.Console.AlertRecord)
-		maintenance.businesses = alertBusinesses
-		maintenance.sourceOf = func(ctx context.Context) (string, error) {
-			// Answered from the client's copy within bindingReuse; past it,
-			// each request the read makes is bounded by the Console's own
-			// speed, within the coverage.
-			ctx, cancel := context.WithTimeout(ctx, effectiveSourceCoverage)
-			defer cancel()
-			binding, err := linkd.Console.Binding(openalerts.WithRequestCoverage(ctx, effectiveSourceCoverage))
-			return binding.EventSourceID, err
-		}
-	}
+	route := newFilterRoute(cfg, filterCloser)
+	maintenance := &effectiveMaintenance{bundle: bundle, catalog: catalog, capacity: linkdBudget, legacy: legacyTime.Provider(),
+		legacyCache: legacyTime, filter: route}
 	bundle.dependencies.RunEffectiveTime = maintenance.run
 	maintenanceReadings.bind(maintenance)
-	bindTargetScopeClose(bundle, scopeClose, openAlertCopy, recoveries, route, withFilterClose(route, events), alertBusinesses, recorder)
-	openAlertFacts := withTargetScopeClose(openAlertSetFactsSource(openAlertCopy, external.Now), scopeClose)
+	bindTargetScopeClose(bundle, scopeClose, openAlertCopy, route, recorder)
+	activeCopyFacts := withTargetScopeClose(activeCopyFactsSource(openAlertCopy), scopeClose)
 	// The control leader's difference against the strategies that no longer
 	// exist. It runs on every replica's loop and does nothing on a follower;
 	// the leader check is inside the round, so a failover needs no wiring of
-	// its own. It exists only with the alert link's Console: the difference
-	// is the link's roster minus the snapshot, and a deployment without the
-	// link has neither the roster nor the alerts it would close.
-	if absentCloseWired(cfg, linkd.Console != nil) {
-		absentClose := newAbsentStrategyClose(bundle, reconciler, linkd.Console, events)
+	// its own. It exists only with the link's control plane: the difference
+	// is the strategies the link's search finds alerts of minus the
+	// snapshot, and a deployment without it can neither find nor close them.
+	if absentCloseWired(cfg, route != nil) {
+		absentClose := newAbsentStrategyClose(bundle, reconciler, route)
 		absentClose.documents, _ = strategySource.(controlplane.StrategyDocumentPresence)
-		absentClose.businesses = alertBusinesses
-		absentClose.edits = newEditStrategyClose(bundle, reconciler, linkd.Console, events)
-		absentClose.edits.recoveries = recoveries
-		absentClose.filter = route
-		absentClose.edits.filter = absentClose.filter
+		absentClose.edits = newEditStrategyClose(bundle, reconciler, route)
 		recorder.SetEditCloseSource(absentClose.edits.Stats)
 		absentPage.bind(absentClose)
 		bundle.dependencies.RunAbsentClose = absentClose.run
 		recorder.SetAbsentCloseSource(absentClose.Stats, absentClose.Rounds, absentClose.Difference)
 	}
 	recorder.SetEffectiveCloseSource(maintenance.Stats)
-	// Bound whether or not a Console is configured: not_configured is a
-	// reading, and the absent_strategy families are missing there by
-	// construction.
-	recorder.SetLinkdConsoleSource(fleet.LinkdConsoleStates, openalerts.ConsoleOps, openalerts.ConsoleFailureClasses,
-		linkdConsoleReading(linkd.Console, external.Now))
-	workerPorts.OpenAlerts.(*openAlertCopyPort).registerOwned = maintenance.registerExecutedPlans
 	// The walk's counts, from the same published facts the verdict page reads.
 	//
 	// None of them were on /metrics, so the one signal that says this replica
@@ -1398,8 +1321,7 @@ func openProductionPhaseTwoBundleAssembly(
 		restore:             progressRestoreSource(progressStore, observationAdmit(observationMemory, memoryline.ConsumerFleetRestore)),
 		staleAfter:          stallAfter,
 		restoreBudget:       fleetRestoreBudgetPerPublish,
-		openAlerts:          openAlertFacts,
-		openAlertCounts:     openAlertCountsSource(openAlertCopy),
+		activeCopy:          activeCopyFacts,
 		controlSource:       bundle.controlSourceFleetFacts,
 		platformSettings:    platformSettingsFactsSource(platformSettings, external.Now),
 		publicSurface:       surface,
@@ -1411,9 +1333,8 @@ func openProductionPhaseTwoBundleAssembly(
 		leaderRound:         bundle.leaderRoundFleetFacts,
 		viewStream:          viewStreamFleetFacts(bundle.dependencies.ViewStreamStats, external.Now),
 		source:              bundle.sourceFleetFacts,
-		endpoints: withTargetGroups(withLinkdConsole(endpointFactsSource(cfg, sharing, recorder, cmdbIndex.Default(), platformSettings,
-			bundle.sourceFleetFacts, events.State, openAlertFacts, external.Now),
-			linkd.Console, linkd.Location, external.Now), groupStore, external.Now),
+		endpoints: withTargetGroups(endpointFactsSource(cfg, sharing, recorder, cmdbIndex.Default(), platformSettings,
+			bundle.sourceFleetFacts, events.State, external.Now), groupStore, external.Now),
 		// The same snapshot the readiness endpoint serves, so the fleet and
 		// the probe cannot disagree about one replica.
 		readiness: readinessFactsSource(health),
@@ -1710,199 +1631,17 @@ func maxDuration(values ...time.Duration) time.Duration {
 	return maximum
 }
 
-// openAlertCopyPort adapts the process copy to the worker's port: the
-// worker speaks in Plan identities, the copy in strategy keys.
-type openAlertCopyPort struct {
-	cache *openalerts.Cache
-	// recoveries takes every acknowledged reopen - an ABNORMAL after a
-	// RECOVERY of the fingerprint - into the fleet's record (L40); nil
-	// without the link's Console, where no close is decided from the link's
-	// evidence.
-	recoveries    *openalerts.Recoveries
-	registerOwned func(execution.QueryGroupIdentity, []execution.PlanIdentity)
-	// linked is whether the deployment has the link's Console, the only way
-	// the copy is ever read (execution.OpenAlertLink).
-	linked bool
-}
-
-// Linked says whether a consumer's set stands behind the copy.
-func (port openAlertCopyPort) Linked() bool {
-	return port.linked
-}
-
-// Holds is the copy's judged membership (execution.OpenAlertJudge).
-func (port openAlertCopyPort) Holds(tenantID, strategyID, fingerprint string) (bool, bool) {
-	return port.cache.Holds(openalerts.StrategyKey{TenantID: tenantID, StrategyID: strategyID}, fingerprint)
-}
-
-func (port openAlertCopyPort) Contains(tenantID, strategyID, fingerprint string) bool {
-	return port.cache.Contains(tenantID, strategyID, fingerprint)
-}
-
-func (port openAlertCopyPort) TrackPlans(qg execution.QueryGroupIdentity, plans []execution.PlanIdentity) {
-	if port.registerOwned != nil {
-		port.registerOwned(qg, plans)
-		return
-	}
-	keys := make([]openalerts.StrategyKey, 0, len(plans))
-	for _, plan := range plans {
-		keys = append(keys, openalerts.StrategyKey{TenantID: plan.TenantID, StrategyID: plan.StrategyID})
-	}
-	port.cache.Track(keys...)
-}
-
-func (port openAlertCopyPort) Acknowledged(events []contract.TriggerEventV1) {
-	port.cache.Acknowledged(events)
-	noteReopens(port.recoveries, events, time.Now())
-}
-
-// noteReopens gives the record the RECOVERY and ABNORMAL events the sink
-// acknowledged, in order: only what reaches the link - not a compatibility
-// envelope, not an event without a fingerprint. The record remembers the
-// recoveries in this process and writes only a reopen, so an
-// acknowledgement waits on Redis only when its batch holds one (at most one
-// per RECOVERY sent), never for a steady stream of either. A failure is
-// counted on the record (note_failed) and holds nothing: the record only
-// ever holds closes back.
-func noteReopens(recoveries *openalerts.Recoveries, events []contract.TriggerEventV1, at time.Time) {
-	if recoveries == nil {
-		return
-	}
-	sent := make([]openalerts.Sent, 0, len(events))
-	for _, event := range events {
-		recovery := event.EventKind == contract.TriggerEventRecovery
-		if !recovery && event.EventKind != contract.TriggerEventAbnormal {
-			continue
+// activeCopyFactsSource is what this replica publishes about its copy.
+func activeCopyFactsSource(copy *activecopy.Copy) func() *fleet.ActiveCopyFacts {
+	return func() *fleet.ActiveCopyFacts {
+		stats := copy.Stats()
+		facts := &fleet.ActiveCopyFacts{Configured: copy != nil, Known: stats.Known, Queued: stats.Queued, Unsupported: stats.Unsupported,
+			Answers: make(map[string]uint64, len(stats.Answers)), Outcomes: stats.Outcomes}
+		for answer, n := range stats.Answers {
+			facts.Answers[string(answer)] = n
 		}
-		if event.DedupeMD5 == "" || event.StrategyRef == nil || event.LegacyOutput != nil {
-			continue
-		}
-		sent = append(sent, openalerts.Sent{TenantID: event.TenantID, StrategyID: event.PlanRef.StrategyID, Fingerprint: event.DedupeMD5, Recovery: recovery})
+		return facts
 	}
-	if len(sent) == 0 {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = recoveries.Note(ctx, at, sent)
-}
-
-// openAlertSetFactsSource is what this replica publishes about its copy. The
-// age is absent until there has been an authoritative read: a zero would
-// read as "just now" on a copy that never loaded.
-func openAlertSetFactsSource(cache *openalerts.Cache, now func() time.Time) func() *fleet.OpenAlertSetFacts {
-	return func() *fleet.OpenAlertSetFacts {
-		return openAlertSetFacts(cache.Stats(), cache.StaleBeyondBound(), now())
-	}
-}
-
-// openAlertCountsSource reads the copy's open-alert counts for the snapshot.
-func openAlertCountsSource(cache *openalerts.Cache) func([]string) *fleet.OpenAlertCounts {
-	if cache == nil {
-		return nil
-	}
-	return func(owned []string) *fleet.OpenAlertCounts {
-		counts, unknown := cache.OpenCounts()
-		return openAlertCountsOf(counts, unknown, owned)
-	}
-}
-
-// openAlertCountsOf is the copy's counts by strategy id, sorted, zeros left
-// out. One id under two tenants takes the larger count, and an id unknown
-// under any tenant stays unknown even when another tenant counts it: the
-// unread tenant could hold more, and count beside unknown reads at least. A
-// strategy of an owned object the copy tracks under no tenant is unknown, and
-// owned nil -- the strategies could not be named -- says so instead.
-// Strategy refs carry no tenant, so an owned id tracked under one tenant is
-// taken as tracked.
-func openAlertCountsOf(counts map[openalerts.StrategyKey]int, unknown []openalerts.StrategyKey, owned []string) *fleet.OpenAlertCounts {
-	byStrategy, tracked := map[string]int{}, map[string]bool{}
-	for key, count := range counts {
-		tracked[key.StrategyID] = true
-		if count > byStrategy[key.StrategyID] {
-			byStrategy[key.StrategyID] = count
-		}
-	}
-	answer := &fleet.OpenAlertCounts{OwnedUnnamed: owned == nil}
-	for strategy, count := range byStrategy {
-		if count > 0 {
-			answer.Counts = append(answer.Counts, fleet.StrategyOpenCount{Strategy: strategy, Count: count})
-		}
-	}
-	sort.Slice(answer.Counts, func(i, j int) bool { return answer.Counts[i].Strategy < answer.Counts[j].Strategy })
-	seen := map[string]bool{}
-	for _, key := range unknown {
-		if !seen[key.StrategyID] {
-			seen[key.StrategyID] = true
-			answer.Unknown = append(answer.Unknown, key.StrategyID)
-		}
-	}
-	for _, strategy := range owned {
-		if !tracked[strategy] && !seen[strategy] {
-			seen[strategy] = true
-			answer.Unknown = append(answer.Unknown, strategy)
-		}
-	}
-	sort.Strings(answer.Unknown)
-	return answer
-}
-
-// openAlertSetFacts is the copy's stats as the replica publishes them.
-func openAlertSetFacts(stats openalerts.Stats, staleBeyondBound bool, at time.Time) *fleet.OpenAlertSetFacts {
-	facts := &fleet.OpenAlertSetFacts{StaleBeyondBound: staleBeyondBound,
-		CalibrationConfigured: stats.CalibrationConfigured, SubscriptionReady: stats.SubscriptionReady, CalibratedSets: stats.Calibrated,
-		PendingReads: stats.PendingReads, PendingReconciles: stats.PendingReconciles, MemberBytes: stats.MemberBytes,
-		Available: stats.Available, UnavailableReason: string(stats.UnavailableReason),
-		TrackedSets: stats.Tracked, LoadedSets: stats.Loaded, Members: stats.Members,
-		Configured: stats.Configured, LocationConfirmed: stats.LocationConfirmed, KeyedByAlertID: stats.KeyedByAlertID}
-	if !stats.KeyedByAlertIDAsOf.IsZero() {
-		asOf := stats.KeyedByAlertIDAsOf
-		facts.KeyedByAlertIDAsOf = &asOf
-	}
-	if !stats.IndexReadAt.IsZero() {
-		age := at.Sub(stats.IndexReadAt).Seconds()
-		facts.IndexReadAgeSeconds = &age
-	}
-	facts.IndexStaleAfterSeconds, facts.StaleSets = stats.StaleAfter.Seconds(), stats.Stale
-	facts.CalibrationNeeded, facts.CalibrationCapacity, facts.CalibrationShort = stats.CalibrationNeeded, stats.CalibrationCapacity, stats.CalibrationShort
-	facts.RoundsSkipped = stats.RoundsSkipped
-	for _, large := range stats.TooLarge {
-		facts.TooLarge = append(facts.TooLarge, fleet.TooLargeSetRow{TenantID: large.Strategy.TenantID, StrategyID: large.Strategy.StrategyID,
-			Members: large.Refusal.Members, Bytes: large.Refusal.Bytes, MaxMembers: large.Refusal.MaxMembers, MaxBytes: large.Refusal.MaxBytes})
-	}
-	for _, over := range stats.CalibrationOverAge {
-		facts.CalibrationOverAge = append(facts.CalibrationOverAge, fleet.CalibrationOverAgeRow{TenantID: over.Strategy.TenantID,
-			StrategyID: over.Strategy.StrategyID, AgeSeconds: over.Age.Seconds()})
-	}
-	if !stats.LoadedAt.IsZero() {
-		age := at.Sub(stats.LoadedAt).Seconds()
-		facts.AuthoritativeAgeSeconds = &age
-	}
-	// Every answer word, zero included: a word missing from the map
-	// cannot be told from one never given.
-	facts.Lookups = make(map[string]uint64, len(openalerts.Answers))
-	facts.GateOwnLookups = make(map[string]uint64, len(openalerts.Answers))
-	for _, answer := range openalerts.Answers {
-		facts.Lookups[string(answer)] = stats.Lookups[answer]
-		facts.GateOwnLookups[string(answer)] = stats.OwnLookups[answer]
-	}
-	facts.GateOwnHeld = stats.OwnHeld
-	facts.SentDepartures = make(map[string]uint64, len(openalerts.SentDepartures))
-	for _, path := range openalerts.SentDepartures {
-		facts.SentDepartures[path] = stats.SentDepartures[path]
-	}
-	open := stats.OwnOpen
-	facts.OwnOpen = &open
-	facts.OwnOpenDepartures = make(map[string]uint64, len(openalerts.OwnOpenDepartures))
-	for _, path := range openalerts.OwnOpenDepartures {
-		facts.OwnOpenDepartures[path] = stats.OwnOpenDepartures[path]
-	}
-	if !stats.GateSince.IsZero() {
-		since := stats.GateSince
-		facts.GateSince = &since
-	}
-	facts.GateRecent, facts.GateRecentOwnHeld = gateLookupFacts(stats.RecentLookups), gateLookupFacts(stats.RecentOwnHeld)
-	return facts
 }
 
 func productionPhaseTwoPrefix(prefix, component string) string {
@@ -1935,20 +1674,6 @@ func phaseTwoUQLimits(cfg config.Config) accessuq.Limits {
 
 func phaseTwoProductionBudgetsFitPlatform(cfg config.Config) bool {
 	return cfg.PhaseTwo.Coordinator.MaxRetainedBytes <= math.MaxInt64
-}
-
-// gateLookupFacts is the kept gate lookups as the replica publishes them.
-func gateLookupFacts(lookups []openalerts.GateLookup) []fleet.GateLookupFact {
-	if len(lookups) == 0 {
-		return nil
-	}
-	out := make([]fleet.GateLookupFact, 0, len(lookups))
-	for _, lookup := range lookups {
-		out = append(out, fleet.GateLookupFact{At: lookup.At, TenantID: lookup.TenantID, StrategyID: lookup.StrategyID,
-			Fingerprint: lookup.Fingerprint, Answer: string(lookup.Answer), Open: lookup.Open, Own: lookup.Own,
-			InOtherSets: append([]string(nil), lookup.InOtherSets...)})
-	}
-	return out
 }
 
 // businessAttributionLookups is what a global business Plan's events are

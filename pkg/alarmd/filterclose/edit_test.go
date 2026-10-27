@@ -57,7 +57,7 @@ func opened(id, version string, facts *contract.StrategyFactsV2, noData bool, se
 	return &fakeAlert{id: id, labels: labels, dimensions: dimensions, severity: severity, extra: encoded}
 }
 
-var roster = Expectation{Count: 40, Source: ExpectRoster}
+var roster = Expectation{Count: 40, Source: ExpectDecidedIDs}
 
 // An edit closes, by bucket, the older version whose metric changed (both
 // families), the threshold alerts of older versions at a level no longer
@@ -81,7 +81,7 @@ func TestAnEditClosesTheOrphanedBucketsAndKeepsTheRest(t *testing.T) {
 		h.link.add(alert)
 	}
 	closer := h.closer(t)
-	if word := closer.Edit(context.Background(), EditInput{Scope: testScope, Plan: currentPlan(), Expect: roster}); word != "" {
+	if word, _ := closer.Edit(context.Background(), EditInput{Scope: testScope, Plan: currentPlan(), Expect: roster}); word != "" {
 		t.Fatalf("word %s", word)
 	}
 	for id, want := range map[string]int{"x1": 1, "x2": 1, "xn": 1, "k2": 1, "n1": 1, "k1": 0, "kn": 0, "n2": 0, "c1": 0, "a1": 0} {
@@ -234,7 +234,7 @@ func TestABigBucketUnderLoadClosesWholeAndOnce(t *testing.T) {
 	bigBucket(h)
 	faulty(h.link)
 	closer := h.closer(t)
-	input := EditInput{Scope: testScope, Plan: currentPlan(), Expect: Expectation{Count: 37000, Source: ExpectOwnRecords}}
+	input := EditInput{Scope: testScope, Plan: currentPlan(), Expect: Expectation{Count: 37000, Source: ExpectDecidedIDs}}
 	for round := 0; ; round++ {
 		if round == 400 {
 			t.Fatalf("not settled after %d rounds: %v", round, nonZero(closer.Stats()))
@@ -260,7 +260,7 @@ func TestANewLeaderCarriesOnWhereTheLastStopped(t *testing.T) {
 	h := newHarness(t)
 	bigBucket(h)
 	faulty(h.link)
-	input := EditInput{Scope: testScope, Plan: currentPlan(), Expect: Expectation{Count: 37000, Source: ExpectOwnRecords}}
+	input := EditInput{Scope: testScope, Plan: currentPlan(), Expect: Expectation{Count: 37000, Source: ExpectDecidedIDs}}
 	first := h.closer(t)
 	// The first leader runs rounds until it has closed some and kept some,
 	// and is stopped in the middle of its next filtered close.

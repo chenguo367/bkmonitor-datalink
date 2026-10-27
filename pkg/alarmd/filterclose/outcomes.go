@@ -25,10 +25,12 @@ const (
 	// OutcomeExpectExceeded is a job refused: its dry run matched more than
 	// the independent expectation allows. Nothing was closed.
 	OutcomeExpectExceeded = "expect_exceeded"
-	// OutcomeLinkUnsupported is the link answering 501, 404 or 405 to the
-	// search or the filtered close: its storage cannot search (MySQL), or it
-	// has no such routes. The caller stays on its existing path.
-	OutcomeLinkUnsupported = "link_unsupported"
+	// OutcomeUnsupported is filtered close unsupported: the link answered
+	// 501, 404 or 405 to the search or the filtered close - its storage
+	// cannot search (MySQL), or it has no such routes - or did within
+	// unsupportedRecheck, and nothing was sent. Nothing closes the decision
+	// instead: there is no other path.
+	OutcomeUnsupported = "filter_close_unsupported"
 	// OutcomeLinkBusy is a 429 of the whole request: no decision, next round.
 	OutcomeLinkBusy = "link_busy"
 	// OutcomeLinkRefused is a 4xx of the whole request other than 404, 405
@@ -72,8 +74,6 @@ const (
 	OutcomePendingUnavailable  = "pending_unavailable"
 
 	// Where a job's expectation came from.
-	OutcomeExpectOwnRecords   = "expect_" + ExpectOwnRecords
-	OutcomeExpectRoster       = "expect_" + ExpectRoster
 	OutcomeExpectTargets      = "expect_" + ExpectTargets
 	OutcomeExpectDecidedIDs   = "expect_" + ExpectDecidedIDs
 	OutcomeExpectFixedCeiling = "expect_" + ExpectFixedCeiling
@@ -85,19 +85,22 @@ const (
 	OutcomeAlertsRead        = "alerts_read"
 	OutcomeAlertsTruncated   = "alerts_truncated"
 	OutcomeAlertDecidedClose = "alert_decided_close"
+	// OutcomeAbsentTruncated is a tenant's discovery that found
+	// MaxAbsentPerRound strategies and stopped; the next round goes on.
+	OutcomeAbsentTruncated = "absent_truncated"
 )
 
 // Outcomes is every outcome, the edit decisions' words among them.
 var Outcomes = append([]string{
-	OutcomeJobDone, OutcomeJobIncomplete, OutcomeNothingMatched, OutcomeExpectExceeded, OutcomeLinkUnsupported, OutcomeLinkBusy,
+	OutcomeJobDone, OutcomeJobIncomplete, OutcomeNothingMatched, OutcomeExpectExceeded, OutcomeUnsupported, OutcomeLinkBusy,
 	OutcomeLinkRefused, OutcomeLinkFailed, OutcomeCommandUnavailable, OutcomeFilterRefused,
 	OutcomeItemClosed, OutcomeItemAlreadyClosed, OutcomeItemEndedOtherwise, OutcomeItemSourceUnpublished, OutcomeItemConflictUnknown,
 	OutcomeItemRederived, OutcomeItemPending, OutcomeItemPendingFull, OutcomeItemPendingLost, OutcomeItemRefused,
 	OutcomePendingClosed, OutcomePendingAlreadyClosed, OutcomePendingEndedOther, OutcomePendingLeftDecision, OutcomePendingNotFound,
 	OutcomePendingRetryFailed, OutcomePendingGivenUp, OutcomePendingRefused, OutcomePendingUnreadable, OutcomePendingUnavailable,
-	OutcomeExpectOwnRecords, OutcomeExpectRoster, OutcomeExpectTargets, OutcomeExpectDecidedIDs, OutcomeExpectFixedCeiling,
+	OutcomeExpectTargets, OutcomeExpectDecidedIDs, OutcomeExpectFixedCeiling,
 	OutcomeBucketsTruncated, OutcomeDigestMismatch, OutcomeSampleUnreadable, OutcomeAlertsRead, OutcomeAlertsTruncated,
-	OutcomeAlertDecidedClose,
+	OutcomeAlertDecidedClose, OutcomeAbsentTruncated,
 }, editWords()...)
 
 func editWords() []string {

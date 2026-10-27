@@ -237,6 +237,18 @@ func enumerationFilter(scope Scope, current string, seen []Bucket) (Filter, erro
 // withAlertID is filter narrowed to one alert, any status: the pending
 // retry's check that the alert is still one the decision named.
 func withAlertID(filter Filter, alertID string) (Filter, error) {
+	return narrowed(filter, term(fieldAlertID, alertID))
+}
+
+// activeOnly is filter narrowed to active alerts, for a search: the link's
+// search reads its history as well (alert-search.md: "覆盖当前部署的 Active
+// 与 History 查询目标"); only the filtered close adds status=active itself.
+func activeOnly(filter Filter) (Filter, error) {
+	return narrowed(filter, term(fieldStatus, "active"))
+}
+
+// narrowed is filter with one more clause in its top bool.filter.
+func narrowed(filter Filter, clause any) (Filter, error) {
 	var query map[string]map[string]json.RawMessage
 	if err := json.Unmarshal(filter.body, &query); err != nil || query["bool"] == nil {
 		return Filter{}, errUnscoped
@@ -245,7 +257,7 @@ func withAlertID(filter Filter, alertID string) (Filter, error) {
 	if err := json.Unmarshal(query["bool"]["filter"], &clauses); err != nil {
 		return Filter{}, errUnscoped
 	}
-	encoded, err := json.Marshal(append(clauses, term(fieldAlertID, alertID)))
+	encoded, err := json.Marshal(append(clauses, clause))
 	if err != nil {
 		return Filter{}, err
 	}
@@ -254,9 +266,39 @@ func withAlertID(filter Filter, alertID string) (Filter, error) {
 	if err != nil {
 		return Filter{}, err
 	}
-	narrowed := Filter{scope: filter.scope, body: body}
-	return narrowed, requireScope(narrowed)
+	result := Filter{scope: filter.scope, body: body}
+	return result, requireScope(result)
 }
+
+// discoveryFilter is the tenant's active alerts of the source whose
+// strategy is none of running: a read that names no one strategy, the
+// absent close's discovery. Its own check is that it carries the tenant,
+// the source and status active at the top.
+func discoveryFilter(tenantID, eventSourceID string, running []string) (json.RawMessage, error) {
+	if tenantID == "" || eventSourceID == "" {
+		return nil, errUnscoped
+	}
+	query := object{"filter": []any{term(fieldTenant, tenantID), term(fieldSource, eventSourceID), term(fieldStatus, "active"),
+		exists(labelID)}}
+	if len(running) > 0 {
+		query["must_not"] = []any{terms(labelID, sorted(running))}
+	}
+	body, err := json.Marshal(object{"bool": query})
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxDiscoveryBodyBytes {
+		return nil, errDiscoveryTooLarge
+	}
+	return body, nil
+}
+
+// maxDiscoveryBodyBytes keeps the discovery under the link's request bound
+// (1 MiB by default, dispatch.alert_search.max_request_bytes), half of it
+// left for the envelope and a bound set lower: about 50,000 strategy ids.
+const maxDiscoveryBodyBytes = 512 << 10
+
+var errDiscoveryTooLarge = errors.New("alarmd filterclose: the running strategies do not fit one discovery")
 
 // Target is one target removed from a strategy's scope, by the dimensions
 // its alerts carry: every key must match (an IP and its cloud area

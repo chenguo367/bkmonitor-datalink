@@ -352,8 +352,10 @@ func TestRetiredKeysAreIgnoredAndNamed(t *testing.T) {
 		{"kafka:\n  initial_offset: \"\"\n", "initial_offset"},
 		{"limits:\n  reader:\n    max_envelope_bytes: 1\n", "reader"},
 		{"phase_two:\n  linkd:\n    absent_close_send: true\n", "absent_close_send"},
-		// The link's coordinates come from its Console; values keep only the
-		// Console's address and credentials.
+		// The link is reached only by its control plane: no sets, no Console.
+		{"phase_two:\n  linkd:\n    console_url: https://console.example.test/api\n", "console_url"},
+		{"phase_two:\n  linkd:\n    username: reader\n", "username"},
+		{"phase_two:\n  linkd:\n    password_file: /secret\n", "password_file"},
 		{"phase_two:\n  linkd:\n    connection:\n      address: stated:6379\n", "connection"},
 		{"phase_two:\n  linkd:\n    key_prefix: stated\n", "key_prefix"},
 		{"phase_two:\n  linkd:\n    event_source_id: \"42\"\n", "event_source_id"},

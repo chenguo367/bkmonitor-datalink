@@ -6,6 +6,7 @@
 package access
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -71,10 +72,12 @@ type ScopeDrop struct {
 	Filter, Reason   string
 	Fingerprint      string
 	StrategyRevision int64
-	// GlobalBusiness is a Plan that files each record under the business it
-	// is about: a close of its alert carries the alert's business, not the
-	// Plan's.
-	GlobalBusiness bool
+	// Target is the record's values of its Plan's target identity keys
+	// (contract.TargetPlanIdentityV1.Dimensions) as its alert carries them:
+	// the close is by target, every key matching. Nil where the Plan names
+	// no target identity, or the record does not carry every key as a
+	// string or a number; the close is then by Fingerprint.
+	Target map[string]string
 	// Round is the Slot's evaluation time: two drops of one fingerprint are
 	// two observations only when they come from two Slots.
 	Round int64
@@ -172,9 +175,6 @@ type planOutput struct {
 	shard execution.ShardRef
 	// intervalSeconds is the Plan's evaluation period.
 	intervalSeconds int64
-	// globalBusiness is a Plan that files each record under the business it
-	// is about rather than its own.
-	globalBusiness bool
 }
 
 type planOutputs map[execution.PlanIdentity]planOutput
@@ -200,7 +200,7 @@ func buildPlanOutputs(duePlans []execution.DuePlan, queries []PlannedQuery) plan
 		ref := due.CompiledPlan.StrategyRef()
 		outputs[due.Identity] = planOutput{strategyID: ref.StrategyID, revision: int64(ref.SnapshotRevision), shard: due.Shard,
 			identity: due.CompiledPlan.OutputIdentity(), multiInput: len(inputs[due.Identity]) > 1,
-			intervalSeconds: due.ScheduleSpec.EvaluationIntervalSeconds, globalBusiness: due.CompiledPlan.GlobalBusiness()}
+			intervalSeconds: due.ScheduleSpec.EvaluationIntervalSeconds}
 	}
 	return outputs
 }
@@ -276,7 +276,7 @@ func (adapter *seriesAdapter) reportSuperseded(identity execution.PlanIdentity, 
 		readOffset = max(0, time.Duration(ready-adapter.round*1000)*time.Millisecond)
 	}
 	adapter.scopeSink.Observe(ScopeDrop{Plan: identity, Fingerprint: own, StrategyRevision: output.revision,
-		GlobalBusiness: output.globalBusiness, Round: adapter.round, IntervalSeconds: output.intervalSeconds,
+		Round: adapter.round, IntervalSeconds: output.intervalSeconds,
 		ReadOffset: readOffset, CloseReason: linkdoutput.CloseReasonSupersededIdentity})
 }
 
@@ -364,10 +364,52 @@ func (adapter *seriesAdapter) reportScopeDrop(identity execution.PlanIdentity, p
 	if ready := adapter.query.ReadyAtUnixMilli; ready > 0 {
 		readOffset = max(0, time.Duration(ready-adapter.round*1000)*time.Millisecond)
 	}
+	target := scopeTarget(plan, alertedDimensions(facts))
 	for _, offered := range fingerprints {
-		adapter.scopeSink.Observe(ScopeDrop{Plan: identity, Filter: filter, Reason: reason, Fingerprint: offered,
-			StrategyRevision: output.revision, GlobalBusiness: output.globalBusiness, Round: adapter.round, IntervalSeconds: output.intervalSeconds, ReadOffset: readOffset})
+		adapter.scopeSink.Observe(ScopeDrop{Plan: identity, Filter: filter, Reason: reason, Fingerprint: offered, Target: target,
+			StrategyRevision: output.revision, Round: adapter.round, IntervalSeconds: output.intervalSeconds, ReadOffset: readOffset})
 	}
+}
+
+// scopeTarget is the record's values of its Plan's target identity keys,
+// read from the dimensions its alert carries; nil when the Plan names no
+// target identity or a key is missing or not a string or a number. A
+// number is matched as its decimal text: the link indexes dimensions as
+// keywords (alert-search.md, dimensions.<key> flattened).
+func scopeTarget(plan admission.PlanContext, dimensions map[string]json.RawMessage) map[string]string {
+	if plan.TargetPlan == nil || len(plan.TargetPlan.Identity.Dimensions) == 0 {
+		return nil
+	}
+	target := make(map[string]string, len(plan.TargetPlan.Identity.Dimensions))
+	for _, key := range plan.TargetPlan.Identity.Dimensions {
+		value, ok := keywordOf(dimensions[key])
+		if !ok {
+			return nil
+		}
+		target[key] = value
+	}
+	return target
+}
+
+// keywordOf is a JSON string's text or a JSON integer's decimal text.
+func keywordOf(raw json.RawMessage) (string, bool) {
+	if len(raw) == 0 {
+		return "", false
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return text, text != ""
+	}
+	var number json.Number
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if decoder.Decode(&number) != nil {
+		return "", false
+	}
+	if _, err := number.Int64(); err != nil {
+		return "", false
+	}
+	return number.String(), true
 }
 
 func (adapter *seriesAdapter) tallyScopeDrop(plan execution.PlanIdentity, word string) {

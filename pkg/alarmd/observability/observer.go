@@ -3800,16 +3800,27 @@ const ReasonTraceExportFailed ReasonCode = "trace_export_failed"
 // existed the whole close chain normalized to reason_code=other on the
 // metrics side and had no cell of its own.
 const (
-	// EffectiveCloseAcked counts closes the broker acknowledged, one per
-	// alert: sent, not closed. A close the link finds no active alert for
-	// (orphaned there, an alert it already closed) is acknowledged all the
-	// same; the producer's answer cannot tell the two apart.
-	EffectiveCloseAcked ReasonCode = "close_acked"
+	// EffectiveCloseDone counts inactive closes the link's filter ran: one
+	// per Plan and version, done or carried on by the next step
+	// (filterclose job_done, job_incomplete). The alerts are counted by the
+	// filter close's own items (linkd filter close metric).
+	EffectiveCloseDone ReasonCode = "close_done"
+	// EffectiveCloseNothingMatched is an inactive close whose dry run
+	// matched no active alert of the Plan's version.
+	EffectiveCloseNothingMatched ReasonCode = "close_nothing_matched"
+	// EffectiveCloseNotSettled is an inactive close the link did not settle
+	// this step - busy, failed, refused, past its expectation - tried again
+	// by the next step; the filter close's metric names which.
+	EffectiveCloseNotSettled ReasonCode = "close_not_settled"
+	// EffectiveCloseUnsupported is filtered close unsupported: the link
+	// answered 501, 404 or 405, and nothing closes the Plan's alerts.
+	EffectiveCloseUnsupported ReasonCode = "filter_close_unsupported"
+	// EffectiveCloseUnrouted is an inactive Plan on a deployment that names
+	// no link control plane: nothing closes its alerts.
+	EffectiveCloseUnrouted ReasonCode = "close_unrouted"
 	// EffectiveClosePrecheckFailed is the owner and content check before a
 	// send refusing: the fence, the content scope or the timeline moved.
 	EffectiveClosePrecheckFailed ReasonCode = "close_precheck_failed"
-	// EffectiveCloseSendFailed is the producer not acknowledging a batch.
-	EffectiveCloseSendFailed ReasonCode = "close_send_failed"
 	// EffectiveCloseMaintenanceBusy is a close that could not take the Query
 	// Group's flight because a Slot was executing. Once is nothing; on every
 	// tick it is a Query Group whose close never happens, which used to be
@@ -3846,73 +3857,15 @@ const (
 	// time its batch was ready. The batch is not sent, and the step goes on
 	// to the Query Group's next Plan.
 	EffectiveCloseBoundaryActive ReasonCode = "close_boundary_active"
-	// EffectiveCloseBusinessUnknown is an alert of a global business Plan
-	// whose record could not be read or names no business. Such a Plan's
-	// alerts are each filed under the business they are about, and a close
-	// must carry it; the alert is not closed this round. Counts alerts.
-	EffectiveCloseBusinessUnknown ReasonCode = "close_business_unknown"
-	// EffectiveCloseSourceLastKnown is a step whose read of this
-	// deployment's event source failed, or waited out its back-off, and
-	// whose closes were decided on the source last read: a deployment
-	// property that an outage of the alert link's Console does not change.
-	// One per step, not per Query Group.
-	EffectiveCloseSourceLastKnown ReasonCode = "source_last_known"
-	// EffectiveCloseSourceUnknown is a step whose closes were deferred: the
-	// event source could not be read and none has been read yet, by this
-	// loop or by the open-alert copy. One per step.
-	EffectiveCloseSourceUnknown ReasonCode = "source_unknown"
-	// EffectiveCloseEvidenceUnavailable is a Plan outside its effective time
-	// whose open alerts could not be listed: its set in the open-alert copy
-	// has no current calibration - never calibrated, past its age, the
-	// calibration failing, or a truncated one that listed nothing. Not
-	// "nothing to close": a calibrated set with no alerts is not counted,
-	// and neither is a set whose members, read fresh, stand in for its
-	// alerts (index_set_close_acked) - unless an earlier reconcile named
-	// alerts active and missing from that set, which its members do not
-	// carry and the stand-in does not close: the Plan is counted here as
-	// well, the alerts waiting for a reconcile that lists them. The
-	// absent-strategy close's word for the same condition. One per Plan, per
-	// step that finds it inactive.
-	EffectiveCloseEvidenceUnavailable ReasonCode = "evidence_unavailable"
-	// EffectiveCloseIndexSetAcked counts, among close_acked, the closes
-	// sent from the strategy's index set: its alerts not listed (no
-	// current calibration), its members read fresh and standing in for them,
-	// each close addressed by fingerprint. Counts alerts.
-	EffectiveCloseIndexSetAcked ReasonCode = "index_set_close_acked"
-	// EffectiveCloseAlreadySent counts a close held back because this
-	// process sent it, once per send held (the first step that holds it),
-	// not once per step: a listed alert's within the minute its send asks a
-	// calibration in, one addressed from the index set until a read of the
-	// set after the send no longer carries the member, or the set's stale
-	// bound has passed since the send. The listing or set still names the
-	// alert only because it was read before the link processed the close.
-	EffectiveCloseAlreadySent ReasonCode = "close_already_sent"
-	// EffectiveCloseSentMemoryFull counts, once per Plan per step, closes
-	// not sent because the memory of sends (EffectiveCloseAlreadySent's) is
-	// at its bound: a close it could not remember would go out again on
-	// every step. Sent once the memory has room.
-	EffectiveCloseSentMemoryFull ReasonCode = "sent_memory_full"
-	// EffectiveCloseReopenedSinceRead counts, by alert, a close held back
-	// because a recovery for its fingerprint was sent after the listing or
-	// the index set it was decided from was read, and an ABNORMAL of it after
-	// that: the alert may have ended and a new one opened under it, which
-	// the close would end (L40). Decided again from the next read.
-	EffectiveCloseReopenedSinceRead ReasonCode = "reopened_since_read"
-	// EffectiveCloseRecoveryUnknown counts, by alert, closes held back
-	// because the fleet's record of reopens could not be read.
-	EffectiveCloseRecoveryUnknown ReasonCode = "recovery_unknown"
 )
 
 // EffectiveCloseOutcomes is every outcome, for the metric to pre-create each
 // cell and for a reader to bound the family by.
 var EffectiveCloseOutcomes = []ReasonCode{
-	EffectiveCloseAcked, EffectiveClosePrecheckFailed, EffectiveCloseSendFailed,
-	EffectiveCloseMaintenanceBusy, EffectiveClosePlanUncompilable, EffectiveCloseIdentityInvalid,
+	EffectiveCloseDone, EffectiveCloseNothingMatched, EffectiveCloseNotSettled, EffectiveCloseUnsupported, EffectiveCloseUnrouted,
+	EffectiveClosePrecheckFailed, EffectiveCloseMaintenanceBusy, EffectiveClosePlanUncompilable, EffectiveCloseIdentityInvalid,
 	EffectiveCloseEffectiveTimeUnknown, EffectiveCloseLegacyUnavailable, EffectiveCloseUnavailable, EffectiveCloseUnsupportedRunner,
 	EffectiveCloseViewNotExecutable, EffectiveCloseCalendarDeletionUnsettled, EffectiveCloseBoundaryActive,
-	EffectiveCloseBusinessUnknown, EffectiveCloseSourceLastKnown, EffectiveCloseSourceUnknown,
-	EffectiveCloseEvidenceUnavailable, EffectiveCloseIndexSetAcked, EffectiveCloseAlreadySent, EffectiveCloseSentMemoryFull,
-	EffectiveCloseReopenedSinceRead, EffectiveCloseRecoveryUnknown,
 }
 
 // Maintenance details are bounded log reasons, not new metric label dimensions.

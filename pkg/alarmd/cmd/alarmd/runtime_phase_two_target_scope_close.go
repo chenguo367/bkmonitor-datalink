@@ -5,11 +5,11 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/activecopy"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scopeclose"
 )
 
@@ -49,14 +49,13 @@ func (loop targetScopeCloseLoop) run(ctx context.Context) {
 }
 
 // targetScopeCloseFor builds the close and the sink the admission step
-// reports to, only for a deployment with the alert link's Console. Without
-// it there is no calibrated set, no alert ids and no own source to judge
-// against, so the close could never act; wiring it anyway would have every
-// rejection of every Plan screened and counted as set_unavailable for
-// nothing. The sink is then a nil interface, which the access path reads as
-// "nobody listens", and the outcome counters stay at zero.
+// reports to, only for a deployment with the link's control plane. Without
+// it there is no copy to judge against and no filter to close through, so
+// the close could never act; wiring it anyway would have every rejection of
+// every Plan screened and counted for nothing. The sink is then a nil
+// interface, which the access path reads as "nobody listens".
 func targetScopeCloseFor(cfg config.Config, now func() time.Time) (*scopeclose.Closer, access.ScopeDropSink) {
-	if cfg.PhaseTwo.Linkd.ConsoleURL == "" {
+	if !cfg.PhaseTwo.Linkd.ControlPlane.Configured() {
 		return nil, nil
 	}
 	budget := config.DeriveLinkdCapacity(config.DetectCapacityInputs())
@@ -65,20 +64,22 @@ func targetScopeCloseFor(cfg config.Config, now func() time.Time) (*scopeclose.C
 	return closer, scopeDropSink{closer: closer}
 }
 
-// bindTargetScopeClose binds the close to the open alert copy and the
-// producer, its counts to the metric and its loop to the bundle. Nothing is
-// wired for a nil close.
-func bindTargetScopeClose(bundle *phaseTwoWorkerBundle, closer *scopeclose.Closer, cache *openalerts.Cache, recoveries *openalerts.Recoveries,
-	route *filterRoute, writer scopeclose.Writer, businesses *openalerts.AlertBusinesses, recorder *metric.Recorder) {
+// bindTargetScopeClose binds the close to the copy and the link's filter,
+// its counts to the metric and its loop to the bundle. Nothing is wired for
+// a nil close.
+func bindTargetScopeClose(bundle *phaseTwoWorkerBundle, closer *scopeclose.Closer, copy *activecopy.Copy, route *filterRoute,
+	recorder *metric.Recorder) {
 	if closer == nil {
 		return
 	}
-	closer.Bind(scopeclose.CacheSet(cache), writer)
-	if recoveries != nil {
-		closer.BindGuard(recoveryGuard(cache, recoveries, route))
+	var set scopeclose.OpenSet
+	if copy != nil {
+		set = copy
 	}
-	if businesses != nil {
-		closer.BindAlertBusiness(businesses.Of)
+	if route != nil {
+		closer.Bind(set, route.closer, route.source)
+	} else {
+		closer.Bind(set, nil, "")
 	}
 	recorder.SetTargetScopeCloseSource(closer.Stats)
 	bundle.targetScopeClose = closer
@@ -91,13 +92,13 @@ func bindTargetScopeClose(bundle *phaseTwoWorkerBundle, closer *scopeclose.Close
 type scopeDropSink struct{ closer *scopeclose.Closer }
 
 func (sink scopeDropSink) Screen(plan execution.PlanIdentity) string {
-	return sink.closer.Screen(openalerts.StrategyKey{TenantID: plan.TenantID, StrategyID: plan.StrategyID})
+	return sink.closer.Screen(scopeclose.Key{TenantID: plan.TenantID, StrategyID: plan.StrategyID})
 }
 
 func (sink scopeDropSink) Observe(drop access.ScopeDrop) {
-	sink.closer.Observe(scopeclose.Drop{TenantID: drop.Plan.TenantID, BusinessID: drop.Plan.BusinessID,
-		StrategyID: drop.Plan.StrategyID, Fingerprint: drop.Fingerprint, StrategyRevision: drop.StrategyRevision, GlobalBusiness: drop.GlobalBusiness,
-		Round: drop.Round, IntervalSeconds: drop.IntervalSeconds, ReadOffset: drop.ReadOffset, CloseReason: drop.CloseReason})
+	sink.closer.Observe(scopeclose.Drop{TenantID: drop.Plan.TenantID, StrategyID: drop.Plan.StrategyID, Fingerprint: drop.Fingerprint,
+		Target: drop.Target, StrategyRevision: drop.StrategyRevision, Round: drop.Round, IntervalSeconds: drop.IntervalSeconds,
+		ReadOffset: drop.ReadOffset, CloseReason: drop.CloseReason})
 }
 
 func (sink scopeDropSink) Count(reporter access.ScopeDropReporter, word string, n int) {
@@ -113,14 +114,14 @@ func (sink scopeDropSink) Count(reporter access.ScopeDropReporter, word string, 
 	case access.ScopeDropNoFingerprint:
 		outcome = scopeclose.OutcomeNotMember
 	}
-	sink.closer.Count(openalerts.StrategyKey{TenantID: plan.TenantID, StrategyID: plan.StrategyID},
+	sink.closer.Count(scopeclose.Key{TenantID: plan.TenantID, StrategyID: plan.StrategyID},
 		reporter.Instance(), int64(reporter.Slot.EvaluationTime), outcome, n)
 }
 
-// withTargetScopeClose puts the close's reading beside the open set it acts
-// on, in the replica's facts and so in fleet.get and the health view.
-func withTargetScopeClose(source func() *fleet.OpenAlertSetFacts, closer *scopeclose.Closer) func() *fleet.OpenAlertSetFacts {
-	return func() *fleet.OpenAlertSetFacts {
+// withTargetScopeClose puts the close's reading beside the copy it judges
+// from, in the replica's facts and so in fleet.get and the health view.
+func withTargetScopeClose(source func() *fleet.ActiveCopyFacts, closer *scopeclose.Closer) func() *fleet.ActiveCopyFacts {
+	return func() *fleet.ActiveCopyFacts {
 		facts := source()
 		if facts != nil && closer != nil {
 			facts.TargetScopeClose = targetScopeCloseFacts(closer.Facts())
@@ -139,24 +140,4 @@ func targetScopeCloseFacts(facts scopeclose.Facts) *fleet.TargetScopeCloseFacts 
 			PendingSample: row.PendingSample, DecidedSample: row.DecidedSample})
 	}
 	return result
-}
-
-// recoveryGuard holds back a scope close a reopen overtook (L40): a
-// recovery of its fingerprint sent after the evidence the close was decided
-// from - the listing, or the index set standing in for it - was read, and
-// an ABNORMAL of it after that.
-func recoveryGuard(cache *openalerts.Cache, recoveries *openalerts.Recoveries, route *filterRoute) scopeclose.Guard {
-	return func(ctx context.Context, key openalerts.StrategyKey, fingerprint string, fromSet bool) string {
-		if route.inForce() {
-			// Closed by alert id through the link's filter: a reopen is not
-			// reached (L40), so nothing is held for one.
-			return ""
-		}
-		listed, index := cache.EvidenceStarted(key)
-		readStarted := listed
-		if fromSet {
-			readStarted = index
-		}
-		return recoveries.Held(ctx, key.TenantID, key.StrategyID, []string{fingerprint}, readStarted)[fingerprint]
-	}
 }

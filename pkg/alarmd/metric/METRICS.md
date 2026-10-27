@@ -17,13 +17,13 @@ What the control leader's difference against disabled or deleted strategies deci
 
 Labels: `side`
 
-The sizes the last round decided on: roster_strategies is the strategies the alert link listed with an unrecovered alert, roster_unreadable the ones it listed and could not read, roster_invalid the rows its walk skipped as naming no strategy of this binding (a smaller roster, never a failed page), roster_pages and roster_complete how far the walk of its roster got, candidates the difference itself, snapshot_strategies the strategy cache it was judged against, remembered_identities the strategies the catalog let go and still knows the business of. Each age is reported beside its bound - snapshot_age_seconds beside max_snapshot_age_seconds, link_health_age_seconds (since the link's last successful discovery) beside max_link_health_age_seconds, past which the health page calls the link's maintenance stale - so a refused round, or a roster that stopped growing, can be read as the side falling behind rather than as a bound that does not fit. The link's age never refuses a round: an old roster can only miss a strategy. link_pending is the link's own refresh backlog.
+The sizes the last round decided on: found_strategies is the strategies the alert link's search found with an active alert outside the running set, discovery_searches and discovery_tenants the searches that took and the tenants walked, discovery_complete whether every tenant was walked (1) or a search failed (0), candidates the difference itself, snapshot_strategies the strategy cache it was judged against, remembered_identities the strategies the catalog let go and still knows the business of. snapshot_age_seconds is reported beside its bound max_snapshot_age_seconds, so a refused round can be read as the source falling behind rather than as a bound that does not fit.
 
 ## alarmd_absent_strategy_round_total
 
 Labels: `disposition`
 
-How each round of the difference ended: none is a round that decided, and the rest name the fact that was not good enough to decide on - link_unavailable (the alert link's roster could not be read), snapshot_unusable (the source was not observed this round), snapshot_empty and snapshot_stale. Rounds, not strategies. none is the denominator the outcome family is read against.
+How each round of the difference ended: none is a round that decided, and the rest name the fact that was not good enough to decide on - link_unavailable (the alert link's search could not be read or its control plane is not named), snapshot_unusable (the source was not observed this round), snapshot_empty and snapshot_stale. Rounds, not strategies. none is the denominator the outcome family is read against.
 
 ## alarmd_access_inplace_held_input_bytes
 
@@ -114,6 +114,28 @@ Timelines a cutover opened again because their key was gone. This used to fail e
 Labels: `reason`
 
 Schedule timelines the Control Leader left out when it read the activation's Plan records back from the open Segments, by why: one per Query Group per activation it read. The rest of the activation loads and is cut over as usual. undecodable: the bytes do not decode; the Leader rebuilds that Query Group's records from the publication it runs and rewrites the timeline (timeline_repairs_total). newer_format: the bytes are a timeline of another schema version, written by a build that reads them, and are left alone. absent: the key is not there at all; the Leader rebuilds that Query Group's records and opens the timeline again (timeline_repairs_total{reopened}). A read that fails is never counted here: it fails the activation read as before. The fleet's activation row names the Query Groups. Counted by the Leader; read it summed over replicas. Reader: the release acceptance, from /metrics after each deploy.
+
+## alarmd_active_copy_entries
+
+Labels: `kind`
+
+What the copy holds: known (fingerprints with a word) and queued (waiting for a pass).
+
+## alarmd_active_copy_link_unsupported
+
+1 once the link answered that it cannot search (501, 404 or 405): filtered close unsupported.
+
+## alarmd_active_copy_lookup_total
+
+Labels: `answer`
+
+The recovery gate's and the no-data end's lookups by how the copy answered: own_sent (this process's acknowledged ABNORMAL), search_hit (an active alert the link's search found within 5 minutes), search_miss (two misses at least 2 minutes apart, within an hour), young_miss (one run of misses shorter than that: held, not judged), unknown (no current word: queued for the next pass, held meanwhile), full (unknown and not queued, the copy at its bound).
+
+## alarmd_active_copy_pass_total
+
+Labels: `outcome`
+
+The refresh passes' requests and results: request (a search of at most 500 fingerprints, tenant + event source + status active, across strategies), link_busy (429: the pass stopped, the fingerprints stay queued and held), link_unsupported (501/404/405: nothing is ever judged; warned once), read_failed (any other failure: held), hit and miss (fingerprints answered), foreign_item (an item that is not an active alert of a queued fingerprint, this source and its strategy), dropped (forgotten when a strategy came back after 10 minutes untracked).
 
 ## alarmd_active_qg_set_object_bytes
 
@@ -909,30 +931,6 @@ Labels: `outcome`, `reason`, `origin`
 
 Level outcomes the evaluation concluded, by outcome kind and, for UNKNOWN and TERMINAL, by reason. NORMAL, ABNORMAL and RECOVERY carry no reason. UNKNOWN by reason is the reading for a Level that was not judged: EFFECTIVE_TIME_INACTIVE is its configured hours, EFFECTIVE_TIME_UNKNOWN a schedule that could not be resolved, HISTORY_WARMING a window not yet full, GAP_* a guard. This counts Level outcomes per series per evaluation, not alerts and not strategies; read a reason against level_outcome_total summed over every cell for its share. origin says whose the reason is: physical for what this round met itself, carried for a stored guard's reason repeated on a later round (an UNKNOWN Level held by a guard an earlier round raised; the origin Slot is on the evaluation_completed line), derived for alarmd's own judgement from configuration, schedule or State (EFFECTIVE_TIME_INACTIVE, HISTORY_WARMING, ...). Only UNKNOWN is ever carried.
 
-## alarmd_linkd_calibration_coverage
-
-Labels: `state`
-
-Tracked strategies by whether calibration at the Console's measured pace reaches them within the calibration interval: covered, or short. A round calibrates enough strategies to cover every tracked one with a quarter to spare, bounded by how many calls the Console answers in half a refresh cycle (from the latest calls' p90); short is the strategies an interval at that bound cannot reach, whose open-alert sets go unjudged and so unclosed. fleet.get names the strategies past their calibration age. Absent without a Console.
-
-## alarmd_linkd_console_calls_total
-
-Labels: `op`, `result`
-
-Calls this replica made to the alert link's Console, by operation (roster, reconcile, alert_record) and result (ok, failed). Only the control leader walks the roster. An alert_record answered with 'no such alert' is ok. Every cell exists once the source is bound, so a zero is a reading.
-
-## alarmd_linkd_console_failures_total
-
-Labels: `op`, `class`
-
-Failed calls to the alert link's Console, by operation and class: the transport's word for a request that got no answer (cancelled - the caller let go, timeout, connection_refused, connection_reset, dns, tls, eof, other - the same words a query provider's route detail uses), status (an answer other than 200) and incomplete (a body not read whole or not decoded). The classes of one operation add up to its result="failed" cell of linkd_console_calls_total; the latest one, with when, is the Console row's last_failure_class on the deployment's dependencies, and its start and every change of class write one console_call_failed line. Every cell exists once the source is bound. Reader: the release acceptance, from /metrics after each deploy.
-
-## alarmd_linkd_console_state
-
-Labels: `state`
-
-The alert link's Console as this replica last saw it, one cell per state and 1 on the current one: not_configured (the deployment names no Console, so neither the open alert set's calibration nor the close of disabled or deleted strategies' alerts runs; by design on a deployment whose events all go the Python-compatible way), not_called, unreadable (the latest call of some operation failed), link_unhealthy (the Console answered and the link says its own set maintenance is failing, never succeeded or is behind; its roster may then miss strategies the close would take, and the close still runs on what it lists), reachable, and off_role, a cell on every process: 1 on one with neither the control nor the worker role (the rest 0), else 0.
-
 ## alarmd_linkd_filter_close_total
 
 Labels: `outcome`
@@ -1327,48 +1325,6 @@ Labels: `observer`
 
 Panics an observer raised and the fan-out recovered, by observer; every other observer still received the observation. entry is a panic before any member. Any count is a defect. Reader: the release acceptance, at +5 and +15 minutes after each deploy (its observer_panics column).
 
-## alarmd_open_alert_set_authoritative_age_seconds
-
-Seconds since the oldest calibration among the tracked strategies' sets completed: a full read of the consumer's open alerts for a strategy, reconciled against its index. Absent until one has.
-
-## alarmd_open_alert_set_entries
-
-Labels: `kind`
-
-What the copy holds: member is fingerprints from the last publication, sent_open those this process sent ABNORMAL for within the local retention.
-
-## alarmd_open_alert_set_evictions_total
-
-Fingerprints this process sent that were dropped from the copy to stay inside its bound, oldest first.
-
-## alarmd_open_alert_set_lookup_total
-
-Labels: `answer`
-
-Lookups by how they were answered. index_member and index_absent are the consumer's index; recently_sent is a fingerprint the index does not carry yet that this process sent ABNORMAL for within its lag, the copy's word and not the consumer's; self_maintained and passed_through are the unavailable policy answering, and which of the two appears is the policy in force. index_stale is a set read once whose last successful read or calibration (complete or truncated) is older than 3 x (the index interval + ceil(tracked strategies / read batch) x the refresh interval), answered by the same policy as a set never read; the bound grows with the strategies tracked, so it differs between deployments.
-
-## alarmd_open_alert_set_notices_refused_total
-
-Labels: `reason`
-
-Change notices on the link's channel this process dropped, by why: oversized (past 64 KiB), undecodable (not a notice under the strict shape: a field this build does not know, a wrong type, content after it), invalid_key (the tenant or strategy it names is not a valid one). A dropped notice costs delay only: the strategy is read on the next periodic read. A steady rate is the link publishing a notice this build does not read. Read with alarmd-cli invoke metrics.get.
-
-## alarmd_open_alert_set_refresh_total
-
-Labels: `result`
-
-Refreshes by result: index (a strategy's index read), authoritative (a calibration completed), truncated (a calibration whose answer the link marked incomplete or that passed this process's caps of 10000 rows or 5000 active alerts: what it listed is added and its alerts are closed where due, nothing unlisted is taken as gone, and it is asked again on the calibration cadence), unavailable (either failed). A flat line is the refresh loop not running.
-
-## alarmd_open_alert_set_tracked_strategies
-
-Strategies the copy reads on each refresh: those evaluated by this worker within the tracking window. Read against worker_owned_query_groups; well above it is strategies this worker lost still inside the window.
-
-## alarmd_open_alert_set_unavailable_total
-
-Labels: `reason`
-
-Why the copy could not answer from the consumer's sets: read_error (an index read or a calibration failed, each time), too_large (a strategy's set larger than this process's read budget - members or bytes, from its memory - each time, refused before it is scanned once a member's weight is known; fleet.get names these strategies), location_unconfirmed (the link's Console has not named where the sets are) and keying_unconfirmed (it has not said they are keyed by the alert ids this process sends), each counted once on entering the state; fleet health degrades with OPEN_ALERT_SET_UNCONFIRMED while either lasts. A deployment without the Console counts nothing here.
-
 ## alarmd_operation_total
 
 Labels: `operation`, `result`, `reason_code`
@@ -1622,12 +1578,6 @@ Rebalance rounds that planned moves and published none, by reason. reason=set_un
 ## alarmd_rebalance_planned_moves
 
 Assignments the latest rebalance round on this Control Leader planned to move from the most to the least loaded ready worker. Read beside assignment_moves_total: planned and not published for more than one stabilisation window is a ready set that keeps changing. Meaningful on the Control Leader only; aggregate replicas with max, not sum.
-
-## alarmd_recovery_record_total
-
-Labels: `outcome`
-
-The fleet's record of the reopens alarmd sent - an ABNORMAL acknowledged after a RECOVERY of the same fingerprint - which holds back a close decided from the link's evidence when a recovery of its fingerprint was sent after that evidence was read and an ABNORMAL after that (L40), as this process used it: noted counts reopens the sink acknowledged and the record took, note_failed reopens it could not take - a close decided after one of them is not held back by it - read_failed reads of the record that failed, each holding back every close it was asked about (recovery_unknown in the close's own outcomes), and forgotten recoveries this process let go of, past its bound, before an ABNORMAL could follow them - a reopen after one is not recorded. Every cell exists from the start so a zero is a reading and not an absence.
 
 ## alarmd_redis_caller_failure_reason_total
 
@@ -2095,7 +2045,7 @@ Spans of sampled Slots that were not exported, by why: queue_full (the export qu
 
 Labels: `outcome`
 
-RECOVERY records, by what the consumer's open alert set decided: passed (an open alert on the series; the envelope went), passed_one_time_close (the one close of a group the target dropped, let through without the consumer's copy vouching for it: about one per dropped group, more only when that round's no-data memory write failed and the round ran again; an orphan at the consumer where it holds no such alert), held_no_open_alert (none; nothing to resolve, no envelope), held_fingerprint_unknown (the series identity the consumer keys alerts by could not be built; held and named rather than read as absent), not_configured (the evaluation ran without a set; the envelope went as before the gate -- on a production worker this is a wiring fault), protocol_not_gated (the Plan publishes the compatibility protocol, which has no RECOVERY message: the set was not asked and the envelope is not built; output_events_without_message_total counts it). It counts records per evaluation, not alerts. Which of passed and held_no_open_alert dominates says nothing on its own; read it against open_alert_set_lookup_total, whose self_maintained and passed_through answers are this process's own knowledge, not the consumer's.
+RECOVERY records, by what alarmd's copy of the consumer's active alerts decided: passed (an open alert on the series; the envelope went), passed_one_time_close (the one close of a group the target dropped, let through without the consumer's copy vouching for it: about one per dropped group, more only when that round's no-data memory write failed and the round ran again; an orphan at the consumer where it holds no such alert), held_no_open_alert (none; nothing to resolve, no envelope), held_fingerprint_unknown (the series identity the consumer keys alerts by could not be built; held and named rather than read as absent), not_configured (the evaluation ran without a set; the envelope went as before the gate -- on a production worker this is a wiring fault), protocol_not_gated (the Plan publishes the compatibility protocol, which has no RECOVERY message: the set was not asked and the envelope is not built; output_events_without_message_total counts it). It counts records per evaluation, not alerts. Which of passed and held_no_open_alert dominates says nothing on its own; read it against active_copy_lookup_total, whose own_sent answers are this process's own knowledge, not the consumer's.
 
 ## alarmd_trigger_recovery_beside_level_total
 
