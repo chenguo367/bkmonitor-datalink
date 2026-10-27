@@ -141,3 +141,50 @@ func TestALabelIsReadAsTheLinkIndexesIt(t *testing.T) {
 		}
 	}
 }
+
+// A redirect is not followed: Go would carry the Internal-Token header to
+// wherever it points. The 3xx is the answer.
+func TestARedirectIsNotFollowedWithTheToken(t *testing.T) {
+	var leaked []string
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leaked = append(leaked, r.Header.Get("Internal-Token"))
+	}))
+	t.Cleanup(elsewhere.Close)
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	})
+	_, err := client.Search(context.Background(), "tenant-a", json.RawMessage(`{"match_all":{}}`), "", 1)
+	if Status(err) != http.StatusTemporaryRedirect || len(leaked) != 0 {
+		t.Fatalf("err %v, the redirect's target saw %d requests", err, len(leaked))
+	}
+}
+
+// A request the link answers 400 is not sent: no query or filter object,
+// a limit outside 1..500.
+func TestARequestTheLinkWouldRefuseIsNotSent(t *testing.T) {
+	requests := 0
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) { requests++ })
+	ctx := context.Background()
+	for name, call := range map[string]func() error{
+		"nil query":  func() error { _, err := client.Search(ctx, "tenant-a", nil, "", 1); return err },
+		"null query": func() error { _, err := client.Search(ctx, "tenant-a", json.RawMessage(`null`), "", 1); return err },
+		"limit 0":    func() error { _, err := client.Search(ctx, "tenant-a", json.RawMessage(`{}`), "", 0); return err },
+		"limit 501":  func() error { _, err := client.Search(ctx, "tenant-a", json.RawMessage(`{}`), "", 501); return err },
+		"nil filter": func() error { _, err := client.CloseByFilter(ctx, nil, "tenant-a", nil, "", 1, true); return err },
+		"array": func() error {
+			_, err := client.CloseByFilter(ctx, nil, "tenant-a", json.RawMessage(`[]`), "", 1, true)
+			return err
+		},
+		"close 501": func() error {
+			_, err := client.CloseByFilter(ctx, nil, "tenant-a", json.RawMessage(`{}`), "", 501, true)
+			return err
+		},
+	} {
+		if err := call(); err != ErrInvalidRequest {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	if requests != 0 {
+		t.Fatalf("%d requests sent", requests)
+	}
+}

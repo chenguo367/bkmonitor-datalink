@@ -77,6 +77,11 @@ func New(options Options) (*Client, error) {
 	if strings.TrimSpace(options.Secret) == "" || strings.TrimSpace(options.Username) == "" || options.Client == nil {
 		return nil, errors.New("alarmd linkdmanage: the control plane secret, username and client are required")
 	}
+	// A copy that never follows a redirect: Go carries a custom header such
+	// as Internal-Token across one, so a redirect would hand the token to
+	// wherever it points. A 3xx is answered as the status it is.
+	client := *options.Client
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	maxBytes := options.MaxBytes
 	if maxBytes <= 0 {
 		maxBytes = defaultMaxPageBytes + 1<<20
@@ -85,7 +90,7 @@ func New(options Options) (*Client, error) {
 	if now == nil {
 		now = time.Now
 	}
-	return &Client{base: base, client: options.Client, secret: []byte(options.Secret), username: options.Username,
+	return &Client{base: base, client: &client, secret: []byte(options.Secret), username: options.Username,
 		maxBytes: maxBytes, now: now}, nil
 }
 
@@ -238,6 +243,9 @@ type SearchPage struct {
 // Search reads one page of the tenant's alerts matching query, an
 // Elasticsearch query object.
 func (c *Client) Search(ctx context.Context, tenantID string, query json.RawMessage, after string, limit int) (SearchPage, error) {
+	if err := validRequest(query, limit); err != nil {
+		return SearchPage{}, err
+	}
 	body, err := json.Marshal(struct {
 		TenantID string          `json:"bk_tenant_id"`
 		Query    json.RawMessage `json:"query"`
@@ -255,6 +263,21 @@ func (c *Client) Search(ctx context.Context, tenantID string, query json.RawMess
 		return SearchPage{}, err
 	}
 	return page, nil
+}
+
+// ErrInvalidRequest is a request the link would refuse with 400, not sent:
+// no query or filter object (sent as JSON null), or a limit outside 1..500
+// (b7e5beddf internal/controlplane/api/alert_search.go validAlertQuery,
+// close_filter.go:68). A caller that means every alert says
+// {"match_all":{}}.
+var ErrInvalidRequest = errors.New("alarmd linkdmanage: a query object and a limit of 1..500 are required")
+
+func validRequest(query json.RawMessage, limit int) error {
+	trimmed := bytes.TrimSpace(query)
+	if len(trimmed) == 0 || trimmed[0] != '{' || limit < 1 || limit > MaxLimit {
+		return ErrInvalidRequest
+	}
+	return nil
 }
 
 // ErrBodyTooLarge is a request alarmd would not send: past the link's body
@@ -285,6 +308,9 @@ type FilterPage struct {
 // cursor, the limit and dry_run added before it; nil on a dry run.
 func (c *Client) CloseByFilter(ctx context.Context, command []byte, tenantID string, filter json.RawMessage, after string, limit int,
 	dryRun bool) (FilterPage, error) {
+	if err := validRequest(filter, limit); err != nil {
+		return FilterPage{}, err
+	}
 	head, err := json.Marshal(struct {
 		TenantID string          `json:"bk_tenant_id,omitempty"`
 		Filter   json.RawMessage `json:"filter"`
