@@ -298,7 +298,8 @@ func runPhaseTwoApplicationWithDependencies(
 		server.SetAPI(bundle.dependencies.FleetAPI)
 	}
 	if err == nil && bundle != nil && bundle.dependencies.NoDataCloseAPI != nil {
-		server.SetInternalAPI(bundle.dependencies.NoDataCloseAPI)
+		bindNoDataCloseAPI(bundle.dependencies.NoDataCloseAPI, bundle.dependencies.Config.HTTP.InternalListen, bundle.dependencies.Recorder,
+			logger, server.SetInternalAPI)
 	}
 	if err == nil && bundle != nil && bundle.dependencies.ControlStream != nil {
 		// The same for the control stream: a Worker that connects before
@@ -684,7 +685,7 @@ type phaseTwoWorkerBundleDependencies struct {
 	// NoDataCloseAPI records manual closes of no-data alerts (decision-024),
 	// served on the cluster-only listener; nil for a process without the
 	// control role.
-	NoDataCloseAPI http.Handler
+	NoDataCloseAPI *noDataCloseAPI
 	// PublicSurfaceRestricted is whether the listener's public surface is
 	// restricted: asked for by the configuration and the CLI came up.
 	PublicSurfaceRestricted bool

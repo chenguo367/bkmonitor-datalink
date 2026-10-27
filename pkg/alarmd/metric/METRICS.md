@@ -933,6 +933,12 @@ Labels: `state`
 
 The alert link's Console as this replica last saw it, one cell per state and 1 on the current one: not_configured (the deployment names no Console, so neither the open alert set's calibration nor the close of disabled or deleted strategies' alerts runs; by design on a deployment whose events all go the Python-compatible way), not_called, unreadable (the latest call of some operation failed), link_unhealthy (the Console answered and the link says its own set maintenance is failing, never succeeded or is behind; its roster may then miss strategies the close would take, and the close still runs on what it lists), reachable, and off_role, a cell on every process: 1 on one with neither the control nor the worker role (the rest 0), else 0.
 
+## alarmd_linkd_filter_close_total
+
+Labels: `outcome`
+
+The strategy closes alarmd runs through the alert link's search and close by filter (package filterclose), by outcome. Per job (one decision's filter in one round): job_done, job_incomplete (the round ended or the dry run's count was spent), nothing_matched, expect_exceeded (the dry run matched more than the independent expectation allows; nothing closed), link_unsupported (501/404/405: the existing path is taken), link_busy (429), link_refused (another 4xx), link_failed (timeout, 5xx, transport), command_unavailable, filter_refused; and where the job's expectation came from: expect_own_records, expect_roster, expect_removed_targets, expect_decided_ids, expect_fixed_ceiling. Per item: item_closed, item_already_closed, item_ended_otherwise (409 invalid_transition), item_source_unpublished, item_conflict_unknown, item_rederived (429, 504 not_attempted, 409 version_conflict: found again by the filter), item_pending (5xx: kept to retry by id), item_pending_full, item_pending_lost, item_refused. Per retry of a kept item: pending_closed, pending_already_closed, pending_ended_otherwise, pending_left_decision (the decision's filter no longer names the alert: dropped, not closed), pending_not_found, pending_retry_failed, pending_given_up, pending_refused, pending_unreadable, pending_unavailable. The edit close's own: buckets_truncated, digest_mismatch, sample_unreadable, alerts_read, alerts_truncated, alert_decided_close, and edit_<word> for each edit decision and note. Every cell exists from the start so a zero is a reading and not an absence.
+
 ## alarmd_live_query_reserve_seconds
 
 This process's measured post-query tail, pooled across its Query Groups: a read's deadline is its consumer deadline less this (or a group's own longer tail) instead of the frozen reserve, and a round is judged short of time against that deadline. Zero before enough Slots are measured, when the frozen reserve applies.
@@ -1208,6 +1214,12 @@ Seconds since a long-running loop last finished a turn, successful or not, by lo
 Labels: `loop`
 
 How long one turn of a long-running loop took, by loop, failed turns included. control is the refresh and reconcile loop; dispatch is the scheduler's queue loop, measured up to the wait. The liveness bound on a loop is judged against the longest turn this shows.
+
+## alarmd_no_data_close_requests_total
+
+Labels: `outcome`
+
+The alert link's calls of the no-data close route (/internal/v1/no-data-closures), by outcome: recorded; full_skipped, answered 200 and not recorded because the strategy's close hash is at its bound (a refusal would stop the user's close at the link; skipped, alarmd may raise the absence again); store_unavailable (503, the link retries); the refusals method_not_allowed (405), body_unreadable, body_not_object and identity_invalid (400). internal_listen_off is 1 when the process serves the route with no http.internal_listen, so the route is served nowhere. Every cell exists from the start so a zero is a reading and not an absence.
 
 ## alarmd_no_data_end_total
 
