@@ -146,10 +146,9 @@ func (loop *editStrategyClose) step(ctx context.Context, snapshot map[absentaler
 			continue
 		}
 		examined++
-		// The expectation is the fixed ceiling: no count of the strategy's
-		// alerts exists apart from the search being checked.
-		word, buckets := loop.filter.closer.Edit(ctx, filterclose.EditInput{Scope: loop.filter.scope(key), Plan: planOf(facts),
-			Expect: filterclose.Expectation{Count: filterclose.FixedCeiling, Source: filterclose.ExpectFixedCeiling}})
+		// Each bucket's expectation is alarmd's own record of the strategy's
+		// open episodes at its version (filterclose.Closer.Edit).
+		word, buckets := loop.filter.closer.Edit(ctx, filterclose.EditInput{Scope: loop.filter.scope(key), Plan: planOf(facts)})
 		if word == filterclose.OutcomeUnsupported {
 			return
 		}

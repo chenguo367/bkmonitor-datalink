@@ -12,11 +12,13 @@ package filterclose
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdmanage"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openepisodes"
 )
 
 // Every builder puts the tenant, the event source and the strategy in the
@@ -75,10 +77,12 @@ func TestEveryFilterCarriesTenantSourceAndStrategy(t *testing.T) {
 	}
 }
 
-// A dry run that matches more than the expectation allows closes nothing;
-// within it, the strategy's alerts close and another strategy's, another
-// source's and another tenant's do not.
-func TestADryRunPastTheExpectationClosesNothing(t *testing.T) {
+// A dry run that matches more than alarmd's own record of the strategy's
+// episodes allows closes nothing; within it, the strategy's alerts close
+// and another strategy's, another source's and another tenant's do not. A
+// close that then finds nothing prunes the record, and the strategy has
+// none left.
+func TestADryRunPastTheRecordClosesNothing(t *testing.T) {
 	h := newHarness(t)
 	for i := 0; i < 50; i++ {
 		h.link.add(&fakeAlert{id: alertID(i), labels: map[string]string{"strategy_id": "41", "strategy_version": "3"}})
@@ -86,15 +90,23 @@ func TestADryRunPastTheExpectationClosesNothing(t *testing.T) {
 	h.link.add(&fakeAlert{id: "other-strategy", labels: map[string]string{"strategy_id": "42"}})
 	h.link.add(&fakeAlert{id: "other-source", source: "another", labels: map[string]string{"strategy_id": "41"}})
 	h.link.add(&fakeAlert{id: "other-tenant", tenant: "tenant-b", labels: map[string]string{"strategy_id": "41"}})
+	// 29 episodes allow 29 + 20 = 49: one short of the link's 50.
+	h.opened(t, "41", "3", nil, fingerprints(0, 29)...)
+	h.opened(t, "42", "3", nil, fingerprints(100, 40)...)
 	closer := h.closer(t)
-	if word := closer.Absent(context.Background(), testScope, DecisionAbsent, 3, Expectation{Count: 10, Source: ExpectDecidedIDs}); word != OutcomeExpectExceeded {
+	if word := closer.Absent(context.Background(), testScope, DecisionAbsent, 3); word != OutcomeExpectExceeded {
 		t.Fatalf("word %s, want expect_exceeded", word)
 	}
 	if h.link.requests[linkdmanage.RouteCloseFilter] == 0 || h.link.alert(alertID(0)).closes != 0 {
 		t.Fatalf("closed past the expectation: %+v", h.link.alert(alertID(0)))
 	}
-	if word := closer.Absent(context.Background(), testScope, DecisionAbsent, 3, Expectation{Count: 48, Source: ExpectDecidedIDs}); word != OutcomeJobDone {
-		t.Fatalf("word %s, want job_done", word)
+	if stats := closer.Stats(); stats[OutcomeExpectOwnRecord] != 1 || stats[OutcomeExpectExceeded] != 1 {
+		t.Fatalf("stats %v", nonZero(stats))
+	}
+	// 30 allow exactly 50.
+	h.opened(t, "41", "3", nil, fingerprints(29, 1)...)
+	if word := closer.Absent(context.Background(), testScope, DecisionAbsent, 3); word != OutcomeJobDone {
+		t.Fatalf("word %s, want job_done (stats %v)", word, nonZero(closer.Stats()))
 	}
 	for i := 0; i < 50; i++ {
 		if h.link.alert(alertID(i)).closes != 1 {
@@ -106,10 +118,134 @@ func TestADryRunPastTheExpectationClosesNothing(t *testing.T) {
 			t.Fatalf("%s closed", id)
 		}
 	}
-	// The fixed ceiling is a bound as it is, with no margin.
-	if (Expectation{Count: FixedCeiling, Source: ExpectFixedCeiling}).allowed() != FixedCeiling {
-		t.Fatal("the fixed ceiling has a margin")
+	if word := closer.Absent(context.Background(), testScope, DecisionAbsent, 3); word != OutcomeNothingMatched {
+		t.Fatalf("word %s, want nothing_matched", word)
 	}
+	if closer.Stats()[OutcomeRecordPruned] != 30 {
+		t.Fatalf("stats %v, want the 30 entries pruned", nonZero(closer.Stats()))
+	}
+	for strategy, want := range map[string]int{"41": 0, "42": 40} {
+		record, err := h.record(t).Load(context.Background(), openepisodes.Key{TenantID: "tenant-a", StrategyID: strategy})
+		if err != nil || len(record.Entries) != want || record.Exists != (want > 0) {
+			t.Fatalf("strategy %s record %+v, %v; want %d entries", strategy, record, err, want)
+		}
+	}
+}
+
+// The margin is a tenth of the count, at least twenty.
+func TestTheMarginIsATenthAtLeastTwenty(t *testing.T) {
+	for count, want := range map[int]int{0: 20, 30: 50, 200: 220, 36000: 39600} {
+		if got := (Expectation{Count: count, Source: ExpectOwnRecord}).allowed(); got != want {
+			t.Fatalf("count %d allows %d, want %d", count, got, want)
+		}
+	}
+}
+
+// An inactive close of one version counts only that version's entries:
+// the record holds 25 at version 3 and 100 at version 4, the link 50 at
+// version 3. 25 allow 45, so the close is refused; the entries of version
+// 4 do not lend it their count.
+func TestAnInactiveCloseCountsOnlyItsVersionsEntries(t *testing.T) {
+	h := newHarness(t)
+	for i := 0; i < 50; i++ {
+		h.link.add(&fakeAlert{id: alertID(i), labels: map[string]string{"strategy_id": "41", "strategy_version": "3"}})
+	}
+	h.opened(t, "41", "3", nil, fingerprints(0, 25)...)
+	h.opened(t, "41", "4", nil, fingerprints(100, 100)...)
+	closer := h.closer(t)
+	if word := closer.Inactive(context.Background(), testScope, "3", 3); word != OutcomeExpectExceeded {
+		t.Fatalf("word %s, want expect_exceeded", word)
+	}
+	h.opened(t, "41", "3", nil, fingerprints(25, 5)...)
+	if word := closer.Inactive(context.Background(), testScope, "3", 3); word != OutcomeJobDone {
+		t.Fatalf("word %s, want job_done", word)
+	}
+	// Nothing left at version 3: its entries are pruned, version 4's kept.
+	if word := closer.Inactive(context.Background(), testScope, "3", 3); word != OutcomeNothingMatched {
+		t.Fatalf("word %s", word)
+	}
+	record, err := h.record(t).Load(context.Background(), openepisodes.Key{TenantID: "tenant-a", StrategyID: "41"})
+	if err != nil || len(record.Entries) != 100 {
+		t.Fatalf("record %d entries, %v; want version 4's 100", len(record.Entries), err)
+	}
+	for _, entry := range record.Entries {
+		if entry.Version != "4" {
+			t.Fatalf("entry %+v left", entry)
+		}
+	}
+}
+
+// A strategy with no record - expired, lost - is never closed by its
+// filter: each alert the search pages is decided from its own labels and
+// closed by its id. The inactive close of version 3 closes the alerts
+// whose strategy_version is 3 and not version 4's; the requests closing
+// carry alert ids.
+func TestWithoutARecordEachAlertIsDecidedAndClosedByItsID(t *testing.T) {
+	h := newHarness(t)
+	for i := 0; i < 30; i++ {
+		version := "3"
+		if i%3 == 0 {
+			version = "4"
+		}
+		h.link.add(&fakeAlert{id: alertID(i), labels: map[string]string{"strategy_id": "41", "strategy_version": version}})
+	}
+	closer := h.closer(t)
+	if word := closer.Inactive(context.Background(), testScope, "3", 3); word != OutcomeJobDone {
+		t.Fatalf("word %s, want job_done (stats %v)", word, nonZero(closer.Stats()))
+	}
+	for i := 0; i < 30; i++ {
+		want := 1
+		if i%3 == 0 {
+			want = 0
+		}
+		if got := h.link.alert(alertID(i)).closes; got != want {
+			t.Fatalf("%s closed %d, want %d", alertID(i), got, want)
+		}
+	}
+	stats := closer.Stats()
+	if stats[OutcomeRecordMissing] != 1 || stats[OutcomeAlertDecidedClose] != 20 || stats[OutcomeExpectDecidedIDs] != 1 ||
+		stats[OutcomeExpectOwnRecord] != 0 {
+		t.Fatalf("stats %v", nonZero(stats))
+	}
+	for _, body := range h.link.closeBodies {
+		if !strings.Contains(body, `"alert_id"`) {
+			t.Fatalf("a close without alert ids: %s", body)
+		}
+	}
+	// The absent close of the strategy without a record decides by the
+	// strategy label: the ten left close.
+	if word := closer.Absent(context.Background(), testScope, DecisionAbsent, 3); word != OutcomeJobDone {
+		t.Fatalf("absent word %s", word)
+	}
+	for i := 0; i < 30; i += 3 {
+		if h.link.alert(alertID(i)).closes != 1 {
+			t.Fatalf("%s not closed by the absent close", alertID(i))
+		}
+	}
+}
+
+// A record that cannot be read decides nothing: no dry run, no close.
+func TestAnUnreadableRecordDecidesNothing(t *testing.T) {
+	h := newHarness(t)
+	h.link.add(&fakeAlert{id: alertID(0), labels: map[string]string{"strategy_id": "41", "strategy_version": "3"}})
+	closer := h.closer(t)
+	closer.record = failingRecord{}
+	if word := closer.Absent(context.Background(), testScope, DecisionAbsent, 3); word != OutcomeRecordUnavailable {
+		t.Fatalf("word %s", word)
+	}
+	if h.link.requests[linkdmanage.RouteCloseFilter] != 0 || h.link.requests[linkdmanage.RouteSearch] != 0 {
+		t.Fatalf("requests %v", h.link.requests)
+	}
+}
+
+type failingRecord struct{}
+
+func (failingRecord) Load(context.Context, openepisodes.Key) (openepisodes.Record, error) {
+	return openepisodes.Record{}, errors.New("redis down")
+}
+
+func (failingRecord) Prune(context.Context, openepisodes.Key, []string) error {
+	return errors.New("redis down")
 }
 
 // Removing targets (A, 1) and (B, 0) of a strategy whose alerts are keyed
@@ -158,17 +294,17 @@ func TestALinkThatCannotSearchIsFilteredCloseUnsupported(t *testing.T) {
 	closer.warn = func(error) { warned++ }
 	at := time.Unix(1_800_000_000, 0)
 	closer.now = func() time.Time { return at }
-	if word := closer.Absent(context.Background(), testScope, DecisionAbsent, 3, Expectation{Count: 1, Source: ExpectDecidedIDs}); word != OutcomeUnsupported {
+	if word := closer.Absent(context.Background(), testScope, DecisionAbsent, 3); word != OutcomeUnsupported {
 		t.Fatalf("word %s", word)
 	}
 	sent := h.link.requests[linkdmanage.RouteCloseFilter] + h.link.requests[linkdmanage.RouteSearch]
 	if !closer.Unsupported() || warned != 1 {
 		t.Fatalf("unsupported %v, warned %d", closer.Unsupported(), warned)
 	}
-	if word := closer.Inactive(context.Background(), testScope, "3", 3, Expectation{Count: 1, Source: ExpectFixedCeiling}); word != OutcomeUnsupported {
+	if word := closer.Inactive(context.Background(), testScope, "3", 3); word != OutcomeUnsupported {
 		t.Fatalf("word %s", word)
 	}
-	if word, _ := closer.Edit(context.Background(), EditInput{Scope: testScope, Plan: currentPlan(), Expect: Expectation{Count: 1, Source: ExpectFixedCeiling}}); word != OutcomeUnsupported {
+	if word, _ := closer.Edit(context.Background(), EditInput{Scope: testScope, Plan: currentPlan()}); word != OutcomeUnsupported {
 		t.Fatalf("edit word %s", word)
 	}
 	if got := h.link.requests[linkdmanage.RouteCloseFilter] + h.link.requests[linkdmanage.RouteSearch]; got != sent {

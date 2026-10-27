@@ -14,10 +14,12 @@ func newLinkdFilterCloseCollector() *outcomeCounterCollector {
 		"The strategy closes alarmd runs through the alert link's search and close by filter (package filterclose), by "+
 			"outcome. Per job (one decision's filter in one round): job_done, job_incomplete (the round ended or the "+
 			"dry run's count was spent), nothing_matched, expect_exceeded (the dry run matched more than the independent "+
-			"expectation allows; nothing closed), link_unsupported (501/404/405: the existing path is taken), link_busy "+
-			"(429), link_refused (another 4xx), link_failed (timeout, 5xx, transport), command_unavailable, "+
-			"filter_refused; and where the job's expectation came from: expect_own_records, expect_roster, "+
-			"expect_removed_targets, expect_decided_ids, expect_fixed_ceiling. Per item: item_closed, "+
+			"expectation allows; nothing closed), filter_close_unsupported (501/404/405: nothing closes the decision), "+
+			"link_busy (429), link_refused (another 4xx), link_failed (timeout, 5xx, transport), command_unavailable, "+
+			"filter_refused; where the job's expectation came from: expect_own_record (alarmd's own record of the episodes it "+
+			"opened), expect_removed_targets, expect_decided_ids; the record's: record_missing (no record: decided alert "+
+			"by alert), record_truncated, record_unavailable (read failed: nothing decided), record_pruned (entries "+
+			"removed after their decision found nothing), record_prune_failed. Per item: item_closed, "+
 			"item_already_closed, item_ended_otherwise (409 invalid_transition), item_source_unpublished, "+
 			"item_conflict_unknown, item_rederived (429, 504 not_attempted, 409 version_conflict: found again by the "+
 			"filter), item_pending (5xx: kept to retry by id), item_pending_full, item_pending_lost, item_refused. Per "+
@@ -25,7 +27,8 @@ func newLinkdFilterCloseCollector() *outcomeCounterCollector {
 			"pending_left_decision (the decision's filter no longer names the alert: dropped, not closed), "+
 			"pending_not_found, pending_retry_failed, pending_given_up, pending_refused, pending_unreadable, "+
 			"pending_unavailable. The edit close's own: buckets_truncated, digest_mismatch, sample_unreadable, "+
-			"alerts_read, alerts_truncated, alert_decided_close, and edit_<word> for each edit decision and note. "+
+			"and edit_<word> for each edit decision and note; alerts_read, alerts_truncated, alert_decided_close are the "+
+			"edit close's and the alert-by-alert close's of a strategy with no record. "+
 			"Every cell exists from the start so a zero is a reading and not an absence.")
 }
 
@@ -36,4 +39,23 @@ func (r *Recorder) SetLinkdFilterCloseSource(words []string, outcomes func() map
 		return
 	}
 	r.phaseTwo.linkdFilterClose.set(words, outcomes)
+}
+
+func newOpenEpisodeRecordCollector() *outcomeCounterCollector {
+	return newOutcomeCounterCollector("open_episode_record_total",
+		"Writes to alarmd's own record of the alert episodes it opened (package openepisodes), the expectation the "+
+			"strategy-wide closes check a dry run against, by outcome: opened (an entry written for an ABNORMAL the "+
+			"process had no own send of), ended (an entry removed for a RECOVERY), refreshed (a hash's life set again "+
+			"for a strategy that only repeats its ABNORMALs), queue_full (a change dropped: the ACK path never waits), "+
+			"write_failed (a change in a pipeline the Redis did not take). Counted per change; every cell exists from "+
+			"the start.")
+}
+
+// SetOpenEpisodeRecordSource binds the record writer's counts. Safe before
+// or after registration; a nil recorder is a no-op.
+func (r *Recorder) SetOpenEpisodeRecordSource(words []string, outcomes func() map[string]uint64) {
+	if r == nil || r.phaseTwo.openEpisodeRecord == nil {
+		return
+	}
+	r.phaseTwo.openEpisodeRecord.set(words, outcomes)
 }

@@ -468,3 +468,44 @@ func TestReadQueryRefusesOutsideItsScope(t *testing.T) {
 		t.Fatal("more than a batch accepted")
 	}
 }
+
+// Acknowledged hands the episode record the envelopes that change it: an
+// ABNORMAL the copy held no own send of - a search hit is not one - and
+// every RECOVERY; the repeat of an own ABNORMAL changes nothing, and a
+// compatibility-protocol envelope never reaches the link.
+func TestAcknowledgedReturnsWhatChangesTheEpisodeRecord(t *testing.T) {
+	link := newFakeSearch(t)
+	clk := &clock{at: time.Unix(1_800_000_000, 0)}
+	c := newCopy(t, link, clk)
+	ref := &contract.StrategySnapshotRef{TenantID: "t", StrategyID: 1, Revision: 1}
+	event := func(kind string, n int) contract.TriggerEventV1 {
+		e := contract.TriggerEventV1{TenantID: "t", DedupeMD5: fp(n), StrategyRef: ref, EventKind: kind}
+		e.PlanRef.StrategyID = "1"
+		return e
+	}
+	legacy := event(contract.TriggerEventAbnormal, 9)
+	legacy.LegacyOutput = &contract.LegacyEventContext{}
+	if changed := c.Acknowledged([]contract.TriggerEventV1{event(contract.TriggerEventAbnormal, 1), legacy}); len(changed) != 1 ||
+		changed[0].DedupeMD5 != fp(1) {
+		t.Fatalf("first ABNORMAL: %v", changed)
+	}
+	if changed := c.Acknowledged([]contract.TriggerEventV1{event(contract.TriggerEventAbnormal, 1)}); len(changed) != 0 {
+		t.Fatalf("a repeated own ABNORMAL changed %v", changed)
+	}
+	// fp(2) known as a search hit: its first own ABNORMAL is a change.
+	link.open("t", "1", fp(2))
+	c.Holds("t", "1", fp(2))
+	c.Pass(context.Background())
+	if held, judged := c.Holds("t", "1", fp(2)); !held || !judged {
+		t.Fatal("the hit was not taken")
+	}
+	if changed := c.Acknowledged([]contract.TriggerEventV1{event(contract.TriggerEventAbnormal, 2)}); len(changed) != 1 {
+		t.Fatalf("the first own ABNORMAL of a hit changed %v", changed)
+	}
+	if changed := c.Acknowledged([]contract.TriggerEventV1{event(contract.TriggerEventRecovery, 1), event(contract.TriggerEventRecovery, 3)}); len(changed) != 2 {
+		t.Fatalf("RECOVERY changed %v", changed)
+	}
+	if changed := c.Acknowledged([]contract.TriggerEventV1{event(contract.TriggerEventAbnormal, 1)}); len(changed) != 1 {
+		t.Fatalf("an ABNORMAL after the RECOVERY changed %v", changed)
+	}
+}

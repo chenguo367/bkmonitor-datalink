@@ -24,6 +24,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/filterclose"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/redistest"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdmanage"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openepisodes"
 )
 
 // closeRequest is one request the fake link received on its filtered close
@@ -137,7 +138,11 @@ func newScopeHarness(t *testing.T, set OpenSet) (*Closer, *scopeLink, *time.Time
 	}
 	now := time.Unix(1_800_000_000, 0)
 	clock := func() time.Time { return now }
-	link2, err := filterclose.New(filterclose.Options{Link: client, Commands: commands, Pending: pending, Now: clock})
+	record, err := openepisodes.NewStore(server.Client(), "alarmd-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	link2, err := filterclose.New(filterclose.Options{Link: client, Commands: commands, Pending: pending, Record: record, Now: clock})
 	if err != nil {
 		t.Fatal(err)
 	}

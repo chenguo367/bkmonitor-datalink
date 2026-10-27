@@ -58,8 +58,8 @@ func TestEditEnumerationReadsOnlyActiveAlerts(t *testing.T) {
 	h := newHarness(t)
 	h.link.add(&fakeAlert{id: "old-recovered", status: "recovered", labels: map[string]string{"strategy_id": "41", "strategy_version": "1"}})
 	closer := h.closer(t)
-	buckets, _, word := closer.enumerate(context.Background(), testScope, "5")
-	if word != "" || len(buckets) != 0 {
+	buckets, _, complete, word := closer.enumerate(context.Background(), testScope, "5")
+	if word != "" || len(buckets) != 0 || !complete {
 		t.Fatalf("buckets %+v, word %q", buckets, word)
 	}
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdmanage"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openepisodes"
 )
 
 // The link's control plane is the one way alarmd reads or closes the link's
@@ -95,6 +96,9 @@ type openAlertCopyPort struct {
 	// registerOwned also tells the effective-time maintenance which Plans
 	// this process evaluates; nil in tests that need only the copy.
 	registerOwned func(execution.QueryGroupIdentity, []execution.PlanIdentity)
+	// record hears what each acknowledged batch opened and ended, as the
+	// copy judges it (openepisodes); nil without the link's control plane.
+	record *openepisodes.Writer
 }
 
 // Linked says whether a link stands behind the copy (execution.OpenAlertLink).
@@ -120,6 +124,9 @@ func (port openAlertCopyPort) TrackPlans(qg execution.QueryGroupIdentity, plans 
 	}
 }
 
+// Acknowledged tells the copy, then the record what the copy says changed.
+// Neither waits on I/O: the record's writes are queued.
 func (port openAlertCopyPort) Acknowledged(events []contract.TriggerEventV1) {
-	port.copy.Acknowledged(events)
+	changed := port.copy.Acknowledged(events)
+	port.record.Acknowledged(events, changed)
 }

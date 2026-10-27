@@ -361,10 +361,10 @@ func (loop *absentStrategyClose) closeStrategy(ctx context.Context, absent absen
 	if absent.Refused != "" {
 		decision = filterclose.DecisionUnsupported
 	}
-	// The expectation is the fixed ceiling: no count of the strategy's
-	// alerts exists apart from the search being checked.
-	execution.word = loop.filter.closer.Absent(ctx, loop.filter.scope(absent.Key), decision, absent.Identity.Revision,
-		filterclose.Expectation{Count: filterclose.FixedCeiling, Source: filterclose.ExpectFixedCeiling})
+	// The expectation is alarmd's own record of the strategy's open
+	// episodes; without one each alert is closed by its id
+	// (filterclose.Closer.Absent).
+	execution.word = loop.filter.closer.Absent(ctx, loop.filter.scope(absent.Key), decision, absent.Identity.Revision)
 	if execution.word == filterclose.OutcomeJobDone || execution.word == filterclose.OutcomeJobIncomplete {
 		execution.sent = true
 		loop.count(absentalerts.OutcomeCloseSent, 1)

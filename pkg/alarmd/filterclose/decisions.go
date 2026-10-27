@@ -19,6 +19,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/editclose"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdmanage"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openepisodes"
 )
 
 // The decision words a job's operation id is made of, beside the edit
@@ -31,16 +32,17 @@ const (
 )
 
 // Absent closes every alert of a strategy no longer published (decision
-// absent) or refused for a capability (unsupported). The expectation is the
-// last count the leader read of the strategy's open alerts.
-func (closer *Closer) Absent(ctx context.Context, scope Scope, decision string, revision int64, expect Expectation) string {
+// absent) or refused for a capability (unsupported). The expectation is
+// every entry of the strategy's record; without one, each alert of the
+// strategy is closed by its id.
+func (closer *Closer) Absent(ctx context.Context, scope Scope, decision string, revision int64) string {
 	filter, err := StrategyFilter(scope)
 	if err != nil {
 		closer.count(OutcomeFilterRefused, 1)
 		return OutcomeFilterRefused
 	}
-	return closer.Run(ctx, Job{Filter: filter, Decision: decision, Revision: revision, Expect: expect,
-		Reason: fmt.Sprintf("alarmd: strategy %s %s", scope.StrategyID, decision)})
+	return closer.recorded(ctx, Job{Filter: filter, Decision: decision, Revision: revision,
+		Reason: fmt.Sprintf("alarmd: strategy %s %s", scope.StrategyID, decision)}, everyEntry, labelIs("strategy_id", scope.StrategyID))
 }
 
 // AbsentFound is a strategy the link holds active alerts of this source
@@ -117,18 +119,22 @@ func (closer *Closer) Fingerprints(ctx context.Context, scope Scope, fingerprint
 
 // Inactive closes the strategy's alerts outside its effective time; version
 // non-empty closes only the alerts opened at it, where the decision is the
-// version's alone.
-func (closer *Closer) Inactive(ctx context.Context, scope Scope, version string, revision int64, expect Expectation) string {
+// version's alone. The expectation is the record's entries of the version
+// (every entry without one); without a record, each alert whose own
+// strategy_version label is the version is closed by its id.
+func (closer *Closer) Inactive(ctx context.Context, scope Scope, version string, revision int64) string {
 	filter, err := StrategyFilter(scope)
+	match, decide := everyEntry, labelIs("strategy_id", scope.StrategyID)
 	if version != "" {
 		filter, err = VersionFilter(scope, version)
+		match, decide = versionIs(version), labelIs("strategy_version", version)
 	}
 	if err != nil {
 		closer.count(OutcomeFilterRefused, 1)
 		return OutcomeFilterRefused
 	}
-	return closer.Run(ctx, Job{Filter: filter, Decision: DecisionInactive, Version: version, Revision: revision, Expect: expect,
-		Reason: fmt.Sprintf("alarmd: strategy %s outside its effective time", scope.StrategyID)})
+	return closer.recorded(ctx, Job{Filter: filter, Decision: DecisionInactive, Version: version, Revision: revision,
+		Reason: fmt.Sprintf("alarmd: strategy %s outside its effective time", scope.StrategyID)}, match, decide)
 }
 
 // RemovedTargets closes the alerts of targets removed from the strategy's
@@ -180,12 +186,10 @@ const (
 	maxAlertsPerTurn = 2000
 )
 
-// EditInput is one strategy's edit close: its current Plans and the
-// expectation for any one of its buckets, the strategy's own count.
+// EditInput is one strategy's edit close: its current Plans.
 type EditInput struct {
-	Scope  Scope
-	Plan   editclose.Plan
-	Expect Expectation
+	Scope Scope
+	Plan  editclose.Plan
 }
 
 // Edit closes the alerts an edit of their strategy orphaned. Each bucket of
@@ -201,6 +205,13 @@ type EditInput struct {
 // the strategy's turn early - OutcomeUnsupported ends the round - or
 // empty, and how many buckets of other versions it found: none is a
 // strategy no edit close has anything left of.
+//
+// A bucket's expectation is the strategy record's entries of its version
+// (all its buckets' alerts: an over-count of the one bucket), the level
+// filter's the entries of the older versions it names. Without a record a
+// bucket decided to close is walked alert by alert instead, and the level
+// filter's alerts are decided one by one (editclose.Decide). A complete
+// walk that finds no older bucket prunes the record's older entries.
 func (closer *Closer) Edit(ctx context.Context, input EditInput) (string, int) {
 	if word := closer.refuseUnsupported(); word != "" {
 		return word, 0
@@ -211,9 +222,36 @@ func (closer *Closer) Edit(ctx context.Context, input EditInput) (string, int) {
 		return "", 0
 	}
 	current := strconv.FormatInt(plan.Revision, 10)
-	buckets, samples, word := closer.enumerate(ctx, input.Scope, current)
+	buckets, samples, complete, word := closer.enumerate(ctx, input.Scope, current)
 	if word != "" {
 		return word, 0
+	}
+	if complete && len(buckets) == 0 {
+		closer.pruneOlder(ctx, input.Scope, plan.Revision)
+	}
+	// The record is read once per strategy, by the first dry run that needs
+	// it.
+	var record openepisodes.Record
+	recordWord, loaded := "", false
+	fromRecord := func(versions ...string) func(context.Context) (Expectation, string) {
+		return func(ctx context.Context) (Expectation, string) {
+			if !loaded {
+				record, recordWord = closer.readRecord(ctx, input.Scope)
+				loaded = true
+			}
+			if recordWord != "" {
+				return Expectation{}, recordWord
+			}
+			n, _ := covered(record, func(entry openepisodes.Entry) bool {
+				for _, version := range versions {
+					if entry.Version == version {
+						return true
+					}
+				}
+				return false
+			})
+			return Expectation{Count: n, Source: ExpectOwnRecord}, ""
+		}
 	}
 	var older []string
 	seenOlder := map[string]bool{}
@@ -262,8 +300,12 @@ func (closer *Closer) Edit(ctx context.Context, input EditInput) (string, int) {
 				closer.count(OutcomeFilterRefused, 1)
 				continue
 			}
-			if word := closer.Run(ctx, Job{Filter: filter, Decision: decision, Version: bucket.Version, Digest: bucket.Digest,
-				Revision: plan.Revision, Expect: input.Expect, Reason: editReason(input.Scope, decision, bucket.Version)}); word == OutcomeUnsupported {
+			word := closer.Run(ctx, Job{Filter: filter, Decision: decision, Version: bucket.Version, Digest: bucket.Digest,
+				Revision: plan.Revision, expect: fromRecord(bucket.Version), Reason: editReason(input.Scope, decision, bucket.Version)})
+			if word == OutcomeRecordMissing {
+				word = closer.oneByOne(ctx, input, bucket)
+			}
+			if word == OutcomeUnsupported {
 				return word, len(buckets)
 			}
 		}
@@ -283,11 +325,36 @@ func (closer *Closer) Edit(ctx context.Context, input EditInput) (string, int) {
 	for _, version := range older {
 		versions += version + ","
 	}
-	if word := closer.Run(ctx, Job{Filter: filter, Decision: editclose.OutcomeLevelRemoved, Version: versions, Revision: plan.Revision,
-		Expect: input.Expect, Reason: editReason(input.Scope, editclose.OutcomeLevelRemoved, "")}); word == OutcomeUnsupported {
+	job := Job{Filter: filter, Decision: editclose.OutcomeLevelRemoved, Version: versions, Revision: plan.Revision,
+		expect: fromRecord(older...), Reason: editReason(input.Scope, editclose.OutcomeLevelRemoved, "")}
+	word = closer.Run(ctx, job)
+	if word == OutcomeRecordMissing {
+		word = closer.perAlert(ctx, job, func(alert linkdmanage.Alert) bool {
+			decision, _ := editclose.Decide(plan, recordOf(alert))
+			return decision == editclose.OutcomeLevelRemoved
+		})
+	}
+	if word == OutcomeUnsupported {
 		return word, len(buckets)
 	}
 	return "", len(buckets)
+}
+
+// pruneOlder removes the record's entries of versions older than current:
+// the link holds no alert of the strategy at another version.
+func (closer *Closer) pruneOlder(ctx context.Context, scope Scope, current int64) {
+	record, err := closer.record.Load(ctx, recordKey(scope))
+	if err != nil {
+		closer.count(OutcomeRecordUnavailable, 1)
+		return
+	}
+	var older []string
+	for _, entry := range record.Entries {
+		if revision, err := strconv.ParseInt(entry.Version, 10, 64); err == nil && revision < current {
+			older = append(older, entry.Fingerprint)
+		}
+	}
+	closer.prune(ctx, scope, older)
 }
 
 func editReason(scope Scope, decision, version string) string {
@@ -298,8 +365,9 @@ func editReason(scope Scope, decision, version string) string {
 }
 
 // enumerate is the strategy's buckets other than the current version's,
-// each with the one alert that found it.
-func (closer *Closer) enumerate(ctx context.Context, scope Scope, current string) ([]Bucket, []linkdmanage.Alert, string) {
+// each with the one alert that found it, and whether the walk reached its
+// end.
+func (closer *Closer) enumerate(ctx context.Context, scope Scope, current string) ([]Bucket, []linkdmanage.Alert, bool, string) {
 	var buckets []Bucket
 	var samples []linkdmanage.Alert
 	for len(buckets) < maxBuckets {
@@ -309,14 +377,14 @@ func (closer *Closer) enumerate(ctx context.Context, scope Scope, current string
 		}
 		if err != nil {
 			closer.count(OutcomeFilterRefused, 1)
-			return nil, nil, OutcomeFilterRefused
+			return nil, nil, false, OutcomeFilterRefused
 		}
 		page, err := closer.link.Search(ctx, scope.TenantID, filter.body, "", 1)
 		if err != nil {
-			return nil, nil, closer.failed(err)
+			return nil, nil, false, closer.failed(err)
 		}
 		if len(page.Items) == 0 {
-			return buckets, samples, ""
+			return buckets, samples, true, ""
 		}
 		alert := page.Items[0]
 		bucket, ok := bucketOf(alert)
@@ -324,13 +392,13 @@ func (closer *Closer) enumerate(ctx context.Context, scope Scope, current string
 			// A version the filter required and the alert does not carry as
 			// a decimal: no bucket can exclude it, so the walk stops here.
 			closer.count(OutcomeSampleUnreadable, 1)
-			return buckets, samples, ""
+			return buckets, samples, false, ""
 		}
 		buckets = append(buckets, bucket)
 		samples = append(samples, alert)
 	}
 	closer.count(OutcomeBucketsTruncated, 1)
-	return buckets, samples, ""
+	return buckets, samples, false, ""
 }
 
 func bucketOf(alert linkdmanage.Alert) (Bucket, bool) {

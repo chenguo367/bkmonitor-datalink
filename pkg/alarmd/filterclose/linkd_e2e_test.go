@@ -29,6 +29,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdmanage"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdoutput"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openepisodes"
 )
 
 // linkdModuleEnvironment names the alert link's module (pkg/linkd of
@@ -50,6 +51,9 @@ const harnessSecret = "example-secret"
 type linkdHarness struct {
 	t    *testing.T
 	base string
+	// record is alarmd's episode record each opened event is written to,
+	// as a worker writes it after the broker's ACK; set by closerOn.
+	record *openepisodes.Store
 }
 
 func startLinkdHarness(t *testing.T, flags ...string) *linkdHarness {
@@ -127,6 +131,15 @@ func (h *linkdHarness) open(event *contract.TriggerEventV1) string {
 	if err := json.NewDecoder(response.Body).Decode(&opened); err != nil || response.StatusCode != http.StatusOK || opened.AlertID == "" {
 		h.t.Fatalf("the link did not open an alert (%d, %v)", response.StatusCode, err)
 	}
+	if h.record != nil {
+		change, ok := openepisodes.ChangeOf(*event, time.Now())
+		if !ok {
+			h.t.Fatal("the event opens nothing in the record")
+		}
+		if err := h.record.Apply(context.Background(), []openepisodes.Change{change}, nil); err != nil {
+			h.t.Fatal(err)
+		}
+	}
 	return opened.AlertID
 }
 
@@ -161,7 +174,12 @@ func closerOn(t *testing.T, h *linkdHarness) (*Closer, *linkdmanage.Client) {
 	}
 	commands, _ := NewCommands(server.Client(), "alarmd-e2e")
 	pending, _ := NewPending(server.Client(), "alarmd-e2e", MaxPending)
-	closer, err := New(Options{Link: client, Commands: commands, Pending: pending})
+	record, err := openepisodes.NewStore(server.Client(), "alarmd-e2e")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.record = record
+	closer, err := New(Options{Link: client, Commands: commands, Pending: pending, Record: record})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,6 +193,7 @@ func decisionAt(revision int64, facts *contract.StrategyFactsV2, n int, noData b
 		EventID: fmt.Sprintf("%064x", n+1), EventKind: contract.TriggerEventAbnormal, EventSemanticDigest: strings.Repeat("c", 64),
 		PrimaryLevelID: 2, TenantID: "tenant-a", BusinessID: "2", SignalType: contract.SignalTypeMetric,
 		StrategyRef: &contract.StrategySnapshotRef{TenantID: "tenant-a", BusinessID: 2, StrategyID: 41, Revision: revision},
+		PlanRef:     contract.RuntimePlanRefV1{StrategyID: "41"},
 		DedupeMD5:   fmt.Sprintf("%032x", n+1), EvaluationTime: 1756684860,
 		RecordRef: contract.TriggerRecordRefV1{SourceTime: 1756684800, Dimensions: map[string]json.RawMessage{
 			"bk_target_ip": json.RawMessage(`"192.0.2.1"`), "device": json.RawMessage(fmt.Sprintf(`"sd%d"`, n))}},
@@ -204,7 +223,7 @@ func TestTheFilterCloseAgainstTheLinksOwnHandlers(t *testing.T) {
 	old, current := factsOf("m4"), factsOf("m5")
 	closing := []string{h.open(decisionAt(4, old, 1, false)), h.open(decisionAt(4, old, 2, false)), h.open(decisionAt(4, old, 3, true))}
 	kept := []string{h.open(decisionAt(4, current, 4, false)), h.open(decisionAt(5, current, 5, false)), h.open(decisionAt(5, old, 6, false))}
-	if word, _ := closer.Edit(context.Background(), EditInput{Scope: testScope, Plan: currentPlan(), Expect: Expectation{Count: 6, Source: ExpectDecidedIDs}}); word != "" {
+	if word, _ := closer.Edit(context.Background(), EditInput{Scope: testScope, Plan: currentPlan()}); word != "" {
 		t.Fatalf("word %s, stats %v", word, nonZero(closer.Stats()))
 	}
 	for _, id := range closing {
@@ -218,7 +237,7 @@ func TestTheFilterCloseAgainstTheLinksOwnHandlers(t *testing.T) {
 		}
 	}
 	before := closer.Stats()[OutcomeItemClosed]
-	closer.Edit(context.Background(), EditInput{Scope: testScope, Plan: currentPlan(), Expect: Expectation{Count: 6, Source: ExpectDecidedIDs}})
+	closer.Edit(context.Background(), EditInput{Scope: testScope, Plan: currentPlan()})
 	if closer.Stats()[OutcomeItemClosed] != before || closer.Stats()[OutcomeNothingMatched] == 0 {
 		t.Fatalf("a repeat closed again: %v", nonZero(closer.Stats()))
 	}
@@ -245,7 +264,7 @@ func TestTheFilterCloseAgainstTheLinksHandlersUnderFaults(t *testing.T) {
 	for n := 60; n < 70; n++ {
 		kept = append(kept, h.open(decisionAt(4, current, n, false)))
 	}
-	input := EditInput{Scope: testScope, Plan: currentPlan(), Expect: Expectation{Count: 70, Source: ExpectDecidedIDs}}
+	input := EditInput{Scope: testScope, Plan: currentPlan()}
 	for round := 0; ; round++ {
 		if round == 50 {
 			t.Fatalf("not settled: %v", nonZero(closer.Stats()))

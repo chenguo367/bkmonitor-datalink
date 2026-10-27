@@ -11,6 +11,7 @@ package filterclose
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,8 +25,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/redistest"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdmanage"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openepisodes"
 )
 
 // fakeLink is the link's three routes over alerts in memory, written from
@@ -68,6 +71,8 @@ type fakeLink struct {
 	// beforeClose runs when a filtered close (not a dry run) arrives,
 	// before it selects its candidates, under the lock.
 	beforeClose func(link *fakeLink)
+	// closeBodies is every filtered close's (not a dry run's) filter.
+	closeBodies []string
 	unsupported bool
 }
 
@@ -416,6 +421,9 @@ func (link *fakeLink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid filtered close request", http.StatusBadRequest)
 			return
 		}
+		if !input.DryRun {
+			link.closeBodies = append(link.closeBodies, string(input.Filter))
+		}
 		if !input.DryRun && link.beforeClose != nil {
 			link.beforeClose(link)
 		}
@@ -493,11 +501,60 @@ func (h *harness) closer(t *testing.T) *Closer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	closer, err := New(Options{Link: h.client, Commands: commands, Pending: pending})
+	closer, err := New(Options{Link: h.client, Commands: commands, Pending: pending, Record: h.record(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return closer
+}
+
+// record is the store of alarmd's episode record on the harness's Redis.
+func (h *harness) record(t *testing.T) *openepisodes.Store {
+	t.Helper()
+	store, err := openepisodes.NewStore(h.redis.Client(), h.prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
+
+// opened records episodes of the strategy at a version as a worker does
+// after the broker's ACK: each fingerprint's ABNORMAL envelope through
+// openepisodes.ChangeOf into the store. target, when given, is the Plan's
+// target identity dimensions and the series' values of them.
+func (h *harness) opened(t *testing.T, strategy, version string, target map[string]string, fingerprints ...string) {
+	t.Helper()
+	revision, err := strconv.ParseInt(version, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var changes []openepisodes.Change
+	for _, fingerprint := range fingerprints {
+		event := contract.TriggerEventV1{EventKind: contract.TriggerEventAbnormal, TenantID: testScope.TenantID,
+			PlanRef: contract.RuntimePlanRefV1{StrategyID: strategy}, StrategyRef: &contract.StrategySnapshotRef{Revision: revision},
+			DedupeMD5: fingerprint, RecordRef: contract.TriggerRecordRefV1{Dimensions: map[string]json.RawMessage{}}}
+		for name, value := range target {
+			event.TargetDimensions = append(event.TargetDimensions, name)
+			event.RecordRef.Dimensions[name], _ = json.Marshal(value)
+		}
+		change, ok := openepisodes.ChangeOf(event, time.Unix(1_800_000_000, 0))
+		if !ok {
+			t.Fatalf("no change for %s", fingerprint)
+		}
+		changes = append(changes, change)
+	}
+	if err := h.record(t).Apply(context.Background(), changes, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// fingerprints are n distinct fingerprints from start.
+func fingerprints(start, n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = fmt.Sprintf("%032x", start+i)
+	}
+	return out
 }
 
 var testScope = Scope{TenantID: "tenant-a", EventSourceID: "built_in_bk", StrategyID: "41"}

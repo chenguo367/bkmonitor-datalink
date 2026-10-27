@@ -32,6 +32,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openepisodes"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
@@ -467,6 +468,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["alarmd_strategy_edit_close_total"] = "variableLabels: {outcome}"
 	expected["alarmd_no_data_close_requests_total"] = "variableLabels: {outcome}"
 	expected["alarmd_linkd_filter_close_total"] = "variableLabels: {outcome}"
+	expected["alarmd_open_episode_record_total"] = "variableLabels: {outcome}"
 	expected["alarmd_target_scope_close_total"] = "variableLabels: {outcome}"
 	expected["alarmd_absent_strategy_difference"] = "variableLabels: {side}"
 	expected["alarmd_absent_strategy_round_total"] = "variableLabels: {disposition}"
@@ -1101,6 +1103,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// cmd/alarmd noDataCloseOutcomes: eight words.
 	bounds[fqName("no_data_close_requests_total")] = 8
 	bounds[fqName("linkd_filter_close_total")] = len(filterclose.Outcomes)
+	bounds[fqName("open_episode_record_total")] = len(openepisodes.Outcomes)
 	bounds[fqName("target_scope_close_total")] = len(scopeclose.Outcomes)
 	bounds[fqName("absent_strategy_round_total")] = len(absentalerts.Refusals)
 	bounds[fqName("absent_strategy_difference")] = len(differenceSides)

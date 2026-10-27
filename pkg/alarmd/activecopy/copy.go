@@ -381,13 +381,21 @@ func (c *Copy) queue(m member) bool {
 // forget the fingerprint, so the next question about it is asked of the
 // link. Only envelopes the link sees count: a compatibility-protocol one
 // goes elsewhere, and one without a fingerprint opens nothing.
-func (c *Copy) Acknowledged(events []contract.TriggerEventV1) {
+//
+// It returns the envelopes that change alarmd's record of the episodes it
+// opened (package openepisodes): an ABNORMAL the copy held no own send of
+// before - the episode's first, or its first since this process started
+// or the strategy was tracked again - and every RECOVERY. A repeated
+// ABNORMAL of an episode returns nothing, so the record is written once
+// an episode, not once a round.
+func (c *Copy) Acknowledged(events []contract.TriggerEventV1) []contract.TriggerEventV1 {
 	if c == nil || len(events) == 0 {
-		return
+		return nil
 	}
 	now := c.options.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	var changed []contract.TriggerEventV1
 	for _, event := range events {
 		if event.DedupeMD5 == "" || event.StrategyRef == nil || event.LegacyOutput != nil {
 			continue
@@ -395,14 +403,20 @@ func (c *Copy) Acknowledged(events []contract.TriggerEventV1) {
 		m := member{key: StrategyKey{TenantID: event.TenantID, StrategyID: event.PlanRef.StrategyID}, fingerprint: event.DedupeMD5}
 		switch event.EventKind {
 		case contract.TriggerEventAbnormal:
-			if _, known := c.words[m]; known || len(c.words)+len(c.queued) < MaxEntries {
+			old, known := c.words[m]
+			if !known || old.kind != kindOwnSent {
+				changed = append(changed, event)
+			}
+			if known || len(c.words)+len(c.queued) < MaxEntries {
 				c.set(m, word{kind: kindOwnSent, at: now})
 			}
 			delete(c.queued, m)
 		case contract.TriggerEventRecovery:
 			c.forget(m)
+			changed = append(changed, event)
 		}
 	}
+	return changed
 }
 
 // Track notes the strategies this process evaluates. A strategy tracked

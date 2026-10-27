@@ -840,10 +840,10 @@ func (m *effectiveMaintenance) sendClose(ctx context.Context, qg execution.Query
 	// process's own clock, the minute on the injected one.
 	job, cancel := context.WithTimeout(ctx, minuteEnd.Sub(checkedAt))
 	defer cancel()
-	// The expectation is the fixed ceiling: no count of the version's
-	// alerts exists apart from the search being checked.
+	// The expectation is alarmd's own record of the version's open
+	// episodes (filterclose.Closer.Inactive).
 	word := m.filter.closer.Inactive(job, m.filter.scope(absentalerts.Key{TenantID: key.tenantID, StrategyID: key.strategyID}), strconv.FormatInt(key.revision, 10),
-		key.revision, filterclose.Expectation{Count: filterclose.FixedCeiling, Source: filterclose.ExpectFixedCeiling})
+		key.revision)
 	trace := observability.TraceFields{QueryGroupKey: string(qg), StrategyID: key.strategyID}
 	switch word {
 	case filterclose.OutcomeJobDone, filterclose.OutcomeJobIncomplete:

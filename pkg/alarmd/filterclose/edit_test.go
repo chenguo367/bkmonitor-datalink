@@ -19,6 +19,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/editclose"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openepisodes"
 )
 
 // currentFacts is the strategy's current Plans' facts; metric names the
@@ -57,7 +58,13 @@ func opened(id, version string, facts *contract.StrategyFactsV2, noData bool, se
 	return &fakeAlert{id: id, labels: labels, dimensions: dimensions, severity: severity, extra: encoded}
 }
 
-var roster = Expectation{Count: 40, Source: ExpectDecidedIDs}
+// roster records the strategy's episodes as its workers would have: 20
+// open at each of the versions 3 and 4.
+func roster(t *testing.T, h *harness) {
+	t.Helper()
+	h.opened(t, "41", "4", nil, fingerprints(0, 20)...)
+	h.opened(t, "41", "3", nil, fingerprints(20, 20)...)
+}
 
 // An edit closes, by bucket, the older version whose metric changed (both
 // families), the threshold alerts of older versions at a level no longer
@@ -80,8 +87,9 @@ func TestAnEditClosesTheOrphanedBucketsAndKeepsTheRest(t *testing.T) {
 	} {
 		h.link.add(alert)
 	}
+	roster(t, h)
 	closer := h.closer(t)
-	if word, _ := closer.Edit(context.Background(), EditInput{Scope: testScope, Plan: currentPlan(), Expect: roster}); word != "" {
+	if word, _ := closer.Edit(context.Background(), EditInput{Scope: testScope, Plan: currentPlan()}); word != "" {
 		t.Fatalf("word %s", word)
 	}
 	for id, want := range map[string]int{"x1": 1, "x2": 1, "xn": 1, "k2": 1, "n1": 1, "k1": 0, "kn": 0, "n2": 0, "c1": 0, "a1": 0} {
@@ -109,6 +117,40 @@ func TestAnEditClosesTheOrphanedBucketsAndKeepsTheRest(t *testing.T) {
 	}
 }
 
+// Without a record the edit closes the same alerts, each decided from its
+// own record and closed by its id: no request closes by a bucket's or the
+// level's filter alone.
+func TestAnEditWithoutARecordClosesTheSameAlertsByID(t *testing.T) {
+	h := newHarness(t)
+	old, current := factsOf("m4"), factsOf("m5")
+	for _, alert := range []*fakeAlert{
+		opened("x1", "4", old, false, "critical", nil), opened("x2", "4", old, false, "warning", nil),
+		opened("xn", "4", old, true, "warning", nil),
+		opened("k1", "4", current, false, "critical", nil), opened("k2", "4", current, false, "info", nil),
+		opened("kn", "4", current, true, "info", nil),
+		opened("c1", "5", current, false, "info", nil),
+	} {
+		h.link.add(alert)
+	}
+	closer := h.closer(t)
+	if word, _ := closer.Edit(context.Background(), EditInput{Scope: testScope, Plan: currentPlan()}); word != "" {
+		t.Fatalf("word %s", word)
+	}
+	for id, want := range map[string]int{"x1": 1, "x2": 1, "xn": 1, "k2": 1, "k1": 0, "kn": 0, "c1": 0} {
+		if got := h.link.alert(id).closes; got != want {
+			t.Fatalf("%s closed %d times, want %d (stats %v)", id, got, want, nonZero(closer.Stats()))
+		}
+	}
+	for _, body := range h.link.closeBodies {
+		if !strings.Contains(body, `"alert_id"`) {
+			t.Fatalf("a close without alert ids: %s", body)
+		}
+	}
+	if closer.Stats()[OutcomeRecordMissing] != 1 || closer.Stats()[OutcomeExpectOwnRecord] != 0 {
+		t.Fatalf("stats %v", nonZero(closer.Stats()))
+	}
+}
+
 // The design relies on the link keeping an alert's labels as its opening
 // event wrote them (b7e5beddf internal/lifecycle/plan.go:417), which is
 // the link's implementation and not a stated contract. If a label moved
@@ -133,8 +175,9 @@ func TestAnAlertWhoseLabelsMovedIsNotClosedByTheOldVersionsDecision(t *testing.T
 		}
 		return ""
 	}
+	roster(t, h)
 	closer := h.closer(t)
-	closer.Edit(context.Background(), EditInput{Scope: testScope, Plan: currentPlan(), Expect: roster})
+	closer.Edit(context.Background(), EditInput{Scope: testScope, Plan: currentPlan()})
 	if h.link.alert("x1").closes != 0 || h.link.alert("x2").closes != 1 || h.link.alert("y1").closes != 0 {
 		t.Fatalf("x1 %d x2 %d y1 %d", h.link.alert("x1").closes, h.link.alert("x2").closes, h.link.alert("y1").closes)
 	}
@@ -232,9 +275,10 @@ func settled(t *testing.T, h *harness, closer *Closer) bool {
 func TestABigBucketUnderLoadClosesWholeAndOnce(t *testing.T) {
 	h := newHarness(t)
 	bigBucket(h)
+	h.opened(t, "41", "4", nil, fingerprints(0, 37000)...)
 	faulty(h.link)
 	closer := h.closer(t)
-	input := EditInput{Scope: testScope, Plan: currentPlan(), Expect: Expectation{Count: 37000, Source: ExpectDecidedIDs}}
+	input := EditInput{Scope: testScope, Plan: currentPlan()}
 	for round := 0; ; round++ {
 		if round == 400 {
 			t.Fatalf("not settled after %d rounds: %v", round, nonZero(closer.Stats()))
@@ -259,8 +303,9 @@ func TestABigBucketUnderLoadClosesWholeAndOnce(t *testing.T) {
 func TestANewLeaderCarriesOnWhereTheLastStopped(t *testing.T) {
 	h := newHarness(t)
 	bigBucket(h)
+	h.opened(t, "41", "4", nil, fingerprints(0, 37000)...)
 	faulty(h.link)
-	input := EditInput{Scope: testScope, Plan: currentPlan(), Expect: Expectation{Count: 37000, Source: ExpectDecidedIDs}}
+	input := EditInput{Scope: testScope, Plan: currentPlan()}
 	first := h.closer(t)
 	// The first leader runs rounds until it has closed some and kept some,
 	// and is stopped in the middle of its next filtered close.
@@ -291,5 +336,28 @@ func TestANewLeaderCarriesOnWhereTheLastStopped(t *testing.T) {
 	}
 	if len(h.link.operations) != operations || second.Stats()[OutcomePendingAlreadyClosed]+second.Stats()[OutcomePendingClosed] == 0 {
 		t.Fatalf("operations %d -> %d, stats %v", operations, len(h.link.operations), nonZero(second.Stats()))
+	}
+}
+
+// A walk that finds no alert of the strategy at an older version prunes
+// the record's older entries and keeps the current version's.
+func TestAnEditThatFindsNoOlderBucketPrunesTheOlderEntries(t *testing.T) {
+	h := newHarness(t)
+	h.link.add(opened("c1", "5", factsOf("m5"), false, "info", nil))
+	h.opened(t, "41", "3", nil, fingerprints(0, 4)...)
+	h.opened(t, "41", "4", nil, fingerprints(10, 4)...)
+	h.opened(t, "41", "5", nil, fingerprints(20, 4)...)
+	closer := h.closer(t)
+	if word, buckets := closer.Edit(context.Background(), EditInput{Scope: testScope, Plan: currentPlan()}); word != "" || buckets != 0 {
+		t.Fatalf("word %q buckets %d", word, buckets)
+	}
+	record, err := h.record(t).Load(context.Background(), openepisodes.Key{TenantID: "tenant-a", StrategyID: "41"})
+	if err != nil || len(record.Entries) != 4 || closer.Stats()[OutcomeRecordPruned] != 8 {
+		t.Fatalf("record %+v, %v, stats %v", record, err, nonZero(closer.Stats()))
+	}
+	for _, entry := range record.Entries {
+		if entry.Version != "5" {
+			t.Fatalf("entry %+v left", entry)
+		}
 	}
 }

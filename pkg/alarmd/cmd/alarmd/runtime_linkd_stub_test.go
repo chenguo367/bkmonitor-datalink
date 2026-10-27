@@ -25,8 +25,11 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/redistest"
 )
 
-// stubControlPlane answers the link's management routes: a search finds
-// nothing, a filtered close matches the alerts given, or every route
+// stubControlPlane answers the link's management routes: a filtered close
+// matches the alerts given, whatever its filter; a search that names one
+// strategy and excludes nothing (the alert-by-alert close of a strategy
+// alarmd holds no record of) finds the same alerts, active, labelled as the
+// search's terms name them; any other search finds nothing; or every route
 // answers 501 (storage that cannot search). It records each request's body.
 type stubControlPlane struct {
 	mu          sync.Mutex
@@ -54,7 +57,7 @@ func (stub *stubControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	}
 	switch r.URL.Path {
 	case "/api/v1/alerts/search":
-		_, _ = w.Write([]byte(`{"items":[],"next":""}`))
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": stub.searchItems(body), "next": ""})
 	case "/api/v1/alerts/close":
 		var request struct {
 			DryRun bool `json:"dry_run"`
@@ -74,6 +77,43 @@ func (stub *stubControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// searchItems is the matches as a search of one strategy finds them.
+func (stub *stubControlPlane) searchItems(body []byte) []map[string]any {
+	var request struct {
+		TenantID string `json:"bk_tenant_id"`
+		Query    struct {
+			Bool struct {
+				Filter  []map[string]map[string]any `json:"filter"`
+				MustNot []json.RawMessage           `json:"must_not"`
+			} `json:"bool"`
+		} `json:"query"`
+	}
+	if json.Unmarshal(body, &request) != nil || len(request.Query.Bool.MustNot) > 0 {
+		return []map[string]any{}
+	}
+	labels := map[string]any{}
+	source := ""
+	for _, clause := range request.Query.Bool.Filter {
+		for field, value := range clause["term"] {
+			if name, ok := strings.CutPrefix(field, "labels."); ok {
+				labels[name] = value
+			}
+			if field == "event_source_id" {
+				source, _ = value.(string)
+			}
+		}
+	}
+	if labels["strategy_id"] == nil {
+		return []map[string]any{}
+	}
+	items := []map[string]any{}
+	for _, id := range stub.matches {
+		items = append(items, map[string]any{"alert_id": id, "bk_tenant_id": request.TenantID, "event_source_id": source,
+			"status": "active", "labels": labels})
+	}
+	return items
 }
 
 func (stub *stubControlPlane) requests(path string) []string {

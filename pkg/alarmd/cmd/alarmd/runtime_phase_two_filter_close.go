@@ -21,6 +21,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdmanage"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openepisodes"
 )
 
 // Every close alarmd decides goes through the link's search and close by
@@ -57,13 +58,39 @@ func newFilterCloser(cfg config.Config, client *linkdmanage.Client, runtime redi
 	if err != nil {
 		return nil, err
 	}
-	closer, err := filterclose.New(filterclose.Options{Link: client, Commands: commands, Pending: pending, Now: now,
+	record, err := openepisodes.NewStore(runtime, cfg.Redis.StatePrefix)
+	if err != nil {
+		return nil, err
+	}
+	closer, err := filterclose.New(filterclose.Options{Link: client, Commands: commands, Pending: pending, Record: record, Now: now,
 		Warn: linkdUnsupportedWarning(logger, "filter_close")})
 	if err != nil {
 		return nil, err
 	}
 	recorder.SetLinkdFilterCloseSource(filterclose.Outcomes, closer.Stats)
 	return closer, nil
+}
+
+// newEpisodeWriter is the writer of alarmd's record of the episodes it
+// opened, for a deployment with the link's management client (the record
+// is only read before a close through it); nil otherwise. Its counts are
+// bound either way, so the family reads zeros rather than nothing.
+func newEpisodeWriter(cfg config.Config, client *linkdmanage.Client, runtime redis.UniversalClient, now func() time.Time,
+	recorder *metric.Recorder) (*openepisodes.Writer, error) {
+	if client == nil || runtime == nil {
+		recorder.SetOpenEpisodeRecordSource(openepisodes.Outcomes, (*openepisodes.Writer)(nil).Stats)
+		return nil, nil
+	}
+	store, err := openepisodes.NewStore(runtime, cfg.Redis.StatePrefix)
+	if err != nil {
+		return nil, err
+	}
+	writer, err := openepisodes.NewWriter(store, now)
+	if err != nil {
+		return nil, err
+	}
+	recorder.SetOpenEpisodeRecordSource(openepisodes.Outcomes, writer.Stats)
+	return writer, nil
 }
 
 // filterRoute is the closer and the deployment's event source every filter

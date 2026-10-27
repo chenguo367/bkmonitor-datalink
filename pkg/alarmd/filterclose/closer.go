@@ -23,10 +23,13 @@
 // What has to hold before anything is closed:
 //
 //   - a dry run of the filter matches no more than an expectation from a
-//     source independent of the search - alarmd's own count of the
-//     strategy's open alerts, the link Console's roster, the removed
-//     targets times the series per target, or a fixed ceiling from measured
-//     sizes - plus a margin; otherwise the job is refused and counted;
+//     source independent of the search - alarmd's own record of the open
+//     episodes it emitted for the strategy (package openepisodes), the
+//     removed targets times the series per target, or the alert ids a
+//     round decided one by one - plus a margin; otherwise the job is
+//     refused and counted. Where the strategy has no record (it expired,
+//     or the Redis lost it) nothing is closed by the filter: each candidate
+//     alert is decided from its own labels and closed by its id;
 //   - each decision has one command (operation id, reason, effective_at),
 //     stored in the runtime Redis with the decision and sent byte for byte
 //     on every request and retry, after a restart and on another leader;
@@ -57,6 +60,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdmanage"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openepisodes"
 )
 
 // Link is the link's management API (linkdmanage.Client).
@@ -65,6 +69,13 @@ type Link interface {
 	CloseByFilter(ctx context.Context, command []byte, tenantID string, filter json.RawMessage, after string, limit int,
 		dryRun bool) (linkdmanage.FilterPage, error)
 	CloseOne(ctx context.Context, alertID string, command []byte) (bool, error)
+}
+
+// Record is alarmd's own record of the episodes it opened
+// (openepisodes.Store).
+type Record interface {
+	Load(ctx context.Context, key openepisodes.Key) (openepisodes.Record, error)
+	Prune(ctx context.Context, key openepisodes.Key, fingerprints []string) error
 }
 
 // Expectation is how many alerts a job's filter may match, and where that
@@ -82,26 +93,26 @@ const (
 	// ExpectDecidedIDs is the alerts a round decided one by one: the filter
 	// names their ids, so it cannot match more.
 	ExpectDecidedIDs = "decided_ids"
-	// ExpectFixedCeiling is FixedCeiling, where none of the above answers.
-	ExpectFixedCeiling = "fixed_ceiling"
+	// ExpectOwnRecord is alarmd's own record of the open episodes it
+	// emitted for the strategy (openepisodes), the entries the decision
+	// covers: its version for an inactive or edit close, all of them for an
+	// absent close, the ones of targets outside the current scope for a
+	// scope close.
+	ExpectOwnRecord = "own_record"
 )
 
-// FixedCeiling is the expectation where no independent count exists. The
-// largest strategy measured on the test environment held about 36,000
-// active alerts (2026-10, the 2b readings); a bucket past this is refused
-// and counted, never closed on a guess.
-const FixedCeiling = 50000
-
-// expectSlack is the least margin over an expectation: the count it comes
-// from is read at another moment than the dry run, and alerts open between.
+// expectSlack is the least margin over an expectation.
 const expectSlack = 20
 
 // allowed is the most a dry run may match: the count plus a tenth, at
-// least expectSlack; the fixed ceiling as it is.
+// least expectSlack. The margin covers what the count cannot: it is read
+// at another moment than the dry run, and episodes open between; a worker
+// writes the record after the broker's ACK, so an alert the link opened
+// may not be in it yet (the write is queued); and the link may hold a
+// series' alert opened by an event whose record write was lost. The record
+// over-counts in the other direction - episodes the link ended on its own
+// stay in it until pruned - which only widens what is allowed.
 func (expect Expectation) allowed() int {
-	if expect.Source == ExpectFixedCeiling {
-		return expect.Count
-	}
 	return expect.Count + max(expect.Count/10, expectSlack)
 }
 
@@ -111,8 +122,10 @@ func (expect Expectation) word() string {
 		return OutcomeExpectTargets
 	case ExpectDecidedIDs:
 		return OutcomeExpectDecidedIDs
+	case ExpectOwnRecord:
+		return OutcomeExpectOwnRecord
 	}
-	return OutcomeExpectFixedCeiling
+	return ""
 }
 
 // Job is one decision's filter, run in a round.
@@ -132,6 +145,10 @@ type Job struct {
 	// job's filter when zero. A target batch names its strategy instead: a
 	// pending item does not carry the whole batch.
 	Recheck Filter
+	// expect, when set, is read in place of Expect before a dry run - only
+	// then: a job whose term already checked its filter reads nothing. A
+	// word it returns ends the job with that word.
+	expect func(context.Context) (Expectation, string)
 }
 
 // pageLimit is the filtered close's page: the link's own default, so one
@@ -150,7 +167,10 @@ type Options struct {
 	Link     Link
 	Commands *Commands
 	Pending  *Pending
-	Now      func() time.Time
+	// Record is alarmd's record of the episodes it opened, the expectation
+	// of every strategy-wide close.
+	Record Record
+	Now    func() time.Time
 	// Warn is told each time the link answers that it cannot serve the
 	// search or the filtered close: filtered close is unsupported, and
 	// nothing closes the decisions instead.
@@ -162,6 +182,7 @@ type Closer struct {
 	link     Link
 	commands *Commands
 	pending  *Pending
+	record   Record
 	now      func() time.Time
 	warn     func(error)
 
@@ -188,14 +209,14 @@ type progress struct {
 }
 
 func New(options Options) (*Closer, error) {
-	if options.Link == nil || options.Commands == nil || options.Pending == nil {
-		return nil, errors.New("alarmd filterclose: the link, command store and pending store are required")
+	if options.Link == nil || options.Commands == nil || options.Pending == nil || options.Record == nil {
+		return nil, errors.New("alarmd filterclose: the link, command store, pending store and episode record are required")
 	}
 	now := options.Now
 	if now == nil {
 		now = time.Now
 	}
-	return &Closer{link: options.Link, commands: options.Commands, pending: options.Pending, now: now, warn: options.Warn,
+	return &Closer{link: options.Link, commands: options.Commands, pending: options.Pending, record: options.Record, now: now, warn: options.Warn,
 		progress: map[string]*progress{}, counts: map[string]uint64{}, buckets: map[string]string{}}, nil
 }
 
@@ -323,7 +344,6 @@ func (closer *Closer) Run(ctx context.Context, job Job) string {
 		closer.count(OutcomeCommandUnavailable, 1)
 		return OutcomeCommandUnavailable
 	}
-	closer.count(job.Expect.word(), 1)
 	progressKey := key + ":" + filterKey(job.Filter)
 	closer.mu.Lock()
 	state := closer.progress[progressKey]
@@ -333,6 +353,15 @@ func (closer *Closer) Run(ctx context.Context, job Job) string {
 	}
 	closer.mu.Unlock()
 	if state.checked == 0 {
+		if job.expect != nil {
+			expect, word := job.expect(ctx)
+			if word != "" {
+				closer.forgetProgress(progressKey)
+				return word
+			}
+			job.Expect = expect
+		}
+		closer.count(job.Expect.word(), 1)
 		allowed := job.Expect.allowed()
 		matched, word := closer.dryRun(ctx, job, state, allowed+1)
 		if word != "" {

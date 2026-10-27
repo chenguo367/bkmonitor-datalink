@@ -74,14 +74,31 @@ const (
 	OutcomePendingUnavailable  = "pending_unavailable"
 
 	// Where a job's expectation came from.
-	OutcomeExpectTargets      = "expect_" + ExpectTargets
-	OutcomeExpectDecidedIDs   = "expect_" + ExpectDecidedIDs
-	OutcomeExpectFixedCeiling = "expect_" + ExpectFixedCeiling
+	OutcomeExpectTargets    = "expect_" + ExpectTargets
+	OutcomeExpectDecidedIDs = "expect_" + ExpectDecidedIDs
+	OutcomeExpectOwnRecord  = "expect_" + ExpectOwnRecord
+
+	// The record's (ExpectOwnRecord). OutcomeRecordMissing is a strategy
+	// with no record - its hash expired, or the Redis lost it, or every
+	// episode of it recovered - whose close is then decided alert by alert;
+	// OutcomeRecordTruncated a record past openepisodes.MaxLoad, decided the
+	// same way; OutcomeRecordUnavailable a read that failed: nothing is
+	// decided, the next round reads again. OutcomeRecordPruned counts the
+	// entries removed after a close of their decision found nothing at the
+	// link; OutcomeRecordPruneFailed a removal that failed (the entries stay,
+	// an over-count).
+	OutcomeRecordMissing     = "record_missing"
+	OutcomeRecordTruncated   = "record_truncated"
+	OutcomeRecordUnavailable = "record_unavailable"
+	OutcomeRecordPruned      = "record_pruned"
+	OutcomeRecordPruneFailed = "record_prune_failed"
 
 	// The edit close's own.
-	OutcomeBucketsTruncated  = "buckets_truncated"
-	OutcomeDigestMismatch    = "digest_mismatch"
-	OutcomeSampleUnreadable  = "sample_unreadable"
+	OutcomeBucketsTruncated = "buckets_truncated"
+	OutcomeDigestMismatch   = "digest_mismatch"
+	OutcomeSampleUnreadable = "sample_unreadable"
+	// OutcomeAlertsRead, OutcomeAlertsTruncated and OutcomeAlertDecidedClose
+	// are also the alert-by-alert close's of a strategy with no record.
 	OutcomeAlertsRead        = "alerts_read"
 	OutcomeAlertsTruncated   = "alerts_truncated"
 	OutcomeAlertDecidedClose = "alert_decided_close"
@@ -98,7 +115,8 @@ var Outcomes = append([]string{
 	OutcomeItemRederived, OutcomeItemPending, OutcomeItemPendingFull, OutcomeItemPendingLost, OutcomeItemRefused,
 	OutcomePendingClosed, OutcomePendingAlreadyClosed, OutcomePendingEndedOther, OutcomePendingLeftDecision, OutcomePendingNotFound,
 	OutcomePendingRetryFailed, OutcomePendingGivenUp, OutcomePendingRefused, OutcomePendingUnreadable, OutcomePendingUnavailable,
-	OutcomeExpectTargets, OutcomeExpectDecidedIDs, OutcomeExpectFixedCeiling,
+	OutcomeExpectTargets, OutcomeExpectDecidedIDs, OutcomeExpectOwnRecord,
+	OutcomeRecordMissing, OutcomeRecordTruncated, OutcomeRecordUnavailable, OutcomeRecordPruned, OutcomeRecordPruneFailed,
 	OutcomeBucketsTruncated, OutcomeDigestMismatch, OutcomeSampleUnreadable, OutcomeAlertsRead, OutcomeAlertsTruncated,
 	OutcomeAlertDecidedClose, OutcomeAbsentTruncated,
 }, editWords()...)

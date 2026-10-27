@@ -726,6 +726,10 @@ func openProductionPhaseTwoBundleAssembly(
 		return nil, err
 	}
 	recorder.SetActiveCopySource(openAlertCopy.Stats)
+	episodeWriter, err := newEpisodeWriter(cfg, linkdManage, redisForCaller(runtimeClient, redisfailure.CallerLinkd), external.Now, recorder)
+	if err != nil {
+		return nil, err
+	}
 	recorder.SetActivationRebuildSource(repository.ActivationRebuildCounts)
 	recorder.SetTimelineRepairSource(repository.TimelineRepairCounts)
 	recorder.SetActivationSkippedTimelinesSource(repository.SkippedTimelinesReading)
@@ -758,7 +762,7 @@ func openProductionPhaseTwoBundleAssembly(
 		// Linked only with the link's control plane: without it the copy is
 		// never refreshed and can never judge, and the worker keeps no
 		// no-data end index.
-		OpenAlerts: &openAlertCopyPort{copy: openAlertCopy},
+		OpenAlerts: &openAlertCopyPort{copy: openAlertCopy, record: episodeWriter},
 		// The horizon the platform settings copy resolves now, read per Slot:
 		// runtime state lives at most this long past a series' last write.
 		StateHorizon: func() int64 { return platformSettings.Current().NoDataTrackingHorizonSeconds },
@@ -1174,6 +1178,9 @@ func openProductionPhaseTwoBundleAssembly(
 			if openAlertCopy == nil {
 				<-runCtx.Done()
 				return nil
+			}
+			if episodeWriter != nil {
+				go episodeWriter.Run(runCtx)
 			}
 			openAlertCopy.Run(runCtx)
 			return nil
