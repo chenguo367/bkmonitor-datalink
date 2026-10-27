@@ -149,6 +149,22 @@ func TestTheScopeCloseIsRefusedPastTheRecord(t *testing.T) {
 	if len(fixture.link.closed()) != 0 || fixture.recorded.route.closer.Stats()[filterclose.OutcomeExpectExceeded] != 1 {
 		t.Fatalf("closed %v, stats %v", fixture.link.closed(), fixture.recorded.route.closer.Stats())
 	}
+	// The refusal is not settled: the strategy waits a few rounds, then is
+	// tried again, and once the record holds the episodes the close goes.
+	sent := fixture.closes()
+	for i := 0; i < scopeRefusedRounds; i++ {
+		fixture.loop.step(context.Background(), fixture.snapshot)
+	}
+	if fixture.closes() != sent || fixture.loop.Stats()[scopeCloseBackoff] != scopeRefusedRounds {
+		t.Fatalf("requests %d while backing off, stats %v", fixture.closes()-sent, fixture.loop.Stats())
+	}
+	for i := 0; i < 21; i++ {
+		fixture.opened(t, 100+i, fmt.Sprintf("198.51.100.%d", i))
+	}
+	fixture.loop.step(context.Background(), fixture.snapshot)
+	if got := fixture.link.closed(); len(got) != 21 {
+		t.Fatalf("closed %d after the record caught up, stats %v", len(got), fixture.recorded.route.closer.Stats())
+	}
 }
 
 // A scope too large for one request is not sent, not cut: counted; and a

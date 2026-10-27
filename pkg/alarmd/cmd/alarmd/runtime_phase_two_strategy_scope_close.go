@@ -41,6 +41,9 @@ const (
 	// scopeCloseStrategies bounds the strategies a round sends for; the
 	// rest wait for the next round. Each costs a dry run and the closes.
 	scopeCloseStrategies = 64
+	// scopeRefusedRounds is how many rounds a strategy whose close was
+	// refused past its record waits before it is tried again.
+	scopeRefusedRounds = 3
 )
 
 // The loop's outcomes, closed: a metric label is made of them.
@@ -67,7 +70,12 @@ const (
 	// second rejected Slot.
 	scopeCloseUnconfirmed = "scope_unconfirmed"
 	scopeCloseUnchanged   = "scope_unchanged"
-	scopeCloseRoundFull   = "round_full"
+	// scopeCloseBackoff is a strategy whose last close was refused past its
+	// record (expect_exceeded) waiting out scopeRefusedRounds before the
+	// next try: a transient under-count (a record write still queued)
+	// heals, a lasting one stays counted in linkd_filter_close_total.
+	scopeCloseBackoff   = "refused_backoff"
+	scopeCloseRoundFull = "round_full"
 	// scopeCloseSent is a strategy whose close was run; its word is
 	// filterclose's (linkd_filter_close_total).
 	scopeCloseSent = "close_run"
@@ -78,7 +86,7 @@ const (
 
 var scopeCloseOutcomes = []string{scopeCloseNotLeader, scopeClosePublicationUnavailable, scopeCloseSnapshotUnavailable,
 	scopeCloseLinkUnavailable, scopeClosePlansDisagree, scopeCloseResolutionIncomplete, scopeCloseMemberUnreadable,
-	scopeCloseEmpty, scopeCloseUnconfirmed, scopeCloseUnchanged, scopeCloseRoundFull, scopeCloseSent, scopeCloseSettled}
+	scopeCloseEmpty, scopeCloseUnconfirmed, scopeCloseUnchanged, scopeCloseBackoff, scopeCloseRoundFull, scopeCloseSent, scopeCloseSettled}
 
 // strategyTargets is what the loop asks the control plane
 // (controlplane.SourceReconciler).
@@ -94,8 +102,11 @@ type strategyScopeClose struct {
 	filter   *filterRoute
 	// closed is, per strategy, the scope digest this term closed for;
 	// seen the digest the last round read, waiting for its second read.
-	closed    map[absentalerts.Key]string
-	seen      map[absentalerts.Key]string
+	closed map[absentalerts.Key]string
+	seen   map[absentalerts.Key]string
+	// refused is, per strategy whose last close was refused past its
+	// record, the rounds left before the next try.
+	refused   map[absentalerts.Key]int
 	wasLeader bool
 	countsMu  sync.Mutex
 	counts    map[string]uint64
@@ -104,7 +115,8 @@ type strategyScopeClose struct {
 func newStrategyScopeClose(bundle *phaseTwoWorkerBundle, plans strategyTargets, resolver worker.TargetResolver,
 	filter *filterRoute) *strategyScopeClose {
 	return &strategyScopeClose{bundle: bundle, plans: plans, resolver: resolver, filter: filter,
-		closed: map[absentalerts.Key]string{}, seen: map[absentalerts.Key]string{}, counts: map[string]uint64{}}
+		closed: map[absentalerts.Key]string{}, seen: map[absentalerts.Key]string{}, refused: map[absentalerts.Key]int{},
+		counts: map[string]uint64{}}
 }
 
 // Stats is every outcome's count.
@@ -134,13 +146,14 @@ func (loop *strategyScopeClose) leading() bool {
 }
 
 // settles says a close's word ends the scope's decision: closed, nothing
-// to close, refused by the record or by the request's bounds. A word of a
-// failed or unfinished request, or job_done_rederived (items left for the
-// filter to find again), leaves it to the next round.
+// to close, refused by the request's bounds. A word of a failed or
+// unfinished request, or job_done_rederived (items left for the filter to
+// find again), leaves it to the next round; expect_exceeded to a round
+// after scopeRefusedRounds.
 func settles(word string) bool {
 	switch word {
-	case filterclose.OutcomeJobDone, filterclose.OutcomeNothingMatched, filterclose.OutcomeExpectExceeded,
-		filterclose.OutcomeTargetListTooLarge, filterclose.OutcomeFilterRefused:
+	case filterclose.OutcomeJobDone, filterclose.OutcomeNothingMatched, filterclose.OutcomeTargetListTooLarge,
+		filterclose.OutcomeFilterRefused:
 		return true
 	}
 	return false
@@ -153,7 +166,7 @@ func (loop *strategyScopeClose) step(ctx context.Context, snapshot map[absentale
 	defer cancel()
 	if !loop.leading() {
 		if loop.wasLeader {
-			loop.closed, loop.seen = map[absentalerts.Key]string{}, map[absentalerts.Key]string{}
+			loop.closed, loop.seen, loop.refused = map[absentalerts.Key]string{}, map[absentalerts.Key]string{}, map[absentalerts.Key]int{}
 		}
 		loop.wasLeader = false
 		loop.count(scopeCloseNotLeader, 1)
@@ -176,6 +189,11 @@ func (loop *strategyScopeClose) step(ctx context.Context, snapshot map[absentale
 	for key := range loop.seen {
 		if _, held := snapshot[key]; !held {
 			delete(loop.seen, key)
+		}
+	}
+	for key := range loop.refused {
+		if _, held := snapshot[key]; !held {
+			delete(loop.refused, key)
 		}
 	}
 	keys := make([]absentalerts.Key, 0, len(snapshot))
@@ -226,6 +244,11 @@ func (loop *strategyScopeClose) step(ctx context.Context, snapshot map[absentale
 			loop.count(scopeCloseUnconfirmed, 1)
 			continue
 		}
+		if wait := loop.refused[key]; wait > 0 {
+			loop.refused[key] = wait - 1
+			loop.count(scopeCloseBackoff, 1)
+			continue
+		}
 		if sent >= scopeCloseStrategies {
 			loop.count(scopeCloseRoundFull, 1)
 			continue
@@ -239,6 +262,9 @@ func (loop *strategyScopeClose) step(ctx context.Context, snapshot map[absentale
 		}
 		if word == filterclose.OutcomeUnsupported {
 			return
+		}
+		if word == filterclose.OutcomeExpectExceeded {
+			loop.refused[key] = scopeRefusedRounds
 		}
 		if settles(word) {
 			loop.closed[key] = digest

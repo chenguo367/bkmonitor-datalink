@@ -73,7 +73,8 @@ func newStrategyScopeCloseCollector() *outcomeCounterCollector {
 			"resolver), plans_disagree (the strategy's Plans carry different target plans), resolution_incomplete (the "+
 			"target did not resolve Complete with its exclusions: nothing closed), member_unreadable, scope_empty (resolved "+
 			"Complete with no member: nothing closed), scope_unconfirmed (a scope read once: it closes when the next "+
-			"round reads the same), scope_unchanged, "+
+			"round reads the same), scope_unchanged, refused_backoff (a strategy whose close was refused past its "+
+			"record waiting a few rounds before the next try), "+
 			"round_full (past the round's strategies), close_run, scope_settled (the close's word ends the decision until "+
 			"the scope changes). The close's own word is in linkd_filter_close_total. Every cell exists from the start.")
 }
