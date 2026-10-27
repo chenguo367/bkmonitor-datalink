@@ -12,7 +12,8 @@ package metric
 func newLinkdFilterCloseCollector() *outcomeCounterCollector {
 	return newOutcomeCounterCollector("linkd_filter_close_total",
 		"The strategy closes alarmd runs through the alert link's search and close by filter (package filterclose), by "+
-			"outcome. Per job (one decision's filter in one round): job_done, job_incomplete (the round ended or the "+
+			"outcome. Per job (one decision's filter in one round): job_done, job_done_rederived (the filter ran out but "+
+			"items came back certainly not closed: not settled, run again), job_incomplete (the round ended or the "+
 			"dry run's count was spent), nothing_matched, expect_exceeded (the dry run matched more than the independent "+
 			"expectation allows; nothing closed), filter_close_unsupported (501/404/405: nothing closes the decision), "+
 			"link_busy (429), link_refused (another 4xx), link_failed (timeout, 5xx, transport), command_unavailable, "+
@@ -29,7 +30,8 @@ func newLinkdFilterCloseCollector() *outcomeCounterCollector {
 			"pending_not_found, pending_retry_failed, pending_given_up, pending_refused, pending_unreadable, "+
 			"pending_unavailable. The edit close's own: buckets_truncated, digest_mismatch, sample_unreadable, "+
 			"and edit_<word> for each edit decision and note; alerts_read, alerts_truncated, alert_decided_close are the "+
-			"edit close's and the alert-by-alert close's of a strategy with no record. "+
+			"edit close's and the alert-by-alert close's of a strategy with no record; absent_truncated (a tenant's "+
+			"discovery stopped at its per-round bound). "+
 			"Every cell exists from the start so a zero is a reading and not an absence.")
 }
 

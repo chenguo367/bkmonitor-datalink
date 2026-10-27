@@ -122,7 +122,8 @@ func (loop *strategyScopeClose) leading() bool {
 
 // settles says a close's word ends the scope's decision: closed, nothing
 // to close, refused by the record or by the request's bounds. A word of a
-// failed or unfinished request leaves it to the next round.
+// failed or unfinished request, or job_done_rederived (items left for the
+// filter to find again), leaves it to the next round.
 func settles(word string) bool {
 	switch word {
 	case filterclose.OutcomeJobDone, filterclose.OutcomeNothingMatched, filterclose.OutcomeExpectExceeded,

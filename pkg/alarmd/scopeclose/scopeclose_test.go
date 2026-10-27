@@ -40,10 +40,13 @@ type closeRequest struct {
 // closes them. status, when set, answers every request with that status
 // instead.
 type scopeLink struct {
-	mu       sync.Mutex
-	active   int
-	status   int
-	requests []closeRequest
+	mu     sync.Mutex
+	active int
+	status int
+	// itemStatus, when set, answers each item of a real close with it:
+	// nothing is closed.
+	itemStatus int
+	requests   []closeRequest
 }
 
 func (link *scopeLink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -63,10 +66,14 @@ func (link *scopeLink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	n := min(link.active, request.Limit)
 	items := make([]map[string]any, 0, n)
-	for i := 0; i < n; i++ {
-		items = append(items, map[string]any{"alert_id": fmt.Sprintf("alert-%d", i), "status": http.StatusOK})
+	status := http.StatusOK
+	if !request.DryRun && link.itemStatus != 0 {
+		status = link.itemStatus
 	}
-	if !request.DryRun {
+	for i := 0; i < n; i++ {
+		items = append(items, map[string]any{"alert_id": fmt.Sprintf("alert-%d", i), "status": status})
+	}
+	if !request.DryRun && status == http.StatusOK {
 		link.active -= n
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "next": "", "dry_run": request.DryRun, "closed": n})
@@ -331,7 +338,25 @@ func TestAFailedCloseIsHeldAndRetried(t *testing.T) {
 			}
 		})
 	}
+	// Items the link certainly did not close (429 each): the batch is not
+	// settled, the entry is kept and closed on the next step.
 	closer, link, _ := newScopeHarness(t, knownSet{"fp-1": true})
+	link.set(1, 0)
+	link.itemStatus = http.StatusTooManyRequests
+	confirm(closer, Drop{Fingerprint: "fp-1", Target: hostTarget("192.0.2.32")})
+	closer.Step(context.Background())
+	if stats := closer.Stats(); stats[OutcomeSendFailed] != 1 || stats[OutcomeCloseSent] != 0 {
+		t.Fatalf("stats %v, want the rederived batch kept", stats)
+	}
+	link.mu.Lock()
+	link.itemStatus = 0
+	link.mu.Unlock()
+	closer.Step(context.Background())
+	if stats := closer.Stats(); stats[OutcomeCloseSent] != 1 {
+		t.Fatalf("stats %v, want the kept entry closed", stats)
+	}
+
+	closer, link, _ = newScopeHarness(t, knownSet{"fp-1": true})
 	link.set(1, http.StatusNotImplemented)
 	confirm(closer, Drop{Fingerprint: "fp-1", Target: hostTarget("192.0.2.31")})
 	closer.Step(context.Background())

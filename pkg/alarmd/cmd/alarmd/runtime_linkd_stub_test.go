@@ -40,6 +40,9 @@ type stubControlPlane struct {
 	bodies  map[string][]string
 	// onClose, when set, runs as a close that is not a dry run arrives.
 	onClose func()
+	// itemBusy answers each item of a close that is not a dry run 429:
+	// certainly not closed, the matches stay.
+	itemBusy bool
 }
 
 func (stub *stubControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -64,10 +67,14 @@ func (stub *stubControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		}
 		_ = json.Unmarshal(body, &request)
 		items := []map[string]any{}
-		for _, id := range stub.matches {
-			items = append(items, map[string]any{"alert_id": id, "status": 200})
+		status := http.StatusOK
+		if stub.itemBusy && !request.DryRun {
+			status = http.StatusTooManyRequests
 		}
-		if !request.DryRun {
+		for _, id := range stub.matches {
+			items = append(items, map[string]any{"alert_id": id, "status": status})
+		}
+		if !request.DryRun && status == http.StatusOK {
 			stub.matches = nil
 			if stub.onClose != nil {
 				stub.onClose()

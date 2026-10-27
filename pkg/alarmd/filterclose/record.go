@@ -107,8 +107,10 @@ func (closer *Closer) prune(ctx context.Context, scope Scope, fingerprints []str
 // the term's last round stopped, each decided from its own record, the
 // ones decided closed by their ids under the decision's filter (so an
 // alert that left the decision meanwhile is not closed). It returns the
-// last close's word, OutcomeJobIncomplete while the walk has pages left,
-// or OutcomeNothingMatched when nothing was decided.
+// first word of a close that did not settle (anything but job_done and
+// nothing_matched), else OutcomeJobIncomplete while the walk has pages
+// left, OutcomeJobDone when a close ran, or OutcomeNothingMatched when
+// nothing was decided.
 func (closer *Closer) perAlert(ctx context.Context, job Job, decide func(linkdmanage.Alert) bool) string {
 	read, err := activeOnly(job.Filter)
 	if err != nil {
@@ -147,6 +149,7 @@ func (closer *Closer) perAlert(ctx context.Context, job Job, decide func(linkdma
 	closer.mu.Unlock()
 	closer.count(OutcomeAlertDecidedClose, len(ids))
 	word := OutcomeNothingMatched
+	settled := func(word string) bool { return word == OutcomeNothingMatched || word == OutcomeJobDone }
 	recheck := job.Recheck
 	if recheck.body == nil {
 		recheck = job.Filter
@@ -156,13 +159,19 @@ func (closer *Closer) perAlert(ctx context.Context, job Job, decide func(linkdma
 		byID, err := narrowed(job.Filter, terms(fieldAlertID, sorted(batch)))
 		if err != nil {
 			closer.count(OutcomeFilterRefused, 1)
-			word = OutcomeFilterRefused
+			if settled(word) {
+				word = OutcomeFilterRefused
+			}
 			continue
 		}
-		word = closer.Run(ctx, Job{Filter: byID, Decision: job.Decision, Version: job.Version, Digest: job.Digest, Revision: job.Revision,
+		batchWord := closer.Run(ctx, Job{Filter: byID, Decision: job.Decision, Version: job.Version, Digest: job.Digest, Revision: job.Revision,
 			Expect: Expectation{Count: len(batch), Source: ExpectDecidedIDs}, Reason: job.Reason, Recheck: recheck})
-		if word == OutcomeUnsupported {
-			return word
+		if batchWord == OutcomeUnsupported {
+			return batchWord
+		}
+		switch {
+		case !settled(batchWord) && settled(word), word == OutcomeNothingMatched:
+			word = batchWord
 		}
 	}
 	if after != "" && (word == OutcomeJobDone || word == OutcomeNothingMatched) {

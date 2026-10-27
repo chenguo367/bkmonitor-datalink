@@ -326,7 +326,8 @@ func filterKey(filter Filter) string {
 // Every page starts from the filter's head again on a new round: an alert
 // closed no longer matches status=active, so the head is what is left. An
 // item the link did not close for certain (busy, not attempted, version
-// conflict) is found again that way and sent the same command; an item
+// conflict) is found again that way and sent the same command, and the
+// job answers OutcomeJobDoneRederived rather than OutcomeJobDone; an item
 // whose close may have been saved is kept and retried by id
 // (RetryPending).
 func (closer *Closer) Run(ctx context.Context, job Job) string {
@@ -383,7 +384,7 @@ func (closer *Closer) Run(ctx context.Context, job Job) string {
 		state.checked = matched
 		closer.mu.Unlock()
 	}
-	after := ""
+	after, rederived := "", 0
 	for state.processed < state.checked {
 		if ctx.Err() != nil {
 			closer.count(OutcomeJobIncomplete, 1)
@@ -394,12 +395,18 @@ func (closer *Closer) Run(ctx context.Context, job Job) string {
 		if err != nil {
 			return closer.failed(err)
 		}
-		closer.items(ctx, job, command, page.Items)
+		rederived += closer.items(ctx, job, command, page.Items)
 		closer.mu.Lock()
 		state.processed += len(page.Items)
 		closer.mu.Unlock()
 		if page.Next == "" || len(page.Items) == 0 {
 			closer.forgetProgress(progressKey)
+			if rederived > 0 {
+				// Left for the filter to find again: the decision is not
+				// settled until a run of it closes everything it finds.
+				closer.count(OutcomeJobDoneRederived, 1)
+				return OutcomeJobDoneRederived
+			}
 			closer.count(OutcomeJobDone, 1)
 			return OutcomeJobDone
 		}
@@ -437,13 +444,14 @@ func (closer *Closer) dryRun(ctx context.Context, job Job, state *progress, limi
 	}
 }
 
-// items counts a page's results and keeps the ones whose close may have
-// been saved.
-func (closer *Closer) items(ctx context.Context, job Job, command Command, items []linkdmanage.Item) {
+// items counts a page's results, keeps the ones whose close may have been
+// saved, and returns how many came back certainly not closed.
+func (closer *Closer) items(ctx context.Context, job Job, command Command, items []linkdmanage.Item) int {
 	recheck := job.Recheck
 	if recheck.body == nil {
 		recheck = job.Filter
 	}
+	rederived := 0
 	for _, item := range items {
 		switch {
 		case item.Status == http.StatusOK && item.AlreadyClosed:
@@ -456,6 +464,7 @@ func (closer *Closer) items(ctx context.Context, job Job, command Command, items
 				closer.count(OutcomeItemEndedOtherwise, 1)
 			case linkdmanage.ConflictVersion:
 				closer.count(OutcomeItemRederived, 1)
+				rederived++
 			case linkdmanage.ConflictSourceUnpublished:
 				closer.count(OutcomeItemSourceUnpublished, 1)
 			default:
@@ -464,6 +473,7 @@ func (closer *Closer) items(ctx context.Context, job Job, command Command, items
 		case item.Status == http.StatusTooManyRequests,
 			item.Status == http.StatusGatewayTimeout && item.ErrorCode == "not_attempted":
 			closer.count(OutcomeItemRederived, 1)
+			rederived++
 		case item.Status >= 500:
 			scope := job.Filter.scope
 			err := closer.pending.Keep(ctx, pendingItem{TenantID: scope.TenantID, EventSourceID: scope.EventSourceID, StrategyID: scope.StrategyID,
@@ -480,6 +490,7 @@ func (closer *Closer) items(ctx context.Context, job Job, command Command, items
 			closer.count(OutcomeItemRefused, 1)
 		}
 	}
+	return rederived
 }
 
 // RetryPending retries up to n kept items by id, each with its own

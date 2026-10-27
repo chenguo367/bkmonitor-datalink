@@ -278,6 +278,21 @@ func TestEffectiveMaintenanceClosesOncePerInactivePeriodAndConfirmsOnce(t *testi
 	if len(g.closed()) != 1 {
 		t.Fatal("a close the link did not settle was remembered as done")
 	}
+
+	// A close whose items came back certainly not closed (429 each) is a
+	// close sent but not settled: the next step runs it again.
+	h := newMaintenanceTestFixture(t, maintenanceReadySnapshot, maintenanceTime(8, 0), maintenanceMatches)
+	h.stub.itemBusy = true
+	h.m.step(context.Background())
+	if h.m.Stats()[closeOutcomeDone] != 1 || len(h.closed()) != 1 {
+		t.Fatalf("stats %v closes %v, want the rederived close counted as sent", h.m.Stats(), h.closed())
+	}
+	h.stub.itemBusy = false
+	h.advance(time.Second)
+	h.m.step(context.Background())
+	if len(h.closed()) != 2 {
+		t.Fatalf("closes %d: a close whose items came back rederived was remembered as settled", len(h.closed()))
+	}
 }
 
 // A link that cannot close by filter (501) is counted unsupported and the

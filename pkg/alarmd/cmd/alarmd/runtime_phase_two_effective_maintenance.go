@@ -735,6 +735,8 @@ func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.Q
 		if err != nil {
 			return
 		}
+		// Only a settled word: job_done_rederived left items for the filter
+		// to find again, and the next step runs the close again.
 		switch word {
 		case filterclose.OutcomeJobDone, filterclose.OutcomeNothingMatched:
 			if done, ok := m.inactiveClosed[key]; ok {
@@ -846,7 +848,7 @@ func (m *effectiveMaintenance) sendClose(ctx context.Context, qg execution.Query
 		key.revision)
 	trace := observability.TraceFields{QueryGroupKey: string(qg), StrategyID: key.strategyID}
 	switch word {
-	case filterclose.OutcomeJobDone, filterclose.OutcomeJobIncomplete:
+	case filterclose.OutcomeJobDone, filterclose.OutcomeJobIncomplete, filterclose.OutcomeJobDoneRederived:
 		m.observeTrace(ctx, trace, closeOutcomeDone, nil, 1)
 	case filterclose.OutcomeNothingMatched:
 		m.observeTrace(ctx, trace, closeOutcomeNothingMatched, nil, 1)

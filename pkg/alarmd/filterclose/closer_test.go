@@ -441,3 +441,51 @@ func TestAPerSeriesCloseClosesOnlyItsFingerprints(t *testing.T) {
 		}
 	}
 }
+
+// A job whose filter runs out with items the link certainly did not close
+// (429, 504 not_attempted, 409 version_conflict) is not settled: it answers
+// job_done_rederived, and the next run closes them and answers job_done.
+// The close of a strategy without a record keeps that word across its id
+// batches: a later batch that settles does not hide an earlier one that
+// did not.
+func TestAJobWithItemsLeftToFindAgainIsNotSettled(t *testing.T) {
+	for _, fault := range []string{"busy", "conflict"} {
+		t.Run(fault, func(t *testing.T) {
+			h := newHarness(t)
+			for i := 0; i < 10; i++ {
+				h.link.add(&fakeAlert{id: alertID(i), labels: map[string]string{"strategy_id": "41", "strategy_version": "3"}})
+			}
+			h.opened(t, "41", "3", nil, fingerprints(0, 10)...)
+			h.link.itemFault = func(id string, n int) string {
+				if id == alertID(4) && n == 0 {
+					return fault
+				}
+				return ""
+			}
+			closer := h.closer(t)
+			if word := closer.Inactive(context.Background(), testScope, "3", 3); word != OutcomeJobDoneRederived {
+				t.Fatalf("word %s, want job_done_rederived (stats %v)", word, nonZero(closer.Stats()))
+			}
+			if word := closer.Inactive(context.Background(), testScope, "3", 3); word != OutcomeJobDone {
+				t.Fatalf("second word %s, want job_done (stats %v)", word, nonZero(closer.Stats()))
+			}
+			if h.link.alert(alertID(4)).closes != 1 {
+				t.Fatal("the rederived alert was not closed by the second run")
+			}
+		})
+	}
+	h := newHarness(t)
+	for i := 0; i < linkdmanage.MaxLimit+50; i++ {
+		h.link.add(&fakeAlert{id: alertID(i), labels: map[string]string{"strategy_id": "41", "strategy_version": "3"}})
+	}
+	h.link.itemFault = func(id string, n int) string {
+		if id == alertID(5) && n == 0 {
+			return "busy"
+		}
+		return ""
+	}
+	closer := h.closer(t)
+	if word := closer.Inactive(context.Background(), testScope, "3", 3); word != OutcomeJobDoneRederived {
+		t.Fatalf("per-alert word %s, want job_done_rederived (stats %v)", word, nonZero(closer.Stats()))
+	}
+}

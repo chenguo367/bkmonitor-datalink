@@ -83,7 +83,8 @@ const (
 	// has no word on.
 	OutcomeSetUnavailable = "set_unavailable"
 	// OutcomeSendFailed counts entries the link did not settle - busy,
-	// failed, refused, past the expectation - kept and tried next step.
+	// failed, refused, past the expectation, items left to be found again
+	// (job_done_rederived) - kept and tried next step.
 	OutcomeSendFailed = "send_failed"
 	// OutcomeUnsupported counts entries not closed because filtered close
 	// is unsupported: the link answered 501, 404 or 405. Nothing else

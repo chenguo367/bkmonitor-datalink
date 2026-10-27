@@ -15,8 +15,14 @@ import "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/editclose"
 // decision's filter run in one round; an item is one alert's result in a
 // filtered close; a pending outcome is one retry by id.
 const (
-	// The job's word.
+	// The job's word. OutcomeJobDone is a job whose filter ran out with
+	// every item it closed settled.
 	OutcomeJobDone = "job_done"
+	// OutcomeJobDoneRederived is a job whose filter ran out but some of its
+	// items came back certainly not closed (item_rederived: 429, 504
+	// not_attempted, 409 version_conflict): not settled, the caller runs
+	// the decision again until it answers job_done or nothing_matched.
+	OutcomeJobDoneRederived = "job_done_rederived"
 	// OutcomeJobIncomplete is a job the round ended, or whose closes reached
 	// the count its dry run checked, before the filter ran out; the next
 	// round carries on from a new dry run.
@@ -112,7 +118,7 @@ const (
 
 // Outcomes is every outcome, the edit decisions' words among them.
 var Outcomes = append([]string{
-	OutcomeJobDone, OutcomeJobIncomplete, OutcomeNothingMatched, OutcomeExpectExceeded, OutcomeUnsupported, OutcomeLinkBusy,
+	OutcomeJobDone, OutcomeJobDoneRederived, OutcomeJobIncomplete, OutcomeNothingMatched, OutcomeExpectExceeded, OutcomeUnsupported, OutcomeLinkBusy,
 	OutcomeLinkRefused, OutcomeLinkFailed, OutcomeCommandUnavailable, OutcomeFilterRefused, OutcomeTargetListTooLarge,
 	OutcomeItemClosed, OutcomeItemAlreadyClosed, OutcomeItemEndedOtherwise, OutcomeItemSourceUnpublished, OutcomeItemConflictUnknown,
 	OutcomeItemRederived, OutcomeItemPending, OutcomeItemPendingFull, OutcomeItemPendingLost, OutcomeItemRefused,

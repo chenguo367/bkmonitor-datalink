@@ -371,7 +371,8 @@ func (loop *absentStrategyClose) closeStrategy(ctx context.Context, absent absen
 	// episodes; without one each alert is closed by its id
 	// (filterclose.Closer.Absent).
 	execution.word = loop.filter.closer.Absent(ctx, loop.filter.scope(absent.Key), decision, absent.Identity.Revision)
-	if execution.word == filterclose.OutcomeJobDone || execution.word == filterclose.OutcomeJobIncomplete {
+	switch execution.word {
+	case filterclose.OutcomeJobDone, filterclose.OutcomeJobIncomplete, filterclose.OutcomeJobDoneRederived:
 		execution.sent = true
 		loop.count(absentalerts.OutcomeCloseSent, 1)
 	}
