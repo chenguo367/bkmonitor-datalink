@@ -48,7 +48,7 @@ func TestOpenAlertSetFactsAndPortAdapter(t *testing.T) {
 	}
 
 	port := openAlertCopyPort{cache: cache}
-	port.TrackPlans("qg-test", []execution.PlanIdentity{{TenantID: "default", BusinessID: "2", StrategyID: "1001"}})
+	port.TrackPlans("qg-test", []execution.PlanIdentity{{TenantID: "default", BusinessID: "2", StrategyID: "101"}})
 	if stats := cache.Stats(); stats.Tracked != 1 {
 		t.Fatalf("tracked = %d, want the one Plan the worker named", stats.Tracked)
 	}
