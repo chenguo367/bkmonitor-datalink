@@ -95,6 +95,12 @@ type phaseTwoProductionExternalDependencies struct {
 	// StartupWaitInitial overrides the first retry delay of a startup
 	// dependency that does not answer; zero is the production delay.
 	StartupWaitInitial time.Duration
+	// ProbationRounds and EdgeProbeSpan override the lookback's
+	// (lookback.Options) when positive; zero is production's. Each round of
+	// a probation or a probe is a Slot, so a test that takes a group down
+	// through its probes runs them shorter.
+	ProbationRounds int
+	EdgeProbeSpan   time.Duration
 }
 
 func (external phaseTwoProductionExternalDependencies) startupWaiter(
@@ -580,7 +586,7 @@ func openProductionPhaseTwoBundleAssembly(
 		return nil, err
 	}
 	lookbackEngine, lookbackState, err := buildLookback(queryClient.Recheck, flights, lookbackOwner, logger,
-		external.Now, observationAdmit(observationMemory, memoryline.ConsumerLookback), readHolds)
+		external.Now, observationAdmit(observationMemory, memoryline.ConsumerLookback), external.lookbackRounds, readHolds)
 	if err != nil {
 		return nil, err
 	}

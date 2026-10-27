@@ -385,6 +385,14 @@ func TestAProbeNearAFailedFloorNeedsEightHoursOfItsRounds(t *testing.T) {
 			t.Fatalf("elsewhere, %v apart: %d rounds, want %d", c.period, got, ProbationRounds)
 		}
 	}
+	// A span and a probation of the options' own are what it reads instead.
+	engine.options.EdgeProbeSpan, engine.options.ProbationRounds = time.Hour, 20
+	if got := engine.probeRounds(&floorProbeState{edge: true, period: time.Minute}); got != 60 {
+		t.Fatalf("near a failed floor on an hour's span, a minute apart: %d rounds, want 60", got)
+	}
+	if got := engine.probeRounds(&floorProbeState{edge: true, period: 4 * time.Minute}); got != 20 {
+		t.Fatalf("near a failed floor on an hour's span, four minutes apart: %d rounds, want the probation's 20", got)
+	}
 }
 
 // A probe's rounds are its Slots: one whose Slots are five minutes apart, over data a minute apart, is near a failed
