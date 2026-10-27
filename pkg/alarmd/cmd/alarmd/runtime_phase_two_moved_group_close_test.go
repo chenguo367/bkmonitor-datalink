@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdoutput"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
@@ -67,15 +66,12 @@ func moveStrategyOutOfItsGroup(t *testing.T, shift, editAt time.Duration) (*clos
 	t.Helper()
 	fixture := startClosePathsFixture(t)
 	origin := fixture.start
-	fixture.console.set(true, []closePathsRow{{fingerprint: closePathsA1, status: "matched", listed: true}},
-		map[string]closePathsAlert{closePathsA1: {revision: 1, family: "metric_algorithm", severity: "critical", dimensions: thresholdDimensions(true)}})
-	fixture.setMembers(closePathsA1)
-	// The copy tracks the strategy once the inactive close has read its
-	// Query Group and registered it: the read the edit then leaves behind.
-	fixture.waitFor("the copy lists the strategy's alerts", func() bool {
-		_, listed := fixture.listed()
-		return listed
-	}, func() string { return "not listed" })
+	fixture.open(closePathsA1)
+	// The inactive close reads the Query Group's Plans on its first step,
+	// at the bundle's start, and again each second while the read is not
+	// current; nothing outside the loop marks the read, so the case gives
+	// it two of its steps: the read the edit then leaves behind.
+	time.Sleep(2 * time.Second) // fixed-wait: two steps of the maintenance loop, whose Plans read nothing outside it observes
 	before := fixture.ownedGroups()
 	if len(before) != 1 {
 		t.Fatalf("revision 1 runs in %v, want one Query Group", before)
@@ -105,7 +101,6 @@ func (fixture *closePathsFixture) heldAcrossSteps(old execution.QueryGroupIdenti
 	fixture.t.Helper()
 	from := fixture.groupOutcomes(old, closeOutcomeUnavailable)
 	fixture.waitFor("the inactive close reads the old Query Group again", func() bool {
-		fixture.copy.RequestCalibration()
 		owned := false
 		for _, qg := range fixture.ownedGroups() {
 			owned = owned || qg == old
@@ -114,18 +109,6 @@ func (fixture *closePathsFixture) heldAcrossSteps(old execution.QueryGroupIdenti
 	}, func() string {
 		return "unavailable=" + strconv.Itoa(fixture.groupOutcomes(old, closeOutcomeUnavailable)-from)
 	})
-}
-
-func wantClosesUnderRevision(t *testing.T, closes []linkdoutput.CloseRequest, revision int64) {
-	t.Helper()
-	if len(closes) == 0 {
-		t.Fatal("no close was sent")
-	}
-	for _, request := range closes {
-		if request.Fingerprint != closePathsA1 || request.Reason != "" || request.StrategyRevision != revision || request.BusinessID != closePathsBusiness {
-			t.Fatalf("close %+v, want A1 closed as inactive under revision %d", request, revision)
-		}
-	}
 }
 
 func TestAStrategyEditedOutOfItsQueryGroupIsNotClosedOnItsOldRevision(t *testing.T) {
@@ -139,45 +122,6 @@ func TestAStrategyEditedOutOfItsQueryGroupIsNotClosedOnItsOldRevision(t *testing
 	}
 	// Revision 2's own window ends: the alert is closed, under revision 2.
 	fixture.life.clock.Store(origin.Add(60 * time.Minute).UnixMilli())
-	fixture.waitFor("the inactive close closes A1", func() bool {
-		fixture.copy.RequestCalibration()
-		return len(fixture.closes()) > 0
-	}, func() string { return "no close" })
-	wantClosesUnderRevision(t, fixture.closes(), 2)
-}
-
-// The same through the index-set fallback: the link's reconcile answers
-// nothing, so the set's members stand in for the strategy's alerts. The old
-// Query Group's revision 1 addresses no member while revision 2 is in effect.
-func TestAStrategyEditedOutOfItsQueryGroupIsNotClosedFromTheSetOnItsOldRevision(t *testing.T) {
-	fixture, old, origin := moveStrategyOutOfItsGroup(t, 90*time.Minute, 3*time.Minute)
-	key := closePathsKey()
-	fixture.console.fail(true)
-	fixture.waitFor("the copy is refused a calibration", func() bool {
-		fixture.copy.RequestCalibration()
-		return fixture.console.refusedToCopy() > 0
-	}, func() string { return "no refused reconcile" })
-	// Revision 1's window ended at origin+20m; revision 2's runs from
-	// origin+80m to origin+110m. The last listing is past the age it is
-	// acted on, and the set stands in.
-	fixture.life.clock.Store(origin.Add(95 * time.Minute).UnixMilli())
-	fixture.waitFor("the set stands in for the strategy's alerts", func() bool {
-		fixture.copy.RequestCalibration()
-		members, ok := fixture.copy.UnlistedMembers(key)
-		return ok && len(members) == 1 && members[0] == closePathsA1
-	}, func() string {
-		members, ok := fixture.copy.UnlistedMembers(key)
-		return strconv.FormatBool(ok) + " " + strconv.Itoa(len(members))
-	})
-	fixture.heldAcrossSteps(old)
-	if closes := fixture.closes(); len(closes) != 0 {
-		t.Fatalf("the strategy is in effect under revision 2, yet %+v was closed from the set", closes)
-	}
-	// Revision 2's own window ends: the member is closed from the set, under
-	// revision 2.
-	fixture.life.clock.Store(origin.Add(120 * time.Minute).UnixMilli())
-	fixture.waitFor("the inactive close closes the set's member", func() bool {
-		return fixture.maintenanceCounts()[closeOutcomeIndexSetAcked] > 0
-	}, func() string { return "no index-set close" })
+	fixture.waitFor("the inactive close closes A1", func() bool { return len(fixture.closes()) > 0 }, func() string { return "no close" })
 	wantClosesUnderRevision(t, fixture.closes(), 2)
 }

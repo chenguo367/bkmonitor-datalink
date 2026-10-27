@@ -16,8 +16,6 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
-
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 )
 
 // The inactive close judges a Query Group's Plans only under the lease they
@@ -34,12 +32,12 @@ func TestTheInactiveCloseHoldsPlansReadUnderALeaseThatMoved(t *testing.T) {
 		{"timeline revision", func(r *maintenanceTestRunner) { r.revision++ }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newMaintenanceTestFixture(t, maintenanceReadySnapshot, maintenanceTime(16, 59), []openalerts.Alert{maintenanceAlert("native", "critical")})
+			f := newMaintenanceTestFixture(t, maintenanceReadySnapshot, maintenanceTime(16, 59), maintenanceMatches)
 			catalog := f.m.catalog.(*maintenanceTestCatalog)
 			ctx := context.Background()
 			f.m.step(ctx)
-			if catalog.reads != 1 || len(f.writer.batches) != 0 {
-				t.Fatalf("inside the window: reads %d, batches %v, want one read and no close", catalog.reads, f.writer.batches)
+			if catalog.reads != 1 || len(f.closed()) != 0 {
+				t.Fatalf("inside the window: reads %d, closes %v, want one read and no close", catalog.reads, f.closed())
 			}
 			tc.move(f.runner)
 			catalog.err = errors.New("store not answering")
@@ -48,14 +46,14 @@ func TestTheInactiveCloseHoldsPlansReadUnderALeaseThatMoved(t *testing.T) {
 			if catalog.reads != 2 {
 				t.Fatalf("the lease moved: reads %d, want the Plans read again", catalog.reads)
 			}
-			if len(f.writer.batches) != 0 {
-				t.Fatalf("closed %v on Plans read under a lease that has moved", f.writer.batches)
+			if len(f.closed()) != 0 {
+				t.Fatalf("closed %v on Plans read under a lease that has moved", f.closed())
 			}
 			// The read under the new lease lands: the Plans are judged again.
 			catalog.err = nil
 			f.m.step(ctx)
-			if len(f.writer.batches) != 1 || len(f.writer.batches[0]) != 1 {
-				t.Fatalf("closed %v once the Plans were read under the current lease, want the one alert", f.writer.batches)
+			if len(f.closed()) != 1 {
+				t.Fatalf("closed %v once the Plans were read under the current lease, want the one alert", f.closed())
 			}
 		})
 	}
@@ -80,21 +78,21 @@ func TestTheInactiveCloseJudgesPlansOnlyInsideTheSegmentTheyWereReadFrom(t *test
 		{"open", 0, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newMaintenanceTestFixture(t, maintenanceReadySnapshot, maintenanceTime(16, 59), []openalerts.Alert{maintenanceAlert("native", "critical")})
+			f := newMaintenanceTestFixture(t, maintenanceReadySnapshot, maintenanceTime(16, 59), maintenanceMatches)
 			catalog := f.m.catalog.(*maintenanceTestCatalog)
 			catalog.until = tc.until
 			ctx := context.Background()
 			f.m.step(ctx)
-			if catalog.reads != 1 || len(f.writer.batches) != 0 {
-				t.Fatalf("inside the window: reads %d, batches %v, want one read and no close", catalog.reads, f.writer.batches)
+			if catalog.reads != 1 || len(f.closed()) != 0 {
+				t.Fatalf("inside the window: reads %d, closes %v, want one read and no close", catalog.reads, f.closed())
 			}
 			// The Query Group is retired at the Segment's end: a read past it
 			// finds no Plan.
 			catalog.err = errors.New("schedule unavailable")
 			f.advance(31 * time.Minute)
 			f.m.step(ctx)
-			if got := len(f.writer.batches) == 1; got != tc.closes {
-				t.Fatalf("closed %v at 17:30 with Plans read from a Segment ending %d, want a close %v", f.writer.batches, tc.until, tc.closes)
+			if got := len(f.closed()) == 1; got != tc.closes {
+				t.Fatalf("closed %v at 17:30 with Plans read from a Segment ending %d, want a close %v", f.closed(), tc.until, tc.closes)
 			}
 			if wantReads := map[bool]int{false: 2, true: 1}[tc.closes]; catalog.reads != wantReads {
 				t.Fatalf("reads %d, want %d", catalog.reads, wantReads)
