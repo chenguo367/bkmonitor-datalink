@@ -78,6 +78,7 @@ type Link interface {
 // (openepisodes.Store).
 type Record interface {
 	Load(ctx context.Context, key openepisodes.Key) (openepisodes.Record, error)
+	Since(ctx context.Context, key openepisodes.Key) (time.Time, bool, error)
 	Prune(ctx context.Context, key openepisodes.Key, fingerprints []string) error
 }
 

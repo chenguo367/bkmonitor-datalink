@@ -99,6 +99,18 @@ func terms(field string, values []string) object { return object{"terms": object
 
 func exists(field string) object { return object{"exists": object{"field": field}} }
 
+// openedSince is filter narrowed to the alerts the link opened at or after
+// since: the ones alarmd's record vouches for (openepisodes.SinceField).
+func openedSince(filter Filter, since time.Time) (Filter, error) {
+	return narrowed(filter, object{"range": object{fieldCreated: object{"gte": since.UTC().Format(time.RFC3339Nano)}}})
+}
+
+// openedBefore is filter narrowed to the alerts the link opened before
+// since: the ones the record cannot vouch for, decided alert by alert.
+func openedBefore(filter Filter, since time.Time) (Filter, error) {
+	return narrowed(filter, object{"range": object{fieldCreated: object{"lt": since.UTC().Format(time.RFC3339Nano)}}})
+}
+
 // openedBy is the alerts the link opened at or before at: a decision read
 // at that moment is not about an alert opened after it.
 func openedBy(at time.Time) (object, error) {
@@ -304,7 +316,7 @@ func narrowed(filter Filter, clause any) (Filter, error) {
 	if err != nil {
 		return Filter{}, err
 	}
-	result := Filter{scope: filter.scope, body: body}
+	result := Filter{scope: filter.scope, body: body, batch: filter.batch}
 	return result, requireScope(result)
 }
 

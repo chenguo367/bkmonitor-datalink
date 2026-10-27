@@ -21,6 +21,14 @@
 // what the last one left; only its expiry (TTL) or the loss of the Redis
 // takes a record away, and then the closes decide alert by alert.
 //
+// Each hash carries its start, field SinceField, written once when the hash
+// is created (HSETNX): the record holds every episode opened from then on,
+// and none it can vouch for before. A hash created at the rollout, after a
+// Redis loss or after its expiry lacks the episodes opened earlier and
+// still open - exactly the ones that send nothing new - so the closes
+// check against the record only the alerts the link opened from the start
+// on, and decide the older ones alert by alert.
+//
 // The record over-counts, never under-counts, in normal operation: an
 // episode the link ended on its own (a close by filter, a user's close)
 // stays in it until a close of its decision finds nothing at the link and
@@ -61,6 +69,10 @@ const MaxLoad = 1 << 20
 // scanCount is HSCAN's page hint.
 const scanCount = 1000
 
+// SinceField is the hash's start: the unix second it was created at. No
+// fingerprint spells it (fingerprints are hex).
+const SinceField = "_since"
+
 // Key names one strategy's record.
 type Key struct {
 	TenantID   string
@@ -86,11 +98,14 @@ type Entry struct {
 
 // Record is one strategy's record as read.
 type Record struct {
-	// Exists is a hash with at least one field: a record. A strategy whose
-	// every episode recovered, or whose hash expired or was lost, has none.
+	// Exists is a hash with at least one field, its start included: a
+	// record. A strategy whose hash expired or was lost has none; one whose
+	// every episode recovered keeps its start and no entry.
 	Exists    bool
 	Truncated bool
 	Entries   []Entry
+	// Since is the hash's start (SinceField); zero when it has none.
+	Since time.Time
 }
 
 // Store is the record in the runtime Redis.
@@ -193,6 +208,9 @@ func (store *Store) Apply(ctx context.Context, changes []Change, refresh []Key) 
 			if err != nil {
 				return err
 			}
+			// The start goes in first, once: a hash this write creates
+			// starts at the write.
+			pipe.HSetNX(ctx, key, SinceField, strconv.FormatInt(change.Entry.OpenedAt, 10))
 			pipe.HSet(ctx, key, change.Fingerprint, value)
 		} else {
 			pipe.HDel(ctx, key, change.Fingerprint)
@@ -219,6 +237,13 @@ func (store *Store) Load(ctx context.Context, key Key) (Record, error) {
 			return Record{}, err
 		}
 		for i := 0; i+1 < len(fields); i += 2 {
+			if fields[i] == SinceField {
+				if at, err := strconv.ParseInt(fields[i+1], 10, 64); err == nil && at > 0 {
+					record.Since = time.Unix(at, 0)
+				}
+				record.Exists = true
+				continue
+			}
 			entry := Entry{Fingerprint: fields[i]}
 			if json.Unmarshal([]byte(fields[i+1]), &entry) != nil || entry.Version == "" {
 				entry = Entry{Fingerprint: fields[i], Unreadable: true}
@@ -235,6 +260,23 @@ func (store *Store) Load(ctx context.Context, key Key) (Record, error) {
 		}
 		cursor = next
 	}
+}
+
+// Since is the record's start alone (one HGET): zero, false when the
+// strategy has no record or a record without a start.
+func (store *Store) Since(ctx context.Context, key Key) (time.Time, bool, error) {
+	raw, err := store.client.HGet(ctx, store.key(key), SinceField).Result()
+	if errors.Is(err, redis.Nil) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	at, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || at <= 0 {
+		return time.Time{}, false, nil
+	}
+	return time.Unix(at, 0), true, nil
 }
 
 // Prune removes the entries of the given fingerprints: the episodes of a

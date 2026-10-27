@@ -176,14 +176,14 @@ func TestTheRecordHoldsEachOpenEpisodeOnce(t *testing.T) {
 	if stats := w.writer.Stats(); stats[openepisodes.OutcomeRefreshed] != 1 || stats[openepisodes.OutcomeEnded] != 1 {
 		t.Fatalf("stats %v", stats)
 	}
-	// The last RECOVERY empties the hash: no record.
+	// The last RECOVERY empties the hash of entries; its start stays.
 	restarted := newWorker(t, client, clk)
 	restarted.acknowledge(t, envelope(contract.TriggerEventAbnormal, 2))
 	if stats := restarted.writer.Stats(); stats[openepisodes.OutcomeOpened] != 1 {
 		t.Fatalf("a restarted worker did not write its open episode: %v", stats)
 	}
 	restarted.acknowledge(t, envelope(contract.TriggerEventRecovery, 2))
-	if record := load(t, client); record.Exists || len(record.Entries) != 0 {
+	if record := load(t, client); !record.Exists || len(record.Entries) != 0 || record.Since.IsZero() {
 		t.Fatalf("record after every RECOVERY: %+v", record)
 	}
 }
@@ -208,5 +208,38 @@ func TestAFailedWriteAndAFullQueueAreCounted(t *testing.T) {
 	}
 	if stats := w.writer.Stats(); stats[openepisodes.OutcomeQueueFull] != 1 || time.Since(started) > time.Second {
 		t.Fatalf("stats %v after %v", stats, time.Since(started))
+	}
+}
+
+// The hash's start is written once, by the write that creates the hash: a
+// later write does not move it, the entries' count does not include it,
+// and a hash lost and created again starts at its new first write.
+func TestTheRecordStartsAtItsFirstWrite(t *testing.T) {
+	server := redistest.Start(t)
+	if server == nil {
+		t.Skip("no redis-server")
+	}
+	client := server.Client()
+	start := time.Unix(1_800_000_000, 0)
+	clk := &clock{at: start}
+	w := newWorker(t, client, clk)
+	w.acknowledge(t, envelope(contract.TriggerEventAbnormal, 1))
+	clk.at = start.Add(time.Hour)
+	w.acknowledge(t, envelope(contract.TriggerEventAbnormal, 2))
+	store, _ := openepisodes.NewStore(client, prefix)
+	if record := load(t, client); !record.Since.Equal(start) || len(record.Entries) != 2 {
+		t.Fatalf("record %+v, want started at %v with two entries", record, start)
+	}
+	if since, ok, err := store.Since(context.Background(), key); err != nil || !ok || !since.Equal(start) {
+		t.Fatalf("since %v %v %v", since, ok, err)
+	}
+	client.Del(context.Background(), prefix+":openepisodes:v1:tenant-a:41")
+	if _, ok, err := store.Since(context.Background(), key); err != nil || ok {
+		t.Fatalf("a lost record still has a start (%v)", err)
+	}
+	clk.at = start.Add(2 * time.Hour)
+	w.acknowledge(t, envelope(contract.TriggerEventAbnormal, 3))
+	if record := load(t, client); !record.Since.Equal(clk.at) || len(record.Entries) != 1 {
+		t.Fatalf("record %+v, want started again at %v", record, clk.at)
 	}
 }

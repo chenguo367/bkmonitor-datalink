@@ -242,9 +242,18 @@ func (closer *Closer) Edit(ctx context.Context, input EditInput) (string, int) {
 		closer.pruneOlder(ctx, input.Scope, plan.Revision)
 	}
 	// The record is read once per strategy, by the first dry run that needs
-	// it.
+	// it; its start once, by the first close.
 	var record openepisodes.Record
 	recordWord, loaded := "", false
+	var since time.Time
+	sinceWord, sinceRead := "", false
+	recordSince := func(ctx context.Context) (time.Time, string) {
+		if !sinceRead {
+			since, sinceWord = closer.readSince(ctx, input.Scope)
+			sinceRead = true
+		}
+		return since, sinceWord
+	}
 	fromRecord := func(versions ...string) func(context.Context) (Expectation, string) {
 		return func(ctx context.Context) (Expectation, string) {
 			if !loaded {
@@ -277,7 +286,7 @@ func (closer *Closer) Edit(ctx context.Context, input EditInput) (string, int) {
 			older = append(older, bucket.Version)
 		}
 		if bucket.Digest == "" {
-			if word := closer.oneByOne(ctx, input, bucket); word == OutcomeUnsupported {
+			if word := closer.oneByOne(ctx, input, bucket, time.Time{}); word == OutcomeUnsupported {
 				return word, len(buckets)
 			}
 			continue
@@ -303,19 +312,38 @@ func (closer *Closer) Edit(ctx context.Context, input EditInput) (string, int) {
 		closer.count("edit_"+note, 1)
 		switch {
 		case decision == editclose.OutcomeGroupDimensionsUndecided:
-			if word := closer.oneByOne(ctx, input, bucket); word == OutcomeUnsupported {
+			if word := closer.oneByOne(ctx, input, bucket, time.Time{}); word == OutcomeUnsupported {
 				return word, len(buckets)
 			}
 		case editclose.Closes(decision):
-			filter, err := BucketFilter(input.Scope, bucket)
-			if err != nil {
-				closer.count(OutcomeFilterRefused, 1)
+			since, sinceWord := recordSince(ctx)
+			if sinceWord == OutcomeRecordUnavailable {
 				continue
 			}
-			word := closer.Run(ctx, Job{Filter: filter, Decision: decision, Version: bucket.Version, Digest: bucket.Digest,
-				Revision: plan.Revision, expect: fromRecord(bucket.Version), Reason: editReason(input.Scope, decision, bucket.Version)})
-			if word == OutcomeRecordMissing {
-				word = closer.oneByOne(ctx, input, bucket)
+			word := OutcomeRecordMissing
+			if sinceWord == "" {
+				filter, err := BucketFilter(input.Scope, bucket)
+				if err == nil {
+					filter, err = openedSince(filter, since)
+				}
+				if err != nil {
+					closer.count(OutcomeFilterRefused, 1)
+					continue
+				}
+				word = closer.Run(ctx, Job{Filter: filter, Decision: decision, Version: bucket.Version, Digest: bucket.Digest,
+					Revision: plan.Revision, expect: fromRecord(bucket.Version), Reason: editReason(input.Scope, decision, bucket.Version)})
+			}
+			switch word {
+			case OutcomeUnsupported:
+				return word, len(buckets)
+			case OutcomeRecordMissing:
+				// No record, or none with a start: the whole bucket alert by
+				// alert.
+				word = closer.oneByOne(ctx, input, bucket, time.Time{})
+			default:
+				// The bucket's alerts opened before the record's start,
+				// which it cannot vouch for: alert by alert.
+				word = closer.oneByOne(ctx, input, bucket, since)
 			}
 			if word == OutcomeUnsupported {
 				return word, len(buckets)
@@ -339,12 +367,34 @@ func (closer *Closer) Edit(ctx context.Context, input EditInput) (string, int) {
 	}
 	job := Job{Filter: filter, Decision: editclose.OutcomeLevelRemoved, Version: versions, Revision: plan.Revision,
 		expect: fromRecord(older...), Reason: editReason(input.Scope, editclose.OutcomeLevelRemoved, "")}
-	word = closer.Run(ctx, job)
+	levelRemoved := func(alert linkdmanage.Alert) bool {
+		decision, _ := editclose.Decide(plan, recordOf(alert))
+		return decision == editclose.OutcomeLevelRemoved
+	}
+	start, startWord := recordSince(ctx)
+	switch startWord {
+	case OutcomeRecordUnavailable:
+		return "", len(buckets)
+	case OutcomeRecordMissing:
+		word = OutcomeRecordMissing
+	default:
+		recent, olderPart := job, job
+		recent.Recheck, olderPart.Recheck = filter, filter
+		var err, olderErr error
+		recent.Filter, err = openedSince(filter, start)
+		olderPart.Filter, olderErr = openedBefore(filter, start)
+		olderPart.expect = nil
+		if err != nil || olderErr != nil {
+			closer.count(OutcomeFilterRefused, 1)
+			return "", len(buckets)
+		}
+		word = closer.Run(ctx, recent)
+		if word != OutcomeRecordMissing && word != OutcomeUnsupported {
+			word = closer.perAlert(ctx, olderPart, levelRemoved)
+		}
+	}
 	if word == OutcomeRecordMissing {
-		word = closer.perAlert(ctx, job, func(alert linkdmanage.Alert) bool {
-			decision, _ := editclose.Decide(plan, recordOf(alert))
-			return decision == editclose.OutcomeLevelRemoved
-		})
+		word = closer.perAlert(ctx, job, levelRemoved)
 	}
 	if word == OutcomeUnsupported {
 		return word, len(buckets)
@@ -440,17 +490,24 @@ func sampleFacts(alert linkdmanage.Alert) (contract.StrategyFactsV2, bool) {
 	return facts, true
 }
 
-// oneByOne reads a bucket's alerts, up to maxAlertsPerTurn a round from
-// where the last round stopped, decides each from its own record, and
+// oneByOne reads a bucket's alerts (only the ones opened before before,
+// when it is set), up to maxAlertsPerTurn a round from where the last
+// round stopped, decides each from its own record, and
 // closes the ones decided by their ids, under the bucket's filter.
-func (closer *Closer) oneByOne(ctx context.Context, input EditInput, bucket Bucket) string {
+func (closer *Closer) oneByOne(ctx context.Context, input EditInput, bucket Bucket, before time.Time) string {
 	filter, err := BucketFilter(input.Scope, bucket)
 	if err != nil {
 		closer.count(OutcomeFilterRefused, 1)
 		return OutcomeFilterRefused
 	}
-	walkKey := filterKey(filter)
-	read, err := activeOnly(filter)
+	read := filter
+	if !before.IsZero() {
+		read, err = openedBefore(filter, before)
+	}
+	if err == nil {
+		read, err = activeOnly(read)
+	}
+	walkKey := filterKey(read)
 	if err != nil {
 		closer.count(OutcomeFilterRefused, 1)
 		return OutcomeFilterRefused

@@ -120,9 +120,12 @@ func (link *fakeLink) add(alert *fakeAlert) {
 
 // fakeOpenedAt is when an alert that names no other was opened; a test's
 // decisions are read after it (fakeDecidedAt).
+// The record a test writes starts before (fakeRecordStart), so it vouches
+// for every alert that names no other opening time.
 var (
-	fakeOpenedAt  = time.Unix(1_700_000_000, 0)
-	fakeDecidedAt = fakeOpenedAt.Add(time.Hour)
+	fakeOpenedAt    = time.Unix(1_700_000_000, 0)
+	fakeDecidedAt   = fakeOpenedAt.Add(time.Hour)
+	fakeRecordStart = fakeOpenedAt.Add(-time.Hour)
 )
 
 func (link *fakeLink) alert(id string) fakeAlert {
@@ -608,7 +611,7 @@ func (h *harness) opened(t *testing.T, strategy, version string, target map[stri
 			event.TargetDimensions = append(event.TargetDimensions, name)
 			event.RecordRef.Dimensions[name], _ = json.Marshal(value)
 		}
-		change, ok := openepisodes.ChangeOf(event, time.Unix(1_800_000_000, 0))
+		change, ok := openepisodes.ChangeOf(event, fakeRecordStart)
 		if !ok {
 			t.Fatalf("no change for %s", fingerprint)
 		}

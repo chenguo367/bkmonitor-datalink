@@ -11,6 +11,7 @@ package filterclose
 
 import (
 	"context"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdmanage"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openepisodes"
@@ -65,13 +66,56 @@ func covered(record openepisodes.Record, match func(openepisodes.Entry) bool) (i
 	return n, fingerprints
 }
 
-// recorded runs job against the record's entries match selects, prunes
-// them when the link holds none of the decision's alerts, and decides
-// alert by alert with decide where the strategy has no record.
+// readSince is the record's start, or the word that ends the job:
+// OutcomeRecordMissing (counted) where the strategy has no record or one
+// without a start, OutcomeRecordUnavailable where the read failed.
+func (closer *Closer) readSince(ctx context.Context, scope Scope) (time.Time, string) {
+	since, ok, err := closer.record.Since(ctx, recordKey(scope))
+	switch {
+	case err != nil:
+		closer.count(OutcomeRecordUnavailable, 1)
+		return time.Time{}, OutcomeRecordUnavailable
+	case !ok:
+		closer.count(OutcomeRecordMissing, 1)
+		return time.Time{}, OutcomeRecordMissing
+	}
+	return since, ""
+}
+
+// recorded runs job over the alerts opened since the record's start
+// against the record's entries match selects, decides the alerts opened
+// before the start alert by alert with decide (the record cannot vouch for
+// them: they opened before it was created), prunes the entries when the
+// link holds none of the decision's alerts, and decides every alert one by
+// one where the strategy has no record. It returns the first word that did
+// not settle, else job_done when anything was closed, else
+// nothing_matched.
 func (closer *Closer) recorded(ctx context.Context, job Job, match func(openepisodes.Entry) bool,
 	decide func(linkdmanage.Alert) bool) string {
+	if word := closer.refuseUnsupported(); word != "" {
+		return word
+	}
+	since, word := closer.readSince(ctx, job.Filter.scope)
+	switch word {
+	case OutcomeRecordMissing:
+		return closer.perAlert(ctx, job, decide)
+	case OutcomeRecordUnavailable:
+		return word
+	}
+	recent, older := job, job
+	if recent.Recheck.body == nil {
+		recent.Recheck = job.Filter
+	}
+	older.Recheck = recent.Recheck
+	var err, olderErr error
+	recent.Filter, err = openedSince(job.Filter, since)
+	older.Filter, olderErr = openedBefore(job.Filter, since)
+	if err != nil || olderErr != nil {
+		closer.count(OutcomeFilterRefused, 1)
+		return OutcomeFilterRefused
+	}
 	var prune []string
-	job.expect = func(ctx context.Context) (Expectation, string) {
+	recent.expect = func(ctx context.Context) (Expectation, string) {
 		record, word := closer.readRecord(ctx, job.Filter.scope)
 		if word != "" {
 			return Expectation{}, word
@@ -80,15 +124,36 @@ func (closer *Closer) recorded(ctx context.Context, job Job, match func(openepis
 		prune = fingerprints
 		return Expectation{Count: n, Source: ExpectOwnRecord}, ""
 	}
-	word := closer.Run(ctx, job)
-	switch word {
-	case OutcomeRecordMissing:
+	word = closer.Run(ctx, recent)
+	if word == OutcomeRecordMissing {
 		return closer.perAlert(ctx, job, decide)
-	case OutcomeNothingMatched:
+	}
+	if word == OutcomeUnsupported {
+		return word
+	}
+	olderWord := closer.perAlert(ctx, older, decide)
+	if word == OutcomeNothingMatched && olderWord == OutcomeNothingMatched {
 		closer.prune(ctx, job.Filter.scope, prune)
 	}
-	return word
+	return worse(word, olderWord)
 }
+
+// worse is the word of two parts of one decision: the first that did not
+// settle, else job_done when either closed something, else
+// nothing_matched.
+func worse(a, b string) string {
+	switch {
+	case !settledWord(a):
+		return a
+	case !settledWord(b):
+		return b
+	case a == OutcomeJobDone || b == OutcomeJobDone:
+		return OutcomeJobDone
+	}
+	return OutcomeNothingMatched
+}
+
+func settledWord(word string) bool { return word == OutcomeNothingMatched || word == OutcomeJobDone }
 
 // prune removes the entries of a decision the link holds nothing of.
 func (closer *Closer) prune(ctx context.Context, scope Scope, fingerprints []string) {
@@ -149,7 +214,6 @@ func (closer *Closer) perAlert(ctx context.Context, job Job, decide func(linkdma
 	closer.mu.Unlock()
 	closer.count(OutcomeAlertDecidedClose, len(ids))
 	word := OutcomeNothingMatched
-	settled := func(word string) bool { return word == OutcomeNothingMatched || word == OutcomeJobDone }
 	recheck := job.Recheck
 	if recheck.body == nil {
 		recheck = job.Filter
@@ -159,7 +223,7 @@ func (closer *Closer) perAlert(ctx context.Context, job Job, decide func(linkdma
 		byID, err := narrowed(job.Filter, terms(fieldAlertID, sorted(batch)))
 		if err != nil {
 			closer.count(OutcomeFilterRefused, 1)
-			if settled(word) {
+			if settledWord(word) {
 				word = OutcomeFilterRefused
 			}
 			continue
@@ -171,7 +235,7 @@ func (closer *Closer) perAlert(ctx context.Context, job Job, decide func(linkdma
 			return batchWord
 		}
 		switch {
-		case !settled(batchWord) && settled(word), word == OutcomeNothingMatched:
+		case !settledWord(batchWord) && settledWord(word), word == OutcomeNothingMatched:
 			word = batchWord
 		}
 	}

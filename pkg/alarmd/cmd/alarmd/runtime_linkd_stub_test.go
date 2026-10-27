@@ -186,6 +186,10 @@ type fakeLinkdAlert struct {
 	extra                                             json.RawMessage
 	closes                                            int
 	reason                                            string
+	// created is when the link opened it; add sets an hour ahead of the
+	// wall clock when zero: opened after alarmd's record started, as the
+	// link opens an alert after the event alarmd recorded.
+	created time.Time
 }
 
 func newFakeLinkd(t *testing.T) *fakeLinkd {
@@ -205,6 +209,9 @@ func (link *fakeLinkd) add(alert *fakeLinkdAlert) {
 	}
 	if alert.source == "" {
 		alert.source = "built_in_bk"
+	}
+	if alert.created.IsZero() {
+		alert.created = time.Now().Add(time.Hour)
 	}
 	link.alerts[alert.id] = alert
 }
@@ -302,6 +309,26 @@ func (link *fakeLinkd) compile(query json.RawMessage) func(*fakeLinkdAlert) bool
 			return func(alert *fakeLinkdAlert) bool {
 				_, ok := alert.field(field.Field)
 				return ok
+			}
+		case "range":
+			var fields map[string]map[string]string
+			if json.Unmarshal(body, &fields) != nil || len(fields) != 1 || fields["create_at"] == nil {
+				link.t.Errorf("range %s: the fake ranges create_at only", body)
+				return never
+			}
+			return func(alert *fakeLinkdAlert) bool {
+				for op, text := range fields["create_at"] {
+					at, err := time.Parse(time.RFC3339Nano, text)
+					if err != nil {
+						link.t.Errorf("range bound %q: %v", text, err)
+						return false
+					}
+					if (op == "gte" && alert.created.Before(at)) || (op == "lt" && !alert.created.Before(at)) ||
+						(op == "lte" && alert.created.After(at)) || (op == "gt" && !alert.created.After(at)) {
+						return false
+					}
+				}
+				return true
 			}
 		case "bool":
 			var b struct {

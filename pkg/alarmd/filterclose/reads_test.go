@@ -12,6 +12,7 @@ package filterclose
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 // The link's search reads its history as well as its active alerts
@@ -135,7 +136,7 @@ func TestClosesStopAtWhatTheDryRunChecked(t *testing.T) {
 			// Ids that sort before the checked ones: the close's page
 			// meets them first.
 			id := "a-" + alertID(i)
-			link.alerts[id] = &fakeAlert{id: id, status: "active", tenant: "tenant-a", source: "built_in_bk",
+			link.alerts[id] = &fakeAlert{id: id, status: "active", tenant: "tenant-a", source: "built_in_bk", created: fakeOpenedAt,
 				labels: map[string]string{"strategy_id": "41", "strategy_version": "3"}}
 		}
 		link.sorted = nil
@@ -150,5 +151,78 @@ func TestClosesStopAtWhatTheDryRunChecked(t *testing.T) {
 	}
 	if closed != 30 {
 		t.Fatalf("closed %d, want the 30 the dry run checked", closed)
+	}
+}
+
+// A record created after alerts it never saw (the rollout, a Redis loss,
+// an expiry) vouches only for the alerts opened from its start: those are
+// checked against it, the older ones decided alert by alert and closed by
+// their ids, so the decision heals instead of being refused for good. A
+// dry run of the recent alerts past the record is still refused and
+// counted; the older ones close all the same.
+func TestARecordVouchesOnlyForAlertsOpenedFromItsStart(t *testing.T) {
+	h := newHarness(t)
+	older := fakeRecordStart.Add(-24 * time.Hour)
+	for i := 0; i < 40; i++ {
+		h.link.add(&fakeAlert{id: alertID(i), labels: map[string]string{"strategy_id": "41", "strategy_version": "3"}, created: older})
+	}
+	for i := 40; i < 45; i++ {
+		h.link.add(&fakeAlert{id: alertID(i), labels: map[string]string{"strategy_id": "41", "strategy_version": "3"}})
+	}
+	h.opened(t, "41", "3", nil, fingerprints(40, 5)...)
+	closer := h.closer(t)
+	if word := closer.Inactive(context.Background(), testScope, "3", 3, fakeOpenedAt); word != OutcomeJobDone {
+		t.Fatalf("word %s, want job_done (stats %v)", word, nonZero(closer.Stats()))
+	}
+	for i := 0; i < 45; i++ {
+		if h.link.alert(alertID(i)).closes != 1 {
+			t.Fatalf("%s not closed (stats %v)", alertID(i), nonZero(closer.Stats()))
+		}
+	}
+	if stats := closer.Stats(); stats[OutcomeAlertDecidedClose] != 40 || stats[OutcomeExpectExceeded] != 0 {
+		t.Fatalf("stats %v", nonZero(stats))
+	}
+
+	// Recent alerts past the record: refused, the older ones closed.
+	h2 := newHarness(t)
+	for i := 0; i < 10; i++ {
+		h2.link.add(&fakeAlert{id: alertID(i), labels: map[string]string{"strategy_id": "41", "strategy_version": "3"}, created: older})
+	}
+	for i := 10; i < 40; i++ {
+		h2.link.add(&fakeAlert{id: alertID(i), labels: map[string]string{"strategy_id": "41", "strategy_version": "3"}})
+	}
+	h2.opened(t, "41", "3", nil, fingerprints(10, 5)...)
+	closer = h2.closer(t)
+	if word := closer.Inactive(context.Background(), testScope, "3", 3, fakeOpenedAt); word != OutcomeExpectExceeded {
+		t.Fatalf("word %s, want expect_exceeded (stats %v)", word, nonZero(closer.Stats()))
+	}
+	for i := 0; i < 40; i++ {
+		if want := map[bool]int{true: 1, false: 0}[i < 10]; h2.link.alert(alertID(i)).closes != want {
+			t.Fatalf("%s closed %d, want %d", alertID(i), h2.link.alert(alertID(i)).closes, want)
+		}
+	}
+}
+
+// An edit's bucket and level closes take the same split: the bucket's
+// alerts opened before the record's start are decided one by one and
+// closed by their ids, the recent ones by the bucket's filter against the
+// record.
+func TestAnEditDecidesTheAlertsBeforeTheRecordOneByOne(t *testing.T) {
+	h := newHarness(t)
+	old := factsOf("m4")
+	early := opened("a-early", "4", old, false, "critical", nil)
+	early.created = fakeRecordStart.Add(-time.Hour)
+	h.link.add(early)
+	h.link.add(opened("b-recent", "4", old, false, "critical", nil))
+	h.opened(t, "41", "4", nil, fingerprints(0, 1)...)
+	closer := h.closer(t)
+	if word, _ := closer.Edit(context.Background(), EditInput{Scope: testScope, Plan: currentPlan()}); word != "" {
+		t.Fatalf("word %s", word)
+	}
+	if h.link.alert("a-early").closes != 1 || h.link.alert("b-recent").closes != 1 {
+		t.Fatalf("early %d recent %d (stats %v)", h.link.alert("a-early").closes, h.link.alert("b-recent").closes, nonZero(closer.Stats()))
+	}
+	if stats := closer.Stats(); stats[OutcomeAlertDecidedClose] != 1 || stats[OutcomeExpectOwnRecord] == 0 {
+		t.Fatalf("stats %v", nonZero(stats))
 	}
 }

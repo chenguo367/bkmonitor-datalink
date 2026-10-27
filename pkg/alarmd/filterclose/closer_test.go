@@ -126,7 +126,8 @@ func TestADryRunPastTheRecordClosesNothing(t *testing.T) {
 	}
 	for strategy, want := range map[string]int{"41": 0, "42": 40} {
 		record, err := h.record(t).Load(context.Background(), openepisodes.Key{TenantID: "tenant-a", StrategyID: strategy})
-		if err != nil || len(record.Entries) != want || record.Exists != (want > 0) {
+		// The pruned record keeps its start: no entry left.
+		if err != nil || len(record.Entries) != want || !record.Exists || record.Since.IsZero() {
 			t.Fatalf("strategy %s record %+v, %v; want %d entries", strategy, record, err, want)
 		}
 	}
@@ -242,6 +243,10 @@ type failingRecord struct{}
 
 func (failingRecord) Load(context.Context, openepisodes.Key) (openepisodes.Record, error) {
 	return openepisodes.Record{}, errors.New("redis down")
+}
+
+func (failingRecord) Since(context.Context, openepisodes.Key) (time.Time, bool, error) {
+	return time.Time{}, false, errors.New("redis down")
 }
 
 func (failingRecord) Prune(context.Context, openepisodes.Key, []string) error {

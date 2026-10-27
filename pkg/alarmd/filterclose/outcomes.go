@@ -92,8 +92,9 @@ const (
 	OutcomeExpectOwnRecord  = "expect_" + ExpectOwnRecord
 
 	// The record's (ExpectOwnRecord). OutcomeRecordMissing is a strategy
-	// with no record - its hash expired, or the Redis lost it, or every
-	// episode of it recovered - whose close is then decided alert by alert;
+	// with no record - its hash expired, or the Redis lost it - or one
+	// without a start, whose close is then decided alert by alert (the
+	// alerts opened before a record's start always are);
 	// OutcomeRecordTruncated a record past openepisodes.MaxLoad, decided the
 	// same way; OutcomeRecordUnavailable a read that failed: nothing is
 	// decided, the next round reads again. OutcomeRecordPruned counts the
