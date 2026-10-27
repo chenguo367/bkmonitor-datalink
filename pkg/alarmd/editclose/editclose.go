@@ -201,7 +201,9 @@ func (plan Plan) Key() string {
 	return b.String()
 }
 
-// Alert is what an alert's record states (openalerts.AlertRecord).
+// Alert is what an alert's record states, as the link's search returns it
+// (filterclose reads it from the alert's labels, dimensions and
+// extra_data).
 type Alert struct {
 	Revision         int64
 	DimensionKeys    []string

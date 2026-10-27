@@ -234,8 +234,9 @@ const (
 	// strategy.
 	OutcomeEvidenceUnavailable = "evidence_unavailable"
 	// OutcomeEvidenceTruncated: the strategy's alerts were read, and the
-	// link's answer was incomplete or past the reader's caps
-	// (openalerts.Reconciliation.Truncated). The alerts it listed are closed
+	// link's answer was incomplete or past the reader's caps. No reader of
+	// this build reports it (the Console-era listing is gone); the word
+	// stays in the closed list until the outcomes are cut. The alerts it listed are closed
 	// as usual and the rest are left for a later round, when the strategy is
 	// decided again; when none listed is this deployment's, that is not "it
 	// has none of ours". Per strategy, beside its other outcomes.
