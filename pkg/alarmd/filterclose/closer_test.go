@@ -323,8 +323,8 @@ func TestALinkThatCannotSearchIsFilteredCloseUnsupported(t *testing.T) {
 	if closer.Unsupported() {
 		t.Fatal("not asked again after the recheck")
 	}
-	if err := closer.Probe(context.Background(), "tenant-a", "built_in_bk"); err == nil || warned != 2 {
-		t.Fatalf("probe %v, warned %d", err, warned)
+	if word := closer.Absent(context.Background(), testScope, DecisionAbsent, 3); word != OutcomeUnsupported || warned != 2 {
+		t.Fatalf("after the recheck word %s, warned %d", word, warned)
 	}
 }
 

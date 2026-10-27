@@ -249,21 +249,6 @@ func (closer *Closer) refuseUnsupported() string {
 	return OutcomeUnsupported
 }
 
-// Probe asks the link once whether it serves the search: one search of
-// limit 1 under the tenant and this deployment's source. An unsupported
-// answer is warned and counted as any job's; the error is returned.
-func (closer *Closer) Probe(ctx context.Context, tenantID, eventSourceID string) error {
-	query, err := json.Marshal(object{"bool": object{"filter": []any{term(fieldSource, eventSourceID)}}})
-	if err != nil {
-		return err
-	}
-	if _, err := closer.link.Search(ctx, tenantID, query, "", 1); err != nil {
-		closer.failed(err)
-		return err
-	}
-	return nil
-}
-
 // Forget drops the term's progress: a new term checks every job again.
 func (closer *Closer) Forget() {
 	closer.mu.Lock()
