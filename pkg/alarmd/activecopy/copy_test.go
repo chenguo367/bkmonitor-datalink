@@ -509,3 +509,31 @@ func TestAcknowledgedReturnsWhatChangesTheEpisodeRecord(t *testing.T) {
 		t.Fatalf("an ABNORMAL after the RECOVERY changed %v", changed)
 	}
 }
+
+// A question first asked while the link is unsupported is queued all the
+// same: the retry after the wait asks it, and the answer clears the
+// unsupported state. Were it not queued, the retry would ask nothing and
+// the copy would stay down.
+func TestALookupWhileUnsupportedIsQueuedForTheRetry(t *testing.T) {
+	link := newFakeSearch(t)
+	clk := &clock{at: time.Unix(1_800_000_000, 0)}
+	c, err := New(Options{Link: link, EventSourceID: source, Now: clk.now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	link.open("t", "1", fp(2))
+	link.errs = []error{&linkdmanage.StatusError{Route: "search", Status: 501}}
+	c.Contains("t", "1", fp(1))
+	c.Pass(context.Background())
+	if !c.Stats().Unsupported {
+		t.Fatalf("stats %+v", c.Stats())
+	}
+	if c.Contains("t", "1", fp(2)) {
+		t.Fatal("answered while unsupported")
+	}
+	clk.at = clk.at.Add(UnsupportedRetryMin)
+	c.Pass(context.Background())
+	if c.Stats().Unsupported || !c.Contains("t", "1", fp(2)) {
+		t.Fatalf("after the retry: stats %+v, queries %d", c.Stats(), len(link.queries))
+	}
+}

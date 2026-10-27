@@ -212,3 +212,40 @@ func TestAnEmptyScopeClosesNothing(t *testing.T) {
 		t.Fatalf("closed %v, want removed only", got)
 	}
 }
+
+// A busy link does not settle the scope: the next round sends again. A
+// leader that lost and regained leadership sends again for an unchanged
+// scope, after reading it twice.
+func TestTheScopeCloseRetriesABusyLinkAndResendsAfterLeadershipReturns(t *testing.T) {
+	fixture := newScopeFixture(t, "192.0.2.1|0")
+	fixture.alert("removed", "192.0.2.9")
+	fixture.opened(t, 1, "192.0.2.9")
+	fixture.link.mu.Lock()
+	fixture.link.busy = true
+	fixture.link.mu.Unlock()
+	fixture.confirmedStep(t)
+	if len(fixture.link.closed()) != 0 || fixture.loop.Stats()[scopeCloseSettled] != 0 {
+		t.Fatalf("closed %v, stats %v while busy", fixture.link.closed(), fixture.loop.Stats())
+	}
+	fixture.link.mu.Lock()
+	fixture.link.busy = false
+	fixture.link.mu.Unlock()
+	fixture.loop.step(context.Background(), fixture.snapshot)
+	if got := fixture.link.closed(); got["removed"] != 1 || fixture.loop.Stats()[scopeCloseSettled] != 1 {
+		t.Fatalf("closed %v, stats %v after the link answered", got, fixture.loop.Stats())
+	}
+
+	fixture.alert("removed-later", "192.0.2.8")
+	fixture.opened(t, 2, "192.0.2.8")
+	fixture.loop.bundle.mu.Lock()
+	fixture.loop.bundle.controlLeader = false
+	fixture.loop.bundle.mu.Unlock()
+	fixture.loop.step(context.Background(), fixture.snapshot)
+	fixture.loop.bundle.mu.Lock()
+	fixture.loop.bundle.controlLeader = true
+	fixture.loop.bundle.mu.Unlock()
+	fixture.confirmedStep(t)
+	if got := fixture.link.closed(); got["removed-later"] != 1 {
+		t.Fatalf("closed %v after leadership returned, stats %v", got, fixture.loop.Stats())
+	}
+}
