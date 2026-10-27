@@ -89,6 +89,13 @@ const (
 	untrackedGap = 10 * time.Minute
 	// MaxEntries bounds the fingerprints the copy knows and has queued.
 	MaxEntries = 1 << 20
+	// UnsupportedRetryMin and UnsupportedRetryMax bound the wait before the
+	// copy asks again a link that answered it cannot search: a rollback or
+	// a proxy's 404 during a rollout passes, so the copy never stops for
+	// good. The wait doubles from the first to the second while the link
+	// keeps answering so; the second is filterclose's recheck.
+	UnsupportedRetryMin = time.Minute
+	UnsupportedRetryMax = 10 * time.Minute
 )
 
 // Answer is how a lookup was answered. Closed: a metric label.
@@ -107,10 +114,14 @@ const (
 	// AnswerFull is an unknown fingerprint not queued because the copy is
 	// at MaxEntries.
 	AnswerFull Answer = "full"
+	// AnswerLinkUnsupported is an unknown fingerprint while the link
+	// answers it cannot search: queued for the retry, held meanwhile.
+	AnswerLinkUnsupported Answer = "link_unsupported"
 )
 
 // Answers lists every Answer, for the metric that pre-creates them all.
-var Answers = []Answer{AnswerOwnSent, AnswerSearchHit, AnswerSearchMiss, AnswerYoungMiss, AnswerUnknown, AnswerFull}
+var Answers = []Answer{AnswerOwnSent, AnswerSearchHit, AnswerSearchMiss, AnswerYoungMiss, AnswerUnknown, AnswerFull,
+	AnswerLinkUnsupported}
 
 // Pass outcomes. Closed: a metric label.
 const (
@@ -119,8 +130,14 @@ const (
 	// (429, no queueing): the pass stops, the fingerprints stay queued.
 	OutcomeLinkBusy = "link_busy"
 	// OutcomeLinkUnsupported is a link that cannot search (501) or does
-	// not serve the route (404, 405): nothing is ever judged.
+	// not serve the route (404, 405): the pass stops and the copy asks
+	// again after a bounded wait (UnsupportedRetryMin..Max); nothing is
+	// judged meanwhile.
 	OutcomeLinkUnsupported = "link_unsupported"
+	// OutcomeFingerprintRefused is a queued fingerprint that is not a
+	// native one (32 lowercase hex digits): it is taken out of its batch,
+	// unasked, and the rest of the batch is sent. Counted per fingerprint.
+	OutcomeFingerprintRefused = "fingerprint_refused"
 	// OutcomeReadFailed is any other failed request: the fingerprints stay
 	// queued and held.
 	OutcomeReadFailed = "read_failed"
@@ -135,7 +152,7 @@ const (
 
 // Outcomes lists every pass outcome.
 var Outcomes = []string{OutcomeRequest, OutcomeLinkBusy, OutcomeLinkUnsupported, OutcomeReadFailed, OutcomeHit, OutcomeMiss,
-	OutcomeForeignItem, OutcomeDropped}
+	OutcomeForeignItem, OutcomeDropped, OutcomeFingerprintRefused}
 
 // Searcher is the link's search (linkdmanage.Client).
 type Searcher interface {
@@ -149,7 +166,8 @@ type Options struct {
 	// every read names it.
 	EventSourceID string
 	Now           func() time.Time
-	// Warn is told once when the link answers that it cannot search.
+	// Warn is told once each time the link starts answering that it cannot
+	// search.
 	Warn func(error)
 }
 
@@ -191,8 +209,12 @@ type Copy struct {
 	queued  map[member]struct{}
 	tracked map[StrategyKey]time.Time
 	batch   int
-	// unsupported is set once the link answers it cannot search.
+	// unsupported is set while the link answers it cannot search: from its
+	// first such answer to the next search it answers. retryAt is when the
+	// copy asks again, retryWait the wait that set it.
 	unsupported bool
+	retryAt     time.Time
+	retryWait   time.Duration
 	answers     map[Answer]uint64
 	outcomes    map[string]uint64
 }
@@ -336,6 +358,9 @@ func (c *Copy) lookup(m member, now time.Time) (Answer, bool) {
 	if !c.queue(m) {
 		return AnswerFull, false
 	}
+	if c.unsupported {
+		return AnswerLinkUnsupported, false
+	}
 	return AnswerUnknown, false
 }
 
@@ -447,7 +472,7 @@ func (c *Copy) Pass(ctx context.Context) {
 	now := c.options.Now()
 	c.mu.Lock()
 	c.pruneLocked(now)
-	if c.unsupported {
+	if c.unsupported && now.Before(c.retryAt) {
 		c.mu.Unlock()
 		return
 	}
@@ -478,12 +503,35 @@ func (c *Copy) Pass(ctx context.Context) {
 	}
 }
 
-// ask sends one batch; false stops the pass.
+// ask sends one batch; false stops the pass. A fingerprint the read
+// cannot name is taken out of the batch and counted, so it never holds up
+// the rest.
 func (c *Copy) ask(ctx context.Context, tenant string, batch []member) bool {
+	asked := make([]member, 0, len(batch))
 	fingerprints := make([]string, 0, len(batch))
+	refused := 0
 	for _, m := range batch {
+		if !nativeFingerprint(m.fingerprint) {
+			refused++
+			continue
+		}
+		asked = append(asked, m)
 		fingerprints = append(fingerprints, m.fingerprint)
 	}
+	if refused > 0 {
+		c.mu.Lock()
+		for _, m := range batch {
+			if !nativeFingerprint(m.fingerprint) {
+				delete(c.queued, m)
+			}
+		}
+		c.outcomes[OutcomeFingerprintRefused] += uint64(refused)
+		c.mu.Unlock()
+	}
+	if len(asked) == 0 {
+		return true
+	}
+	batch = asked
 	query, err := ReadQuery(c.options.EventSourceID, fingerprints)
 	if err != nil {
 		c.count(OutcomeReadFailed, 1)
@@ -530,6 +578,7 @@ func (c *Copy) ask(ctx context.Context, tenant string, batch []member) bool {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.unsupported, c.retryAt, c.retryWait = false, time.Time{}, 0
 	if c.batch < BatchSize {
 		c.batch = min(BatchSize, c.batch*2)
 	}
@@ -568,6 +617,8 @@ func (c *Copy) failed(err error) bool {
 		c.mu.Lock()
 		first := !c.unsupported
 		c.unsupported = true
+		c.retryWait = min(UnsupportedRetryMax, max(UnsupportedRetryMin, c.retryWait*2))
+		c.retryAt = c.options.Now().Add(c.retryWait)
 		c.mu.Unlock()
 		if first && c.options.Warn != nil {
 			c.options.Warn(err)
@@ -612,7 +663,8 @@ type Stats struct {
 	Outcomes map[string]uint64
 	Known    int
 	Queued   int
-	// Unsupported is a link that answered it cannot search.
+	// Unsupported is a link that answers it cannot search, until it answers
+	// a search again.
 	Unsupported bool
 }
 

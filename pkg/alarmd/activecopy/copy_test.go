@@ -221,7 +221,10 @@ func TestBusyOrFailedReadHoldsAndCounts(t *testing.T) {
 	}
 }
 
-func TestUnsupportedLinkIsCountedAndWarnedOnce(t *testing.T) {
+// A link that answers it cannot search is asked again after a bounded,
+// doubling wait, never given up on; the gate holds meanwhile under its own
+// answer, and the copy is warned once an episode.
+func TestUnsupportedLinkIsRetriedOnABoundedBackoff(t *testing.T) {
 	link := newFakeSearch(t)
 	clk := &clock{at: time.Unix(1_800_000_000, 0)}
 	warned := 0
@@ -229,12 +232,93 @@ func TestUnsupportedLinkIsCountedAndWarnedOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	link.open("t", "1", fp(1))
+	unsupported := &linkdmanage.StatusError{Route: "search", Status: 404}
+	link.errs = []error{unsupported, unsupported, unsupported, unsupported, unsupported, unsupported}
 	c.Contains("t", "1", fp(1))
-	link.errs = []error{&linkdmanage.StatusError{Route: "search", Status: 501}}
+	first := clk.at
 	c.Pass(context.Background())
-	c.Pass(context.Background())
-	if len(link.queries) != 1 || warned != 1 || c.Stats().Outcomes[OutcomeLinkUnsupported] != 1 || !c.Stats().Unsupported {
+	if len(link.queries) != 1 || warned != 1 || !c.Stats().Unsupported {
 		t.Fatalf("queries %d, warned %d, stats %+v", len(link.queries), warned, c.Stats())
+	}
+	// Held, under its own answer, and not asked before the wait ends.
+	if c.Contains("t", "1", fp(1)) || c.Stats().Answers[AnswerLinkUnsupported] != 1 {
+		t.Fatalf("gate while unsupported: %+v", c.Stats().Answers)
+	}
+	clk.at = clk.at.Add(UnsupportedRetryMin - time.Second)
+	c.Pass(context.Background())
+	if len(link.queries) != 1 {
+		t.Fatalf("asked again before the wait: %d", len(link.queries))
+	}
+	// The wait doubles while the link keeps answering so, up to its bound.
+	waits := []time.Duration{}
+	last := first
+	for asked, tick := 1, 0; asked < 6; tick++ {
+		if tick > 3600 {
+			t.Fatalf("not asked again within an hour: waits %v", waits)
+		}
+		clk.at = clk.at.Add(time.Second)
+		c.Pass(context.Background())
+		if len(link.queries) > asked {
+			asked = len(link.queries)
+			waits = append(waits, clk.at.Sub(last))
+			last = clk.at
+		}
+	}
+	want := []time.Duration{UnsupportedRetryMin, 2 * UnsupportedRetryMin, 4 * UnsupportedRetryMin, 8 * UnsupportedRetryMin, UnsupportedRetryMax}
+	for i, wait := range waits {
+		if wait != want[i] {
+			t.Fatalf("waits %v, want %v", waits, want)
+		}
+	}
+	if warned != 1 || c.Stats().Outcomes[OutcomeLinkUnsupported] != 6 {
+		t.Fatalf("warned %d, stats %+v", warned, c.Stats())
+	}
+	// The link serves its search again: the next retry answers, the episode
+	// ends, and a later 501 is a new episode, warned again.
+	clk.at = clk.at.Add(UnsupportedRetryMax)
+	c.Pass(context.Background())
+	if !c.Contains("t", "1", fp(1)) || c.Stats().Unsupported {
+		t.Fatalf("after the link came back: %+v", c.Stats())
+	}
+	link.errs = []error{&linkdmanage.StatusError{Route: "search", Status: 501}}
+	c.Holds("t", "1", fp(2))
+	c.Pass(context.Background())
+	if warned != 2 || !c.Stats().Unsupported {
+		t.Fatalf("second episode: warned %d, stats %+v", warned, c.Stats())
+	}
+	clk.at = clk.at.Add(UnsupportedRetryMin)
+	c.Pass(context.Background())
+	if c.Stats().Unsupported {
+		t.Fatal("the second episode started from the long wait")
+	}
+}
+
+// A fingerprint the read cannot name is taken out of its batch and
+// counted; the rest of the batch is asked in the same pass.
+func TestANonNativeFingerprintDoesNotHoldUpItsBatch(t *testing.T) {
+	link := newFakeSearch(t)
+	clk := &clock{at: time.Unix(1_800_000_000, 0)}
+	c := newCopy(t, link, clk)
+	link.open("t", "1", fp(1))
+	c.Contains("t", "1", fp(1))
+	c.Contains("t", "1", "not-a-native-fingerprint")
+	c.Contains("t", "1", "0123456789ABCDEF0123456789ABCDEF")
+	c.Pass(context.Background())
+	stats := c.Stats()
+	if len(link.queries) != 1 || !c.Contains("t", "1", fp(1)) || stats.Outcomes[OutcomeFingerprintRefused] != 2 ||
+		stats.Outcomes[OutcomeReadFailed] != 0 || stats.Queued != 0 {
+		t.Fatalf("queries %d, stats %+v", len(link.queries), stats)
+	}
+	wanted := link.queries[0]["bool"].(map[string]any)["filter"].([]any)[2].(map[string]any)["terms"].(map[string]any)["fingerprint"].([]any)
+	if len(wanted) != 1 || wanted[0] != fp(1) {
+		t.Fatalf("asked %v", wanted)
+	}
+	// A batch of nothing but refused fingerprints sends nothing.
+	c.Contains("t", "1", "still-not-native")
+	c.Pass(context.Background())
+	if len(link.queries) != 1 || c.Stats().Outcomes[OutcomeFingerprintRefused] != 3 {
+		t.Fatalf("queries %d, stats %+v", len(link.queries), c.Stats())
 	}
 }
 

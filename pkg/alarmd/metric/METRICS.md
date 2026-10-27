@@ -123,19 +123,19 @@ What the copy holds: known (fingerprints with a word) and queued (waiting for a 
 
 ## alarmd_active_copy_link_unsupported
 
-1 once the link answered that it cannot search (501, 404 or 405): filtered close unsupported.
+1 while the link answers that it cannot search (501, 404 or 405), until a search is answered again.
 
 ## alarmd_active_copy_lookup_total
 
 Labels: `answer`
 
-The recovery gate's and the no-data end's lookups by how the copy answered: own_sent (this process's acknowledged ABNORMAL), search_hit (an active alert the link's search found within 5 minutes), search_miss (two misses at least 2 minutes apart, within an hour), young_miss (one run of misses shorter than that: held, not judged), unknown (no current word: queued for the next pass, held meanwhile), full (unknown and not queued, the copy at its bound).
+The recovery gate's and the no-data end's lookups by how the copy answered: own_sent (this process's acknowledged ABNORMAL), search_hit (an active alert the link's search found within 5 minutes), search_miss (two misses at least 2 minutes apart, within an hour), young_miss (one run of misses shorter than that: held, not judged), unknown (no current word: queued for the next pass, held meanwhile), full (unknown and not queued, the copy at its bound), link_unsupported (unknown while the link answers it cannot search: queued for the retry, held meanwhile).
 
 ## alarmd_active_copy_pass_total
 
 Labels: `outcome`
 
-The refresh passes' requests and results: request (a search of at most 500 fingerprints, tenant + event source + status active, across strategies), link_busy (429: the pass stopped, the fingerprints stay queued and held), link_unsupported (501/404/405: nothing is ever judged; warned once), read_failed (any other failure: held), hit and miss (fingerprints answered), foreign_item (an item that is not an active alert of a queued fingerprint, this source and its strategy), dropped (forgotten when a strategy came back after 10 minutes untracked).
+The refresh passes' requests and results: request (a search of at most 500 fingerprints, tenant + event source + status active, across strategies), link_busy (429: the pass stopped, the fingerprints stay queued and held), link_unsupported (501/404/405: the pass stopped, asked again after 1 minute doubling to 10 while it lasts; warned once an episode), fingerprint_refused (a queued fingerprint that is not native, taken out of its batch unasked; per fingerprint), read_failed (any other failure: held), hit and miss (fingerprints answered), foreign_item (an item that is not an active alert of a queued fingerprint, this source and its strategy), dropped (forgotten when a strategy came back after 10 minutes untracked).
 
 ## alarmd_active_qg_set_object_bytes
 

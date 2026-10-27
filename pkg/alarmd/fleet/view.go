@@ -2617,9 +2617,10 @@ type DegradationKind string
 
 const (
 	// DegradationActiveCopyUnsupported: the link answered that it cannot
-	// search or close by filter (501, or 404/405 from a link older than the
-	// routes). The replica's copy is never refreshed - every RECOVERY it did
-	// not send the ABNORMAL of is held - and no close is made at the link.
+	// search (501, or 404/405 from a link older than the routes). While it
+	// lasts the replica's copy is not refreshed - every RECOVERY it did not
+	// send the ABNORMAL of is held, counted link_unsupported - and the copy
+	// asks again on a bounded backoff; it clears on the next answered search.
 	DegradationActiveCopyUnsupported DegradationKind = "ACTIVE_COPY_UNSUPPORTED"
 	// DegradationControlSourceStale: no refresh round of the control plane's
 	// strategy source has succeeded for longer than the staleness bound. The

@@ -1176,7 +1176,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// failure.
 		{"GROUPS WINDOW ::", "保护未解除（最初触发 CONFIG_DRIFT） · 1 个对象 · 正在恢复（窗口内没有新失败；轮次在结束或只是迟到，结果还没补齐） · 首次 17:00:00 · 最近一轮 17:59:30 · 本进程没见过这些对象成功完成 · 1 条策略 · 1 个业务"},
 		{"BASIS CUTOVER ::", "最近一次激活失败：alarmd controlplane: schedule activation conflict（副本 abcde）。伴随证据：segment_content_freshness_total{stale}"},
-		{"GROUPS DEGRADED ::", "ACTIVE_COPY_UNSUPPORTED（linkd 回答不支持检索与按条件关闭（501）：本副本的活动告警副本不再刷新，恢复门只放行本副本自己发过异常的告警，告警关闭都不做） · 副本 fghij，没有可列的对象"},
+		{"GROUPS DEGRADED ::", "ACTIVE_COPY_UNSUPPORTED（linkd 回答不支持检索（501/404/405）：期间本副本的活动告警副本不刷新，恢复门只放行本副本自己发过异常的告警（其余计入 link_unsupported 并暂缓），按退避（1 分钟起、最长 10 分钟）重试，检索恢复即解除） · 副本 fghij，没有可列的对象"},
 		{"GROUPS DEGRADED ::", "CONTROL_SOURCE_STALE（策略源超过设计允许的时间没有刷新成功，跑的是上一份好的目录——最近一次失败于 validate_catalog：plan retention 60h13m exceeds catalog retention 24h13m） · 副本 abcde，没有可列的对象"},
 		// The failure's own words stay on the expanded group; the first
 		// screen says which replica, for how long and how many tries.

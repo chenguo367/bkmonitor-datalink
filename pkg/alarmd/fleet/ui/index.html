@@ -898,7 +898,7 @@ var DEGRADATION = {
   ACTIVATION_BEHIND: '控制面变更没有生效：源发布了新内容，激活跟不上去，舰队在执行旧发布',
   CONTROL_SOURCE_STALE: '策略源超过设计允许的时间没有刷新成功，跑的是上一份好的目录',
   CONTROL_LEADER_ABSENT: '副本拿不到控制面 leader 租约、也不知道谁持有，超过设计允许的时间——可能没人在刷新',
-  ACTIVE_COPY_UNSUPPORTED: 'linkd 回答不支持检索与按条件关闭（501）：本副本的活动告警副本不再刷新，恢复门只放行本副本自己发过异常的告警，告警关闭都不做',
+  ACTIVE_COPY_UNSUPPORTED: 'linkd 回答不支持检索（501/404/405）：期间本副本的活动告警副本不刷新，恢复门只放行本副本自己发过异常的告警（其余计入 link_unsupported 并暂缓），按退避（1 分钟起、最长 10 分钟）重试，检索恢复即解除',
   PLATFORM_SETTINGS_STALE: '平台设置的副本超过设计允许的时间没拿到平台的发布，检测在用可能已变的设置',
   OUTPUT_NOT_READY: '副本连不上告警输出：进程活着但不就绪，不接检测任务，由其余副本顶着——少一个副本的容量',
   VIEW_PUBLISH_FAILING: 'leader 超过一分钟发不出视图：已有视图的副本照常检测，这期间重启的副本没有视图、什么都不执行；原因见说明',
