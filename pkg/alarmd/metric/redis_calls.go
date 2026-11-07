@@ -258,7 +258,8 @@ func newRedisCallMetrics() redisCallMetrics {
 			"diagnostic_read, cost_projection; on the source and runtime clients (one client when the deployment " +
 			"points both at one Redis) strategy_source, legacy_effective_time, control_plane, ownership, runtime_state, " +
 			"query_cooldown, fleet, linkd; cmdb_cache, target_group and dynamic_config on whichever client they share; " +
-			"store_census on the source and runtime clients.",
+			"store_census on the source and runtime clients; legacy_output and legacy_pod_cache on the clients of " +
+			"those names.",
 	}, []string{"client", "caller"})
 	callerReasons := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: metricSubsystem, Name: "redis_caller_failure_reason_total",
@@ -294,7 +295,8 @@ func newRedisCallMetrics() redisCallMetrics {
 			Subsystem: metricSubsystem, Name: "redis_caller_duration_seconds",
 			Help: "Redis round-trip duration by the job that made the call, one per call or pipeline batch, " +
 				"including the wait for a connection. caller is a name of redis_caller_operation_total, other for a " +
-				"name outside that list, or unnamed for a call whose context names no job, so the count of a client " +
+				"name outside that list, or unnamed for a call whose context names no job, which is a ping and nothing " +
+				"else, so the count of a client " +
 				"sums to its redis_operation_total. Clients without the Redis hook are not read: the CLI's and the " +
 				"instance registration's, and the lifecycle record's, so a zero there is not an absence of calls.",
 			Buckets: redisDurationBuckets,

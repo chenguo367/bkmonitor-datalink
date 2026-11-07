@@ -704,7 +704,7 @@ func openProductionPhaseTwoBundleAssembly(
 		legacyClients = append(legacyClients, serviceRedis)
 		compatOutputClient = serviceRedis
 		converter := &legacyoutput.Converter{
-			Store:          legacyoutput.RedisSnapshotStore{Client: serviceRedis},
+			Store:          legacyoutput.RedisSnapshotStore{Client: redisForCaller(serviceRedis, redisfailure.CallerLegacyOutput)},
 			SnapshotPrefix: cfg.Kafka.LegacyAdapter.SnapshotPrefix,
 			Now:            external.Now,
 			PluginID:       cfg.Kafka.LegacyAdapter.PluginID,
@@ -714,7 +714,7 @@ func openProductionPhaseTwoBundleAssembly(
 			podClient := redis.NewUniversalClient(productionRedisOptions(podConfig.Connection))
 			podClient.AddHook(recorder.RedisHook("legacy_pod_cache"))
 			legacyClients = append(legacyClients, podClient)
-			resolver, err := legacyoutput.NewDjangoPodResolver(podClient, legacyoutput.PodCacheConfig{KeyPrefix: podConfig.KeyPrefix, Version: podConfig.Version, Observe: recorder.RecordLegacyPodCache, OnFallback: func(reason string) {
+			resolver, err := legacyoutput.NewDjangoPodResolver(redisForCaller(podClient, redisfailure.CallerLegacyPodCache), legacyoutput.PodCacheConfig{KeyPrefix: podConfig.KeyPrefix, Version: podConfig.Version, Observe: recorder.RecordLegacyPodCache, OnFallback: func(reason string) {
 				observer.Observe(context.Background(), observability.Observation{Component: observability.ComponentRuntime, Stage: observability.StageLegacyPodCache, Result: observability.ResultDegraded, Err: fmt.Errorf("legacy Pod cache fallback: %s", reason)})
 			}})
 			if err != nil {

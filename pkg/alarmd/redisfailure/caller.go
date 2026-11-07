@@ -61,12 +61,18 @@ const (
 	// CallerStoreCensus is the census of what the stores hold by key family
 	// (package storecensus): the Control Leader's, every ten minutes.
 	CallerStoreCensus = "store_census"
+	// CallerLegacyOutput is the strategy snapshots the compatibility output
+	// writes on the service Redis.
+	CallerLegacyOutput = "legacy_output"
+	// CallerLegacyPodCache is the Pod facts it reads from the Django cache.
+	CallerLegacyPodCache = "legacy_pod_cache"
 )
 
 // Callers is every caller name, for callers that must enumerate them.
 var Callers = []string{CallerDirectoryRead, CallerDiagnosticWrite, CallerDiagnosticRead, CallerCostProjection,
 	CallerStrategySource, CallerLegacyEffectiveTime, CallerControlPlane, CallerOwnership, CallerRuntimeState, CallerQueryCooldown,
-	CallerFleet, CallerCMDBCache, CallerTargetGroup, CallerDynamicConfig, CallerLinkd, CallerStoreCensus}
+	CallerFleet, CallerCMDBCache, CallerTargetGroup, CallerDynamicConfig, CallerLinkd, CallerStoreCensus,
+	CallerLegacyOutput, CallerLegacyPodCache}
 
 type callerKey struct{}
 

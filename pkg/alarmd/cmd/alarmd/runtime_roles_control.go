@@ -159,13 +159,13 @@ func openProductionControlRoleBundle(
 		return nil, fmt.Errorf("open kafka.legacy_adapter.service_redis: %w", err)
 	}
 	ownedClients = append(ownedClients, serviceClient)
-	converter := &legacyoutput.Converter{Store: legacyoutput.RedisSnapshotStore{Client: serviceClient},
+	converter := &legacyoutput.Converter{Store: legacyoutput.RedisSnapshotStore{Client: redisForCaller(serviceClient, redisfailure.CallerLegacyOutput)},
 		SnapshotPrefix: cfg.Kafka.LegacyAdapter.SnapshotPrefix, Now: external.Now, PluginID: cfg.Kafka.LegacyAdapter.PluginID}
 	if podConfig := cfg.Kafka.LegacyAdapter.PodCache; podConfig != nil {
 		podClient := redis.NewUniversalClient(productionRedisOptions(podConfig.Connection))
 		podClient.AddHook(recorder.RedisHook("legacy_pod_cache"))
 		ownedClients = append(ownedClients, podClient)
-		resolver, err := legacyoutput.NewDjangoPodResolver(podClient, legacyoutput.PodCacheConfig{
+		resolver, err := legacyoutput.NewDjangoPodResolver(redisForCaller(podClient, redisfailure.CallerLegacyPodCache), legacyoutput.PodCacheConfig{
 			KeyPrefix: podConfig.KeyPrefix, Version: podConfig.Version, Observe: recorder.RecordLegacyPodCache,
 		})
 		if err != nil {
