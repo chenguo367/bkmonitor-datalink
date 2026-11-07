@@ -66,13 +66,17 @@ const (
 	CallerLegacyOutput = "legacy_output"
 	// CallerLegacyPodCache is the Pod facts it reads from the Django cache.
 	CallerLegacyPodCache = "legacy_pod_cache"
+	// CallerEffectiveMaintenance is a Query Group's effective-time maintenance
+	// run: its fence checks and whatever else it asks Redis, beside the
+	// owner's detection rounds rather than counted with them.
+	CallerEffectiveMaintenance = "effective_maintenance"
 )
 
 // Callers is every caller name, for callers that must enumerate them.
 var Callers = []string{CallerDirectoryRead, CallerDiagnosticWrite, CallerDiagnosticRead, CallerCostProjection,
 	CallerStrategySource, CallerLegacyEffectiveTime, CallerControlPlane, CallerOwnership, CallerRuntimeState, CallerQueryCooldown,
 	CallerFleet, CallerCMDBCache, CallerTargetGroup, CallerDynamicConfig, CallerLinkd, CallerStoreCensus,
-	CallerLegacyOutput, CallerLegacyPodCache}
+	CallerLegacyOutput, CallerLegacyPodCache, CallerEffectiveMaintenance}
 
 type callerKey struct{}
 

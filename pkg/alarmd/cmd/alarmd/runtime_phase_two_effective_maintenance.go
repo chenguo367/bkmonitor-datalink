@@ -20,6 +20,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/filterclose"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategycache"
@@ -28,6 +29,9 @@ import (
 // Maintenance uses the existing per-QG flight and lease, not a second owner or
 // an outbox. It never waits behind detection, and close batches stay small.
 func (runtime *productionPhaseTwoQueryGroup) withMaintenance(ctx context.Context, run func(context.Context, func(context.Context) error) error) error {
+	// Named so its fence checks read apart from the detection rounds': a run
+	// opens with one, and closes check again before they write.
+	ctx = redisfailure.WithCaller(ctx, redisfailure.CallerEffectiveMaintenance)
 	// Loading external facts never occupies a detection flight. Only the
 	// bounded close write needs exclusion from this owner's in-flight Slot.
 	var release func()
