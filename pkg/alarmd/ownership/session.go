@@ -79,7 +79,12 @@ func (session *Session) ValidateCurrent(ctx context.Context, at time.Time) (exec
 		return execution.OwnerFence{}, err
 	}
 	if err := session.store.CheckFence(ctx, lease.Fence); err != nil {
-		session.stopAccepting()
+		// As ValidateCurrentWithAssignment: only the store's answer about the
+		// fence ends admission. Failing to reach it keeps the lease it may still
+		// hold, and this attempt is refused all the same.
+		if IsLeaseDecision(err) {
+			session.stopAccepting()
+		}
 		return execution.OwnerFence{}, err
 	}
 	return lease.Fence, nil
