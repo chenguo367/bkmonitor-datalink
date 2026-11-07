@@ -203,8 +203,7 @@ type redisCallMetrics struct {
 	callerDuration *prometheus.HistogramVec
 	// scriptCalls and scriptDuration read a script by its name: the command
 	// families can only say eval and evalsha, which is every script at once.
-	// A batch's time goes to the script it carries, never to the SCRIPT LOAD
-	// in front of it, so the reading does not move when the load goes away.
+	// A batch's time goes to the script it carries.
 	scriptCalls    *prometheus.CounterVec
 	scriptDuration *prometheus.HistogramVec
 	// bytes and scriptBytes are what the commands cost on the wire
@@ -282,8 +281,7 @@ func newRedisCallMetrics() redisCallMetrics {
 		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Subsystem: metricSubsystem, Name: "redis_command_duration_seconds",
 			Help: "Redis round-trip duration. A pipelined batch is recorded once for the whole batch, under the " +
-				"command of its first member: a batch that starts with SCRIPT LOAD reads as command=\"script\" " +
-				"however many scripts follow. redis_script_duration_seconds reads a batch by the script it carries.",
+				"command of its first member. redis_script_duration_seconds reads a batch by the script it carries.",
 			Buckets: redisDurationBuckets,
 		}, labels),
 		failures: prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -313,8 +311,7 @@ func newRedisCallMetrics() redisCallMetrics {
 		scriptDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Subsystem: metricSubsystem, Name: "redis_script_duration_seconds",
 			Help: "Redis round-trip duration by script, including the wait for a connection. A pipelined batch is " +
-				"recorded once for the whole batch, under its first eval or evalsha member; a SCRIPT LOAD in front " +
-				"of it is not what the batch is recorded under.",
+				"recorded once for the whole batch, under its first eval or evalsha member.",
 			Buckets: redisDurationBuckets,
 		}, []string{"script", "pipelined"}),
 		bytes: prometheus.NewCounterVec(prometheus.CounterOpts{

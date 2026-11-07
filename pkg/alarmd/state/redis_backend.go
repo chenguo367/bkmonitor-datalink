@@ -570,13 +570,6 @@ func (backend *RedisBackend) evalFencedChunks(
 	ctx context.Context, guard *FenceGuard, writes []FencedWrite, chunks []fencedChunk, byDigest bool,
 ) ([]redis.Cmder, error) {
 	cmds, err := backend.client.Pipelined(ctx, func(pipeline redis.Pipeliner) error {
-		if byDigest {
-			// Caching the script in the same round trip that uses it puts the
-			// text on the wire once per call and costs no extra round trip on
-			// a server that has never seen it. Pipelined commands run in
-			// order, so the calls below find it.
-			pipeline.ScriptLoad(ctx, fencedBatchWriteScript)
-		}
 		for _, chunk := range chunks {
 			keys, args := fencedScriptArguments(guard, writes[chunk.start:chunk.end])
 			if byDigest {
@@ -589,11 +582,6 @@ func (backend *RedisBackend) evalFencedChunks(
 	})
 	if err != nil && !isRedisReplyError(err) {
 		return nil, err
-	}
-	if byDigest && len(cmds) > 0 {
-		// Drop the reply of the caching command, which is not one of the
-		// scripts.
-		cmds = cmds[1:]
 	}
 	return cmds, nil
 }

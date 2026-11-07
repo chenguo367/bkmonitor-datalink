@@ -137,8 +137,7 @@ func scriptMetricsClient(t *testing.T, server *redistest.Instance, recorder *met
 }
 
 // A batch of State writes is the script it carries, once, whatever is in front
-// of it; the family that names commands keeps saying "script" until the load
-// goes away, and this reading does not move when it does.
+// of it; the family that names commands reads it as its first member, evalsha.
 func TestAStateBatchReadsUnderItsScriptAndItsCaller(t *testing.T) {
 	server := redistest.Start(t)
 	if server == nil {
@@ -149,6 +148,20 @@ func TestAStateBatchReadsUnderItsScriptAndItsCaller(t *testing.T) {
 	client := scriptMetricsClient(t, server, recorder)
 	backend, err := state.NewRedisBackendWithClient(server.Addr, redisForCaller(client, redisfailure.CallerRuntimeState))
 	if err != nil {
+		t.Fatal(err)
+	}
+	// A server holding the script, as it does but for the first batch after a
+	// restart: the batch goes by digest alone, by a client the reading does not
+	// count having left the script there.
+	unread := redis.NewClient(&redis.Options{Addr: server.Addr, MaxRetries: -1})
+	t.Cleanup(func() { _ = unread.Close() })
+	seeding, err := state.NewRedisBackendWithClient(server.Addr, unread)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seeding.CompareAndSetManyByDigest(context.Background(), nil, []state.FencedWrite{
+		{Key: "seed", ExpectedMissing: true, Value: []byte("value"), TTL: time.Minute},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	outcomes, err := backend.CompareAndSetManyByDigest(context.Background(), nil, []state.FencedWrite{
@@ -162,7 +175,7 @@ func TestAStateBatchReadsUnderItsScriptAndItsCaller(t *testing.T) {
 	for _, test := range []struct {
 		command string
 		want    float64
-	}{{"load", 1}, {"evalsha", 1}, {"eval", 0}} {
+	}{{"load", 0}, {"evalsha", 1}, {"eval", 0}} {
 		if got := reading.counter("alarmd_redis_script_total", map[string]string{"script": script, "command": test.command, "pipelined": "true", "outcome": "ok"}); got != test.want {
 			t.Errorf("%s = %v, want %v", test.command, got, test.want)
 		}
@@ -170,8 +183,8 @@ func TestAStateBatchReadsUnderItsScriptAndItsCaller(t *testing.T) {
 	if got := reading.observations("alarmd_redis_script_duration_seconds", map[string]string{"script": script, "pipelined": "true"}); got != 1 {
 		t.Errorf("the batch recorded %v times under its script", got)
 	}
-	if got := reading.observations("alarmd_redis_command_duration_seconds", map[string]string{"command": "script", "pipelined": "true"}); got != 1 {
-		t.Errorf("the command family reads the batch %v times under script", got)
+	if got := reading.observations("alarmd_redis_command_duration_seconds", map[string]string{"command": "evalsha", "pipelined": "true"}); got != 1 {
+		t.Errorf("the command family reads the batch %v times under evalsha", got)
 	}
 	if got := reading.observations("alarmd_redis_caller_duration_seconds", map[string]string{"caller": redisfailure.CallerRuntimeState, "pipelined": "true"}); got != 1 {
 		t.Errorf("the caller's batch recorded %v times", got)

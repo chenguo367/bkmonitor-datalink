@@ -1673,7 +1673,7 @@ Redis operations issued by a named job on a client, one per call or pipeline bat
 
 Labels: `client`, `command`, `pipelined`
 
-Redis round-trip duration. A pipelined batch is recorded once for the whole batch, under the command of its first member: a batch that starts with SCRIPT LOAD reads as command="script" however many scripts follow. redis_script_duration_seconds reads a batch by the script it carries.
+Redis round-trip duration. A pipelined batch is recorded once for the whole batch, under the command of its first member. redis_script_duration_seconds reads a batch by the script it carries.
 
 ## alarmd_redis_command_failure_total
 
@@ -1727,7 +1727,7 @@ RESP bytes of the script commands the server answered, by script and direction, 
 
 Labels: `script`, `pipelined`
 
-Redis round-trip duration by script, including the wait for a connection. A pipelined batch is recorded once for the whole batch, under its first eval or evalsha member; a SCRIPT LOAD in front of it is not what the batch is recorded under.
+Redis round-trip duration by script, including the wait for a connection. A pipelined batch is recorded once for the whole batch, under its first eval or evalsha member.
 
 ## alarmd_redis_script_total
 

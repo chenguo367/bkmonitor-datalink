@@ -265,19 +265,10 @@ func TestMeasureFencedBatchScriptTime(t *testing.T) {
 	}
 }
 
-// scriptlessPipeliner stands in for a server that dropped the script between
-// the pipeline caching it and the calls using it: the caching command is
-// replaced by one that caches nothing, keeping its place in the replies.
-type scriptlessPipeliner struct{ redis.Pipeliner }
-
-func (pipe scriptlessPipeliner) ScriptLoad(ctx context.Context, _ string) *redis.StringCmd {
-	return pipe.Pipeliner.Echo(ctx, "not cached")
-}
-
-type scriptlessClient struct{ *countingRedisClient }
-
-func (client scriptlessClient) Pipelined(ctx context.Context, fn func(redis.Pipeliner) error) ([]redis.Cmder, error) {
-	return client.countingRedisClient.Pipelined(ctx, func(pipe redis.Pipeliner) error { return fn(scriptlessPipeliner{pipe}) })
+// scriptLoadCalls is SCRIPT LOAD in INFO commandstats, which Redis 7 names by its
+// subcommand and Redis 5 does not.
+func scriptLoadCalls(calls map[string]int) int {
+	return calls["script|load"] + calls["script"]
 }
 
 // A script the server does not hold is answered NOSCRIPT and never ran, so
@@ -289,7 +280,7 @@ func TestAFencedBatchTheServerHadNoScriptForIsSentAgainWithItsText(t *testing.T)
 	if err := fixture.client.ScriptFlush(ctx).Err(); err != nil {
 		t.Fatal(err)
 	}
-	backend := &RedisBackend{address: fixture.address, client: scriptlessClient{fixture.client}}
+	backend := fixture.backend
 	guard := &FenceGuard{Keys: fixture.owners.FenceKeys(frozenRef().Slot.QueryGroup), OwnerID: fixture.fence.OwnerID,
 		OwnerEpoch: fixture.fence.OwnerEpoch, LeaseToken: fixture.fence.LeaseToken}
 	writes := fencedWritesForTest("noscript", fencedScriptItems+3, 16)
@@ -306,7 +297,40 @@ func TestAFencedBatchTheServerHadNoScriptForIsSentAgainWithItsText(t *testing.T)
 		}
 	}
 	calls := serverCommandCalls(t, fixture)
-	if calls["eval"] != 2 || calls["psetex"] != len(writes) {
-		t.Fatalf("server commands %v, want both scripts sent again as EVAL and every write made once", calls)
+	if calls["evalsha"] != 2 || calls["eval"] != 2 || calls["psetex"] != len(writes) {
+		t.Fatalf("server commands %v, want both scripts answered NOSCRIPT, sent again as EVAL and every write made once", calls)
+	}
+	if loads := scriptLoadCalls(calls); loads != 0 {
+		t.Fatalf("server commands %v, want no SCRIPT LOAD: the EVAL leaves the script on the server", calls)
+	}
+}
+
+// A server that holds the script is sent none of its text: only the digest, once
+// per script, with no SCRIPT LOAD on the way. The text was on the wire for every
+// batch when a batch began by loading it, some 8 MB a minute on a real deployment.
+func TestAFencedBatchSendsNoScriptTextToAServerThatHoldsIt(t *testing.T) {
+	fixture := newRedisBatchFixture(t)
+	ctx := context.Background()
+	if err := fixture.client.ScriptLoad(ctx, fencedBatchWriteScript).Err(); err != nil {
+		t.Fatal(err)
+	}
+	guard := &FenceGuard{Keys: fixture.owners.FenceKeys(frozenRef().Slot.QueryGroup), OwnerID: fixture.fence.OwnerID,
+		OwnerEpoch: fixture.fence.OwnerEpoch, LeaseToken: fixture.fence.LeaseToken}
+	writes := fencedWritesForTest("held", fencedScriptItems+3, 16)
+	if err := fixture.client.ConfigResetStat(ctx).Err(); err != nil {
+		t.Fatal(err)
+	}
+	outcomes, err := fixture.backend.CompareAndSetManyByDigest(ctx, guard, writes)
+	if err != nil || len(outcomes) != len(writes) {
+		t.Fatalf("CompareAndSetManyByDigest() = (%d outcomes, %v)", len(outcomes), err)
+	}
+	for index, outcome := range outcomes {
+		if outcome.Err != nil || outcome.Status != FencedWriteApplied {
+			t.Fatalf("write %d: %+v", index, outcome)
+		}
+	}
+	calls := serverCommandCalls(t, fixture)
+	if calls["evalsha"] != 2 || calls["eval"] != 0 || scriptLoadCalls(calls) != 0 || calls["psetex"] != len(writes) {
+		t.Fatalf("server commands %v, want two EVALSHA, no script text, and every write made once", calls)
 	}
 }
