@@ -1106,9 +1106,10 @@ return {'RENEWED', deadline_ms, scope, pending, effective, now_ms, timeline}
 
 // checkFenceScript answers both questions a fenced worker asks before it acts:
 // is this lease still the live one, and which Assignment record names its
-// owner. It had to read desired_worker_id to answer the first anyway, so the
-// second costs it one HMGET where it used to do one HGET -- and saves the
-// caller the separate HGETALL that ReadAssignment would have sent. The two
+// owner. The fence reads the Assignment record once to answer the first, and
+// the fields the record reply needs ride in that same HMGET, so the second
+// costs nothing on the server -- and saves the caller the separate HGETALL
+// that ReadAssignment would have sent. The two
 // facts then describe one instant, which two round trips cannot promise: the
 // Control Leader can publish a new Assignment between them.
 //
@@ -1130,15 +1131,15 @@ local token = ARGV[4]
 local content_scope = ARGV[5] or ''
 local now_ms = redis_now_ms()
 local empty = {'', '', '', '', '', '', '', '', '', ''}
-local refusal = fence_refusal(KEYS[1], KEYS[2], require_assignment, owner_id, epoch, token, content_scope, now_ms)
+local record_fields = {'desired_worker_id', 'assignment_generation',
+  'record_revision', 'control_epoch', 'placement_reason', 'assigned_at_ms',
+  'content_scope', 'pending_content_scope', 'effective_at_ms', 'timeline_record_revision'}
+local refusal, facts = fence_refusal(KEYS[1], KEYS[2], require_assignment, owner_id, epoch, token, content_scope, now_ms, record_fields)
 if refusal then return {refusal, empty[1], empty[2], empty[3], empty[4], empty[5], empty[6], empty[7], empty[8], empty[9], empty[10]} end
 local record = {'', '', '', '', '', '', '', '', '', ''}
 if require_assignment == '1' then
-  local fields = redis.call('HMGET', KEYS[1], 'desired_worker_id', 'assignment_generation',
-    'record_revision', 'control_epoch', 'placement_reason', 'assigned_at_ms',
-    'content_scope', 'pending_content_scope', 'effective_at_ms', 'timeline_record_revision')
-  for index = 1, 10 do
-    if fields[index] then record[index] = fields[index] end
+  for index, name in ipairs(record_fields) do
+    if facts[name] then record[index] = facts[name] end
   end
 end
 return {'VALID', record[1], record[2], record[3], record[4], record[5], record[6], record[7], record[8], record[9], record[10]}
