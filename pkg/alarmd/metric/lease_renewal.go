@@ -36,7 +36,7 @@ func newLeaseRenewals() *prometheus.CounterVec {
 	renewals := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: metricSubsystem, Name: "lease_renewal_total",
 		Help: "Lease renewal attempts by lease (query_group, control_leader, worker_registration), result and reason. " +
-			"One per attempt: a round makes at most three, so failed is not a lost lease, which " +
+			"One per attempt: a round makes at most three, spread over its renew interval, so failed is not a lost lease, which " +
 			"ownership_transition_total{transition=\"assignment_lost\"} reads. renewed has reason none. failed is a " +
 			"store that could not be asked, by the words of redis_failure_reason_total, or other for an error that " +
 			"is none of them. refused is one of the four words of ownership_refusals_total: the store's own answer, " +
