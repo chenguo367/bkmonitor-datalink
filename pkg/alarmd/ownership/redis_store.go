@@ -781,18 +781,28 @@ func (store *RedisStore) FencedCompareAndSet(
 	if err != nil {
 		return "", err
 	}
-	switch result {
-	case string(FencedCASApplied):
-		return FencedCASApplied, nil
-	case string(FencedCASConflict):
-		return FencedCASConflict, nil
-	case string(FencedCASStaleOwner):
-		return FencedCASStaleOwner, ErrStaleFence
-	case string(FencedCASContentMoved):
-		return FencedCASContentMoved, ErrContentScopeMoved
+	switch status := FencedCASStatus(result); status {
+	case FencedCASApplied, FencedCASConflict, FencedCASStaleOwner, FencedCASContentMoved:
+		return status, FencedCASRefusalError(status)
 	default:
 		return "", errors.New("alarmd ownership: invalid fenced CAS response")
 	}
+}
+
+// FencedCASRefusalError is the error a fenced CAS returns beside its status:
+// the ownership word for the fence's two refusals, nil for an applied write
+// and for a conflict. Every caller has to read the status before the error
+// -- an error alone is an IO failure -- and a store that stands in for this
+// one returns the same pair, so a caller that judged the error first is
+// caught by its own tests rather than in production.
+func FencedCASRefusalError(status FencedCASStatus) error {
+	switch status {
+	case FencedCASStaleOwner:
+		return ErrStaleFence
+	case FencedCASContentMoved:
+		return ErrContentScopeMoved
+	}
+	return nil
 }
 
 func (store *RedisStore) ReadControl(

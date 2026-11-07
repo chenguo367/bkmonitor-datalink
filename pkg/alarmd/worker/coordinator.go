@@ -419,6 +419,9 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: invalid Progress BeginSlot result: %w", err)
 	}
 	if begin.Status != execution.ProgressCommitted {
+		if refused := progressBeginRefused(begin.Status); refused != nil {
+			return execution.SlotExecutionResult{}, refused
+		}
 		reason := begin.ReasonCode
 		if reason == "" {
 			reason = execution.ReasonCode(contract.ReasonProgressBeginRejected)
@@ -1862,10 +1865,27 @@ func (coordinator *SlotExecutionCoordinator) commitProgress(
 // owner's -- and wraps the ownership word, so the Slot names it as the
 // handover does; the other statuses keep theirs.
 func progressNotCommitted(status execution.ProgressCommitStatus) error {
-	if status == execution.ProgressStaleOwner {
+	switch status {
+	case execution.ProgressStaleOwner:
 		return fmt.Errorf("progress not committed: %s: %w", status, ownership.ErrStaleFence)
+	case execution.ProgressContentMoved:
+		return fmt.Errorf("progress not committed: %s: %w", status, ownership.ErrContentScopeMoved)
 	}
 	return fmt.Errorf("progress not committed: %s", status)
+}
+
+// progressBeginRefused is the error for a BeginSlot or BeginRange the owner
+// fence refused, nil for every other status. Nothing of the Slot was written,
+// so the Runner reads it as the attempt's ownership rejection rather than as
+// an execution that ran and failed.
+func progressBeginRefused(status execution.ProgressCommitStatus) error {
+	switch status {
+	case execution.ProgressStaleOwner:
+		return &execution.SlotBeginRefusedError{Status: status, Err: ownership.ErrStaleFence}
+	case execution.ProgressContentMoved:
+		return &execution.SlotBeginRefusedError{Status: status, Err: ownership.ErrContentScopeMoved}
+	}
+	return nil
 }
 
 func (coordinator *SlotExecutionCoordinator) admit(

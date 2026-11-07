@@ -39,7 +39,7 @@ func (store *memoryControl) ReadControlBatch(_ context.Context, groups []executi
 func (store *memoryControl) FencedCompareAndSet(_ context.Context, request ownership.FencedCASRequest) (ownership.FencedCASStatus, error) {
 	store.requests = append(store.requests, request)
 	if store.refused != "" {
-		return store.refused, nil
+		return store.refused, ownership.FencedCASRefusalError(store.refused)
 	}
 	current, found := store.values[request.Fence.QueryGroup]
 	if request.ExpectedMissing == found || !bytes.Equal(request.Expected, current) {

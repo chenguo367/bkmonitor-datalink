@@ -1432,8 +1432,10 @@ type recordingPorts struct {
 	eventFailureKind string
 	// outputWrite, when set, is the count the fake sink reports for every
 	// batch, the way the real sink counts what a batch became.
-	outputWrite    *observability.OutputWriteFacts
-	beginErr       error
+	outputWrite *observability.OutputWriteFacts
+	beginErr    error
+	// beginStatus, when set, is the status BeginSlot answers with.
+	beginStatus    execution.ProgressCommitStatus
 	lastBegin      execution.ProgressBeginRequest
 	admissionCalls int
 	contractDrift  bool
@@ -2179,6 +2181,9 @@ func (ports *recordingPorts) BeginSlot(_ context.Context, request execution.Prog
 	ports.lastBegin = request
 	if ports.beginErr != nil {
 		return execution.ProgressBeginResult{}, ports.beginErr
+	}
+	if ports.beginStatus != "" {
+		return execution.ProgressBeginResult{Status: ports.beginStatus}, nil
 	}
 	return execution.ProgressBeginResult{Status: execution.ProgressCommitted}, nil
 }

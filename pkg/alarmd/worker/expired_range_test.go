@@ -3,6 +3,7 @@ package worker_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -20,8 +21,10 @@ type rangeControl struct {
 	raw           []byte
 	failAt, calls int
 	// staleAt is the call the store answers as a stale owner: the Query
-	// Group moved while the Slot ran.
-	staleAt int
+	// Group moved while the Slot ran. movedAt is the call it answers as a
+	// moved content scope. Both come back as the store returns them, the
+	// status with its ownership error beside it.
+	staleAt, movedAt int
 }
 
 func (c *rangeControl) ReadControl(context.Context, execution.QueryGroupIdentity, string) ([]byte, bool, error) {
@@ -30,7 +33,10 @@ func (c *rangeControl) ReadControl(context.Context, execution.QueryGroupIdentity
 func (c *rangeControl) FencedCompareAndSet(_ context.Context, r ownership.FencedCASRequest) (ownership.FencedCASStatus, error) {
 	c.calls++
 	if c.calls == c.staleAt {
-		return ownership.FencedCASStaleOwner, nil
+		return ownership.FencedCASStaleOwner, ownership.FencedCASRefusalError(ownership.FencedCASStaleOwner)
+	}
+	if c.calls == c.movedAt {
+		return ownership.FencedCASContentMoved, ownership.FencedCASRefusalError(ownership.FencedCASContentMoved)
 	}
 	if c.calls == c.failAt || !bytes.Equal(c.raw, r.Expected) {
 		return ownership.FencedCASConflict, nil
@@ -243,6 +249,49 @@ func TestAnExpiredRangeRefusedForAStaleOwnerNamesTheHandover(t *testing.T) {
 	result, err := coordinator.Execute(ctx, request)
 	if refusal, refused := ownership.RefusalReason(err); result.Completed || !refused || refusal != contract.ReasonOwnershipStaleFence {
 		t.Fatalf("result=%+v err=%v, want the range refused carrying %s", result, err, contract.ReasonOwnershipStaleFence)
+	}
+}
+
+// A BeginRange the owner fence refuses wrote nothing of the range, so the
+// attempt comes back as its ownership rejection carrying the fence's word, as
+// a refused BeginSlot does.
+func TestABeginRangeTheFenceRefusesIsTheAttemptsOwnershipRejection(t *testing.T) {
+	for _, refusal := range []struct {
+		name string
+		at   func(*rangeControl)
+		want error
+	}{
+		{"stale owner", func(control *rangeControl) { control.staleAt = control.calls + 1 }, ownership.ErrStaleFence},
+		{"moved scope", func(control *rangeControl) { control.movedAt = control.calls + 1 }, ownership.ErrContentScopeMoved},
+	} {
+		ctx := context.Background()
+		request := workerRangeRequest(t)
+		now := time.UnixMilli(request.ExpiredRange.JudgedAtMillis)
+		activation := activePlanResult("state-v2", 2)
+		activation.Contract = request.Contract
+		fixture := newQueryFreeFixture(t, []execution.PlanActivationResult{activation})
+		control := &rangeControl{}
+		store, err := progress.NewStore(progress.StoreOptions{Prefix: "alarmd", Control: control, Slots: rangeSlots{}, Now: func() time.Time { return now }})
+		if err != nil {
+			t.Fatal(err)
+		}
+		prior := request.ExpiredRange.First.Contract
+		prior.Slot.EvaluationTime -= 60
+		if _, err := store.CommitProgress(ctx, execution.ProgressCommitRequest{Identity: execution.ProgressIdentity{QueryGroup: prior.Slot.QueryGroup}, OwnerFence: request.OwnerFence, ExpectedNextSlot: prior.Slot.EvaluationTime,
+			Completion: execution.SlotCompletion{Contract: prior, Kind: execution.CompletionFullEmpty, Result: observability.ResultSuccess, Primary: &execution.PrimaryInputFact{Completeness: execution.CompletenessFull, DataState: execution.DataStateEmpty}}}); err != nil {
+			t.Fatal(err)
+		}
+		ports := fixture.ports
+		coordinator, err := worker.NewSlotExecutionCoordinator(worker.Ports{OpenAlerts: ports, Finalization: ports, Activation: ports, Query: ports, Sequencer: ports, Evaluator: ports, Admission: ports, GapGuard: ports, NoData: worker.SharedNoDataStore, Hosts: worker.SharedHostBusiness, Events: ports, State: ports, Progress: store, Observer: observability.ObserverFunc(func(context.Context, observability.Observation) {})}, worker.ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxStateMutations: 100, MaxEvents: 100, MaxGapMutations: 10})
+		if err != nil {
+			t.Fatal(err)
+		}
+		refusal.at(control)
+		result, err := coordinator.Execute(ctx, request)
+		var notBegun *execution.SlotBeginRefusedError
+		if result.Completed || !errors.As(err, &notBegun) || !errors.Is(err, refusal.want) {
+			t.Fatalf("%s at BeginRange: result=%+v err=%v, want the attempt refused carrying %v", refusal.name, result, err, refusal.want)
+		}
 	}
 }
 

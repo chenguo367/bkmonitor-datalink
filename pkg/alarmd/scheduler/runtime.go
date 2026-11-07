@@ -1110,6 +1110,16 @@ func (runner *Runner) runOneTracked(
 	}
 	decidesPool, poolResult := runner.queryCooldownDecision(operation, result, busyUntil)
 	if err != nil {
+		// The fence refused the attempt at its first write, so nothing of the
+		// Slot was written: this is the round's ownership rejection, counted
+		// and retried as one rather than as an execution that failed. It is
+		// the answer the Runner's own check before dispatch used to give, by
+		// the same fence, read at the moment of the write.
+		var notBegun *execution.SlotBeginRefusedError
+		if errors.As(err, &notBegun) {
+			decision = "ownership_rejected"
+			return execution.SlotExecutionResult{}, false, err
+		}
 		// The gate is asked again at execution, and a lease that moved
 		// between the source's reads and here is refused by the same name:
 		// not an attempt of this Slot that failed, the round did not run.

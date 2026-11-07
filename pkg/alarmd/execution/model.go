@@ -4156,7 +4156,30 @@ const (
 	ProgressConflict    ProgressCommitStatus = "CONFLICT"
 	ProgressStaleOwner  ProgressCommitStatus = "STALE_OWNER"
 	ProgressRetryableIO ProgressCommitStatus = "RETRYABLE_IO"
+	// ProgressContentMoved is the fence refusing a write whose declared
+	// content scope the assignment record no longer names: the lease is good
+	// and the writer's view is behind. It is not an IO failure, and reading it
+	// as one would retry it on an IO backoff and name it REDIS_UNAVAILABLE.
+	ProgressContentMoved ProgressCommitStatus = "CONTENT_MOVED"
 )
+
+// SlotBeginRefusedError is an attempt the owner fence refused at its first
+// write -- the BeginSlot or BeginRange CAS -- so nothing of the Slot was
+// written. Err is the ownership word the fence answered with (a stale fence
+// or a moved content scope). The Runner reads it as the attempt's ownership
+// rejection, the same answer its own fence check before dispatch gave when it
+// still made one: the fence that refuses here is the same fence, read at the
+// moment of the write.
+type SlotBeginRefusedError struct {
+	Status ProgressCommitStatus
+	Err    error
+}
+
+func (err *SlotBeginRefusedError) Error() string {
+	return fmt.Sprintf("progress not begun: %s: %v", err.Status, err.Err)
+}
+
+func (err *SlotBeginRefusedError) Unwrap() error { return err.Err }
 
 type ScheduleProgress struct {
 	Identity           ProgressIdentity
@@ -4482,7 +4505,7 @@ func (result ProgressCommitResult) Validate() error {
 		return ValidateResultReason(observability.ResultSuccess, result.ReasonCode)
 	case ProgressRetryableIO:
 		return requireReasonClass(result.ReasonCode, contract.ReasonClassRetryable)
-	case ProgressConflict, ProgressStaleOwner:
+	case ProgressConflict, ProgressStaleOwner, ProgressContentMoved:
 		return requireReasonNone(result.ReasonCode)
 	default:
 		return errors.New("alarmd execution: unknown Progress commit status")
