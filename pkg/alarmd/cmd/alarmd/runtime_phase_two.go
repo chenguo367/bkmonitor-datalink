@@ -2271,6 +2271,11 @@ func (dispatcher *phaseTwoRunnerDispatcher) handleResult(
 		if !result.attempted {
 			var outcome observability.Result = observability.ResultFailed
 			reason := observability.ReasonInternalUnknown
+			// An ownership refusal this branch meets is named by its word
+			// rather than left unknown.
+			if refusal, refused := ownership.RefusalReason(result.err); refused {
+				reason = observability.ReasonCode(refusal)
+			}
 			yielded := heldByYield(result.err)
 			switch yielded {
 			case scheduler.FlightHeldBySupplement:

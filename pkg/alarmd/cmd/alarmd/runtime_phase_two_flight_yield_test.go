@@ -11,13 +11,16 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
 
@@ -150,4 +153,16 @@ func TestTheRunningDispatcherRunsATurnedAwayRoundWhenTheHoldEnds(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+// A round that did not run because ownership refused it is named by the
+// refusal's word on its schedule_due line, not left unknown.
+func TestAnUnattemptedRoundRefusedByOwnershipNamesTheRefusal(t *testing.T) {
+	dispatcher, observed, entry := yieldRig(t)
+	dispatcher.handleResult(context.Background(), phaseTwoScheduledResult{scheduled: entry.scheduled, ran: true,
+		err: fmt.Errorf("acquire: %w", ownership.ErrLeaseBusy)}, true)
+	last := (*observed)[len(*observed)-1]
+	if last.Stage != observability.StageScheduleDue || last.ReasonCode != observability.ReasonCode(contract.ReasonOwnershipLeaseBusy) {
+		t.Fatalf("observed %s %s %s, want the round named %s", last.Stage, last.Result, last.ReasonCode, contract.ReasonOwnershipLeaseBusy)
+	}
 }

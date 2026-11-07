@@ -2945,8 +2945,17 @@ func (executor observedProductionSlotExecutor) Execute(
 	// What a Slot turned away as not ready waits for, on its line.
 	var readiness *observability.ReadinessDeferralFacts
 	var notExecutable *scheduler.ViewNotExecutableError
+	var notBegun *execution.SlotBeginRefusedError
 	if err != nil {
-		if errors.As(err, &notExecutable) {
+		if errors.As(err, &notBegun) {
+			// The fence refused the Slot's first write, so nothing of it was
+			// written: the round's ownership answer, by the fence's own word,
+			// not a Slot that ran and failed (A1.2).
+			observedResult = observability.ResultRetrying
+			if refusal, refused := ownership.RefusalReason(err); refused {
+				reason = observability.ReasonCode(refusal)
+			}
+		} else if errors.As(err, &notExecutable) {
 			// The view did not allow the round at execution (decision-016
 			// batch 4b): retrying by name, with the gate's word, not a
 			// failure of this deployment.

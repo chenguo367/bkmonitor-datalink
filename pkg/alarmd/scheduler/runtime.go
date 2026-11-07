@@ -1114,6 +1114,14 @@ func (runner *Runner) runOneTracked(
 		// the same fence, read at the moment of the write.
 		var notBegun *execution.SlotBeginRefusedError
 		if errors.As(err, &notBegun) {
+			// A moved content scope is the lease holding and this view
+			// behind the record: the view gate's answer, retried on its delay
+			// rather than at once, or a view that stays behind would spin a
+			// round per tick on the refusal.
+			if errors.Is(err, ownership.ErrContentScopeMoved) {
+				decision, *refusal = "view_not_executable", err
+				return runner.refuseViewNotExecutable(err), true, nil
+			}
 			decision = "ownership_rejected"
 			return execution.SlotExecutionResult{}, false, err
 		}
