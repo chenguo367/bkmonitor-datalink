@@ -959,6 +959,35 @@ func (coordinator *SlotExecutionCoordinator) admitDuePlans(
 	return nil
 }
 
+// admitDuePlanActivations is admitDuePlans without the owner fence, for the
+// admission before the Progress commit, whose script runs the fence itself.
+func (coordinator *SlotExecutionCoordinator) admitDuePlanActivations(
+	ctx context.Context,
+	request execution.SlotExecutionRequest,
+	duePlans []execution.DuePlan,
+) error {
+	plans := append([]execution.DuePlan(nil), duePlans...)
+	sort.Slice(plans, func(left, right int) bool { return lessPlanIdentity(plans[left].Identity, plans[right].Identity) })
+	for _, plan := range plans {
+		started := time.Now()
+		result, err := coordinator.ports.Admission.CheckActivation(ctx, execution.SideEffectAdmissionRequest{
+			Contract: request.Contract, Plan: plan.Key(), StateApplyEpoch: plan.StateApplyEpoch, OwnerFence: request.OwnerFence,
+		})
+		if err == nil {
+			if validateErr := result.Validate(); validateErr != nil {
+				err = validateErr
+			} else if !result.Admitted {
+				err = fmt.Errorf("admission denied: %s", result.ReasonCode)
+			}
+		}
+		coordinator.observe(ctx, observability.ComponentState, observability.StagePlanActivationChecked, request.Operation, started, "", result.ReasonCode, err)
+		if err != nil {
+			return fmt.Errorf("alarmd worker: side-effect admission: %w", err)
+		}
+	}
+	return nil
+}
+
 func (coordinator *SlotExecutionCoordinator) protectActivatedPlanGaps(
 	ctx context.Context,
 	request execution.SlotExecutionRequest,
@@ -1758,7 +1787,10 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 			guardReason:       guardReasonFor(header.DuePlans, changedSelected, loadedGaps),
 		}
 	}
-	if err := coordinator.admitDuePlans(ctx, request, header.DuePlans); err != nil {
+	// The activation facts are read again before Progress; the owner fence is
+	// not, because the commit's script runs it at the moment of the write
+	// (02 §7.5), and nothing between here and there is a side effect.
+	if err := coordinator.admitDuePlanActivations(ctx, request, header.DuePlans); err != nil {
 		return execution.SlotExecutionResult{}, err
 	}
 

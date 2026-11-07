@@ -216,7 +216,7 @@ var routineStages = map[Stage]bool{
 	StageSlotSourceCompleted: true, StageRunnerCompleted: true, StageGapLoaded: true, StageGapGuardCommitted: true,
 	StageGapGuardProgress: true, StageNoDataDecided: true, StageNoDataMemoryRead: true, StageNoDataMemoryWritten: true,
 	StageNoDataMemoryRenewed: true, StageProgressCommitted: true, StageStatePreflight: true, StageStateAdmission: true,
-	StageStateApplied: true, StageFrozenStateRenewed: true, StageSideEffectAdmission: true, StageFenceChecked: true,
+	StageStateApplied: true, StageFrozenStateRenewed: true, StageSideEffectAdmission: true, StagePlanActivationChecked: true, StageFenceChecked: true,
 	StageEventACKed: true, StageTargetResolved: true,
 	StageLeaseRenewed: true, StageAssignmentAcquired: true, StageAssignmentLost: true,
 	StageTakeoverStarted: true, StageTakeoverCompleted: true,

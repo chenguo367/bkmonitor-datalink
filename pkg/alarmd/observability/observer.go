@@ -215,9 +215,13 @@ const (
 	StageFrozenStateRenewed  = "frozen_state_renewed"
 	StageEvaluationCompleted = "evaluation_completed"
 	StageSideEffectAdmission = "side_effect_admission"
-	StageStateAdmission      = "state_admission"
-	StageGapGuardCommitted   = "gap_guard_committed"
-	StageMutationCompared    = "mutation_compared"
+	// StagePlanActivationChecked is a Plan's activation read on its own,
+	// before the Progress commit: the commit's script runs the owner fence,
+	// so no fence is read here, and the line is not relayed as fence_checked.
+	StagePlanActivationChecked = "plan_activation_checked"
+	StageStateAdmission        = "state_admission"
+	StageGapGuardCommitted     = "gap_guard_committed"
+	StageMutationCompared      = "mutation_compared"
 	// StageWarmingPeak names a replica's hourly line on its state writes to
 	// series still warming their history: the busiest minute and the groups
 	// behind it (WarmingPeak).
@@ -3883,7 +3887,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentControlPlane, StageNoDataSuspended},
 	{ComponentControlPlane, StageControlHandbackWatch},
 	{ComponentRuntime, StageTraceExport},
-	{ComponentState, StageSideEffectAdmission}, {ComponentState, StageGapGuardCommitted},
+	{ComponentState, StageSideEffectAdmission}, {ComponentState, StagePlanActivationChecked}, {ComponentState, StageGapGuardCommitted},
 	{ComponentState, StageMutationCompared}, {ComponentState, StageStateAdmission}, {ComponentState, StageWarmingPeak},
 	{ComponentState, StageStateApplied}, {ComponentState, StageOutputUnapplied},
 	{ComponentOutput, StageEventACKed}, {ComponentOutput, StageNoDataManualCloseChecked},

@@ -2308,6 +2308,7 @@ var closedLabelSetUnresolved = map[string]string{
 	"reason|viewstream/server.go|admit|server.admission.Admit(ctx, hello.WorkerId, hello.StreamToken)":                                                               "PENDING B3",
 	"reason|worker/coordinator.go|Execute|begin.ReasonCode":                                                                                                          "PENDING B6",
 	"reason|worker/coordinator.go|Execute|finalization.ReasonCode":                                                                                                   "PENDING B6",
+	"reason|worker/coordinator.go|admitDuePlanActivations|result.ReasonCode":                                                                                         "PENDING B6",
 	"reason|worker/coordinator.go|admitPlan|result.ReasonCode":                                                                                                       "PENDING B6",
 	"reason|worker/coordinator.go|commitProgress|progress.ReasonCode":                                                                                                "PENDING B6",
 	"reason|worker/coordinator.go|finalizePreparedWithGaps|planResult.ReasonCode":                                                                                    "PENDING B6",

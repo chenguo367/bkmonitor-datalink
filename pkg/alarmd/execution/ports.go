@@ -47,6 +47,11 @@ type Evaluator interface {
 // publishing events.
 type SideEffectAdmitter interface {
 	Check(context.Context, SideEffectAdmissionRequest) (SideEffectAdmissionResult, error)
+	// CheckActivation is Check without the owner fence: the activation facts
+	// alone. It is for an admission whose next write runs the full fence in
+	// its own script -- the Progress commit -- so the fence is read once, at
+	// the write, rather than once before it and again inside it.
+	CheckActivation(context.Context, SideEffectAdmissionRequest) (SideEffectAdmissionResult, error)
 }
 
 type GapGuardStore interface {

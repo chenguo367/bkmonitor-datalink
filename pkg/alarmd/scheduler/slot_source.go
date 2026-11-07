@@ -717,13 +717,11 @@ func (source *ProductionSlotSource) Next(
 	if err != nil {
 		return FrozenSlot{}, false, SlotDueFacts{}, err
 	}
-	currentAssignment, currentFence, err := source.currentOwnership(ctx, source.now())
-	if err != nil {
-		return FrozenSlot{}, false, SlotDueFacts{}, err
-	}
-	if !sameAssignment(initialAssignment, currentAssignment) || initialFence != currentFence {
-		return FrozenSlot{}, false, SlotDueFacts{}, ErrSlotOwnershipChanged
-	}
+	// The Slot is dispatched under the ownership this round opened with. Its
+	// first write -- BeginSlot or BeginRange -- runs the full fence in its own
+	// script, so a lease lost since then is refused there, at the write, and
+	// nothing before it is a side effect (A1.2).
+	currentAssignment, currentFence := initialAssignment, initialFence
 	slot := FrozenSlot{
 		Contract:                       fact.Contract,
 		ShortPeriodCohort:              shortPeriodCohortForInterval(dueInterval),
@@ -938,13 +936,11 @@ func (source *ProductionSlotSource) slotFromProjection(
 	if err != nil {
 		return FrozenSlot{}, false, err
 	}
-	currentAssignment, currentFence, err := source.currentOwnership(ctx, source.now())
-	if err != nil {
-		return FrozenSlot{}, false, err
-	}
-	if !sameAssignment(initialAssignment, currentAssignment) || initialFence != currentFence {
-		return FrozenSlot{}, false, ErrSlotOwnershipChanged
-	}
+	// The Slot is dispatched under the ownership this round opened with. Its
+	// first write -- BeginSlot or BeginRange -- runs the full fence in its own
+	// script, so a lease lost since then is refused there, at the write, and
+	// nothing before it is a side effect (A1.2).
+	currentAssignment, currentFence := initialAssignment, initialFence
 	slot := FrozenSlot{
 		Contract: projection.Contract, DuePlanTargets: projection.DuePlanTargets.Clone(),
 		EarliestQueryDeadlineUnixMilli: projection.EarliestQueryDeadlineUnixMilli,
@@ -1008,13 +1004,11 @@ func (source *ProductionSlotSource) snapshotUnavailableSlot(
 	if err != nil {
 		return FrozenSlot{}, false, err
 	}
-	currentAssignment, currentFence, err := source.currentOwnership(ctx, source.now())
-	if err != nil {
-		return FrozenSlot{}, false, err
-	}
-	if !sameAssignment(initialAssignment, currentAssignment) || initialFence != currentFence {
-		return FrozenSlot{}, false, ErrSlotOwnershipChanged
-	}
+	// The Slot is dispatched under the ownership this round opened with. Its
+	// first write -- BeginSlot or BeginRange -- runs the full fence in its own
+	// script, so a lease lost since then is refused there, at the write, and
+	// nothing before it is a side effect (A1.2).
+	currentAssignment, currentFence := initialAssignment, initialFence
 	slot := FrozenSlot{
 		Contract:                       contractRef,
 		ShortPeriodCohort:              shortPeriodCohort(schedule, nextSlot),
@@ -2035,14 +2029,14 @@ func (source *ProductionSlotSource) firstAvailableSchedule(
 
 // initialOwnership resolves the ownership facts a Slot decision opens with.
 //
-// It is a separate entry point from currentOwnership because only this one
-// reading may be inherited. The Runner confirms the same two facts immediately
-// before calling Next, with nothing but a local time comparison in between, so
-// this reading and that one describe the same instant and asking twice buys
-// nothing. Every other currentOwnership call in this file sits behind real
-// elapsed work -- a Progress load, a retirement decision, a Snapshot read and a
-// Plan compilation -- and is there to find out whether ownership survived that
-// work, so none of them may be answered from a cache.
+// The Runner confirms the same two facts immediately before calling Next, with
+// nothing but a local time comparison in between, so that reading is inherited
+// rather than asked again. It is also the reading the Slot is dispatched under:
+// the source used to read ownership again after each piece of real elapsed
+// work -- a Progress load, a retirement decision, a Snapshot read -- but none of
+// that work writes, and the first write the Slot makes is a fenced script that
+// reads the fence at the moment it writes. A lease lost in between is refused
+// there, by the same fence (A1.2).
 func (source *ProductionSlotSource) initialOwnership(
 	ctx context.Context,
 	at time.Time,

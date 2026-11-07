@@ -2761,7 +2761,7 @@ func phaseTwoBusyStage(stage observability.Stage) string {
 	case observability.StageEventACKed:
 		return "event"
 	case observability.StageStatePreflight, observability.StageGapLoaded, observability.StageSideEffectAdmission,
-		observability.StageGapGuardCommitted, observability.StageMutationCompared,
+		observability.StagePlanActivationChecked, observability.StageGapGuardCommitted, observability.StageMutationCompared,
 		observability.StageStateAdmission, observability.StageStateApplied:
 		return "state"
 	case observability.StageProgressCommitted:

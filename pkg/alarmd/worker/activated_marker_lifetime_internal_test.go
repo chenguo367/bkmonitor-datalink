@@ -99,6 +99,10 @@ func (admitEverything) Check(context.Context, execution.SideEffectAdmissionReque
 	return execution.SideEffectAdmissionResult{Admitted: true, ReasonCode: observability.ReasonNone}, nil
 }
 
+func (admitEverything) CheckActivation(context.Context, execution.SideEffectAdmissionRequest) (execution.SideEffectAdmissionResult, error) {
+	return execution.SideEffectAdmissionResult{Admitted: true, ReasonCode: observability.ReasonNone}, nil
+}
+
 // sixtyHourRound is one round of a sixty-hour Plan: its request and the
 // header its gap load is built from.
 func sixtyHourRound(t *testing.T, due execution.DuePlan, evaluationTime execution.EvaluationTime) (execution.SlotExecutionRequest, execution.InternalExecutionHeader) {

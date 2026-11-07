@@ -389,7 +389,9 @@ func TestSlotExecutionCoordinatorOrdersRequiredSideEffects(t *testing.T) {
 		// reporting it would be a Slot nobody could tell from one with an
 		// empty candidate set.
 		observability.StageFrozenStateRenewed,
-		observability.StageSideEffectAdmission,
+		// The activation read before Progress reads no fence: the commit's
+		// script runs it.
+		observability.StagePlanActivationChecked,
 		observability.StageProgressCommitted,
 	}
 	var gotStages []observability.Stage
@@ -757,7 +759,7 @@ func TestSlotExecutionCoordinatorPersistsDegradedGapBeforeEvents(t *testing.T) {
 		t.Fatalf("Execute() result=%+v error=%v", result, err)
 	}
 	assertTrace(t, fixture.trace, []string{
-		"query", "gap_load", "sequence", "admission_initial", "gap_before", "admission_progress", "progress_commit",
+		"query", "gap_load", "sequence", "admission_initial", "gap_before", "activation_progress", "progress_commit",
 	})
 	if fixture.ports.lastProgress.Completion.Kind != execution.CompletionPartialGap {
 		t.Fatalf("completion=%q, want=%q", fixture.ports.lastProgress.Completion.Kind, execution.CompletionPartialGap)
@@ -817,7 +819,7 @@ func TestSlotExecutionCoordinatorShortCircuitsAlreadyAppliedState(t *testing.T) 
 		t.Fatalf("Execute() result=%+v error=%v", result, err)
 	}
 	assertTrace(t, fixture.trace, []string{
-		"query", "gap_load", "state_load", "sequence", "admission_initial", "admission_progress", "progress_commit",
+		"query", "gap_load", "state_load", "sequence", "admission_initial", "activation_progress", "progress_commit",
 	})
 	var reused int
 	for _, observed := range *fixture.observations {
@@ -872,7 +874,7 @@ func TestSlotExecutionCoordinatorPreservesStateTerminalAsPlanCompletion(t *testi
 		t.Fatalf("Execute() result=%+v error=%v", result, err)
 	}
 	assertTrace(t, fixture.trace, []string{
-		"query", "gap_load", "state_load", "evaluate", "sequence", "admission_initial", "gap_before", "admission_progress", "progress_commit",
+		"query", "gap_load", "state_load", "evaluate", "sequence", "admission_initial", "gap_before", "activation_progress", "progress_commit",
 	})
 	if fixture.ports.lastProgress.Completion.Kind != execution.CompletionTerminal {
 		t.Fatalf("completion=%q", fixture.ports.lastProgress.Completion.Kind)
@@ -953,7 +955,7 @@ func TestSlotExecutionCoordinatorIsolatesDeterministicStateAdmission(t *testing.
 			assertTrace(t, fixture.trace, []string{
 				"query", "gap_load", "state_load", "evaluate", "evaluate", "sequence", "admission_initial",
 				"admission_event", "state_admission", "event_ack", "state_apply", "gap_after",
-				"admission_progress", "progress_commit",
+				"activation_progress", "progress_commit",
 			})
 			if fixture.ports.eventCount != 1 || fixture.ports.lastProgress.Completion.Kind != execution.CompletionTerminal {
 				t.Fatalf("events=%d completion=%+v", fixture.ports.eventCount, fixture.ports.lastProgress.Completion)
@@ -1135,7 +1137,7 @@ func TestSlotExecutionCoordinatorObserverPanicIsFailOpen(t *testing.T) {
 	}
 	assertTrace(t, fixture.trace, []string{
 		"query", "gap_load", "state_load", "evaluate", "sequence", "admission_initial",
-		"admission_event", "state_admission", "event_ack", "state_apply", "gap_after", "admission_progress", "progress_commit",
+		"admission_event", "state_admission", "event_ack", "state_apply", "gap_after", "activation_progress", "progress_commit",
 	})
 }
 
@@ -1172,7 +1174,7 @@ func TestSlotExecutionCoordinatorAcceptsUnorderedStoreReceipts(t *testing.T) {
 	}
 	assertTrace(t, fixture.trace, []string{
 		"query", "gap_load", "state_load", "evaluate", "evaluate", "sequence", "admission_initial",
-		"admission_event", "state_admission", "event_ack", "state_apply", "gap_after", "admission_progress", "progress_commit",
+		"admission_event", "state_admission", "event_ack", "state_apply", "gap_after", "activation_progress", "progress_commit",
 	})
 	if len(fixture.ports.lastSequenceScope.StateKeys) != 2 || len(fixture.ports.lastSequenceScope.GapKeys) != 1 {
 		t.Fatalf("sequencing scope=%+v", fixture.ports.lastSequenceScope)
@@ -1194,7 +1196,7 @@ func TestSlotExecutionCoordinatorFailsClosedBeforeLaterSideEffects(t *testing.T)
 		{stage: "state_admission", want: fullTrace[:8]},
 		{stage: "state_apply", want: fullTrace[:10]},
 		{stage: "gap_after", want: fullTrace[:11]},
-		{stage: "admission_progress", want: fullTrace[:12]},
+		{stage: "activation_progress", want: fullTrace[:12]},
 		{stage: "progress_commit", want: fullTrace[:13]},
 	}
 	for _, test := range tests {
@@ -1246,7 +1248,7 @@ func TestSlotExecutionCoordinatorKeepsEventACKUnknownRetryable(t *testing.T) {
 
 var fullTrace = []string{
 	"query", "gap_load", "state_load", "evaluate", "sequence", "admission_initial",
-	"admission_event", "state_admission", "event_ack", "state_apply", "gap_after", "admission_progress", "progress_commit",
+	"admission_event", "state_admission", "event_ack", "state_apply", "gap_after", "activation_progress", "progress_commit",
 }
 
 type fixture struct {
@@ -1968,6 +1970,19 @@ func (ports *recordingPorts) Check(context.Context, execution.SideEffectAdmissio
 	if ports.progressActivationChecked {
 		stage = "admission_progress"
 	}
+	ports.record(stage)
+	if ports.admissionRejectAt == ports.admissionCalls {
+		return execution.SideEffectAdmissionResult{
+			Admitted: false, ReasonCode: execution.ReasonCode(contract.ReasonConfigDrift),
+		}, nil
+	}
+	return execution.SideEffectAdmissionResult{Admitted: true}, ports.fail(stage)
+}
+
+// CheckActivation is the admission before Progress, which reads no fence.
+func (ports *recordingPorts) CheckActivation(context.Context, execution.SideEffectAdmissionRequest) (execution.SideEffectAdmissionResult, error) {
+	ports.admissionCalls++
+	stage := "activation_progress"
 	ports.record(stage)
 	if ports.admissionRejectAt == ports.admissionCalls {
 		return execution.SideEffectAdmissionResult{

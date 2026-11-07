@@ -1032,15 +1032,12 @@ func (runner *Runner) runOneTracked(
 		decision = "operation_not_ready"
 		return execution.SlotExecutionResult{}, false, nil
 	}
-	fence, err := runner.session.ValidateCurrent(ctx, runner.now())
-	if err != nil {
-		decision = "ownership_rejected"
-		return execution.SlotExecutionResult{}, false, err
-	}
-	if fence != slot.Dispatch.OwnerFence {
-		decision = "ownership_rejected"
-		return execution.SlotExecutionResult{}, false, ErrSlotOwnershipChanged
-	}
+	// The Slot runs under the fence it was frozen with. Its first write --
+	// BeginSlot or BeginRange -- runs the full fence in its own script, and a
+	// refusal there comes back as a SlotBeginRefusedError, counted below as
+	// this round's ownership rejection, as a fence check here used to be
+	// (A1.2).
+	fence := slot.Dispatch.OwnerFence
 	request := execution.SlotExecutionRequest{
 		ExpiredRange:      slot.ExpiredRange,
 		ShortPeriodCohort: slot.ShortPeriodCohort,

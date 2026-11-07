@@ -19,7 +19,8 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 )
 
-// secondFenceStore fails only the fence check taken just before the Slot runs.
+// secondFenceStore fails the plain fence check -- the one a check just before
+// the Slot used to take -- and answers the merged reading the round opens with.
 type secondFenceStore struct {
 	*countingOwnershipStore
 	checkErr error
@@ -29,15 +30,15 @@ func (store *secondFenceStore) CheckFence(context.Context, execution.OwnerFence)
 	return store.checkErr
 }
 
-// The check taken just before the Slot runs is the one that ended the session on
-// any failure, so a store that could not be asked at that moment lost the Query
-// Group a lease nobody had refused. Through the real session a Runner keeps it,
-// and runs the Slot once the store answers; a refusal still ends it.
-func TestTheFenceCheckBeforeTheSlotEndsTheSessionOnlyOnARefusal(t *testing.T) {
+// A round reads ownership once, when it opens, and takes no second fence check
+// before its Slot: the Slot's first write runs the fence in its own script.
+// Through the real session, a store whose plain fence check would fail is not
+// asked, the Slot runs, and the session stays open. When a fence check ends
+// the session is ownership's own test (TestAFenceCheckEndsTheSessionOnlyOnTheStoresAnswer).
+func TestARoundTakesNoFenceCheckBeforeItsSlot(t *testing.T) {
 	at := time.Unix(200, 0)
 	slot := frozenSlot("query-group-1")
-	open := func(t *testing.T, checkErr error) (*Runner, *ownership.Session, *secondFenceStore, *int) {
-		t.Helper()
+	for _, checkErr := range []error{errors.New("ownership store unreachable"), ownership.ErrNotDesired} {
 		store := &secondFenceStore{countingOwnershipStore: &countingOwnershipStore{
 			fence: slot.Dispatch.OwnerFence, deadline: at.Add(time.Hour), assignment: testAssignment("worker-1", 3),
 		}, checkErr: checkErr}
@@ -54,31 +55,11 @@ func TestTheFenceCheckBeforeTheSlotEndsTheSessionOnlyOnARefusal(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return runner, session, store, &executed
+		if _, attempted, err := runner.RunOne(context.Background()); !attempted || err != nil || executed != 1 {
+			t.Fatalf("plain check answering %v: RunOne() attempted=%t err=%v executed=%d, want the Slot run", checkErr, attempted, err, executed)
+		}
+		if session.Deadline().IsZero() {
+			t.Fatalf("plain check answering %v: the session ended", checkErr)
+		}
 	}
-
-	t.Run("a store that could not be asked", func(t *testing.T) {
-		unreachable := errors.New("ownership store unreachable")
-		runner, session, store, executed := open(t, unreachable)
-		if _, attempted, err := runner.RunOne(context.Background()); attempted || !errors.Is(err, unreachable) || *executed != 0 {
-			t.Fatalf("RunOne() attempted=%t err=%v executed=%d, want the failure returned and no Slot", attempted, err, *executed)
-		}
-		if deadline := session.Deadline(); deadline.IsZero() {
-			t.Fatal("a store that could not be asked ended the session")
-		}
-		store.checkErr = nil
-		if _, _, err := runner.RunOne(context.Background()); err != nil || *executed != 1 {
-			t.Fatalf("once the store answers err=%v executed=%d, want the Slot run", err, *executed)
-		}
-	})
-
-	t.Run("a refusal", func(t *testing.T) {
-		runner, session, _, executed := open(t, ownership.ErrNotDesired)
-		if _, attempted, err := runner.RunOne(context.Background()); attempted || !errors.Is(err, ownership.ErrNotDesired) || *executed != 0 {
-			t.Fatalf("RunOne() attempted=%t err=%v executed=%d, want the refusal returned and no Slot", attempted, err, *executed)
-		}
-		if deadline := session.Deadline(); !deadline.IsZero() {
-			t.Fatalf("a refusal left the session admitting until %s", deadline)
-		}
-	})
 }
