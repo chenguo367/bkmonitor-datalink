@@ -23,6 +23,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisatomic"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisbatch"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisscript"
 )
 
 type RedisStoreOptions struct {
@@ -118,7 +119,7 @@ func (store *RedisStore) RegisterWorker(ctx context.Context, worker WorkerRegist
 // registry share no hash tag: like the activation scripts
 // (controlplane/activation_rebuild.go) this runs on a standalone or Sentinel
 // server, and the configuration refuses Cluster (config/redis.go).
-var registerWorkerWrite = redisatomic.New(`
+var registerWorkerWrite = redisatomic.New("ownership_register_worker", `
 redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
 redis.call('ZADD', KEYS[2], ARGV[3], ARGV[4])
 return 1
@@ -1014,7 +1015,7 @@ func parseInt(value string) int64 {
 //
 // Every branch returns five elements: status, epoch, deadline_ms, scope,
 // now_ms. BUSY carries the deadline of the lease that is in the way.
-var acquireScript = redis.NewScript(FenceLua + `
+var acquireScript = redisscript.New("ownership_acquire", FenceLua+`
 local require_assignment = ARGV[1]
 local owner_id = ARGV[2]
 local ttl_ms = tonumber(ARGV[3])
@@ -1066,7 +1067,7 @@ return {'OWNED', epoch, deadline_ms, scope, now_ms, timeline}
 // for (ARGV[5], milliseconds), like acquire's. Every branch returns six
 // elements: status, deadline_ms, scope, pending scope, effective_at_ms,
 // now_ms; rejections carry empty tails.
-var renewScript = redis.NewScript(FenceLua + `
+var renewScript = redisscript.New("ownership_renew", FenceLua+`
 local require_assignment = ARGV[1]
 local owner_id = ARGV[2]
 local epoch = ARGV[3]
@@ -1121,7 +1122,7 @@ return {'RENEWED', deadline_ms, scope, pending, effective, now_ms, timeline}
 // executing; the fence then also refuses a record that names another. The
 // reply's elements 8 to 10 carry the record's content scope, pending scope
 // and effective time; element 11 carries the timeline revision.
-var checkFenceScript = redis.NewScript(FenceLua + `
+var checkFenceScript = redisscript.New("ownership_check_fence", FenceLua+`
 local require_assignment = ARGV[1]
 local owner_id = ARGV[2]
 local epoch = ARGV[3]
@@ -1143,7 +1144,7 @@ end
 return {'VALID', record[1], record[2], record[3], record[4], record[5], record[6], record[7], record[8], record[9], record[10]}
 `)
 
-var releaseScript = redis.NewScript(`
+var releaseScript = redisscript.New("ownership_release", `
 if redis.call('HGET', KEYS[1], 'owner_id') ~= ARGV[1] or
    redis.call('HGET', KEYS[1], 'owner_epoch') ~= ARGV[2] or
    redis.call('HGET', KEYS[1], 'lease_token') ~= ARGV[3] then return 'STALE' end
@@ -1194,7 +1195,7 @@ return 'RELEASED'
 // Replies are ten elements: desired worker, generation, revision, control
 // epoch, reason, assigned_at, query group, content scope, pending scope,
 // effective_at_ms.
-var publishAssignmentScript = redis.NewScript(FenceLua + `
+var publishAssignmentScript = redisscript.New("ownership_publish_assignment", FenceLua+`
 local leader_id = ARGV[1]
 local leader_epoch = ARGV[2]
 local leader_token = ARGV[3]
@@ -1315,7 +1316,7 @@ return reply()
 // non-empty is the content scope the caller is executing. A fence refused
 // for a moved scope answers CONTENT_MOVED rather than STALE_OWNER: the lease
 // is fine, the view is not, and the two send a worker down different paths.
-var fencedCASScript = redis.NewScript(FenceLua + `
+var fencedCASScript = redisscript.New("ownership_fenced_cas", FenceLua+`
 local require_assignment = ARGV[1]
 local owner_id = ARGV[2]
 local epoch = ARGV[3]

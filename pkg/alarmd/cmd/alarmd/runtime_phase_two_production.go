@@ -2534,8 +2534,16 @@ func (runtime *productionPhaseTwoOwnership) MaintainControlLeader(
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			if isPhaseTwoInvariantError(err) || ownership.IsLeaseDecision(err) ||
-				!authority.Deadline.After(runtime.dependencies.Now()) {
+			// As the Query Group's lease does: a decision or an invariant error
+			// never reached onFailure. A deadline that has passed has: its last
+			// attempt was reported there, and reporting it again would count it
+			// twice.
+			if isPhaseTwoInvariantError(err) || ownership.IsLeaseDecision(err) {
+				observeProductionOwnership(leaseCtx, runtime.dependencies.Observer, observability.StageLeaseRenewed, err)
+				runtime.clearControlAuthority(authority)
+				return err
+			}
+			if !authority.Deadline.After(runtime.dependencies.Now()) {
 				runtime.clearControlAuthority(authority)
 				return err
 			}

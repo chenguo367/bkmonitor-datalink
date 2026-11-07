@@ -945,6 +945,12 @@ Labels: `result`
 
 Reconcile rounds the control leader ran in this process, by result: completed, or failed in one of its stages. Emitted by a process once it has led a round, both results from then on.
 
+## alarmd_lease_renewal_total
+
+Labels: `lease`, `result`, `reason`
+
+Lease renewal attempts by lease (query_group, control_leader, worker_registration), result and reason. One per attempt: a round makes at most three, so failed is not a lost lease, which ownership_transition_total{transition="assignment_lost"} reads. renewed has reason none. failed is a store that could not be asked, by the words of redis_failure_reason_total, or other for an error that is none of them. refused is one of the four words of ownership_refusals_total: the store's own answer, or the same word given locally with no script sent, when the session has already stopped accepting or the fence is invalid, at most once per session. worker_registration counts failures only: its writes answer plain errors and its success is not observed per attempt. The early renewal of the view gate is not counted here. Every cell a renewal can reach exists from startup, so a zero is a count.
+
 ## alarmd_legacy_pod_cache_total
 
 Labels: `result`
@@ -1423,7 +1429,7 @@ Slots whose events the broker acknowledged and whose State write the ownership s
 
 Labels: `site`, `refusal`
 
-Refusals the ownership store answered, by which of its four words and where it was met. refusal: OWNERSHIP_STALE_FENCE (the fence's epoch, token or deadline no longer match the lease), OWNERSHIP_NOT_DESIRED (the assignment names another worker), OWNERSHIP_LEASE_BUSY (another owner holds the lease), CONTENT_SCOPE_MOVED (the content scope a write was fenced against has moved while the lease is live; at renewal, the lease ran out at a content switch because the holder was still on the old content when the change fell due). site: admission is the side-effect admission check before a Slot's writes, state_apply the fenced State write itself, lease the worker's acquire, release and takeover, renewal the lease renewal, control the control leader's assignment writes. Every pair is created at startup, so a zero is never happened and not an absent series. A content change reads as follows: a holder already on the new content when the change falls due keeps its lease across it and nothing here moves; one still on the old content reads renewal CONTENT_SCOPE_MOVED once as its lease runs out at the switch, and takes the Query Group again on the new content at the next reconcile; a write still fenced against the old scope after the switch reads state_apply CONTENT_SCOPE_MOVED. Counted once per observation, not per key: a fenced batch refused as a whole is one.
+Refusals the ownership store answered, by which of its four words and where it was met. refusal: OWNERSHIP_STALE_FENCE (the fence's epoch, token or deadline no longer match the lease), OWNERSHIP_NOT_DESIRED (the assignment names another worker), OWNERSHIP_LEASE_BUSY (another owner holds the lease), CONTENT_SCOPE_MOVED (the content scope a write was fenced against has moved while the lease is live; at renewal, the lease ran out at a content switch because the holder was still on the old content when the change fell due). site: admission is the side-effect admission check before a Slot's writes, state_apply the fenced State write itself, lease the worker's acquire, release and takeover, renewal the renewal of a Query Group's or the control leader's lease, control the control leader's assignment writes. Every pair is created at startup, so a zero is never happened and not an absent series. A content change reads as follows: a holder already on the new content when the change falls due keeps its lease across it and nothing here moves; one still on the old content reads renewal CONTENT_SCOPE_MOVED once as its lease runs out at the switch, and takes the Query Group again on the new content at the next reconcile; a write still fenced against the old scope after the switch reads state_apply CONTENT_SCOPE_MOVED. Counted once per observation, not per key: a fenced batch refused as a whole is one.
 
 ## alarmd_ownership_transition_total
 
@@ -1639,6 +1645,18 @@ Rebalance rounds that planned moves and published none, by reason. reason=set_un
 
 Assignments the latest rebalance round on this Control Leader planned to move from the most to the least loaded ready worker. Read beside assignment_moves_total: planned and not published for more than one stabilisation window is a ready set that keeps changing. Meaningful on the Control Leader only; aggregate replicas with max, not sum.
 
+## alarmd_redis_bytes_total
+
+Labels: `client`, `caller`, `command`, `direction`
+
+RESP bytes of the commands the server answered, by client, job, command and direction (sent or received). A command with no reply (a pool timeout, a failed dial, a connection cut) counts nothing. Worked out from the command rather than counted on the connection: connection setup and Sentinel traffic are not in it, and a status and a bulk string nested in a script's reply read alike. Clients without the Redis hook are not read, as for redis_caller_duration_seconds.
+
+## alarmd_redis_caller_duration_seconds
+
+Labels: `client`, `caller`, `pipelined`
+
+Redis round-trip duration by the job that made the call, one per call or pipeline batch, including the wait for a connection. caller is a name of redis_caller_operation_total, other for a name outside that list, or unnamed for a call whose context names no job, so the count of a client sums to its redis_operation_total. Clients without the Redis hook are not read: the CLI's and the instance registration's, and the lifecycle record's, so a zero there is not an absence of calls.
+
 ## alarmd_redis_caller_failure_reason_total
 
 Labels: `client`, `caller`, `reason`
@@ -1655,7 +1673,7 @@ Redis operations issued by a named job on a client, one per call or pipeline bat
 
 Labels: `client`, `command`, `pipelined`
 
-Redis round-trip duration. A pipelined batch is recorded once for the whole batch.
+Redis round-trip duration. A pipelined batch is recorded once for the whole batch, under the command of its first member: a batch that starts with SCRIPT LOAD reads as command="script" however many scripts follow. redis_script_duration_seconds reads a batch by the script it carries.
 
 ## alarmd_redis_command_failure_total
 
@@ -1698,6 +1716,24 @@ Configured Redis connection pool size by client.
 Labels: `client`, `result`
 
 Redis connection pool acquisitions by client and outcome.
+
+## alarmd_redis_script_bytes_total
+
+Labels: `script`, `direction`
+
+RESP bytes of the script commands the server answered, by script and direction, as redis_bytes_total counts them. A SCRIPT LOAD's text is in its script's sent bytes.
+
+## alarmd_redis_script_duration_seconds
+
+Labels: `script`, `pipelined`
+
+Redis round-trip duration by script, including the wait for a connection. A pipelined batch is recorded once for the whole batch, under its first eval or evalsha member; a SCRIPT LOAD in front of it is not what the batch is recorded under.
+
+## alarmd_redis_script_total
+
+Labels: `script`, `command`, `pipelined`, `outcome`
+
+Lua script commands issued, one per command, pipeline members included. script is the name the script is registered under (redisscript), other for one that is not, which should never be: non-zero is a defect. Scripts with one text share one name. command is eval, evalsha or load (SCRIPT LOAD). outcome is ok, noscript or error; a script refusing in its own reply (a stale fence) has answered and is ok, the refusal is the caller's to count. Commands inside a script are not seen here. Clients without the Redis hook are not read, as for redis_caller_duration_seconds.
 
 ## alarmd_replay_expired_total
 

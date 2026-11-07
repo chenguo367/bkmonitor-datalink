@@ -11,6 +11,7 @@ package metric
 
 import (
 	"context"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -38,6 +39,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisscript"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scopeclose"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sourceliveness"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategycache"
@@ -232,6 +234,15 @@ func TestCustomMetricFamilySeriesDevelopmentLimits(t *testing.T) {
 		"alarmd_redis_failure_reason_total": (len(redisClientNames) + 1) * len(redisfailure.Reasons),
 		"alarmd_redis_command_duration_seconds": (len(redisCommandNames) + 1) * 2 *
 			(len(redisClientNames) + 1) * (12 + 1 + 2),
+		// The script families are bounded by redisscript.MaxScripts plus
+		// "other"; the caller ones by the closed caller list plus "other" and
+		// "unnamed".
+		"alarmd_redis_script_total":            65 * 3 * 2 * 3,
+		"alarmd_redis_script_duration_seconds": 65 * 2 * (12 + 1 + 2),
+		"alarmd_redis_script_bytes_total":      65 * 2,
+		"alarmd_redis_caller_duration_seconds": (len(redisClientNames) + 1) * 18 * 2 * (12 + 1 + 2),
+		"alarmd_redis_bytes_total":             (len(redisClientNames) + 1) * 18 * (len(redisCommandNames) + 1) * 2,
+		"alarmd_lease_renewal_total":           3 * 14,
 	} {
 		if got := bounds[family]; got != want {
 			t.Errorf("query permit metric family %s theoretical maximum = %d, want %d", family, got, want)
@@ -323,7 +334,50 @@ func equalFloats(left, right []float64) bool {
 	return true
 }
 
+func populateRedisScriptLabelCombinations(recorder *Recorder) {
+	metrics := recorder.phaseTwo.redisCalls
+	scripts := []string{redisscript.Other}
+	for index := 0; index < redisscript.MaxScripts; index++ {
+		scripts = append(scripts, fmt.Sprintf("script_%d", index))
+	}
+	for _, script := range scripts {
+		for _, pipelined := range []string{"true", "false"} {
+			metrics.scriptDuration.WithLabelValues(script, pipelined).Observe(0)
+			for _, command := range []string{redisscript.CommandEval, redisscript.CommandEvalSHA, redisscript.CommandLoad} {
+				for _, outcome := range []string{redisScriptOutcomeOK, redisScriptOutcomeNoScript, redisScriptOutcomeError} {
+					metrics.scriptCalls.WithLabelValues(script, command, pipelined, outcome).Inc()
+				}
+			}
+		}
+		for _, direction := range []string{redisBytesSent, redisBytesReceived} {
+			metrics.scriptBytes.WithLabelValues(script, direction).Inc()
+		}
+	}
+	clients := []string{"other"}
+	for client := range redisClientNames {
+		clients = append(clients, client)
+	}
+	commands := []string{"other"}
+	for command := range redisCommandNames {
+		commands = append(commands, command)
+	}
+	callers := append([]string{"other", redisCallerUnnamed}, redisfailure.Callers...)
+	for _, client := range clients {
+		for _, caller := range callers {
+			for _, pipelined := range []string{"true", "false"} {
+				metrics.callerDuration.WithLabelValues(client, caller, pipelined).Observe(0)
+			}
+			for _, command := range commands {
+				for _, direction := range []string{redisBytesSent, redisBytesReceived} {
+					metrics.bytes.WithLabelValues(client, caller, command, direction).Inc()
+				}
+			}
+		}
+	}
+}
+
 func populateAllCustomLabelCombinations(recorder *Recorder) {
+	populateRedisScriptLabelCombinations(recorder)
 	for level := uint32(1); level <= 65; level++ {
 		recorder.RecordUnmappedSeverity(level)
 	}
@@ -509,16 +563,27 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		// Two clients at most: the control plane connection and, when it resolves
 		// to a different endpoint, the runtime connection.
 		// One unlabelled series; connection acquisitions minus it is the retries.
-		fqName("redis_operation_total"):               len(redisClientNames) + 1,
-		fqName("redis_pool_size"):                     2,
-		fqName("redis_pool_connections"):              6,
-		fqName("redis_pool_waits_total"):              6,
-		fqName("redis_command_total"):                 redisCommandSeries,
-		fqName("redis_command_failure_total"):         redisCommandSeries,
-		fqName("redis_failure_reason_total"):          (len(redisClientNames) + 1) * len(redisfailure.Reasons),
-		fqName("redis_caller_operation_total"):        (len(redisClientNames) + 1) * (len(redisfailure.Callers) + 1),
-		fqName("redis_caller_failure_reason_total"):   (len(redisClientNames) + 1) * (len(redisfailure.Callers) + 1) * len(redisfailure.Reasons),
-		fqName("redis_command_duration_seconds"):      histogramSeries(redisCommandSeries, 12),
+		fqName("redis_operation_total"):             len(redisClientNames) + 1,
+		fqName("redis_pool_size"):                   2,
+		fqName("redis_pool_connections"):            6,
+		fqName("redis_pool_waits_total"):            6,
+		fqName("redis_command_total"):               redisCommandSeries,
+		fqName("redis_command_failure_total"):       redisCommandSeries,
+		fqName("redis_failure_reason_total"):        (len(redisClientNames) + 1) * len(redisfailure.Reasons),
+		fqName("redis_caller_operation_total"):      (len(redisClientNames) + 1) * (len(redisfailure.Callers) + 1),
+		fqName("redis_caller_failure_reason_total"): (len(redisClientNames) + 1) * (len(redisfailure.Callers) + 1) * len(redisfailure.Reasons),
+		fqName("redis_command_duration_seconds"):    histogramSeries(redisCommandSeries, 12),
+		// Every registered script plus "other". The table is capped at
+		// MaxScripts whatever a binary links, so these are numbers too. The
+		// callers are the closed list plus "other" and "unnamed".
+		fqName("redis_script_total"):            (redisscript.MaxScripts + 1) * 3 * 2 * 3,
+		fqName("redis_script_duration_seconds"): histogramSeries((redisscript.MaxScripts+1)*2, 12),
+		fqName("redis_script_bytes_total"):      (redisscript.MaxScripts + 1) * 2,
+		fqName("redis_caller_duration_seconds"): histogramSeries((len(redisClientNames)+1)*(len(redisfailure.Callers)+2)*2, 12),
+		fqName("redis_bytes_total"):             (len(redisClientNames) + 1) * (len(redisfailure.Callers) + 2) * (len(redisCommandNames) + 1) * 2,
+		// Three leases, each with renewed, the refusal words and the failure
+		// reasons: the cells a registration cannot reach are not created.
+		fqName("lease_renewal_total"):                 3 * (1 + len(ownership.RefusalReasons) + len(redisfailure.Reasons)),
 		fqName("short_period_slot_completions_total"): 56,
 		// 11 codes UQ declares plus OTHER, times allowed/unavailable/other.
 		fqName("access_response_status_total"): 36,

@@ -58,6 +58,7 @@ type phaseTwoMetrics struct {
 	activationFailures             *prometheus.CounterVec
 	ownedQueryGroups               *prometheus.GaugeVec
 	ownershipTransitions           *prometheus.CounterVec
+	leaseRenewals                  *prometheus.CounterVec
 	queryAdmission                 *prometheus.CounterVec
 	queryDownstreamDistress        *prometheus.CounterVec
 	noDataSlotPlans                *prometheus.CounterVec
@@ -461,6 +462,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			Subsystem: metricSubsystem, Name: "ownership_transition_total",
 			Help: "Ownership lifecycle transitions by bounded transition, result and reason class.",
 		}, []string{"transition", "result", "reason_class"}),
+		leaseRenewals: newLeaseRenewals(),
 		ownershipRefusals: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: metricSubsystem, Name: "ownership_refusals_total",
 			Help: "Refusals the ownership store answered, by which of its four words and where it was met. " +
@@ -470,7 +472,8 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"moved while the lease is live; at renewal, the lease ran out at a content switch because the " +
 				"holder was still on the old content when the change fell due). site: admission is the " +
 				"side-effect admission check before a Slot's writes, state_apply the fenced State write itself, " +
-				"lease the worker's acquire, release and takeover, renewal the lease renewal, control the control " +
+				"lease the worker's acquire, release and takeover, renewal the renewal of a Query Group's or the " +
+				"control leader's lease, control the control " +
 				"leader's assignment writes. Every pair is created at startup, so a zero is never happened and " +
 				"not an absent series. A content change reads as follows: a holder already on the new content " +
 				"when the change falls due keeps its lease across it and nothing here moves; one still on the " +
@@ -2038,7 +2041,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.work, m.busy, m.lastProgress, m.capacity, m.stateWriteReuse, m.stateAlreadyApplied, m.stateVersionConflict, m.sourceObservations, m.sourceRefreshes, m.sourceCompiles,
 		m.sourceReads, m.sourceRefreshBuilds, m.sourceStrategiesRead, m.sourceChangeSignalAge,
 		m.activationFailures, m.unmappedSeverity,
-		m.ownedQueryGroups, m.ownershipTransitions, m.ownershipRefusals,
+		m.ownedQueryGroups, m.ownershipTransitions, m.leaseRenewals, m.ownershipRefusals,
 		m.queryAdmission, m.queryDownstreamDistress,
 		m.noDataSlotPlans, m.noDataAbsences, m.noDataManualCloseDropped, m.noDataManualCloseReadFailures, m.targetPlanResolutions, m.targetSelectorResolutions, m.targetExcludedAbsentMembers, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.inPlaceWaits, m.inPlaceHeldInputBytes, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetRedis,
@@ -2438,6 +2441,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		m.ownershipTransitions.WithLabelValues(
 			string(observation.Stage), string(observation.Result), string(reasonClass),
 		).Inc()
+	}
+	if lease, result, reason, renewal := leaseRenewalCell(observation); renewal {
+		m.leaseRenewals.WithLabelValues(lease, result, reason).Inc()
 	}
 	if site := ownershipRefusalSite(observation); site != "" {
 		m.ownershipRefusals.WithLabelValues(site, string(observation.ReasonCode)).Inc()

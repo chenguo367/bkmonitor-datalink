@@ -14,6 +14,7 @@ import (
 	"github.com/go-redis/redis/v8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisscript"
 )
 
 // AssignmentSweep is what one sweep of the Assignment records found and did.
@@ -51,7 +52,7 @@ type AssignmentSweep struct {
 // Query Group's ownership hash. ARGV[1..3] the leader fence, ARGV[4] the
 // Query Group the record was read under, ARGV[5] how long the epoch is kept,
 // in milliseconds.
-var reclaimAssignmentScript = redis.NewScript(FenceLua + `
+var reclaimAssignmentScript = redisscript.New("ownership_reclaim_assignment", FenceLua+`
 if fence_refusal('', KEYS[1], '0', ARGV[1], ARGV[2], ARGV[3], '', redis_now_ms()) then return 'STALE' end
 local named = redis.call('HGET', KEYS[2], 'query_group')
 if not named then return 'GONE' end
