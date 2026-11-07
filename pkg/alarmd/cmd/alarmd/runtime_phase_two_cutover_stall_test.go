@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -81,7 +82,10 @@ type cutoverStallFixture struct {
 	// uqPartial marks the UQ answer for a query ending at the given Unix
 	// second as partial, so the PRIMARY input is genuinely incomplete; nil
 	// answers every query FULL.
-	uqPartial      func(end int64) bool
+	uqPartial func(end int64) bool
+	// stopInRead, when set, is called by the next query that arrives, which then
+	// answers nothing: the round is stopped inside its read.
+	stopInRead     atomic.Pointer[context.CancelFunc]
 	observationsMu sync.Mutex
 	observations   []observability.Observation
 }
@@ -161,6 +165,13 @@ func openCutoverFixture(
 	uqServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
 		fixture.uqCalls.Add(1)
+		if stop := fixture.stopInRead.Swap(nil); stop != nil {
+			// Read to its end: only then does the server see the client go.
+			_, _ = io.Copy(io.Discard, request.Body)
+			(*stop)()
+			<-request.Context().Done()
+			return
+		}
 		var payload struct {
 			StartTime    string `json:"start_time"`
 			EndTime      string `json:"end_time"`
@@ -306,20 +317,24 @@ func openCutoverFixture(
 }
 
 // stallInFlightAcrossCutover begins the second grid point under the initial
-// Segment (the query is deferred by readiness, so the unfinished projection
+// Segment (its round is stopped inside its read, so the unfinished projection
 // stays persisted) and then cuts over to a publication whose boundary
 // precedes that Slot.
 func (fixture *cutoverStallFixture) stallInFlightAcrossCutover(ctx context.Context, base int64, redisClient *redis.Client, bundle *phaseTwoWorkerBundle) {
 	t := fixture.t
 	t.Helper()
 	// Step 2: the next grid point is begun under the still-open initial
-	// Segment; the query is deferred by readiness, so the unfinished projection
-	// stays persisted with the initial Segment's contract.
+	// Segment. A Slot's first round is its read, and this one is stopped there,
+	// so the unfinished projection stays persisted with the initial Segment's
+	// contract.
 	fixture.firstNewSlot = execution.EvaluationTime(base + 60)
-	fixture.clock.Store(int64(fixture.firstNewSlot) * 1000)
-	result, attempted, err := fixture.runner.RunOne(ctx)
-	if err != nil || !attempted || result.Completed {
-		t.Fatalf("deferred Slot RunOne = (%+v, %t, %v), want an attempted, uncompleted Slot", result, attempted, err)
+	fixture.clock.Store(firstRoundAtMillis(fixture.cfg, fixture.queryGroup, int64(fixture.firstNewSlot), 60))
+	roundCtx, stopRound := context.WithCancel(ctx)
+	defer stopRound()
+	fixture.stopInRead.Store(&stopRound)
+	result, attempted, err := fixture.runner.RunOne(roundCtx)
+	if !attempted || result.Completed || !errors.Is(err, context.Canceled) || fixture.stopInRead.Load() != nil {
+		t.Fatalf("stopped Slot RunOne = (%+v, %t, %v), want an attempted, uncompleted Slot stopped in its read", result, attempted, err)
 	}
 	fixture.inFlight = fixture.progress(ctx)
 	if fixture.inFlight.NextSlot != fixture.firstNewSlot || fixture.inFlight.UnfinishedSlot == nil ||

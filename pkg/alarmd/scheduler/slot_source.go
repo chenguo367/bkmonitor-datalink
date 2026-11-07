@@ -632,9 +632,9 @@ func (source *ProductionSlotSource) Next(
 	// below can carry it out. An empty due Plan set has already returned, so a
 	// Slot that reaches this line always has an interval to report.
 	dueInterval := minimumAlignedInterval(schedule, nextSlot)
-	if at.Unix() < int64(nextSlot) {
+	if notDueUntil := source.firstRoundSecond(schedule, nextSlot, dueInterval, load.Progress); at.Unix() < notDueUntil {
 		decision = "future_slot"
-		return FrozenSlot{}, false, SlotDueFacts{NotDueUntilUnix: int64(nextSlot), NextSlotUnix: int64(nextSlot), IntervalSeconds: dueInterval}, nil
+		return FrozenSlot{}, false, SlotDueFacts{NotDueUntilUnix: notDueUntil, NextSlotUnix: int64(nextSlot), IntervalSeconds: dueInterval}, nil
 	}
 	decision = "read_hold"
 	hold, err := source.slotReadHoldMillis(ctx, schedule, load.Progress, nextSlot, initialFence)
@@ -1406,10 +1406,11 @@ func (source *ProductionSlotSource) observeReplayTakeover(
 //
 // It holds the readiness rule to the schedule's own ruler,
 // execution.SettlingWaitWithinQueryBudget, the same call access makes. The
-// estimate is deliberately the earliest instant access could pick: a Plan with
-// a source delay or a window that ends before its evaluation time reads later
-// than this, so the guard under-fires rather than over-fires. Refusing a
-// replay that would have worked is a detection loss; letting one through that
+// estimate is the read of the Slot's primary query, with or without a source
+// delay, which access adds back to the window it judges. A query over an
+// earlier window, a dependency a day back, is ready before it, but the Slot
+// still waits for the primary.
+// Refusing a replay that would have worked is a detection loss; letting one through that
 // will not is the behaviour already in production.
 func (source *ProductionSlotSource) replayWaitOutlastsDistance(
 	ctx context.Context,
@@ -1421,7 +1422,7 @@ func (source *ProductionSlotSource) replayWaitOutlastsDistance(
 	if source.settlingWait <= 0 {
 		return false, nil
 	}
-	readyAt := source.replayReadyAtUnixMilli(evaluationTime, deadline, hold)
+	readyAt := source.slotReadAtUnixMilli(evaluationTime, deadline, hold)
 	// The boundary is never earlier than the next grid point while the distance
 	// is still inside the limit, so a read that lands before that point cannot
 	// outlast the boundary and the walk below is not worth its reads. This is
@@ -1458,16 +1459,60 @@ func (source *ProductionSlotSource) replayWaitOutlastsDistance(
 	return true, nil
 }
 
-// replayReadyAtUnixMilli is when access will read the Slot: the group's read
+// slotReadAtUnixMilli is when access will read the Slot: the group's read
 // wait (execution.ReadWaitWithinQueryBudget, the call access makes) within
 // the query budget the deadline leaves, then the hold. The Slot's read hold is
 // in its deadline and is not budget for the wait: access chooses the wait
 // within the schedule's own budget and reads that much later, and so does
 // this estimate.
-func (source *ProductionSlotSource) replayReadyAtUnixMilli(evaluationTime execution.EvaluationTime, deadline, hold int64) int64 {
+func (source *ProductionSlotSource) slotReadAtUnixMilli(evaluationTime execution.EvaluationTime, deadline, hold int64) int64 {
 	queryBudget := time.Duration(deadline-int64(evaluationTime)*1000-hold) * time.Millisecond
 	return time.Unix(int64(evaluationTime), 0).
 		Add(execution.ReadWaitWithinQueryBudget(source.queryGroup, queryBudget, source.settlingWait)).UnixMilli() + hold
+}
+
+// firstRoundMinimumInterval is the shortest evaluation interval whose first
+// round waits for its read. A round waiting for the second and the tick reads up
+// to two seconds after the data is ready. A minute's Slot has more than thirty
+// left after its read and can spare them. A shorter one reads close to its
+// deadline, or past it, and is run at its grid point as it always was.
+const firstRoundMinimumInterval = 60
+
+// firstRoundSecond is the second before which a round of this Slot has nothing
+// to do. The grid point used to be, and a Slot run there froze, fenced and wrote
+// its projection, all to be told by access to come back when its data had landed,
+// and then did it again: six round trips and some forty commands, for most of the
+// Slots of a deployment. Now the first round is the read.
+//
+// It leaves the read hold out. A held Slot's first round is still turned away by
+// access, by name: the hold is frozen in that round, and the few it would save do
+// not pay for asking the hold here.
+//
+// A query over an earlier window, a dependency a day back, would have been read at
+// the grid point. It now reads with the primary, and the wait in place it used to
+// spend inside its execution goes away.
+//
+// The grid point stands for a Slot already begun, whose round is a recovery, and for
+// a schedule whose deadline cannot be derived, which the round goes on to name. A
+// source that was not told the settling wait reads at the grid point by the same sum.
+func (source *ProductionSlotSource) firstRoundSecond(
+	schedule execution.FrozenQueryGroupSchedule,
+	slot execution.EvaluationTime,
+	interval int64,
+	progress *execution.ScheduleProgress,
+) int64 {
+	first := int64(slot)
+	if interval < firstRoundMinimumInterval ||
+		(progress != nil && progress.UnfinishedSlot != nil && progress.UnfinishedSlot.Contract.Slot.EvaluationTime == slot) {
+		return first
+	}
+	deadline, err := source.scheduleQueryDeadline(schedule, slot)
+	if err != nil {
+		return first
+	}
+	// Up to the second, as the due index compares: the bound stays the second the
+	// source first answers due, so a dispatch inside it is not read as an overshoot.
+	return (source.slotReadAtUnixMilli(slot, deadline, 0) + 999) / 1000
 }
 
 // replayDistanceBoundary is the grid point at which this Slot's replay

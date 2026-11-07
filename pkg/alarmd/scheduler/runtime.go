@@ -251,7 +251,9 @@ type SlotDueFacts struct {
 	// return; zero means the call carries no bound and the Query Group must be
 	// treated as due now. Truncation to the second is toward the past, which is
 	// the safe direction: an early bound costs one more call, a late one would
-	// hold back a Slot that is already due.
+	// hold back a Slot that is already due. A Slot waiting for its read is the
+	// exception: its bound is rounded up, and the source judges by the same second,
+	// so the bound is still the second it first answers due.
 	NotDueUntilUnix int64
 	// IntervalSeconds is the shortest evaluation interval among the Plans due at
 	// the Slot this call resolved. It is the number shortPeriodCohort already
@@ -769,6 +771,11 @@ func (runner *Runner) NextDeadline() time.Time {
 		return time.Time{}
 	}
 	if bound.Verdict == DueVerdictNotDue && !bound.Deferred && bound.NotDueUntilUnix > 0 {
+		// A Slot's deadline is reckoned from its grid point, whatever it is
+		// waiting for.
+		if bound.NextSlotUnix > 0 {
+			return time.Unix(bound.NextSlotUnix+bound.IntervalSeconds, 0)
+		}
 		return time.Unix(bound.NotDueUntilUnix+bound.IntervalSeconds, 0)
 	}
 	return runner.now().Add(time.Duration(bound.IntervalSeconds) * time.Second)
