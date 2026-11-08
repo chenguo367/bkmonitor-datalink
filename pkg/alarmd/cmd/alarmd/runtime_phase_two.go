@@ -2805,6 +2805,11 @@ func (bundle *phaseTwoWorkerBundle) Shutdown(ctx context.Context) error {
 			}
 			bundle.observeOwnership(ctx, observability.StageAssignmentLost, transitionResult, queryGroups[index], releaseErr)
 		}
+		// The worker session goes after the Query Group leases, so the Control
+		// Leader reads this worker as gone once its Query Groups are let go.
+		if maintainer, ok := bundle.dependencies.Ownership.(phaseTwoWorkerSessionMaintainer); ok {
+			result = append(result, maintainer.ReleaseWorkerSession(ctx))
+		}
 		// The Control Leader lease goes last among the leases, and only when
 		// every leader task has stopped: a wait that timed out may leave one
 		// still writing, and releasing then would let the next leader start
@@ -3093,6 +3098,18 @@ func (bundle *phaseTwoWorkerBundle) startMaintenance() {
 	if bundle.dependencies.Config.HasRole(roles.Worker) {
 		bundle.maintenanceWG.Add(1)
 		go bundle.maintainRegistration()
+		if maintainer, ok := bundle.dependencies.Ownership.(phaseTwoWorkerSessionMaintainer); ok {
+			ownershipCfg := bundle.dependencies.Config.PhaseTwo.Ownership
+			bundle.maintenanceWG.Add(1)
+			go func() {
+				defer bundle.maintenanceWG.Done()
+				err := maintainer.MaintainWorkerSession(bundle.maintenanceCtx, bundle.dependencies.Config.PhaseTwo.Worker.ID,
+					ownershipCfg.LeaseRenewInterval.Duration(), ownershipCfg.LeaseTTL.Duration())
+				if err != nil && !errors.Is(err, context.Canceled) {
+					bundle.observe(context.Background(), observability.ComponentOwnership, observability.StageLeaseRenewed, observability.ResultFailed, err)
+				}
+			}()
+		}
 	}
 	if bundle.dependencies.PublishFleet != nil {
 		bundle.maintenanceWG.Add(1)

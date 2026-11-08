@@ -44,6 +44,7 @@ func TestEveryScriptOfTheBinaryHasItsName(t *testing.T) {
 		"ownership_fenced_hash", "ownership_publish_assignment", "ownership_publish_assignment_index",
 		"ownership_read_query_group_owner", "ownership_reclaim_assignment", "ownership_register_preferred_instance",
 		"ownership_register_worker", "ownership_release", "ownership_renew",
+		"ownership_worker_session_acquire", "ownership_worker_session_read", "ownership_worker_session_release", "ownership_worker_session_renew",
 		"query_cooldown_save",
 		"rollout_create", "rollout_put", "rollout_read", "rollout_release", "rollout_take",
 		"sre_node_cancel", "sre_node_create", "sre_node_dispatch", "sre_node_replace",

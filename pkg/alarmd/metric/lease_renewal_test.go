@@ -39,6 +39,8 @@ func TestARenewalAttemptIsCountedByLeaseResultAndReason(t *testing.T) {
 		{"a query group timing out", renewalObservation("query-group-1", observability.ResultFailed, context.DeadlineExceeded), leaseQueryGroup, leaseRenewalFailed, redisfailure.Timeout},
 		{"the control leader's connection refused", renewalObservation(controlLeader, observability.ResultFailed, fmt.Errorf("dial tcp 192.0.2.1:6379: %w", syscall.ECONNREFUSED)), leaseControlLeader, leaseRenewalFailed, redisfailure.ConnectionRefused},
 		{"a registration timing out", renewalObservation("", observability.ResultFailed, context.DeadlineExceeded), leaseWorkerRegistration, leaseRenewalFailed, redisfailure.Timeout},
+		{"a worker session renewed", renewalObservation(string(ownership.WorkerSessionIdentity("worker-1")), observability.ResultSuccess, nil), leaseWorkerSession, leaseRenewalRenewed, leaseRenewalNone},
+		{"a worker session already held", renewalObservation(string(ownership.WorkerSessionIdentity("worker-1")), observability.ResultFailed, ownership.ErrLeaseBusy), leaseWorkerSession, leaseRenewalRefused, "OWNERSHIP_LEASE_BUSY"},
 		{"a stale query group", renewalObservation("query-group-1", observability.ResultFailed, ownership.ErrStaleFence), leaseQueryGroup, leaseRenewalRefused, "OWNERSHIP_STALE_FENCE"},
 		{"a query group no longer desired", renewalObservation("query-group-1", observability.ResultFailed, ownership.ErrNotDesired), leaseQueryGroup, leaseRenewalRefused, "OWNERSHIP_NOT_DESIRED"},
 		{"a stale control leader", renewalObservation(controlLeader, observability.ResultFailed, fmt.Errorf("wrapped: %w", ownership.ErrStaleFence)), leaseControlLeader, leaseRenewalRefused, "OWNERSHIP_STALE_FENCE"},
@@ -97,7 +99,7 @@ func TestWhatIsNotARenewalAttemptIsNotCounted(t *testing.T) {
 func TestOnlyTheCellsARenewalCanReachExistFromStartup(t *testing.T) {
 	recorder := NewRecorder(BuildInfo{})
 	cells := matchingCells(t, recorder)
-	if want := 2*(1+len(ownership.RefusalReasons)+len(redisfailure.Reasons)) + len(redisfailure.Reasons); len(cells) != want {
+	if want := 3*(1+len(ownership.RefusalReasons)+len(redisfailure.Reasons)) + len(redisfailure.Reasons); len(cells) != want {
 		t.Fatalf("%d cells at startup, want %d", len(cells), want)
 	}
 	for _, lease := range []string{leaseQueryGroup, leaseControlLeader} {

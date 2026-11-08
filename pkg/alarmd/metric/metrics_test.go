@@ -242,7 +242,7 @@ func TestCustomMetricFamilySeriesDevelopmentLimits(t *testing.T) {
 		"alarmd_redis_script_bytes_total":      65 * 2,
 		"alarmd_redis_caller_duration_seconds": (len(redisClientNames) + 1) * 21 * 2 * (12 + 1 + 2),
 		"alarmd_redis_bytes_total":             (len(redisClientNames) + 1) * 21 * (len(redisCommandNames) + 1) * 2,
-		"alarmd_lease_renewal_total":           3 * 14,
+		"alarmd_lease_renewal_total":           4 * 14,
 	} {
 		if got := bounds[family]; got != want {
 			t.Errorf("query permit metric family %s theoretical maximum = %d, want %d", family, got, want)
@@ -583,7 +583,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("redis_bytes_total"):             (len(redisClientNames) + 1) * (len(redisfailure.Callers) + 2) * (len(redisCommandNames) + 1) * 2,
 		// Three leases, each with renewed, the refusal words and the failure
 		// reasons: the cells a registration cannot reach are not created.
-		fqName("lease_renewal_total"):                 3 * (1 + len(ownership.RefusalReasons) + len(redisfailure.Reasons)),
+		fqName("lease_renewal_total"):                 4 * (1 + len(ownership.RefusalReasons) + len(redisfailure.Reasons)),
 		fqName("short_period_slot_completions_total"): 56,
 		// 11 codes UQ declares plus OTHER, times allowed/unavailable/other.
 		fqName("access_response_status_total"): 36,

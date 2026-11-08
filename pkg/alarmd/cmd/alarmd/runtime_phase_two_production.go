@@ -1350,8 +1350,10 @@ type productionPhaseTwoOwnershipDependencies struct {
 
 type productionPhaseTwoOwnership struct {
 	dependencies productionPhaseTwoOwnershipDependencies
-	reconciler   *scheduler.Reconciler
-	flights      *scheduler.FlightCoordinator
+	// workerSession is this process's worker session (MaintainWorkerSession).
+	workerSession workerSessionHolder
+	reconciler    *scheduler.Reconciler
+	flights       *scheduler.FlightCoordinator
 	// lookbackPlanner is the Leader's lookback planning after each view
 	// publication (WithLookbackPlanner); nil plans nothing.
 	lookbackPlanner *lookbackPlanner

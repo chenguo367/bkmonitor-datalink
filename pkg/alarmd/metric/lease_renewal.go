@@ -8,6 +8,7 @@ package metric
 import (
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
@@ -17,6 +18,7 @@ const (
 	leaseQueryGroup         = "query_group"
 	leaseControlLeader      = "control_leader"
 	leaseWorkerRegistration = "worker_registration"
+	leaseWorkerSession      = "worker_session"
 
 	leaseRenewalRenewed = "renewed"
 	leaseRenewalFailed  = "failed"
@@ -35,7 +37,7 @@ const (
 func newLeaseRenewals() *prometheus.CounterVec {
 	renewals := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: metricSubsystem, Name: "lease_renewal_total",
-		Help: "Lease renewal attempts by lease (query_group, control_leader, worker_registration), result and reason. " +
+		Help: "Lease renewal attempts by lease (query_group, control_leader, worker_registration, worker_session), result and reason. " +
 			"One per attempt: a round makes at most three, spread over its renew interval, so failed is not a lost lease, which " +
 			"ownership_transition_total{transition=\"assignment_lost\"} reads. renewed has reason none. failed is a " +
 			"store that could not be asked, by the words of redis_failure_reason_total, or other for an error that " +
@@ -43,15 +45,16 @@ func newLeaseRenewals() *prometheus.CounterVec {
 			"or the same word given locally with no script sent, when the session has already stopped accepting or " +
 			"the fence is invalid, at most once per session. worker_registration counts failures only: its writes " +
 			"answer plain errors and its success is not observed per attempt. The early renewal of the view gate is " +
-			"not counted here. Every cell a renewal can reach exists from startup, so a zero is a count.",
+			"not counted here. worker_session counts the worker's session, its acquisitions with its renewals. " +
+			"Every cell a renewal can reach exists from startup, so a zero is a count.",
 	}, []string{"lease", "result", "reason"})
-	for _, lease := range []string{leaseQueryGroup, leaseControlLeader} {
+	for _, lease := range []string{leaseQueryGroup, leaseControlLeader, leaseWorkerSession} {
 		renewals.WithLabelValues(lease, leaseRenewalRenewed, leaseRenewalNone)
 		for _, reason := range ownership.RefusalReasons {
 			renewals.WithLabelValues(lease, leaseRenewalRefused, reason)
 		}
 	}
-	for _, lease := range []string{leaseQueryGroup, leaseControlLeader, leaseWorkerRegistration} {
+	for _, lease := range []string{leaseQueryGroup, leaseControlLeader, leaseWorkerRegistration, leaseWorkerSession} {
 		for _, reason := range redisfailure.Reasons {
 			renewals.WithLabelValues(lease, leaseRenewalFailed, reason)
 		}
@@ -67,11 +70,13 @@ func leaseRenewalCell(observation observability.Observation) (lease, result, rea
 	if observation.Component != observability.ComponentOwnership || observation.Stage != observability.StageLeaseRenewed {
 		return "", "", "", false
 	}
-	switch observation.Trace.QueryGroupKey {
-	case "":
+	switch key := observation.Trace.QueryGroupKey; {
+	case key == "":
 		lease = leaseWorkerRegistration
-	case string(ownership.ControlLeaderIdentity):
+	case key == string(ownership.ControlLeaderIdentity):
 		lease = leaseControlLeader
+	case ownership.IsWorkerSessionIdentity(execution.QueryGroupIdentity(key)):
+		lease = leaseWorkerSession
 	default:
 		lease = leaseQueryGroup
 	}
