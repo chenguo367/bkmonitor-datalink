@@ -58,7 +58,18 @@ func (runtime *productionPhaseTwoQueryGroup) withMaintenance(ctx context.Context
 		}
 		return err
 	}
-	if _, err := runtime.session.ValidateCurrent(ctx, runtime.now()); err != nil {
+	// The run opens with a fence check, and under a worker session it is one
+	// that confirms: such a lease learns the record's content and timeline
+	// only from its checks, and a Query Group that runs no round -- its
+	// strategies edited out, waiting to retire -- makes no other, so the gate
+	// below would judge it by the timeline it was opened at for good. The
+	// same script either way. The lease taken above stays what a close is
+	// checked against: one the confirmation moved is not closed under.
+	if runtime.session.HeldUnderSession() {
+		if _, _, err := runtime.session.ValidateCurrentWithAssignment(ctx, runtime.now()); err != nil {
+			return err
+		}
+	} else if _, err := runtime.session.ValidateCurrent(ctx, runtime.now()); err != nil {
 		return err
 	}
 	if runtime.viewGate != nil {
