@@ -2327,8 +2327,10 @@ type fakePhaseTwoOwnershipStore struct {
 	publishAssignmentCalls int
 	acquireLeaseCalls      int
 	releaseCalls           int
-	renewed                chan struct{}
-	renewOnce              sync.Once
+	// releaseErr is what Release answers, after counting the call.
+	releaseErr error
+	renewed    chan struct{}
+	renewOnce  sync.Once
 	// renewErr and renewLeaderErr inject the outcome of the next lease or
 	// Control Leader renewal; a nil hook or a nil result renews normally.
 	renewErr         func() error
@@ -2527,7 +2529,7 @@ func (store *fakePhaseTwoOwnershipStore) Release(context.Context, execution.Owne
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	store.releaseCalls++
-	return nil
+	return store.releaseErr
 }
 
 func (store *fakePhaseTwoOwnershipStore) Close() error { return nil }

@@ -2729,8 +2729,10 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 	)
 	if err != nil {
 		release()
-		_ = session.Release(ctx)
-		return nil, err
+		// The lease taken for nothing is let go, and a release that fails
+		// says so with the error that stopped the open: dropped, the lease
+		// stayed held to its TTL with nothing on the line to say why.
+		return nil, errors.Join(err, session.Release(ctx))
 	}
 	observedSource := &observedProductionSlotSource{next: source, observer: runtime.dependencies.Observer}
 	runner, err := scheduler.NewRunner(
@@ -2738,8 +2740,7 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 	)
 	if err != nil {
 		release()
-		_ = session.Release(ctx)
-		return nil, err
+		return nil, errors.Join(err, session.Release(ctx))
 	}
 	if runtime.dependencies.QueryCooldowns != nil {
 		runner.WithQueryCooldownStore(runtime.dependencies.QueryCooldowns)
