@@ -357,8 +357,14 @@ func (reconciler *ScheduleActivationReconciler) ensure(
 			records[index].Fact.Selected.ForceWarming = true
 		}
 		// Only a Plan that was not active before may be one that never ran;
-		// one whose generation moved under it ran, and warms up.
-		records[index].Fact.Selected.Arrived = !continuouslyActive
+		// one whose generation moved under it ran, and warms up. Nor is one
+		// the previous content listed: without a previous record only because
+		// its Query Group's records were not read - its timeline left out of
+		// the read, or the group held back - it was there, whatever its
+		// content now, and no Worker may take it for one that never ran. The
+		// list is the activated publication's manifest, already read.
+		_, listed := previousContent.contexts[records[index].Fact.Plan]
+		records[index].Fact.Selected.Arrived = !continuouslyActive && !listed
 		// A generation that moved under a Plan that stayed active: what of
 		// its state is still the same facts. See stateCarry.
 		if continuouslyActive && previousRecord.Fact.Selected.StateGeneration != records[index].Fact.Selected.StateGeneration {
