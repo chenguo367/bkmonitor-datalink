@@ -661,6 +661,9 @@ type RunnerDueBound struct {
 	// ReadinessHold says a Deferred bound is a frozen Slot waiting for its
 	// data, not a failure's backoff.
 	ReadinessHold bool
+	// AwaitingPredecessor is a not-due bound that is the next Slot not frozen
+	// yet, waiting on a predecessor's read hold record (SlotDueFacts).
+	AwaitingPredecessor *readhold.AwaitingPredecessorError
 }
 
 // DueBound reports what the last completed round concluded. A Runner that has
@@ -687,6 +690,7 @@ func (runner *Runner) recordDueBound(decision string, facts SlotDueFacts) {
 		// or the schedule is retired. This is the bound worth having.
 		bound.Verdict = DueVerdictNotDue
 		bound.NotDueUntilUnix, bound.Retired, bound.NextSlotUnix = facts.NotDueUntilUnix, facts.Retired, facts.NextSlotUnix
+		bound.AwaitingPredecessor = facts.AwaitingPredecessor
 	case "source_backoff":
 		// The local gate answered before any store read. The Query Group is not
 		// due for a reason of its own, which is exactly what deferred means.
