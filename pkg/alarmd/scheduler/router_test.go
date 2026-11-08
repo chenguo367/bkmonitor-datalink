@@ -255,6 +255,8 @@ type fakeAssignmentStore struct {
 	publishedAuthority ownership.PublicationAuthority
 	expectedRevision   uint64
 	publishCalls       int
+	// holderKind is what every publication reports held the lease.
+	holderKind ownership.HolderKind
 }
 
 type profileEligibility string
@@ -288,6 +290,13 @@ func (store *fakeAssignmentStore) ReadAssignments(
 		}
 	}
 	return found, ownership.ControlReadStats{Keys: len(queryGroups), RoundTrips: 1}, nil
+}
+
+// PublishAssignmentReporting is PublishAssignment with the holder this fake
+// reports for it (holderKind, none when unset).
+func (store *fakeAssignmentStore) PublishAssignmentReporting(ctx context.Context, authority ownership.PublicationAuthority, decision ownership.AssignmentDecision) (ownership.AssignmentRecord, ownership.HolderKind, error) {
+	record, err := store.PublishAssignment(ctx, authority, decision)
+	return record, store.holderKind, err
 }
 
 func (store *fakeAssignmentStore) PublishAssignment(

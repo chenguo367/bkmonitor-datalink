@@ -2041,7 +2041,9 @@ func (runtime *productionPhaseTwoOwnership) observeRebalance(
 		PublishedMoves: len(outcome.applied), PublishedFromSessionHolders: outcome.fromSessionHolders, Conflicts: outcome.conflicts,
 		Paused: outcome.paused, PausedForSeconds: outcome.pausedFor.Seconds(),
 		Replaced: settlement.Replaced, Deferred: settlement.Deferred, Unplaceable: settlement.Unplaceable,
-		DeclinedEverywhere: settlement.DeclinedEverywhere, DeclinedEverywhereSample: declinedEverywhereSamples(settlement),
+		Placed: settlement.Placed, PlacedFromSessionHolders: settlement.PlacedFromSessionHolders,
+		ReplacedFromSessionHolders: settlement.ReplacedFromSessionHolders,
+		DeclinedEverywhere:         settlement.DeclinedEverywhere, DeclinedEverywhereSample: declinedEverywhereSamples(settlement),
 		Bytes:      byteConstraintFacts(bytePlan, byteOutcome),
 		ShardAware: &observability.ShardAwareFacts{Ready: shardGate.Ready, Unaware: shardGate.Unaware},
 	}
@@ -2092,6 +2094,7 @@ func byteConstraintFacts(plan scheduler.BytePlan, outcome rebalanceOutcome) *obs
 		SharePercent: scheduler.ByteConstraintPercent, Judged: plan.Judged, PoolUnknown: plan.PoolUnknown, Unread: plan.Unread, Unsettled: plan.Unsettled, UnreadEstimate: plan.UnreadEstimate,
 		Overloaded: plan.Overloaded, Unplaceable: plan.Unplaceable, PlannedMoves: len(plan.Moves),
 		PublishedMoves: len(outcome.applied), Conflicts: outcome.conflicts, Paused: outcome.paused,
+		PublishedFromSessionHolders: outcome.fromSessionHolders, MostLoadedShare: plan.MostLoadedShare,
 	}
 	for _, move := range plan.Moves {
 		facts.Moves = append(facts.Moves, observability.ByteMoveSample{QueryGroup: string(move.QueryGroup), From: move.From, To: move.To, Bytes: move.Bytes})

@@ -195,6 +195,34 @@ func TestWhichSuccessesAreWrittenAndWhichAreCounted(t *testing.T) {
 	}
 }
 
+// A round that took a Query Group off a holder writes its line whichever path
+// took it: a placement off a holder gone from the ready set, a replacement
+// of one no longer eligible, a byte feasibility move. Before, only the count
+// correction's moves did, and the other three moved Query Groups with no line.
+func TestARoundThatMovedByAnyPathWritesItsLine(t *testing.T) {
+	for _, facts := range []*RebalanceFacts{
+		{Placed: 1}, {Replaced: 1}, {Bytes: &ByteConstraintFacts{PublishedMoves: 1}},
+	} {
+		var output bytes.Buffer
+		now := time.Unix(1_000, 0)
+		observer := levelObserver(t, &output, &now)
+		observer.Observe(context.Background(), Observation{Component: ComponentOwnership, Stage: StageRebalancePlanned,
+			Result: ResultSuccess, Rebalance: facts})
+		if lines := decodeLines(t, &output); len(lines) != 1 {
+			t.Fatalf("a round with %+v wrote %v, want its line", facts, lines)
+		}
+	}
+	// A byte plan that published nothing is not a move.
+	var output bytes.Buffer
+	now := time.Unix(1_000, 0)
+	observer := levelObserver(t, &output, &now)
+	observer.Observe(context.Background(), Observation{Component: ComponentOwnership, Stage: StageRebalancePlanned,
+		Result: ResultSuccess, Rebalance: &RebalanceFacts{Bytes: &ByteConstraintFacts{Judged: 4}}})
+	if lines := decodeLines(t, &output); len(lines) != 0 {
+		t.Fatalf("a round that moved nothing wrote %v", lines)
+	}
+}
+
 // A worker's index read is written when the index did not advance for two
 // rounds or more, or could not be read; one stale round is the race between a
 // worker reading and the Leader writing, counted and not written.

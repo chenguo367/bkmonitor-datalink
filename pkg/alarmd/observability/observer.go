@@ -1555,6 +1555,13 @@ type RebalanceFacts struct {
 	Replaced    int `json:"replaced"`
 	Deferred    int `json:"replacements_deferred"`
 	Unplaceable int `json:"unplaceable"`
+	// Placed is how many Query Groups the round took off a holder not in its
+	// ready set and placed elsewhere (a first placement is not one).
+	// PlacedFromSessionHolders and ReplacedFromSessionHolders are the parts of
+	// Placed and Replaced taken from a holder under a worker session.
+	Placed                     int `json:"placed"`
+	PlacedFromSessionHolders   int `json:"placed_from_session_holders"`
+	ReplacedFromSessionHolders int `json:"replaced_from_session_holders"`
 	// DeclinedEverywhere is the part of Unplaceable whose every eligible
 	// worker declines it - an execution of it hung on each in turn, the
 	// Query Group's own bug (design 02 section 6.5) - and the first few by
@@ -1602,6 +1609,11 @@ type ByteConstraintFacts struct {
 	Conflicts      int              `json:"conflicts"`
 	Paused         bool             `json:"paused"`
 	Moves          []ByteMoveSample `json:"moves,omitempty"`
+	// PublishedFromSessionHolders is the part of PublishedMoves taken from a
+	// holder under a worker session; MostLoadedShare the largest judged
+	// Worker's sum of peaks over its limit, above one overloaded.
+	PublishedFromSessionHolders int     `json:"published_from_session_holders"`
+	MostLoadedShare             float64 `json:"most_loaded_share"`
 }
 
 // ByteMoveSample is one byte-constraint move with the peak it was judged by.

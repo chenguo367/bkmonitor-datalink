@@ -174,6 +174,10 @@ type BytePlan struct {
 	Overloaded  []string
 	Unplaceable []string
 	Moves       []ByteMove
+	// MostLoadedShare is the largest judged Worker's sum of peaks over its
+	// limit (the share of its pool the constraint allows), before the moves:
+	// above one is overloaded. Zero when no Worker is judged.
+	MostLoadedShare float64
 }
 
 // PlanByteMoves computes the byte-constraint moves of one round. Only
@@ -262,6 +266,9 @@ func (router *Router) PlanByteMoves(
 	}
 	for _, workerID := range judged {
 		pool, _ := readings.pool(workerID)
+		if limit := byteLimit(pool); limit > 0 {
+			plan.MostLoadedShare = max(plan.MostLoadedShare, float64(sum[workerID])/float64(limit))
+		}
 		if sum[workerID] <= byteLimit(pool) {
 			continue
 		}

@@ -136,6 +136,9 @@ type phaseTwoMetrics struct {
 	shardUnawareReadyReplicas       *loadedGauge
 	rebalanceGap                    *loadedGauge
 	assignmentMoves                 *prometheus.CounterVec
+	byteOverloadedWorkers           *loadedGauge
+	byteMostLoadedShare             *loadedGauge
+	byteUnreadGroups                *loadedGauge
 	rebalancePaused                 *prometheus.CounterVec
 	controlReadRoundTrips           *prometheus.CounterVec
 	controlReadKeys                 *prometheus.CounterVec
@@ -1151,10 +1154,16 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"the rolled-back replica back on it. Which replicas they are is on /api/health rebalance.shard_aware.unaware. " +
 			"Meaningful on the Control Leader only; aggregate replicas with max, not sum."})
 	metrics.rebalanceGap = newLoadedGauge(prometheus.GaugeOpts{Subsystem: metricSubsystem, Name: "rebalance_gap", Help: "Owned Query Groups on the most loaded ready worker minus those on the least loaded, as the latest rebalance round on this Control Leader saw them. Zero is even; a gap that stays above five percent of the even share across rounds is a writer that is not moving. Meaningful on the Control Leader only; aggregate replicas with max, not sum."})
-	metrics.assignmentMoves = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "assignment_moves_total", Help: "Assignments the Control Leader moved to another ready worker, by reason. reason=rebalance is a move to even the owned counts out; each costs the Query Group at most one Slot on the old holder. holder is what held the Query Group's lease: session for a holder holding it under a worker session, no_session for one renewing its own lease (an older binary) or none."}, []string{"reason", "holder"})
+	metrics.assignmentMoves = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "assignment_moves_total", Help: "Assignments the Control Leader moved to another ready worker, by reason: rebalance, a move to even the owned counts out; bytes, a feasibility move off a worker whose Query Groups' retained-byte peaks sum past its share of the pool, one per overloaded worker per round; ineligible, a move off a holder alive and READY but not eligible (a rollout that changed the capability digest); holder_gone, a placement off a holder not in the round's ready set (not READY, registration lapsed, or declining the Query Group). A Query Group placed for the first time is not a move. Each costs the Query Group at most one Slot on the old holder. holder is what held the Query Group's lease: session for a holder holding it under a worker session, no_session for one renewing its own lease (an older binary) or none."}, []string{"reason", "holder"})
 	metrics.rebalancePaused = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "rebalance_paused_total", Help: "Rebalance rounds that planned moves and published none, by reason. reason=set_unstable is the ready set having changed within the stabilisation window, which is what a rolling update or a replica joining looks like; rising without end is a set that never settles."}, []string{"reason"})
-	metrics.assignmentMoves.WithLabelValues("rebalance", "session")
-	metrics.assignmentMoves.WithLabelValues("rebalance", "no_session")
+	for _, reason := range AssignmentMoveReasons {
+		for _, holder := range []string{"session", "no_session"} {
+			metrics.assignmentMoves.WithLabelValues(reason, holder)
+		}
+	}
+	metrics.byteOverloadedWorkers = newLoadedGauge(prometheus.GaugeOpts{Subsystem: metricSubsystem, Name: "rebalance_byte_overloaded_workers", Help: "Ready workers whose Query Groups' retained-byte peaks sum past their share of the pool, as the latest round on this Control Leader judged them; each gives one Query Group away per round (assignment_moves_total{reason=\"bytes\"}). Meaningful on the Control Leader only; aggregate replicas with max, not sum."})
+	metrics.byteMostLoadedShare = newLoadedGauge(prometheus.GaugeOpts{Subsystem: metricSubsystem, Name: "rebalance_byte_most_loaded_share", Help: "The largest judged worker's sum of retained-byte peaks over the share of its pool the byte constraint allows, as the latest round on this Control Leader read it; above one is overloaded. A lower bound while rebalance_byte_unread_groups is not zero. Meaningful on the Control Leader only; aggregate replicas with max, not sum."})
+	metrics.byteUnreadGroups = newLoadedGauge(prometheus.GaugeOpts{Subsystem: metricSubsystem, Name: "rebalance_byte_unread_groups", Help: "Query Groups with no reported retained-byte peak in the latest round on this Control Leader: they count nothing toward their worker's sum, so the byte readings beside it are lower bounds. Meaningful on the Control Leader only; aggregate replicas with max, not sum."})
 	metrics.rebalancePaused.WithLabelValues("set_unstable")
 	metrics.controlReadRoundTrips = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "control_read_round_trips_total", Help: "Redis round trips the Control Leader's reconcile round spent reading the records it places Query Groups from, by read: assignment (one Assignment record per Query Group of the population) or registry (the index plus one registration per ready worker). Counted where the calls are issued, so it is this round's own number and not a share of a client-wide total. Read it against control_read_keys_total on the same read: keys rising while round trips stay flat is the batch doing its job, both rising together is a batch that is not batching."}, []string{"read"})
 	metrics.controlReadKeys = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "control_read_keys_total", Help: "Records the Control Leader's reconcile round asked for, by read. The denominator for control_read_round_trips_total; before the reads were batched the two were equal by construction."}, []string{"read"})
@@ -2052,7 +2061,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.scheduleCutoverFirstTimelines, m.replayExpiries, m.replayTakeovers, m.slotDiversions, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
 		m.queryFailures,
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectCatalogWrittenBytes, m.objectReads, m.stateGenerationSkew, m.stateCarry,
-		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
+		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.byteOverloadedWorkers, m.byteMostLoadedShare, m.byteUnreadGroups, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.recoveryWithheld, m.noDataEnd, m.openAlertGate,
 	}...), append(append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), append(m.handover.collectors(), m.sreActions.actions, m.sreActions.rollouts, m.sreActions.watched, m.sreActions.receipts, m.cliAuth.total, m.cliAuth.rosterApplied)...), append(m.controlFacts.collectors(), m.traceExport.collectors()...)...),
 		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.activeCopy, m.fleetTracker, m.effectiveTimeRefresh, m.activationRebuild, m.timelineRepair, m.activationSkippedTimelines, m.timelineUnreadableReports, m.activationHeader, m.activationBlocked, m.liveReserve, m.roundMemory, m.targetGroup, m.effectiveClose, m.logLines, m.observerPanics, m.absentClose, m.editClose, m.noDataCloseAPI, m.linkdFilterClose, m.linkdFilterCloseRequests, m.openEpisodeRecord, m.newOpens, m.frontRefused, m.processMemory, m.strategyScopeClose, m.targetScopeClose, m.controlSourceRounds, m.apmCarried, m.apmCarriedBytes, m.sourceLivenessChecks, m.sourceLivenessSeconds, m.sourceLivenessDeferred, m.sourceLivenessEvicted, m.sourceLivenessHeldEvicted, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.controlFactsWrites, m.planCarriesReads, m.queryCooldownLoads, m.eventBusinessAttribution, m.detectionSnapshots, m.detectionSnapshotStates, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
@@ -2133,11 +2142,14 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		if facts.ShardAware != nil {
 			m.shardUnawareReadyReplicas.Set(float64(len(facts.ShardAware.Unaware)))
 		}
-		if facts.PublishedFromSessionHolders > 0 {
-			m.assignmentMoves.WithLabelValues("rebalance", "session").Add(float64(facts.PublishedFromSessionHolders))
-		}
-		if rest := facts.PublishedMoves - facts.PublishedFromSessionHolders; rest > 0 {
-			m.assignmentMoves.WithLabelValues("rebalance", "no_session").Add(float64(rest))
+		m.addAssignmentMoves(AssignmentMoveRebalance, facts.PublishedMoves, facts.PublishedFromSessionHolders)
+		m.addAssignmentMoves(AssignmentMoveIneligible, facts.Replaced, facts.ReplacedFromSessionHolders)
+		m.addAssignmentMoves(AssignmentMoveHolderGone, facts.Placed, facts.PlacedFromSessionHolders)
+		if bytes := facts.Bytes; bytes != nil {
+			m.addAssignmentMoves(AssignmentMoveBytes, bytes.PublishedMoves, bytes.PublishedFromSessionHolders)
+			m.byteOverloadedWorkers.Set(float64(len(bytes.Overloaded)))
+			m.byteMostLoadedShare.Set(bytes.MostLoadedShare)
+			m.byteUnreadGroups.Set(float64(bytes.Unread))
 		}
 		if facts.Paused {
 			m.rebalancePaused.WithLabelValues("set_unstable").Inc()
@@ -2905,6 +2917,28 @@ func (r *Recorder) FleetRestoreUnread(reason string) {
 	r.phaseTwo.fleetRestoreUnread.WithLabelValues(reason).Inc()
 }
 
+// The reasons assignment_moves_total names, closed.
+const (
+	AssignmentMoveRebalance  = "rebalance"
+	AssignmentMoveBytes      = "bytes"
+	AssignmentMoveIneligible = "ineligible"
+	AssignmentMoveHolderGone = "holder_gone"
+)
+
+// AssignmentMoveReasons is every reason, for closed label sets.
+var AssignmentMoveReasons = []string{AssignmentMoveRebalance, AssignmentMoveBytes, AssignmentMoveIneligible, AssignmentMoveHolderGone}
+
+// addAssignmentMoves counts moves of one reason, the part taken from a holder
+// under a worker session as session and the rest as no_session.
+func (m *phaseTwoMetrics) addAssignmentMoves(reason string, moves, fromSession int) {
+	if fromSession > 0 {
+		m.assignmentMoves.WithLabelValues(reason, "session").Add(float64(fromSession))
+	}
+	if rest := moves - fromSession; rest > 0 {
+		m.assignmentMoves.WithLabelValues(reason, "no_session").Add(float64(rest))
+	}
+}
+
 func (r *Recorder) ControlLeaderStepDown() {
 	if r == nil {
 		return
@@ -2912,6 +2946,7 @@ func (r *Recorder) ControlLeaderStepDown() {
 	for _, gauge := range []*loadedGauge{
 		r.phaseTwo.rebalancePlannedMoves, r.phaseTwo.rebalanceGap, r.phaseTwo.shardUnawareReadyReplicas,
 		r.phaseTwo.activationHeldQueryGroups, r.phaseTwo.activationHeldAgeSecondsMax,
+		r.phaseTwo.byteOverloadedWorkers, r.phaseTwo.byteMostLoadedShare, r.phaseTwo.byteUnreadGroups,
 	} {
 		if gauge != nil {
 			gauge.Unload()

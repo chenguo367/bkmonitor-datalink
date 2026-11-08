@@ -2393,6 +2393,13 @@ func (store *fakePhaseTwoOwnershipStore) ReadAssignment(context.Context, executi
 	return store.assignment, nil
 }
 
+// PublishAssignmentReporting is PublishAssignment with the holder this fake
+// reports for it: none.
+func (store *fakePhaseTwoOwnershipStore) PublishAssignmentReporting(ctx context.Context, authority ownership.PublicationAuthority, decision ownership.AssignmentDecision) (ownership.AssignmentRecord, ownership.HolderKind, error) {
+	record, err := store.PublishAssignment(ctx, authority, decision)
+	return record, "", err
+}
+
 func (store *fakePhaseTwoOwnershipStore) PublishAssignment(
 	_ context.Context,
 	authority ownership.PublicationAuthority,

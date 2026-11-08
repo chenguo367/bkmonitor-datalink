@@ -714,10 +714,12 @@ func TestSteppingDownAsLeaderTakesTheLeaderReadingsOffTheScrape(t *testing.T) {
 		Component: observability.ComponentOwnership, Stage: observability.StageRebalancePlanned, Result: observability.ResultSuccess,
 		Operation: observability.OperationLoad,
 		Rebalance: &observability.RebalanceFacts{PlannedMoves: 3, MostOwned: 9, LeastOwned: 4,
-			ShardAware: &observability.ShardAwareFacts{Ready: 3, Unaware: []string{"worker-2"}}},
+			ShardAware: &observability.ShardAwareFacts{Ready: 3, Unaware: []string{"worker-2"}},
+			Bytes:      &observability.ByteConstraintFacts{Overloaded: []string{"worker-1"}, MostLoadedShare: 1.2, Unread: 4}},
 	})
 	recorder.phaseTwo.undrainedDrainingQueryGroups.Set(2)
-	leaderReadings := []string{"alarmd_rebalance_planned_moves", "alarmd_rebalance_gap", "alarmd_shard_unaware_ready_replicas"}
+	leaderReadings := []string{"alarmd_rebalance_planned_moves", "alarmd_rebalance_gap", "alarmd_shard_unaware_ready_replicas",
+		"alarmd_rebalance_byte_overloaded_workers", "alarmd_rebalance_byte_most_loaded_share", "alarmd_rebalance_byte_unread_groups"}
 	scraped := scrape(t, recorder)
 	for _, reading := range leaderReadings {
 		if !strings.Contains(scraped, reading+" ") {
@@ -778,6 +780,42 @@ func TestRebalanceMovesAreCountedByWhatHeldTheLease(t *testing.T) {
 	for holder, want := range map[string]float64{"session": 2, "no_session": 1} {
 		if got := redisCounterSum(t, recorder, "alarmd_assignment_moves_total", map[string]string{"reason": "rebalance", "holder": holder}); got != want {
 			t.Fatalf("moves from %s holders = %v, want %v", holder, got, want)
+		}
+	}
+}
+
+// Every path a round takes a Query Group off a holder by is counted under its
+// own reason and by what held the lease: a placement off a holder gone from
+// the ready set, a replacement of a holder no longer eligible, and a byte
+// feasibility move, beside the count correction.
+func TestEveryWayARoundMovesAQueryGroupIsCountedByReason(t *testing.T) {
+	recorder := NewRecorder(BuildInfo{})
+	recorder.Observe(context.Background(), observability.Observation{
+		Component: observability.ComponentOwnership, Stage: observability.StageRebalancePlanned, Result: observability.ResultSuccess,
+		Operation: observability.OperationLoad,
+		Rebalance: &observability.RebalanceFacts{
+			Placed: 3, PlacedFromSessionHolders: 1, Replaced: 2, ReplacedFromSessionHolders: 2,
+			Bytes: &observability.ByteConstraintFacts{PublishedMoves: 1, PublishedFromSessionHolders: 1,
+				Overloaded: []string{"worker-1"}, MostLoadedShare: 1.25, Unread: 7},
+		},
+	})
+	for _, want := range []struct {
+		reason, holder string
+		moves          float64
+	}{
+		{"holder_gone", "session", 1}, {"holder_gone", "no_session", 2},
+		{"ineligible", "session", 2}, {"ineligible", "no_session", 0},
+		{"bytes", "session", 1}, {"bytes", "no_session", 0},
+		{"rebalance", "session", 0}, {"rebalance", "no_session", 0},
+	} {
+		if got := redisCounterSum(t, recorder, "alarmd_assignment_moves_total", map[string]string{"reason": want.reason, "holder": want.holder}); got != want.moves {
+			t.Fatalf("moves %s from %s holders = %v, want %v", want.reason, want.holder, got, want.moves)
+		}
+	}
+	scraped := scrape(t, recorder)
+	for _, line := range []string{"alarmd_rebalance_byte_overloaded_workers 1", "alarmd_rebalance_byte_most_loaded_share 1.25", "alarmd_rebalance_byte_unread_groups 7"} {
+		if !strings.Contains(scraped, line) {
+			t.Fatalf("scrape lacks %q:\n%s", line, scraped)
 		}
 	}
 }

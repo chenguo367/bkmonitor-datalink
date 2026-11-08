@@ -219,7 +219,7 @@ Assignment index rounds the Control Leader attempted, by result.
 
 Labels: `reason`, `holder`
 
-Assignments the Control Leader moved to another ready worker, by reason. reason=rebalance is a move to even the owned counts out; each costs the Query Group at most one Slot on the old holder. holder is what held the Query Group's lease: session for a holder holding it under a worker session, no_session for one renewing its own lease (an older binary) or none.
+Assignments the Control Leader moved to another ready worker, by reason: rebalance, a move to even the owned counts out; bytes, a feasibility move off a worker whose Query Groups' retained-byte peaks sum past its share of the pool, one per overloaded worker per round; ineligible, a move off a holder alive and READY but not eligible (a rollout that changed the capability digest); holder_gone, a placement off a holder not in the round's ready set (not READY, registration lapsed, or declining the Query Group). A Query Group placed for the first time is not a move. Each costs the Query Group at most one Slot on the old holder. holder is what held the Query Group's lease: session for a holder holding it under a worker session, no_session for one renewing its own lease (an older binary) or none.
 
 ## alarmd_assignment_record_read_total
 
@@ -1630,6 +1630,18 @@ Closed-segment attempts refused because newer state has already applied.
 ## alarmd_read_hold_transition_total
 
 Slots whose first readiness preserves a preceding segment's completion deadline.
+
+## alarmd_rebalance_byte_most_loaded_share
+
+The largest judged worker's sum of retained-byte peaks over the share of its pool the byte constraint allows, as the latest round on this Control Leader read it; above one is overloaded. A lower bound while rebalance_byte_unread_groups is not zero. Meaningful on the Control Leader only; aggregate replicas with max, not sum.
+
+## alarmd_rebalance_byte_overloaded_workers
+
+Ready workers whose Query Groups' retained-byte peaks sum past their share of the pool, as the latest round on this Control Leader judged them; each gives one Query Group away per round (assignment_moves_total{reason="bytes"}). Meaningful on the Control Leader only; aggregate replicas with max, not sum.
+
+## alarmd_rebalance_byte_unread_groups
+
+Query Groups with no reported retained-byte peak in the latest round on this Control Leader: they count nothing toward their worker's sum, so the byte readings beside it are lower bounds. Meaningful on the Control Leader only; aggregate replicas with max, not sum.
 
 ## alarmd_rebalance_gap
 
