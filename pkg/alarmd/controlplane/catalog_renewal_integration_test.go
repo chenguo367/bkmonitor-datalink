@@ -117,6 +117,14 @@ func TestEachCatalogRenewalNamesItsJobAndRenewsOnItsOwnCadence(t *testing.T) {
 
 	callers := &renewalCallers{prefix: harness.prefix, byKind: map[string][]string{}}
 	harness.client.AddHook(callers)
+	// The process that activated the publication wrote both timelines with
+	// the full TTL: its first round renews the objects and not them.
+	if err := harness.repository.RenewCurrentActivationObjects(harness.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if named := callers.take(); len(named["schedule_timeline"]) != 0 || len(named["qgobj"]) != 2 {
+		t.Fatalf("the activating process's first round renewed %v, want the objects and no timeline", named)
+	}
 	const catalogTTL = time.Hour
 	fresh, err := controlplane.NewRedisCatalogRepository(harness.client, harness.prefix, catalogTTL)
 	if err != nil {
