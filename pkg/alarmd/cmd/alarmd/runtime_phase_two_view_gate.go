@@ -32,21 +32,20 @@ import (
 //  3. The lease brought back the timeline revision the entry names, and it
 //     is not zero: zero is the record not saying.
 //
-// The first is the view's word, the second and third the record's, brought
-// by the lease: by its renewals, or, held under a worker session, by its
+// The first is the view's word, the second and third the record's, brought by
+// the lease: by its renewals, or, held under a worker session, by its
 // confirmations -- each round's check, the early one below, an effective
 // maintenance run's. A view the record does not vouch for - a delta a
-// partitioned old Leader pushed, an entry ahead of a record not yet stamped
-// - fails on the record's side, and the Slot is not run: the round ends as
-// view_not_executable with the gate's word, and the Runner comes back on
-// its backoff, by which time a renewal, a confirmation or a delta has
-// usually moved one side (batch 4b; batch 4a read the control plane the old way instead, and
-// that binary is what a rollback is). When the three hold, the read
-// carries the timeline revision as a hint and the catalog answers it
-// without the activation header, which is the poll batch 4 removes; the
-// cache and the body are the third party of check 3, and a body at another
-// revision falls back to the header on its own
-// (controlplane.WithTimelineRevisionHint).
+// partitioned old Leader pushed, an entry ahead of a record not yet stamped -
+// fails on the record's side, and the Slot is not run: the round ends as
+// view_not_executable with the gate's word, and the Runner comes back on its
+// backoff, by which time a renewal, a confirmation or a delta has usually moved
+// one side (batch 4b; batch 4a read the control plane the old way instead, and
+// that binary is what a rollback is). When the three hold, the read carries the
+// timeline revision as a hint and the catalog answers it without the activation
+// header, which is the poll batch 4 removes; the cache and the body are the
+// third party of check 3, and a body at another revision falls back to the
+// header on its own (controlplane.WithTimelineRevisionHint).
 //
 // The outcomes are counted per Query Group so the receipt can say how many
 // the Worker executes from the view, and by word so the drill can read
@@ -267,17 +266,17 @@ func (catalog *viewGatedCatalog) gated(ctx context.Context) (context.Context, er
 // lease held under a worker session is confirmed instead (Session.Renew).
 type leaseRenewal func(context.Context) error
 
-// gateContext judges one read. When the only thing wrong is that the view
-// names a newer timeline revision than the lease last brought, the record
-// has moved and the lease has not caught up yet - a cutover moves the
-// records and the view within a second and the leases only at their next
-// renewal or check - so the lease is renewed (under a worker session,
-// confirmed) once, now, and the check is judged again on what the record
-// says; the record is the authority and the renewal is only early. A lease that is ahead of the view is left to the
-// delta, and every other mismatch is refused as it is. Without the early
-// renewal, every Query Group rechecked in the interval after a cutover
-// was refused once or more, a burst per Worker per cutover that the fleet
-// read as blocked runs.
+// gateContext judges one read. When the only thing wrong is that the view names
+// a newer timeline revision than the lease last brought, the record has moved
+// and the lease has not caught up yet - a cutover moves the records and the
+// view within a second and the leases only at their next renewal or check - so
+// the lease is renewed (under a worker session, confirmed) once, now, and the
+// check is judged again on what the record says; the record is the authority
+// and the renewal is only early. A lease that is ahead of the view is left to
+// the delta, and every other mismatch is refused as it is. Without the early
+// renewal, every Query Group rechecked in the interval after a cutover was
+// refused once or more, a burst per Worker per cutover that the fleet read as
+// blocked runs.
 func gateContext(ctx context.Context, gate *viewExecutionGate, queryGroup execution.QueryGroupIdentity, session *ownership.Session, renew leaseRenewal) (context.Context, error) {
 	lease, held := session.Current()
 	revision, outcome, viewRevision := gate.judgeAgainstView(queryGroup, lease, held)
