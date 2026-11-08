@@ -96,8 +96,8 @@ type productionReadHoldGroup struct {
 	// awaiting is a group whose last Slot waited on a predecessor
 	// (readhold.AwaitingPredecessorError): its predecessors are kept, and
 	// read again on each round before the Slot asks again.
-	awaiting bool
-	queryRoute     string
+	awaiting   bool
+	queryRoute string
 	// querySource names the data the query reads (readHoldSource): the
 	// groups that share it are the peers a new group's first hold is seeded
 	// from.
