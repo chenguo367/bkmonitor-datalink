@@ -2146,8 +2146,13 @@ func TestScheduleActivationReconcilerCutsBackToHistoricalSnapshotOnNewOccurrence
 		Contract: fact.Contract,
 		Plans:    []execution.PlanKey{fact.DuePlans[0].Key()},
 	})
-	if err != nil || len(activations.Facts) != 1 || activations.Facts[0].Selection != execution.ActivationNone {
-		t.Fatalf("A@e1 historical activation=(%#v, %v), want NONE while A@e3 is current", activations, err)
+	// A stayed through all three Segments (two threshold edits), so the
+	// replayed Slot of the first is answered with the record it ran under,
+	// A@e1, while A@e3 is the open Segment's: a backlog across an edit is
+	// replayed, not thrown away as PLAN_NOT_ACTIVE.
+	if err != nil || len(activations.Facts) != 1 || activations.Facts[0].Selection == execution.ActivationNone ||
+		activations.Facts[0].Selected.StateApplyEpoch != execution.StateApplyEpoch(first.Publication.PublicationEpoch) {
+		t.Fatalf("A@e1 historical activation=(%#v, %v), want A@e1's own record while A@e3 is current", activations, err)
 	}
 }
 

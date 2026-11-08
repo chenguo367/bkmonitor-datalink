@@ -857,8 +857,9 @@ func (repository *RedisCatalogRepository) LoadActivations(ctx context.Context, r
 	// from the Query Group's own timeline (decision-016 batch 4b): the open
 	// Segment's activation records are the same records the activation
 	// state carries for that Query Group - the cutover writes both from one
-	// list in one script - and a closed Segment's Slot is historical either
-	// way. Answering from the timeline reads no activation header, which is
+	// list in one script - and a closed Segment answers from its own records
+	// either way (activationsFromTimeline). Answering from the timeline reads
+	// no activation header, which is
 	// the poll batch 4 removes; a hint the timeline does not bear falls back
 	// to the header path inside loadScheduleTimelineHinted.
 	if timelineRevisionHint(ctx) > 0 {

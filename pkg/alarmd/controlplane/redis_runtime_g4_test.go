@@ -495,8 +495,13 @@ func TestRedisCatalogRuntimeReplaysPreG4HistoricalSegmentAfterG4StateGenerationU
 	activations, err := repository.LoadActivations(ctx, execution.PlanActivationRequest{
 		Contract: historical.Contract, Plans: []execution.PlanKey{historical.DuePlans[0].Key()},
 	})
-	if err != nil || len(activations.Facts) != 1 || activations.Facts[0].Selection != execution.ActivationNone {
-		t.Fatalf("historical activation admission = (%+v, %v), want NONE without a new-generation Guard", activations, err)
+	// Plan 460 stayed across the G4 cutover (461 was added beside it), so the
+	// replayed pre-G4 Slot is admitted under the record it ran under, at the
+	// legacy generation; its State carries to the G4 generation at that
+	// generation's first Slot, as an edit's does.
+	if err != nil || len(activations.Facts) != 1 || activations.Facts[0].Selection == execution.ActivationNone ||
+		activations.Facts[0].Selected.StateGeneration != legacyGeneration {
+		t.Fatalf("historical activation admission = (%+v, %v), want the legacy-generation record the Slot ran under", activations, err)
 	}
 
 	scheduleKey := "alarmd:control:g4-generation-upgrade:schedule_timeline:" + string(queryGroup)
