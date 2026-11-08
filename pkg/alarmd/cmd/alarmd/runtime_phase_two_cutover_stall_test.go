@@ -85,7 +85,9 @@ type cutoverStallFixture struct {
 	uqPartial func(end int64) bool
 	// stopInRead, when set, is called by the next query that arrives, which then
 	// answers nothing: the round is stopped inside its read.
-	stopInRead     atomic.Pointer[context.CancelFunc]
+	stopInRead atomic.Pointer[context.CancelFunc]
+	// events is what the bundle's event sink was handed, in order.
+	events         *recordingPhaseTwoEventSink
 	observationsMu sync.Mutex
 	observations   []observability.Observation
 }
@@ -244,6 +246,7 @@ func openCutoverFixture(
 		fixture.observations = append(fixture.observations, observation)
 	})
 	events := &recordingPhaseTwoEventSink{}
+	fixture.events = events
 	dependencies := phaseTwoProductionExternalDependencies{
 		Now: fixture.now, HTTPClient: uqServer.Client(), AdditionalObserver: additionalObserver,
 		PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) { return events, nil }),

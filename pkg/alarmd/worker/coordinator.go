@@ -512,7 +512,8 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	err = coordinator.ports.Sequencer.Sequence(ctx, sequencingScope(stream.header, stream.stateItems, stream.gapItems), func(sequenceCtx context.Context) error {
 		var executeErr error
 		result, executeErr = coordinator.finalizePreparedWithGaps(
-			withNoDataEnds(withNoDataAbsenceStarts(sequenceCtx, stream.noDataAbsenceStarts), stream.noDataEndRound()), request, stream.header, stream.bindings, stream.state, stream.gaps, stream.evaluated,
+			withUnseenPlans(withNoDataEnds(withNoDataAbsenceStarts(sequenceCtx, stream.noDataAbsenceStarts), stream.noDataEndRound()), stream.unseenPlans()),
+			request, stream.header, stream.bindings, stream.state, stream.gaps, stream.evaluated,
 			stream.noDataMutations, stream.queryEvidence, stream.seriesCensus, stream.targetSummaries(),
 		)
 		return executeErr
@@ -835,9 +836,18 @@ func classifyActivationChange(
 			fact.Selected.Identity == due.Identity &&
 			fact.Selected.StateGeneration == due.StateGeneration &&
 			fact.Selected.ScheduleRevision == due.ScheduleRevision
+		recorded, written := changeWrittenAtOwnVersion(activations.Contract, due, loadedGaps)
 		switch {
 		case !found || fact.Selection == execution.ActivationNone:
 			this = activationChangeNotActive
+		case written:
+			// An earlier attempt of this Slot already wrote the Plan's marker
+			// under its word: the word stands. Classified again, the marker
+			// itself would change the answer - a new generation's own marker
+			// reads as one that ran before, and a returning Plan's older
+			// marker is gone under it - and the same marker at the same
+			// version under another word is a conflict on every retry.
+			this = recorded
 		case samePlan && fact.Selected.StateApplyEpoch == due.StateApplyEpoch && !fact.Selected.ForceWarming:
 			this = activationChangeUnchanged
 		case samePlan && fact.Selected.StateApplyEpoch != due.StateApplyEpoch:
@@ -854,6 +864,31 @@ func classifyActivationChange(
 		}
 	}
 	return change
+}
+
+// changeWrittenAtOwnVersion is the change a due Plan's marker at this Slot's
+// own ApplyVersion was written under, when it was written under one of the
+// two activation-change words. Any other marker at the version - the
+// satisfied marker of a Plan judged new, or one a query-free completion
+// wrote - says nothing about the activation and is classified as before.
+func changeWrittenAtOwnVersion(
+	contractRef execution.FrozenExecutionContractRef,
+	due execution.DuePlan,
+	loadedGaps execution.GapLoadResult,
+) (activationChange, bool) {
+	marker, found := loadedGaps.Find(due.GapIdentity())
+	if !found || marker.Status != execution.GapFound || !atOwnVersion(contractRef, due.StateApplyEpoch, marker) {
+		return activationChangeUnchanged, false
+	}
+	for _, scope := range marker.Scopes {
+		switch scope.ReasonCode {
+		case execution.ReasonCode(contract.ReasonPlanReactivated):
+			return activationChangeReactivated, true
+		case execution.ReasonCode(contract.ReasonConfigDrift):
+			return activationChangeDrift, true
+		}
+	}
+	return activationChangeUnchanged, false
 }
 
 // guardReasonFor is the word the Guards written for the given activations
@@ -1398,31 +1433,26 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 		return activationRetry(execution.ReasonCode(contract.ReasonActivationReadFailed)), nil
 	}
 	changedPlans, changedActivations := changedDuePlanActivations(header.DuePlans, guardActivations)
+	// A Plan forced to warm up is one Plan of this Slot, not the Slot. Its
+	// WARMING marker is written at this Slot's ApplyVersion, and the Gap
+	// store takes one write per version: evaluating under the marker would
+	// advance it with a second write at the same version, which the store
+	// refuses as a conflict on every retry until the Slot ages out. So the
+	// Plan writes nothing else here and warms from the next Slot, whose
+	// version is newer than the marker's. The other Plans write as they
+	// would: the forced one joins the changed Plans, skipped in the loop
+	// below, and its marker is written by the protection path after their
+	// writes, as a changed Plan's is. A retry of the Slot finds the marker at
+	// the Slot's own version and still skips the Plan
+	// (unsatisfiedForcedWarmingActivations), under the word the marker was
+	// written with (classifyActivationChange).
 	forced := unsatisfiedForcedWarmingActivations(guardActivations, loadedGaps, changedPlans)
-	if len(forced.Facts) > 0 {
-		// The forced WARMING marker is written at this Slot's ApplyVersion,
-		// and the Gap store accepts one write per version: a retry of this
-		// same Slot would evaluate under the marker and try to advance it
-		// with its own mutation at the same version, which the store refuses
-		// as a conflict, on every retry, until the Slot ages out. So this
-		// Slot is the one the marker consumes: it completes query-free with
-		// the drift completion, and warming starts at the next Slot, whose
-		// version is newer than the marker's.
-		change := classifyActivationChange(header.DuePlans, guardActivations, loadedGaps)
-		if _, err := coordinator.ensureActivatedPlanGaps(
-			ctx, request, guardReasonFor(header.DuePlans, forced, loadedGaps), forced, false,
-		); err != nil {
-			return execution.SlotExecutionResult{}, err
-		}
-		primary, err := execution.DeriveStreamingPrimaryInputFact(header, bindings)
-		if err != nil {
-			return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: derive PRIMARY input fact: %w", err)
-		}
-		if err := coordinator.admitActivatedPlans(ctx, request, guardActivations); err != nil {
-			return execution.SlotExecutionResult{}, err
-		}
-		driftCompletion, driftAttribution := activationChangeCompletion(request.Contract, &primary, change, bindings, targets)
-		return coordinator.commitProgress(ctx, request, driftCompletion, driftAttribution)
+	// A forced Plan the Slot found nothing of from before it never ran under
+	// its generation: it is not warmed up (first_seen.go).
+	forced, firstSeen := firstSeenActivations(forced, loadedGaps, unseenPlansFrom(ctx))
+	for _, fact := range forced.Facts {
+		changedPlans[fact.Key()] = struct{}{}
+		changedActivations.Facts = append(changedActivations.Facts, fact)
 	}
 
 	planResults := append([]execution.PlanEvaluationResult(nil), evaluated.Plans...)
@@ -1460,6 +1490,24 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 		}
 		if err := coordinator.admit(ctx, request, due); err != nil {
 			return execution.SlotExecutionResult{}, err
+		}
+		// A first-seen Plan's judgement is recorded before anything of it is
+		// written, so a retry finds it whatever the attempt got to. A Plan
+		// whose evaluation writes a marker of its own this Slot has its
+		// record in that one: a second write at the same version would be a
+		// conflict.
+		if fact, first := firstSeen[due.Key()]; first && len(planResult.GuardBeforeEvents) == 0 && len(planResult.GuardAfterState) == 0 {
+			marker, err := satisfiedMarker(request.Contract, fact)
+			if err != nil {
+				return execution.SlotExecutionResult{}, err
+			}
+			retention, err := generationRetentionOf(due)
+			if err != nil {
+				return execution.SlotExecutionResult{}, err
+			}
+			if err := coordinator.applyGap(ctx, request.Operation, request.Contract, []execution.PlanGapMutation{marker}, retention, GapSiteBeforeEvents); err != nil {
+				return execution.SlotExecutionResult{}, err
+			}
 		}
 		// What this Plan's gap markers live for, read only when it has any.
 		var gapRetention execution.GenerationRetention
@@ -1838,6 +1886,14 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 	return result, err
 }
 
+// unsatisfiedForcedWarmingActivations is the Plans this Slot forces to warm
+// up: forced by their activation and not yet holding a marker at or past it.
+// A WARMING marker at this Slot's own ApplyVersion is one an earlier attempt
+// of this same Slot wrote, not one an earlier Slot did: the Plan is still the
+// one this Slot skips, or its retry would advance that marker at the same
+// version and conflict. A marker older or newer than the Slot is read as
+// before - a newer one is a later Slot's after Progress moved back, and is
+// enough (the store answers it Superseded).
 func unsatisfiedForcedWarmingActivations(
 	activations execution.PlanActivationResult,
 	loaded execution.GapLoadResult,
@@ -1853,12 +1909,21 @@ func unsatisfiedForcedWarmingActivations(
 		}
 		marker, found := loaded.Find(fact.GapIdentity())
 		if found && (marker.Status == execution.GapFound || marker.Status == execution.GapClearedTombstone) &&
-			marker.PersistedApplyVersion.StateApplyEpoch >= fact.Selected.StateApplyEpoch {
+			marker.PersistedApplyVersion.StateApplyEpoch >= fact.Selected.StateApplyEpoch &&
+			!(marker.Status == execution.GapFound && atOwnVersion(activations.Contract, fact.Selected.StateApplyEpoch, marker)) {
 			continue
 		}
 		result.Facts = append(result.Facts, fact)
 	}
 	return result
+}
+
+// atOwnVersion reports whether a gap marker was written at the ApplyVersion
+// the contract's Slot writes a Plan of the given epoch at: by an earlier
+// attempt of this same Slot.
+func atOwnVersion(contractRef execution.FrozenExecutionContractRef, epoch execution.StateApplyEpoch, marker execution.GapGuardSnapshot) bool {
+	version, err := execution.BuildApplyVersion(contractRef, epoch)
+	return err == nil && execution.CompareApplyVersion(marker.PersistedApplyVersion, version) == execution.ApplyVersionEqual
 }
 
 // completionCause is observation only: it says which of the conditions that

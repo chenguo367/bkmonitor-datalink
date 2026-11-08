@@ -202,8 +202,12 @@ func TestAMarkerWrittenFromTheActivationOutlivesASixtyHourPlansNextRound(t *test
 
 			ageRedis(t, client, sixtyHours)
 
-			_, next := sixtyHourRound(t, due, first+execution.EvaluationTime(sixtyHours/time.Second))
+			nextRequest, next := sixtyHourRound(t, due, first+execution.EvaluationTime(sixtyHours/time.Second))
 			loaded = loadRound(t, store, next)
+			// The activations the next round reads are its own, as a Slot's
+			// always are: a marker at the first round's version is an earlier
+			// Slot's, not this one's.
+			activations.Contract = nextRequest.Contract
 			if forced := unsatisfiedForcedWarmingActivations(activations, loaded, nil); len(forced.Facts) != 0 {
 				t.Fatalf("the next round forces warming again for %+v: it would finish without evaluating, as every round after it would", forced.Facts)
 			}
