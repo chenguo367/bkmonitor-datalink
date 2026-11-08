@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -252,6 +253,39 @@ func (fixture *predecessorWaitFixture) inheritedHold(first execution.EvaluationT
 	return hold
 }
 
+// releaseOld runs the leader's rounds until the drained old group is let go:
+// handed over, its read hold closed or not, and forgotten here.
+func (fixture *predecessorWaitFixture) releaseOld() {
+	fixture.t.Helper()
+	released := func() bool {
+		fixture.bundle.mu.RLock()
+		defer fixture.bundle.mu.RUnlock()
+		_, owned := fixture.bundle.runners[fixture.old]
+		return !owned && !fixture.bundle.dependencies.ReadHolds.controller.Inspect(fixture.old).Loaded
+	}
+	for deadline := time.Now().Add(10 * time.Second); !released() && time.Now().Before(deadline); {
+		if err := fixture.bundle.refreshAndReconcile(context.Background(), true); err != nil {
+			fixture.t.Fatal(err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !released() {
+		fixture.t.Fatal("the drained old group was not released")
+	}
+}
+
+// retireCloses is the retired groups' read hold closes by site, and the
+// closes that failed, as the bundle's metrics read them.
+func (fixture *predecessorWaitFixture) retireCloses() (map[string]float64, float64) {
+	fixture.t.Helper()
+	recorder := fixture.bundle.dependencies.Recorder
+	closes := map[string]float64{}
+	for _, site := range readhold.RetireCloseSites {
+		closes[site] = counterValue(fixture.t, recorder, "alarmd_read_hold_retire_closes_total", map[string]string{"site": site})
+	}
+	return closes, counterValue(fixture.t, recorder, "alarmd_read_hold_retire_close_failed_total", nil)
+}
+
 func (fixture *predecessorWaitFixture) predecessorCounts() (map[string]uint64, map[string]uint64) {
 	stats := fixture.bundle.dependencies.ReadHolds.controller.Stats()
 	return stats.Predecessors, stats.TransitionWaits
@@ -267,26 +301,10 @@ func TestADrainedGroupClosesItsHoldWhenReleasedForTheGroupItsPlanMovedTo(t *test
 	fixture.runOld()
 	fixture.clock.Store((int64(fixture.held) + 59) * 1000)
 	boundary := fixture.editQuery()
-	holds := fixture.bundle.dependencies.ReadHolds
-	released := func() uint64 {
-		holds.retireClosedMu.Lock()
-		defer holds.retireClosedMu.Unlock()
-		return holds.retireClosed[readhold.RetireCloseRelease]
-	}
-	for deadline := time.Now().Add(10 * time.Second); released() == 0 && time.Now().Before(deadline); {
-		if err := fixture.bundle.refreshAndReconcile(context.Background(), true); err != nil {
-			t.Fatal(err)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	holds.retireClosedMu.Lock()
-	closes := map[string]uint64{}
-	for site, count := range holds.retireClosed {
-		closes[site] = count
-	}
-	holds.retireClosedMu.Unlock()
-	if closes[readhold.RetireCloseRelease] != 1 || closes[readhold.RetireCloseNext] != 0 {
-		t.Fatalf("retire closes %v, want the drained group closed once, by its release", closes)
+	fixture.releaseOld()
+	// As /metrics reads it: closed once, by the release, and nothing failed.
+	if closes, failed := fixture.retireCloses(); closes[readhold.RetireCloseRelease] != 1 || closes[readhold.RetireCloseNext] != 0 || failed != 0 {
+		t.Fatalf("retire closes %v, failed %v; want the drained group closed once, by its release", closes, failed)
 	}
 
 	first := fixture.first(boundary)
@@ -466,5 +484,52 @@ func TestASuccessorReadsAgainAPredecessorReleasedWhileItWaits(t *testing.T) {
 	if predecessors[readhold.PredecessorInherited] != 1 || predecessors[readhold.PredecessorUnreadable] != 0 ||
 		waits[readhold.TransitionWaitWaiting] != 1 || waits[readhold.TransitionWaitInherited] != 1 {
 		t.Fatalf("predecessors %v waits %v, want one wait, ended inherited, and nothing unreadable", predecessors, waits)
+	}
+}
+
+// The drained old group's release cannot close its record: another writer
+// changed it under the old owner, and the fenced write is refused. The
+// release goes on, the failure is counted where /metrics reads it, and the
+// new group waits on the record still open until its first Slot would have
+// been ready on the bound, freezes the bound then, and says it ended so.
+func TestADrainedGroupWhoseReleaseCannotCloseItsHoldIsCounted(t *testing.T) {
+	fixture := newPredecessorWaitFixture(t)
+	fixture.runOld()
+	ctx := context.Background()
+	spec, err := fixture.bundle.dependencies.ReadHolds.spec(ctx, fixture.initialSchedule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := json.Marshal(readhold.Record{SinceSlot: 1, HoldMillis: 39_500, SegmentStart: fixture.initialSchedule.Segment.Start,
+		Plans: []readhold.PlanRecord{{PlanRef: spec.Plans[0]}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.redisClient.Set(ctx, holdRecordKey(fixture.cutoverStallFixture, fixture.old), changed, time.Hour).Err(); err != nil {
+		t.Fatal(err)
+	}
+	fixture.clock.Store((int64(fixture.held) + 59) * 1000)
+	boundary := fixture.editQuery()
+	fixture.releaseOld()
+	if closes, failed := fixture.retireCloses(); closes[readhold.RetireCloseRelease] != 0 || failed != 1 {
+		t.Fatalf("retire closes %v, failed %v; want the release's close counted as failed", closes, failed)
+	}
+
+	first := fixture.first(boundary)
+	previous, offset := fixture.link()
+	until := min(int64(previous)*1000+600_000+offset, int64(first)*1000+500+600_000)
+	fixture.clock.Store(firstRoundAtMillis(fixture.cfg, fixture.next, int64(first), 60))
+	if _, attempted := fixture.round(); attempted {
+		t.Fatal("the new group's first Slot ran with its predecessor's record open")
+	}
+	fixture.clock.Store(until)
+	fixture.runNewUntil(first)
+	ended, hold := fixture.completion(first)
+	if ended != fullEnding || hold != until-int64(first)*1000-500 {
+		t.Fatalf("the new group's first Slot ended %q with a %d ms hold, want FULL on the bound's %d ms", ended, hold, until-int64(first)*1000-500)
+	}
+	recorder := fixture.bundle.dependencies.Recorder
+	if waits := counterValue(t, recorder, "alarmd_read_hold_transition_waits_total", map[string]string{"outcome": readhold.TransitionWaitBounded}); waits != 1 {
+		t.Fatalf("waits ended on the bound %v, want 1", waits)
 	}
 }

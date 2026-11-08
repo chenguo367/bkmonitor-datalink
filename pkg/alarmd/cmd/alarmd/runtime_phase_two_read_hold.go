@@ -908,6 +908,12 @@ func (holds *productionReadHolds) slotReadHold(ctx context.Context, schedule exe
 	return hold, err
 }
 
+// The slot source counts a retired group's read hold closes through this
+// interface when the read holds it is given implement it, and counts nothing
+// when they do not: pinned here, so that the holds losing either method fail
+// to build rather than leave every close and its failures uncounted.
+var _ scheduler.RetireCloseCounter = (*productionReadHolds)(nil)
+
 // RetireClosed counts a retired group whose read hold closed, by where.
 func (holds *productionReadHolds) RetireClosed(site string) {
 	holds.retireClosedMu.Lock()

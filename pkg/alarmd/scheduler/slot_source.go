@@ -307,6 +307,14 @@ var ErrReadHoldDegraded = errors.New("alarmd scheduler: read hold degraded")
 
 type ProductionSlotSourceOption func(*ProductionSlotSource) error
 
+// RetireCloseCounter counts a retired Query Group's read hold closes, by
+// where they were made (readhold.RetireCloseSites), and the closes that
+// failed. The read holds a source is given count through it.
+type RetireCloseCounter interface {
+	RetireClosed(site string)
+	RetireCloseFailed(err error)
+}
+
 // RetirementReader is what closing a retired, drained Query Group's read hold
 // at its release reads: where it retired, and the Segment that ended there.
 type RetirementReader interface {
@@ -1701,11 +1709,10 @@ func (source *ProductionSlotSource) prepareRetiredReadHoldFrom(ctx context.Conte
 		}
 		return holds.PrepareSchedule(ctx, schedule, fence)
 	}()
-	if failed, counts := source.readHolds.(interface{ RetireCloseFailed(error) }); err != nil && counts {
-		failed.RetireCloseFailed(err)
-	}
-	if closed, counts := source.readHolds.(interface{ RetireClosed(string) }); err == nil && counts {
-		closed.RetireClosed(site)
+	if counter, counts := source.readHolds.(RetireCloseCounter); counts && err != nil {
+		counter.RetireCloseFailed(err)
+	} else if counts {
+		counter.RetireClosed(site)
 	}
 }
 
@@ -1732,8 +1739,8 @@ func (source *ProductionSlotSource) CloseRetiredReadHold(ctx context.Context) (b
 		return false, nil
 	}
 	closed, err := source.closeRetiredReadHold(ctx)
-	if failed, counts := source.readHolds.(interface{ RetireCloseFailed(error) }); err != nil && counts {
-		failed.RetireCloseFailed(err)
+	if counter, counts := source.readHolds.(RetireCloseCounter); err != nil && counts {
+		counter.RetireCloseFailed(err)
 	}
 	return closed, err
 }
