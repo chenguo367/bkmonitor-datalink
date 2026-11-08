@@ -135,3 +135,97 @@ func TestASupplementOfASlotBeforeAnEditIsWritten(t *testing.T) {
 		t.Fatalf("the supplement wrote events for %v, want host B's", written)
 	}
 }
+
+// A supplement written under a gap marker still open, then an edit (design
+// 013 section 4.3, the negative): the old generation's guard does not
+// follow to the new one, its key holds the generation. The supplemented
+// series' Level is held GAPPED by that guard, not for holes its points show,
+// so the carry skips it (skipped_guard_gapped) and it starts the new
+// generation from nothing; the series whose window only has the read's own
+// hole is carried with it. A window of three positions, at a threshold the
+// data never crosses, so what decides is completeness alone.
+func TestASupplementUnderAnOpenGuardIsNotCarriedAcrossAnEdit(t *testing.T) {
+	previousWindow := cutoverStallTriggerWindow
+	cutoverStallTriggerWindow = 3
+	t.Cleanup(func() { cutoverStallTriggerWindow = previousWindow })
+	// The digests the hosts' series go by, from a run where both report.
+	probe := firingFixture(t)
+	probe.uqHosts = func(int64) []string { return []string{supplementHostA, supplementHostB} }
+	probeSlot := execution.EvaluationTime(probe.base + 60)
+	if ended := runSlot(t, probe, probe.queryGroup, probe.runner, probeSlot); ended != fullEnding {
+		t.Fatalf("the probe Slot ended %q", ended)
+	}
+	digests := seriesDigests(probe, probeSlot)
+	if len(digests) != 2 {
+		t.Fatalf("probe digests %v, want one per host", digests)
+	}
+
+	fixture := startCutoverFixtureWith(t, nil, observability.Discard(observability.ComponentRuntime), func(ctx context.Context, client *redis.Client, _ config.Config) {
+		installEditedStrategies(t, ctx, client, 1725000000, thresholdTo(10))
+	})
+	ctx := context.Background()
+	// The Slot's read comes back partial and without host B: the Plan's
+	// marker opens GAPPED.
+	held := execution.EvaluationTime(fixture.base + 60)
+	hosts, partial := []string{supplementHostA}, true
+	fixture.uqHosts = func(int64) []string { return hosts }
+	fixture.uqPartial = func(int64) bool { return partial }
+	if ended := runSlot(t, fixture, fixture.queryGroup, fixture.runner, held); ended != "COMPLETED_WITH_PARTIAL_GAP/QUERY_PARTIAL" {
+		t.Fatalf("the partial Slot ended %q", ended)
+	}
+	partial = false
+	marker, found := fixture.readPlanGapMarker(ctx)
+	if scopes, _ := marker["scopes"].([]any); !found || len(scopes) != 1 || scopes[0].(map[string]any)["Status"] != "GAPPED" {
+		t.Fatalf("the Plan's marker after the partial Slot = %v, want it open, GAPPED", marker)
+	}
+
+	// Host B's data lands; the supplement admits it at the Slot, under the
+	// marker that still stands.
+	hosts = []string{supplementHostA, supplementHostB}
+	client, err := accessuq.NewClient(fixture.cfg.PhaseTwo.Access.UQEndpoint, fixture.cfg.PhaseTwo.Access.QuerySource, http.DefaultClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := fixture.runner.(*settlingRuntime).phaseTwoQueryGroupRuntime.(*productionPhaseTwoQueryGroup)
+	facts, err := runtime.Supplement(access.WithKeptRead(testwait.Context(t), recheckedRead{client: client}), held,
+		fixture.progress(ctx).LastCompletion.Contract.ReadHoldMillis, execution.SupplementScope{Series: []execution.SeriesIdentityDigest{digests[supplementHostB]}})
+	if err != nil || facts.Admitted != 1 {
+		t.Fatalf("Supplement() = (%+v, %v), want host B admitted", facts, err)
+	}
+
+	// A threshold edit, carried with the detection changed.
+	installEditedStrategies(t, ctx, fixture.redisClient, 1725000600, thresholdTo(11))
+	first := held + 60
+	fixture.clock.Store((int64(first) - 1) * 1000)
+	for round := 0; round < 2; round++ {
+		if err := fixture.bundle.refreshAndReconcile(ctx, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := len(fixture.observed())
+	runSlot(t, fixture, fixture.queryGroup, fixture.runner, first)
+	series := map[string]int{}
+	valid := map[string]uint32{}
+	for _, observation := range fixture.observed()[before:] {
+		if facts := observation.StateCarry; facts != nil && facts.Scope == "series" {
+			series[facts.Result] += facts.Count
+		}
+		if coverage := observation.HistoryCoverage; coverage != nil {
+			for _, window := range coverage.Windows {
+				for host, digest := range digests {
+					if string(window.Series) == string(digest) {
+						valid[host] = window.Valid
+					}
+				}
+			}
+		}
+	}
+	if series["skipped_guard_gapped"] != 1 || series["carried_across_detect"] != 1 {
+		t.Fatalf("series carried %v, want host B skipped for the guard and host A carried", series)
+	}
+	// Host B starts from its first point under the new generation; host A
+	// keeps the point before the partial read, its hole carried as a hole.
+	if valid[supplementHostB] != 1 || valid[supplementHostA] != 2 {
+		t.Fatalf("valid positions %v, want host B 1 (started over) and host A 2 (carried with its hole)", valid)
+	}
+}
