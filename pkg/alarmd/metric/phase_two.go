@@ -124,6 +124,7 @@ type phaseTwoMetrics struct {
 	scheduleCutoverFirstSeen        *atomic.Bool
 	queryFailures                   *prometheus.CounterVec
 	objectCatalogObjects            *prometheus.CounterVec
+	catalogRenewals                 *prometheus.CounterVec
 	objectCatalogRedis              *prometheus.HistogramVec
 	objectCatalogManifestBytes      prometheus.Gauge
 	objectCatalogWrittenBytes       *prometheus.CounterVec
@@ -1114,6 +1115,18 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		}
 	}
 	metrics.objectCatalogObjects = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "object_catalog_objects_total", Help: "Content-addressed catalog objects by what a write or renewal did with them: written, present (already stored under their digest) or missing (referenced but not found on renewal)."}, []string{"operation", "outcome"})
+	// Keys, where redis_caller_operation_total under the three catalog
+	// renewal callers counts pipelined batches: a renewal that is due for a
+	// handful of timelines and one due for every one of them are a batch each.
+	metrics.catalogRenewals = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "catalog_renewals_total",
+		Help: "Catalog keys the Control Leader renewed, by kind and why: timeline half_life (this process last renewed or wrote it more " +
+			"than half the catalog TTL ago) or first (it had not since it started); object (the Query Group objects and the manifest) " +
+			"and context (the output contexts) periodic, on the first refresh round of the process and every tenth after. A key a " +
+			"renewal found missing is counted here and in object_catalog_objects_total{outcome=\"missing\"}."},
+		[]string{"kind", "reason"})
+	for _, cell := range [][2]string{{"timeline", "half_life"}, {"timeline", "first"}, {"object", "periodic"}, {"context", "periodic"}} {
+		metrics.catalogRenewals.WithLabelValues(cell[0], cell[1])
+	}
 	metrics.objectCatalogRedis = prometheus.NewHistogramVec(prometheus.HistogramOpts{Subsystem: metricSubsystem, Name: "object_catalog_redis_duration_seconds", Help: "Object catalog write or renewal duration.", Buckets: activeQGSetDurationBuckets}, []string{"operation", "result"})
 	metrics.objectCatalogManifestBytes = prometheus.NewGauge(prometheus.GaugeOpts{Subsystem: metricSubsystem, Name: "object_catalog_manifest_bytes", Help: "Encoded bytes of the manifest written for the latest publication."})
 	// The bytes behind object_catalog_objects_total{outcome="written"}: what a
@@ -2064,7 +2077,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.scheduleCutoverQueryGroups, m.scheduleCutoverReadHoldLinks, m.fleetOverdueEpisodes, m.fleetRestoreUnread, m.scheduleCutoverTimelinesRead, m.scheduleCutoverFirstDuration,
 		m.scheduleCutoverFirstTimelines, m.replayExpiries, m.replayTakeovers, m.slotDiversions, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
 		m.queryFailures,
-		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectCatalogWrittenBytes, m.objectReads, m.stateGenerationSkew, m.stateCarry,
+		m.objectCatalogObjects, m.catalogRenewals, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectCatalogWrittenBytes, m.objectReads, m.stateGenerationSkew, m.stateCarry,
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.byteOverloadedWorkers, m.byteMostLoadedShare, m.byteUnreadGroups, m.placementUnfit, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.recoveryWithheld, m.noDataEnd, m.openAlertGate,
 	}...), append(append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), append(m.handover.collectors(), m.sreActions.actions, m.sreActions.rollouts, m.sreActions.watched, m.sreActions.receipts, m.cliAuth.total, m.cliAuth.rosterApplied)...), append(m.controlFacts.collectors(), m.traceExport.collectors()...)...),
@@ -2205,6 +2218,12 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 				m.activeQGSetBytes.Set(float64(facts.ObjectBytes))
 			}
 		}
+		if facts.Operation == "renew" {
+			// Counted on failure too: the batches renewed before the one that
+			// failed were renewed.
+			m.catalogRenewals.WithLabelValues("timeline", "half_life").Add(float64(facts.TimelinesHalfLife))
+			m.catalogRenewals.WithLabelValues("timeline", "first").Add(float64(facts.TimelinesFirst))
+		}
 	}
 	if facts := observation.QueryFailure; facts != nil && observation.Result == observability.ResultFailed {
 		m.queryFailures.WithLabelValues(facts.Stage, facts.Category).Inc()
@@ -2277,6 +2296,10 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		m.objectCatalogObjects.WithLabelValues(facts.Operation, "written").Add(float64(facts.Written))
 		m.objectCatalogObjects.WithLabelValues(facts.Operation, "present").Add(float64(facts.Present))
 		m.objectCatalogObjects.WithLabelValues(facts.Operation, "missing").Add(float64(facts.Missing))
+		if facts.Operation == "renew" {
+			m.catalogRenewals.WithLabelValues("object", "periodic").Add(float64(facts.RenewedObjects))
+			m.catalogRenewals.WithLabelValues("context", "periodic").Add(float64(facts.RenewedContexts))
+		}
 		if facts.Operation == "write" {
 			// Objects are counted whenever they were written, success or not:
 			// a write that stored them and then failed on the manifest still

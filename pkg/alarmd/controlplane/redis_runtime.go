@@ -19,6 +19,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	alarmdprogress "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/progress"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisbatch"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 )
 
@@ -1434,6 +1435,13 @@ func (repository *RedisCatalogRepository) persistInitialActivation(
 	if changed != 1 {
 		return ErrActivationConflict
 	}
+	// The timelines it wrote carry the full TTL: they are renewed a half-life
+	// from now, not again on the next round.
+	written := make([]string, 0, len(timelines))
+	for _, timeline := range timelines {
+		written = append(written, repository.scheduleTimelineKey(timeline.QueryGroup))
+	}
+	repository.renewals.renewed(written, repository.renewals.now())
 	repository.rememberWritten(activationPayload, next)
 	return nil
 }
@@ -1538,6 +1546,11 @@ func (repository *RedisCatalogRepository) persistCutoverActivation(
 	if changed != 1 {
 		return ErrActivationConflict
 	}
+	written := make([]string, 0, len(updates))
+	for _, update := range updates {
+		written = append(written, repository.scheduleTimelineKey(update.next.QueryGroup))
+	}
+	repository.renewals.renewed(written, repository.renewals.now())
 	repository.rememberWritten(activationPayload, next)
 	return nil
 }
@@ -2067,6 +2080,7 @@ func (repository *RedisCatalogRepository) renewScheduleTimelines(
 	ctx context.Context,
 	active []execution.QueryGroupIdentity,
 	draining []DrainingQueryGroup,
+	facts *observability.ActiveQGSetFacts,
 ) error {
 	if repository == nil || repository.client == nil {
 		return errors.New("alarmd controlplane: Redis catalog repository is required")
@@ -2089,6 +2103,11 @@ func (repository *RedisCatalogRepository) renewScheduleTimelines(
 	for _, entry := range draining {
 		appendKey(entry.QueryGroup)
 	}
+	// Only the timelines this process has not renewed or written within half
+	// the TTL (catalogRenewals): a day's TTL renewed on every thirty-second
+	// refresh round was 2,880 renewals of each key per TTL.
+	keys, first, now := repository.renewals.timelinesDue(keys, repository.ttl)
+	ctx = redisfailure.WithCaller(ctx, redisfailure.CallerCatalogTimelineRenewal)
 	for start := 0; start < len(keys); start += scheduleTimelineRenewBatch {
 		end := start + scheduleTimelineRenewBatch
 		if end > len(keys) {
@@ -2103,6 +2122,10 @@ func (repository *RedisCatalogRepository) renewScheduleTimelines(
 		}); err != nil {
 			return activationDependencyIO(fmt.Errorf("renew Schedule timelines: %w", err))
 		}
+		repository.renewals.renewed(batch, now)
+		firstInBatch := min(max(first-start, 0), len(batch))
+		facts.TimelinesFirst += firstInBatch
+		facts.TimelinesHalfLife += len(batch) - firstInBatch
 	}
 	return nil
 }

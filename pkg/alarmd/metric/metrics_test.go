@@ -240,8 +240,8 @@ func TestCustomMetricFamilySeriesDevelopmentLimits(t *testing.T) {
 		"alarmd_redis_script_total":            65 * 3 * 2 * 3,
 		"alarmd_redis_script_duration_seconds": 65 * 2 * (12 + 1 + 2),
 		"alarmd_redis_script_bytes_total":      65 * 2,
-		"alarmd_redis_caller_duration_seconds": (len(redisClientNames) + 1) * 22 * 2 * (12 + 1 + 2),
-		"alarmd_redis_bytes_total":             (len(redisClientNames) + 1) * 22 * (len(redisCommandNames) + 1) * 2,
+		"alarmd_redis_caller_duration_seconds": (len(redisClientNames) + 1) * 25 * 2 * (12 + 1 + 2),
+		"alarmd_redis_bytes_total":             (len(redisClientNames) + 1) * 25 * (len(redisCommandNames) + 1) * 2,
 		"alarmd_lease_renewal_total":           4 * 14,
 	} {
 		if got := bounds[family]; got != want {
@@ -683,6 +683,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		// Two operations (write, renew) by three outcomes (written, present,
 		// missing); two operations by two results for the duration.
 		fqName("object_catalog_objects_total"): 2 * 3,
+		fqName("catalog_renewals_total"):       4,
 		// object, manifest.
 		fqName("object_catalog_written_bytes_total"): 2,
 		// One series per rollout position, all four always emitted so the

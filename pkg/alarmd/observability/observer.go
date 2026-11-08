@@ -885,7 +885,12 @@ type ActiveQGSetFacts struct {
 	Result      string
 	QueryGroups int
 	ObjectBytes int
-	Duration    time.Duration
+	// TimelinesHalfLife and TimelinesFirst are the Schedule timelines a
+	// renewal renewed: the ones this process last renewed or wrote more than
+	// half the catalog TTL ago, and the ones it had not since it started.
+	TimelinesHalfLife int
+	TimelinesFirst    int
+	Duration          time.Duration
 }
 
 // ScheduleCutoverFacts describe one publication cutover as the Control
@@ -1377,7 +1382,11 @@ type ObjectCatalogFacts struct {
 	Missing       int
 	ManifestBytes int
 	ObjectBytes   int
-	Duration      time.Duration
+	// RenewedObjects and RenewedContexts are the keys a renewal renewed:
+	// the Query Group objects with the manifest, and the output contexts.
+	RenewedObjects  int
+	RenewedContexts int
+	Duration        time.Duration
 }
 
 // ObjectReadFacts describe one read of a catalog object by a Worker: the
@@ -3484,7 +3493,8 @@ func normalizeObjectCatalogFacts(facts *ObjectCatalogFacts) *ObjectCatalogFacts 
 	if normalized.Result != "success" && normalized.Result != "failure" {
 		normalized.Result = "failure"
 	}
-	for _, count := range []*int{&normalized.QueryGroups, &normalized.Written, &normalized.Present, &normalized.Missing, &normalized.ManifestBytes, &normalized.ObjectBytes} {
+	for _, count := range []*int{&normalized.QueryGroups, &normalized.Written, &normalized.Present, &normalized.Missing, &normalized.ManifestBytes, &normalized.ObjectBytes,
+		&normalized.RenewedObjects, &normalized.RenewedContexts} {
 		if *count < 0 {
 			*count = 0
 		}
@@ -3511,8 +3521,10 @@ func normalizeActiveQGSetFacts(facts *ActiveQGSetFacts) *ActiveQGSetFacts {
 	if normalized.QueryGroups < 0 {
 		normalized.QueryGroups = 0
 	}
-	if normalized.ObjectBytes < 0 {
-		normalized.ObjectBytes = 0
+	for _, count := range []*int{&normalized.ObjectBytes, &normalized.TimelinesHalfLife, &normalized.TimelinesFirst} {
+		if *count < 0 {
+			*count = 0
+		}
 	}
 	if normalized.Duration < 0 {
 		normalized.Duration = 0

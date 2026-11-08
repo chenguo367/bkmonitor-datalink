@@ -170,6 +170,7 @@ type RedisCatalogRepository struct {
 	manifestFlights     catalogManifestFlights
 	latestPublication   latestPublicationMemo
 	freshnessClock      func() time.Time
+	renewals            catalogRenewals
 	controlCache        *controlReadCache
 	controlReads        controlReadCounters
 	activationBodyBytes atomic.Int64
@@ -272,14 +273,11 @@ return {1, redis.call('STRLEN', KEYS[5])}
 // and the script only checks that the keys are still there.
 func (repository *RedisCatalogRepository) RenewCurrentActivationObjects(ctx context.Context) error {
 	started := time.Now()
-	metricResult := "failure"
-	queryGroups, objectBytes := 0, 0
+	facts := &observability.ActiveQGSetFacts{Operation: "renew", Result: "failure"}
 	defer func() {
-		renewed := time.Since(started)
+		facts.Duration = time.Since(started)
 		repository.observe(ctx, observability.Observation{Component: observability.ComponentControlPlane, Stage: observability.StageActiveQGSet,
-			Result: factsTextResult(metricResult), ActiveQGSet: &observability.ActiveQGSetFacts{Operation: "renew", Result: metricResult,
-				QueryGroups: queryGroups, ObjectBytes: objectBytes, Duration: renewed},
-			Duration: renewed, DurationKnown: true})
+			Result: factsTextResult(facts.Result), ActiveQGSet: facts, Duration: facts.Duration, DurationKnown: true})
 	}()
 	state, err := repository.LoadActivationHead(ctx)
 	if err != nil {
@@ -327,7 +325,7 @@ func (repository *RedisCatalogRepository) RenewCurrentActivationObjects(ctx cont
 		// The Schedule timelines of the renewed Active Set and of the Draining
 		// projection are renewed only after the guarded CAS proved that the
 		// state read above is still the current one.
-		if err := repository.renewScheduleTimelines(ctx, groups, state.Draining); err != nil {
+		if err := repository.renewScheduleTimelines(ctx, groups, state.Draining, facts); err != nil {
 			return err
 		}
 		repository.renewObjectCatalog(ctx, state.Current.SnapshotRevision)
@@ -336,8 +334,8 @@ func (repository *RedisCatalogRepository) RenewCurrentActivationObjects(ctx cont
 		// header another writer put back while a rebuild conflicted stayed
 		// "missing" on the fleet until the next activation asked.
 		repository.header.present()
-		metricResult = "success"
-		queryGroups, objectBytes = len(groups), int(activeBytes)
+		facts.Result = "success"
+		facts.QueryGroups, facts.ObjectBytes = len(groups), int(activeBytes)
 		return nil
 	case 0:
 		repository.header.conflict(ActivationRenewalHeaderMoved)

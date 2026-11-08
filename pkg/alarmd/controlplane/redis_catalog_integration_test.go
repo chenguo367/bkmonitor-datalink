@@ -1426,6 +1426,10 @@ func TestRenewCurrentActivationObjectsRenewsOnlyReferencedScheduleTimelines(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The renewals' own clock: a timeline is renewed once half the catalog
+	// TTL has passed since this process last renewed or wrote it.
+	renewedAt := time.Unix(1_700_000_000, 0)
+	controlplane.SetCatalogRenewalClockForTest(repository, func() time.Time { return renewedAt })
 	if err := repository.ConfigureDrainingTermination(10 * time.Minute); err != nil {
 		t.Fatal(err)
 	}
@@ -1487,8 +1491,19 @@ func TestRenewCurrentActivationObjectsRenewsOnlyReferencedScheduleTimelines(t *t
 	// Leader's own timer, so a live timeline stays resident in an environment
 	// that has not published for hours, which a write-time TTL alone could not
 	// do. The retired Query Group is still draining, so it is renewed too.
+	// A timeline is renewed only once half the TTL has passed since it was
+	// written or last renewed: the activations above wrote both, so the first
+	// round inside the half-life leaves them, as every round inside it after
+	// a renewal does.
 	for round := 0; round < 2; round++ {
+		renewedAt = renewedAt.Add(catalogTTL/2 - time.Second)
 		expireSoon(first, second)
+		if err := repository.RenewCurrentActivationObjects(ctx); err != nil {
+			t.Fatal(err)
+		}
+		requireNotRenewed(second, "active within the half-life")
+		requireNotRenewed(first, "draining within the half-life")
+		renewedAt = renewedAt.Add(time.Second)
 		if err := repository.RenewCurrentActivationObjects(ctx); err != nil {
 			t.Fatal(err)
 		}
@@ -1511,6 +1526,7 @@ func TestRenewCurrentActivationObjectsRenewsOnlyReferencedScheduleTimelines(t *t
 	if len(state.Draining) != 1 || state.Draining[0].QueryGroup != second {
 		t.Fatalf("draining=%+v, want only the newly retired Query Group %s", state.Draining, second)
 	}
+	renewedAt = renewedAt.Add(catalogTTL / 2)
 	expireSoon(first, second, third)
 	if err := repository.RenewCurrentActivationObjects(ctx); err != nil {
 		t.Fatal(err)

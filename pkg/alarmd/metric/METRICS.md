@@ -315,6 +315,12 @@ Labels: `source_semantics`
 
 Query Groups in the Catalog the leader last built, by the data sources their query reads. Every Query Group falls under exactly one source_semantics, so this family adds up to the Catalog's total. A Query Group whose query reads more than one data source is counted once, under mixed, rather than once per source: counting it per source would make the family stop adding up, and spelling the combination out would make the label set every subset of the sources. A source outside the supported list is other, which should stay zero while the compiler refuses such a source. Each supported source is reported at zero when it has no Query Groups, because a source that compiles nothing must not read the same as a source nobody asked about. Reported by the leader only: no other replica builds a Catalog. A Query Group is one query shared by every Plan that wants it, so this counts querying, not strategies -- catalog_plans counts those.
 
+## alarmd_catalog_renewals_total
+
+Labels: `kind`, `reason`
+
+Catalog keys the Control Leader renewed, by kind and why: timeline half_life (this process last renewed or wrote it more than half the catalog TTL ago) or first (it had not since it started); object (the Query Group objects and the manifest) and context (the output contexts) periodic, on the first refresh round of the process and every tenth after. A key a renewal found missing is counted here and in object_catalog_objects_total{outcome="missing"}.
+
 ## alarmd_catalog_required_history_points
 
 History points the Levels of the Catalog the leader last built require, summed over every accepted Level including the no-data one. The denominator of the retention measurement: read catalog_retained_history_points over this one for what the recovery slack in the retained history costs the deployment. Both are points and not bytes -- bytes are what the retention pool is budgeted in, and are read from the store's own retained-bytes metric across a release; points are their proxy and the only one the leader can publish without reading the store. Reported by the leader only.
@@ -1683,7 +1689,7 @@ Redis operations of a named job that failed, by why, counted as redis_failure_re
 
 Labels: `client`, `caller`
 
-Redis operations issued by a named job on a client, one per call or pipeline batch, for the jobs that share one client: on the diagnostics client directory_read, diagnostic_write, diagnostic_read, cost_projection; on the source and runtime clients (one client when the deployment points both at one Redis) strategy_source, legacy_effective_time, control_plane, ownership, runtime_state, query_cooldown, fleet, linkd; cmdb_cache, target_group and dynamic_config on whichever client they share; store_census and effective_maintenance on the source and runtime clients; lease_confirmation on the runtime client; legacy_output and legacy_pod_cache on the clients of those names.
+Redis operations issued by a named job on a client, one per call or pipeline batch, for the jobs that share one client: on the diagnostics client directory_read, diagnostic_write, diagnostic_read, cost_projection; on the source and runtime clients (one client when the deployment points both at one Redis) strategy_source, legacy_effective_time, control_plane, ownership, runtime_state, query_cooldown, fleet, linkd; cmdb_cache, target_group and dynamic_config on whichever client they share; store_census and effective_maintenance on the source and runtime clients; lease_confirmation on the runtime client; catalog_timeline_renewal, catalog_object_renewal and catalog_context_renewal on the source client; legacy_output and legacy_pod_cache on the clients of those names.
 
 ## alarmd_redis_command_duration_seconds
 
