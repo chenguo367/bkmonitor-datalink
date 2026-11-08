@@ -611,6 +611,12 @@ func (reconciler *Reconciler) settle(
 		ExpectedRecordRevision: expectedRevision, PlacementReason: ownership.PlacementRendezvous, DecidedAt: at,
 		TimelineRecordRevision: timeline,
 	}
+	// The lease is expected to be held by the record's desired worker, whose
+	// session the publication reads to tell whether the move must wait out a
+	// grace.
+	if hasCurrent {
+		decision.HolderWorkerID = current.DesiredWorkerID
+	}
 	// A placement carries the content it places onto when the round
 	// declares scopes, so a Query Group is never placed without one and
 	// then named on the next round; and it withdraws when the round

@@ -1904,7 +1904,7 @@ func (runtime *productionPhaseTwoOwnership) publishMoves(
 			continue
 		}
 		_, err := runtime.dependencies.Store.PublishAssignment(ctx, authority, ownership.AssignmentDecision{
-			QueryGroup: move.QueryGroup, DesiredWorkerID: move.To, ExpectedRecordRevision: record.RecordRevision,
+			QueryGroup: move.QueryGroup, DesiredWorkerID: move.To, HolderWorkerID: move.From, ExpectedRecordRevision: record.RecordRevision,
 			PlacementReason: ownership.PlacementRebalance, DecidedAt: at,
 		})
 		switch {

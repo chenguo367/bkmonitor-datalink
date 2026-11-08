@@ -228,7 +228,9 @@ func TestReconcilerRerunsRendezvousWhenIncumbentIsNotReady(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Reconcile() error = %v", err)
 			}
-			if record.DesiredWorkerID != "worker-2" || store.publishedWorker != "worker-2" ||
+			// The move names the worker it is taken from as the holder whose
+			// session the publication reads.
+			if record.DesiredWorkerID != "worker-2" || store.publishedWorker != "worker-2" || store.publishedHolder != "worker-1" ||
 				store.expectedRevision != current.RecordRevision || store.publishCalls != 1 {
 				t.Fatalf("Reconcile(%s incumbent) record=%+v published=%q revision=%d publishes=%d, want worker-2 at revision %d",
 					test.name, record, store.publishedWorker, store.expectedRevision, store.publishCalls, current.RecordRevision)
@@ -249,6 +251,7 @@ type fakeAssignmentStore struct {
 	workers            []ownership.WorkerRegistration
 	current            ownership.AssignmentRecord
 	publishedWorker    string
+	publishedHolder    string
 	publishedAuthority ownership.PublicationAuthority
 	expectedRevision   uint64
 	publishCalls       int
@@ -294,6 +297,7 @@ func (store *fakeAssignmentStore) PublishAssignment(
 ) (ownership.AssignmentRecord, error) {
 	store.publishedAuthority = authority
 	store.publishedWorker = decision.DesiredWorkerID
+	store.publishedHolder = decision.HolderWorkerID
 	store.expectedRevision = decision.ExpectedRecordRevision
 	store.publishedTimeline = decision.TimelineRecordRevision
 	store.publishCalls++

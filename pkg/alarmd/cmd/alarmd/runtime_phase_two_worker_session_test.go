@@ -15,9 +15,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
 
 // The worker holds one session for as long as it runs: it acquires it,
@@ -80,5 +82,46 @@ func TestAWorkerHoldsOneSessionAndReplacesOneItLost(t *testing.T) {
 		if line.Trace.QueryGroupKey != string(ownership.WorkerSessionIdentity("worker-1")) {
 			t.Fatalf("a session line traced %q, want the session's identity", line.Trace.QueryGroupKey)
 		}
+	}
+}
+
+// decisionRecordingStore is the real ownership store, keeping each decision
+// published through it.
+type decisionRecordingStore struct {
+	*ownership.RedisStore
+	decisions []ownership.AssignmentDecision
+}
+
+func (store *decisionRecordingStore) PublishAssignment(ctx context.Context, authority ownership.PublicationAuthority, decision ownership.AssignmentDecision) (ownership.AssignmentRecord, error) {
+	store.decisions = append(store.decisions, decision)
+	return store.RedisStore.PublishAssignment(ctx, authority, decision)
+}
+
+// A rebalance move names the worker it takes the Query Group from as the
+// holder whose session the publication reads, so a move away from a holder
+// that is gone does not wait out a grace.
+func TestARebalanceMoveNamesTheWorkerItTakesFrom(t *testing.T) {
+	ctx := context.Background()
+	redisStore := newViewGateTestStore(t)
+	store := &decisionRecordingStore{RedisStore: redisStore}
+	now := time.UnixMilli(1_700_000_000_000)
+	authority, err := redisStore.AcquireControlLeader(ctx, "control-1", now, 10*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := redisStore.PublishAssignment(ctx, authority, ownership.AssignmentDecision{
+		QueryGroup: "qg-1", DesiredWorkerID: "worker-from", PlacementReason: ownership.PlacementRendezvous, DecidedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &productionPhaseTwoOwnership{dependencies: productionPhaseTwoOwnershipDependencies{Store: store, Now: time.Now}}
+	outcome, err := runtime.publishMoves(ctx, authority, []scheduler.RebalanceMove{{QueryGroup: "qg-1", From: "worker-from", To: "worker-to"}},
+		map[execution.QueryGroupIdentity]ownership.AssignmentRecord{"qg-1": record}, true, 0, now)
+	if err != nil || len(outcome.applied) != 1 {
+		t.Fatalf("publishMoves() = (%+v, %v), want the move applied", outcome, err)
+	}
+	if len(store.decisions) != 1 || store.decisions[0].HolderWorkerID != "worker-from" {
+		t.Fatalf("published decisions %+v, want one naming worker-from as the holder", store.decisions)
 	}
 }

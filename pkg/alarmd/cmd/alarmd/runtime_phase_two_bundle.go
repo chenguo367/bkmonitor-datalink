@@ -1516,6 +1516,9 @@ func newProductionOwnershipStore(cfg config.Config, client redis.UniversalClient
 	if err := store.ConfigureEpochRetention(phaseTwoOwnerEpochRetention(cfg)); err != nil {
 		return nil, err
 	}
+	if err := store.ConfigureLeaseTTL(cfg.PhaseTwo.Ownership.LeaseTTL.Duration()); err != nil {
+		return nil, err
+	}
 	return store, nil
 }
 

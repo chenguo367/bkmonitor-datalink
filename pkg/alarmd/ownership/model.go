@@ -405,8 +405,13 @@ func (record AssignmentRecord) ContentChangePending() bool {
 // AssignmentDecision is a Control Leader decision based on one observed
 // Assignment revision. ExpectedRecordRevision is zero only for first publish.
 type AssignmentDecision struct {
-	QueryGroup             execution.QueryGroupIdentity
-	DesiredWorkerID        string
+	QueryGroup      execution.QueryGroupIdentity
+	DesiredWorkerID string
+	// HolderWorkerID is the worker the Leader expects holds the lease now --
+	// the record's current desired worker -- whose session the publication
+	// reads to tell a holder that is gone from one that is draining. Empty
+	// is the decision's own desired worker.
+	HolderWorkerID         string
 	ExpectedRecordRevision uint64
 	PlacementReason        PlacementReason
 	DecidedAt              time.Time

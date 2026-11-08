@@ -45,6 +45,19 @@ type RedisStore struct {
 	// epochRetention is how long a swept Query Group keeps its owner epoch
 	// (ConfigureEpochRetention); zero refuses to sweep.
 	epochRetention time.Duration
+	// leaseTTL is the Query Group lease TTL this store's Leader publishes for
+	// the next owner to hold its lease by (ConfigureLeaseTTL); zero publishes
+	// none, and an owner acquires by its own.
+	leaseTTL time.Duration
+}
+
+// ConfigureLeaseTTL sets the lease TTL a publication writes to the record.
+func (store *RedisStore) ConfigureLeaseTTL(ttl time.Duration) error {
+	if store == nil || ttl < 0 {
+		return errors.New("alarmd ownership: invalid lease TTL")
+	}
+	store.leaseTTL = ttl
+	return nil
 }
 
 func NewRedisStore(options RedisStoreOptions) (*RedisStore, error) {
@@ -321,14 +334,18 @@ func (store *RedisStore) PublishAssignment(
 	if err := decision.Validate(); err != nil {
 		return AssignmentRecord{}, err
 	}
+	holder := decision.HolderWorkerID
+	if holder == "" {
+		holder = decision.DesiredWorkerID
+	}
 	result, err := publishAssignmentScript.Run(ctx, store.client, []string{
 		store.ownershipKey(ControlLeaderIdentity), store.assignmentKey(decision.QueryGroup),
-		store.ownershipKey(decision.QueryGroup),
+		store.ownershipKey(decision.QueryGroup), store.workerSessionKey(holder),
 	}, authority.Fence.OwnerID, authority.Fence.OwnerEpoch, authority.Fence.LeaseToken,
 		decision.ExpectedRecordRevision, string(decision.QueryGroup), decision.DesiredWorkerID,
 		string(decision.PlacementReason), decision.DecidedAt.UnixMilli(),
 		decision.ContentScope, ContentSwitchMargin.Milliseconds(), boolText(decision.WithdrawContentScope),
-		decision.TimelineRecordRevision).Result()
+		decision.TimelineRecordRevision, store.leaseTTL.Milliseconds(), holder).Result()
 	if err != nil {
 		return AssignmentRecord{}, err
 	}
@@ -1227,6 +1244,41 @@ local wanted_scope = ARGV[9] or ''
 local margin_ms = tonumber(ARGV[10] or '0')
 local withdraw = ARGV[11] == '1'
 local timeline = tonumber(ARGV[12] or '0')
+local leader_ttl_ms = tonumber(ARGV[13] or '0')
+local holder_id = ARGV[14] or ''
+-- The lease's holder and what decides whether it is still alive. A holder
+-- that took its lease under a worker session (owner_session_epoch, A2) is
+-- alive unless that session is proven gone: KEYS[4] is the session record of
+-- the worker this decision expects to hold the lease, read here in the same
+-- script, and every session of that worker up to a lapsed record's epoch, or
+-- before a live record's, has lapsed for good. A record not there, or a
+-- holder other than the one expected, proves nothing, and the holder is taken
+-- as alive. A holder with no session field holds a lease it renews itself,
+-- and its own deadline says whether it is alive, as it always did.
+local function holder_facts()
+  local held = redis.call('HMGET', KEYS[3], 'owner_id', 'owner_session_epoch', 'owner_lease_ttl_ms', 'deadline_ms')
+  return held[1], held[2], tonumber(held[3] or '0'), tonumber(held[4] or '0')
+end
+local function holder_alive(owner, session_epoch, deadline)
+  if not owner or owner == '' then return false end
+  if not session_epoch or session_epoch == '' then return deadline > now_ms end
+  if owner ~= holder_id then return true end
+  local session = redis.call('HMGET', KEYS[4], 'session_epoch', 'deadline_ms')
+  if not session[1] then return true end
+  local through = tonumber(session[1])
+  if tonumber(session[2] or '0') > now_ms then through = through - 1 end
+  return tonumber(session_epoch) > through
+end
+-- When the grace a live holder gets ends. A session holder has no deadline
+-- of its own being renewed: its last confirmation lets it act for its lease
+-- TTL, so the change takes effect one TTL and the margin from now. A holder
+-- that renews its own lease is capped by that renewal at this instant, and
+-- its deadline plus the margin is enough, as it always was. A deadline left
+-- by a holder before is never later than what the max takes.
+local function grace_end(lease_ttl, deadline)
+  if lease_ttl > 0 then return math.max(now_ms + lease_ttl, deadline) + margin_ms end
+  return deadline + margin_ms
+end
 local function reply()
   local f = redis.call('HMGET', KEYS[2], 'desired_worker_id', 'assignment_generation', 'record_revision',
     'control_epoch', 'placement_reason', 'assigned_at_ms', 'content_scope', 'pending_content_scope', 'effective_at_ms',
@@ -1246,6 +1298,11 @@ if timeline > 0 then
   local have = tonumber(redis.call('HGET', KEYS[2], 'timeline_record_revision') or '0')
   if timeline > have then redis.call('HSET', KEYS[2], 'timeline_record_revision', timeline) end
 end
+-- The lease TTL the next owner holds its lease by: the Leader's, read from
+-- the record at acquisition and kept with the lease, so the holder and the
+-- Leader reckon one grace by one number. Like the timeline revision, it does
+-- not move record_revision.
+if leader_ttl_ms > 0 then redis.call('HSET', KEYS[2], 'lease_ttl_ms', leader_ttl_ms) end
 local current_desired = redis.call('HGET', KEYS[2], 'desired_worker_id')
 if current_desired and current_desired == desired then
   if withdraw then
@@ -1265,12 +1322,11 @@ if current_desired and current_desired == desired then
     end
     return reply()
   end
-  local lease_deadline = tonumber(redis.call('HGET', KEYS[3], 'deadline_ms') or '0')
-  local holder = redis.call('HGET', KEYS[3], 'owner_id')
-  if scope ~= '' and holder and holder ~= '' and lease_deadline > now_ms then
+  local holder, session_epoch, lease_ttl, lease_deadline = holder_facts()
+  if scope ~= '' and holder_alive(holder, session_epoch, lease_deadline) then
     local pending = redis.call('HGET', KEYS[2], 'pending_content_scope')
     if pending == wanted_scope then return reply() end
-    local effective = lease_deadline + margin_ms
+    local effective = grace_end(lease_ttl, lease_deadline)
     local existing = tonumber(redis.call('HGET', KEYS[2], 'effective_at_ms') or '0')
     if existing > effective or (holder ~= desired and existing > now_ms) then effective = existing end
     redis.call('HSET', KEYS[2], 'pending_content_scope', wanted_scope, 'effective_at_ms', effective,
@@ -1283,13 +1339,12 @@ if current_desired and current_desired == desired then
 end
 local generation = tonumber(redis.call('HGET', KEYS[2], 'assignment_generation') or '0') + 1
 local revision = current_revision + 1
-local holder = redis.call('HGET', KEYS[3], 'owner_id')
-local lease_deadline = tonumber(redis.call('HGET', KEYS[3], 'deadline_ms') or '0')
+local holder, session_epoch, lease_ttl, lease_deadline = holder_facts()
 local releasing = redis.call('HGET', KEYS[2], 'releasing_worker_id')
 -- A holder this record authorized -- its desired worker, or the holder an
 -- earlier move is still draining -- that holds a live lease and is not the
 -- new decision keeps the lease until it lets go or its grace ends.
-local draining = holder and holder ~= '' and holder ~= desired and lease_deadline > now_ms and
+local draining = holder and holder ~= '' and holder ~= desired and holder_alive(holder, session_epoch, lease_deadline) and
   (holder == current_desired or holder == releasing)
 redis.call('HSET', KEYS[2], 'query_group', query_group, 'desired_worker_id', desired,
   'assignment_generation', generation, 'record_revision', revision, 'control_epoch', leader_epoch,
@@ -1304,7 +1359,7 @@ end
 -- already draining keeps the end it was given: a later decision moves the
 -- Query Group on, never the holder's end further out.
 local existing = tonumber(redis.call('HGET', KEYS[2], 'effective_at_ms') or '0')
-local effective = lease_deadline + margin_ms
+local effective = grace_end(lease_ttl, lease_deadline)
 if existing > effective or (releasing == holder and existing > now_ms) then effective = existing end
 redis.call('HSET', KEYS[2], 'releasing_worker_id', holder, 'effective_at_ms', effective)
 if withdraw then
