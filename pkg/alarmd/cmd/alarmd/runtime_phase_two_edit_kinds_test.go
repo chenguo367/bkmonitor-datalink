@@ -386,30 +386,39 @@ func TestASlotEndingQueryFreeAcrossAnEditGuardsTheGenerationItRanUnder(t *testin
 	}
 }
 
-// Design 013 section 3.2 has the carry at the new generation's first Slot
-// meet that guard and skip the series (skipped_guard_gapped), not carry the
-// hole across as history.
-func TestTheCarryAfterAQueryFreeSlotSkipsTheGuardedSeries(t *testing.T) {
+// The series carry reads the old record's Levels, not the old generation's
+// Plan marker: the Slot that ended query-free wrote no state, so what it left
+// is a hole in the points, and a hole comes along with the carry as a hole
+// (design 013 section 3.2). The series is carried, not started over, and the
+// first window read after the edit is short by that position while it keeps
+// the points carried with it.
+func TestTheCarryAfterAQueryFreeSlotTakesItsHoleAlong(t *testing.T) {
+	// A window of three positions, so the one the query-free Slot left
+	// empty is inside the first window read after the edit.
+	previousWindow := cutoverStallTriggerWindow
+	cutoverStallTriggerWindow = 3
+	t.Cleanup(func() { cutoverStallTriggerWindow = previousWindow })
 	edited, observed := queryFreeAcrossAnEdit(t)
 	series := map[string]int{}
+	shortWithHistory, startedOver := 0, 0
 	for _, observation := range edited.observed()[observed:] {
 		if facts := observation.StateCarry; facts != nil && facts.Scope == "series" {
 			series[facts.Result] += facts.Count
 		}
+		if coverage := observation.HistoryCoverage; coverage != nil && coverage.Levels > 0 && coverage.Short > 0 {
+			if coverage.WorstValid > 1 {
+				shortWithHistory++
+			} else {
+				startedOver++
+			}
+		}
 	}
-	if series["skipped_guard_gapped"] != 1 || series["carried_across_detect"] != 0 {
-		t.Fatalf("series carried %v, want the series skipped for the guard over the hole", series)
+	if series["carried_across_detect"] == 0 || series["skipped_guard_gapped"] != 0 {
+		t.Fatalf("series carried %v, want the series carried with its hole", series)
 	}
-}
-
-// renumberLevels moves every Level of strategy 1001 to id 2: no Level is
-// common to the versions before and after.
-func renumberLevels(first map[string]any) {
-	for _, algorithm := range first["items"].([]any)[0].(map[string]any)["algorithms"].([]any) {
-		algorithm.(map[string]any)["level"] = 2
-	}
-	for _, detect := range first["detects"].([]any) {
-		detect.(map[string]any)["level"] = 2
+	if shortWithHistory == 0 || startedOver != 0 {
+		t.Fatalf("windows short with the carried points %d, started over %d; want the hole carried, not the series started over",
+			shortWithHistory, startedOver)
 	}
 }
 

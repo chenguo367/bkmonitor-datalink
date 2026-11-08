@@ -73,16 +73,20 @@ func TestAPlanIsUnseenOnlyWhenTheSlotReadNothingFromBeforeIt(t *testing.T) {
 	}
 }
 
-// Only a Plan with no gap marker at all and nothing read from before the
-// Slot is first seen; a marker of any kind - a warm-up marker, a satisfied
-// one - says the Plan ran under the generation, and so does state read from
-// before the Slot. The satisfied marker that records the judgement is a
+// Only a Plan new to its activation, with no gap marker at all and nothing
+// read from before the Slot, is first seen; a marker of any kind - a warm-up
+// marker, a satisfied one - says the Plan ran under the generation, and so
+// does state read from before the Slot. A Plan whose generation moved under
+// it ran under the one before, and finding nothing under the new one does
+// not make it new. The satisfied marker that records the judgement is a
 // clear with no scope at the Slot's own version.
 func TestAPlanIsFirstSeenOnlyWithNeitherAMarkerNorEarlierState(t *testing.T) {
 	due := firstSeenDue()
 	fact := execution.PlanActivationFact{Plan: due.Identity, Selection: execution.ActivationCurrent,
 		Selected: execution.ActivatedPlan{Identity: due.Identity, StateGeneration: due.StateGeneration, StateApplyEpoch: due.StateApplyEpoch,
-			ScheduleRevision: due.ScheduleRevision, ForceWarming: true}}
+			ScheduleRevision: due.ScheduleRevision, ForceWarming: true, Arrived: true}}
+	moved := fact
+	moved.Selected.Arrived = false
 	forced := execution.PlanActivationResult{Contract: frozenRenewalContract(), Facts: []execution.PlanActivationFact{fact}}
 	marker := func(status execution.GapLoadStatus) execution.GapLoadResult {
 		return execution.GapLoadResult{Items: []execution.GapGuardSnapshot{{Identity: fact.GapIdentity(), Status: status}}}
@@ -92,6 +96,7 @@ func TestAPlanIsFirstSeenOnlyWithNeitherAMarkerNorEarlierState(t *testing.T) {
 		name      string
 		gaps      execution.GapLoadResult
 		unseen    map[execution.PlanKey]struct{}
+		moved     bool
 		firstSeen bool
 	}{
 		{name: "no marker, nothing before", unseen: unseen, firstSeen: true},
@@ -99,9 +104,14 @@ func TestAPlanIsFirstSeenOnlyWithNeitherAMarkerNorEarlierState(t *testing.T) {
 		{name: "a warm-up marker", gaps: marker(execution.GapFound), unseen: unseen},
 		{name: "a satisfied marker", gaps: marker(execution.GapClearedTombstone), unseen: unseen},
 		{name: "state from before", unseen: map[execution.PlanKey]struct{}{}},
+		{name: "a generation moved, nothing before", unseen: unseen, moved: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			stillForced, firstSeen := firstSeenActivations(forced, testCase.gaps, testCase.unseen)
+			judged := forced
+			if testCase.moved {
+				judged = execution.PlanActivationResult{Contract: forced.Contract, Facts: []execution.PlanActivationFact{moved}}
+			}
+			stillForced, firstSeen := firstSeenActivations(judged, testCase.gaps, testCase.unseen)
 			if _, judged := firstSeen[fact.Key()]; judged != testCase.firstSeen || (len(stillForced.Facts) == 1) == testCase.firstSeen {
 				t.Fatalf("first seen %t, still forced %d, want first seen %t", judged, len(stillForced.Facts), testCase.firstSeen)
 			}
