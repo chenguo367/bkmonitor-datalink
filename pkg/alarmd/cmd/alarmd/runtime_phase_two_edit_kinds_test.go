@@ -382,3 +382,56 @@ func TestASlotEndingQueryFreeAcrossAnEditGuardsTheGenerationItRanUnder(t *testin
 		t.Fatalf("the old generation's marker %s, want it GAPPED from the Slot that ended query-free", raw)
 	}
 }
+
+// Design 013 section 3.2 has the carry at the new generation's first Slot
+// meet that guard and skip the series (skipped_guard_gapped), not carry the
+// hole across as history.
+func TestTheCarryAfterAQueryFreeSlotSkipsTheGuardedSeries(t *testing.T) {
+	edited, observed := queryFreeAcrossAnEdit(t)
+	series := map[string]int{}
+	for _, observation := range edited.observed()[observed:] {
+		if facts := observation.StateCarry; facts != nil && facts.Scope == "series" {
+			series[facts.Result] += facts.Count
+		}
+	}
+	if series["skipped_guard_gapped"] != 1 || series["carried_across_detect"] != 0 {
+		t.Fatalf("series carried %v, want the series skipped for the guard over the hole", series)
+	}
+}
+
+// renumberLevels moves every Level of strategy 1001 to id 2: no Level is
+// common to the versions before and after.
+func renumberLevels(first map[string]any) {
+	for _, algorithm := range first["items"].([]any)[0].(map[string]any)["algorithms"].([]any) {
+		algorithm.(map[string]any)["level"] = 2
+	}
+	for _, detect := range first["detects"].([]any) {
+		detect.(map[string]any)["level"] = 2
+	}
+}
+
+// An edit whose carry is not whole still warms the Plan up (design 013
+// section 4.1): with no Level common to both versions there is nothing to
+// carry, and the new Segment's first Slot is spent on the warm-up marker
+// (CONFIG_DRIFT). The Slot in flight at the edit completes all the same:
+// that is the closed Segment's answer, whatever the carry.
+func TestAnEditWithNoCommonLevelStillWarmsUp(t *testing.T) {
+	edited := editInFlight(t, renumberLevels)
+	if carry, _ := edited.planCarry(); carry != "none_no_common_level" {
+		t.Fatalf("the renumbering edit decided carry %q, want none_no_common_level", carry)
+	}
+	endings := edited.slotEndings()
+	if ended := endings[edited.inFlight]; ended != fullEnding {
+		t.Fatalf("the Slot in flight ended %q, want FULL; endings %v", ended, endings)
+	}
+	for attempt := 0; attempt < 5 && endings[edited.first] == ""; attempt++ {
+		edited.clock.Store(edited.now().Add(time.Second).UnixMilli())
+		if _, _, err := edited.runner.RunOne(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		endings = edited.slotEndings()
+	}
+	if ended := endings[edited.first]; ended != "COMPLETED_WITH_PARTIAL_GAP/CONFIG_DRIFT" {
+		t.Fatalf("the new Segment's first Slot ended %q, want it spent warming up (CONFIG_DRIFT); endings %v", ended, endings)
+	}
+}
