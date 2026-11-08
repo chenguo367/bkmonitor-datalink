@@ -24,14 +24,18 @@ import (
 // the same identity and generation, is from before the hole. The reopened
 // Segment's first Slot is spent on the warm-up marker and writes no event.
 // It is not one the Worker judges by what it finds - the Plan is not new to
-// the activation - so it warms up the same with its State gone.
+// the activation - so it warms up the same with its State gone. Its word is
+// what the Slot finds of it: with its State kept, the Plan is back
+// (PLAN_REACTIVATED); with its State gone and no marker - a Plan of the first
+// activation never wrote one - nothing says it ran (CONFIG_DRIFT).
 func TestAStrategyPutBackIntoItsRetiredGroupWarmsUp(t *testing.T) {
 	for _, test := range []struct {
 		name      string
 		stateGone bool
+		word      string
 	}{
-		{name: "its State kept"},
-		{name: "its State gone", stateGone: true},
+		{name: "its State kept", word: "COMPLETED_WITH_PARTIAL_GAP/PLAN_REACTIVATED"},
+		{name: "its State gone", stateGone: true, word: "COMPLETED_WITH_PARTIAL_GAP/CONFIG_DRIFT"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := startCutoverFixture(t, nil)
@@ -114,14 +118,9 @@ func TestAStrategyPutBackIntoItsRetiredGroupWarmsUp(t *testing.T) {
 					fixture.clock.Store(fixture.now().UnixMilli() + 1000)
 				}
 			}
-			ended := fixture.slotEndings()[first]
-			// The completion word for a Plan back in its activation is the
-			// design's to settle (013 sections 3.3 and 4.6); either one is a
-			// Slot spent on the warm-up marker.
-			if ended != "COMPLETED_WITH_PARTIAL_GAP/CONFIG_DRIFT" && ended != "COMPLETED_WITH_PARTIAL_GAP/PLAN_REACTIVATED" {
-				t.Fatalf("the reopened Segment's first Slot ended %q, want it spent warming up; endings %v", ended, fixture.slotEndings())
+			if ended := fixture.slotEndings()[first]; ended != test.word {
+				t.Fatalf("the reopened Segment's first Slot ended %q, want %q; endings %v", ended, test.word, fixture.slotEndings())
 			}
-			t.Logf("the reopened Segment's first Slot ended %s", ended)
 			if events := fixture.eventsAt(first); len(events) != 0 {
 				t.Fatalf("the warm-up Slot wrote events: %+v", events)
 			}
