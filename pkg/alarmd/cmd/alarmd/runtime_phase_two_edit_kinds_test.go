@@ -11,14 +11,17 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/go-redis/redis/v8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/state"
 )
 
 // editedInFlight is strategy 1001 edited while a Slot of its Query Group is
@@ -35,6 +38,13 @@ type editedInFlight struct {
 }
 
 func editInFlight(t *testing.T, edit func(first map[string]any)) *editedInFlight {
+	t.Helper()
+	return editInFlightThen(t, edit, nil)
+}
+
+// editInFlightThen is editInFlight with between run after the cutover and
+// before the Slot in flight resumes.
+func editInFlightThen(t *testing.T, edit func(first map[string]any), between func(*cutoverStallFixture)) *editedInFlight {
 	t.Helper()
 	fixture := startCutoverFixture(t, nil)
 	ctx := context.Background()
@@ -75,15 +85,35 @@ func editInFlight(t *testing.T, edit func(first map[string]any)) *editedInFlight
 			closed.Segment, err, boundary)
 	}
 
+	if between != nil {
+		between(fixture)
+	}
 	fixture.clock.Store((int64(edited.inFlight) + 2) * 1000)
-	if result, attempted, err := fixture.runner.RunOne(ctx); err != nil || !attempted || !result.Completed {
-		t.Fatalf("the in-flight Slot RunOne = (%+v, %t, %v), want it completed", result, attempted, err)
-	}
-	fixture.clock.Store((int64(edited.first) + 1) * 1000)
-	if result, attempted, err := fixture.runner.RunOne(ctx); err != nil || !attempted || !result.Completed {
-		t.Fatalf("the new Segment's first Slot RunOne = (%+v, %t, %v), want it completed", result, attempted, err)
-	}
+	edited.runUntilEnded(edited.inFlight)
+	fixture.clock.Store(max(fixture.clock.Load(), (int64(edited.first)+1)*1000))
+	edited.runUntilEnded(edited.first)
 	return edited
+}
+
+// runUntilEnded runs the Query Group's rounds, each at its next ready
+// instant, until slot has ended: a round that retries is followed by the
+// next.
+func (edited *editedInFlight) runUntilEnded(slot execution.EvaluationTime) {
+	edited.t.Helper()
+	for attempt := 0; attempt < 30; attempt++ {
+		if _, ended := edited.slotEndings()[slot]; ended {
+			return
+		}
+		if nextAt := edited.runner.NextReadyAt(); nextAt.After(edited.now()) {
+			edited.clock.Store(nextAt.UnixMilli() + 1)
+		}
+		if _, attempted, err := edited.runner.RunOne(context.Background()); err != nil {
+			edited.t.Fatalf("Slot %d RunOne: %v", slot, err)
+		} else if !attempted {
+			edited.clock.Store(edited.now().Add(time.Second).UnixMilli())
+		}
+	}
+	edited.t.Fatalf("Slot %d did not end; endings %v", slot, edited.slotEndings())
 }
 
 // planCarry is the carry decided for strategy 1001's Plan at the edit, and
@@ -298,5 +328,57 @@ func TestAQueryEditReadsTheStateTheOldGroupWrote(t *testing.T) {
 	}
 	if events := fixture.eventsAt(first); len(events) == 0 {
 		t.Fatal("the new group's first Slot made no alert: it did not read the anomaly the old group stored")
+	}
+}
+
+// queryFreeAcrossAnEdit is the Slot in flight at a threshold edit ending
+// query-free: its snapshot is gone, as content past its retention is, so the
+// Slot is skipped. It returns the observations from that Slot on.
+func queryFreeAcrossAnEdit(t *testing.T) (*editedInFlight, int) {
+	t.Helper()
+	var observed int
+	edited := editInFlightThen(t, thresholdTo(81), func(fixture *cutoverStallFixture) {
+		expireOldContent(t, fixture, fixture.initialSchedule)
+		if err := fixture.repository.ConfigureObjectCache(1, 1); err != nil {
+			t.Fatal(err)
+		}
+		observed = len(fixture.observed())
+	})
+	// Query-free either way the snapshot's loss is judged: skipped, or
+	// completed without its read.
+	if ended := edited.slotEndings()[edited.inFlight]; ended != "GAP_SKIPPED/GAP_SKIPPED" &&
+		ended != "COMPLETED_WITH_UNAVAILABLE/SNAPSHOT_UNAVAILABLE" {
+		t.Fatalf("the Slot in flight ended %q, want it query-free for its snapshot", ended)
+	}
+	return edited, observed
+}
+
+// The Slot in flight at an edit, ending query-free, guards the generation it
+// ran under (design 013 section 3.2): its Segment answers the Plan it ran,
+// so its completion writes the Plan's gap marker on that generation, GAPPED
+// from that Slot. Before, the Segment answered no Plan, and the old
+// generation's window had the hole with no marker over it.
+func TestASlotEndingQueryFreeAcrossAnEditGuardsTheGenerationItRanUnder(t *testing.T) {
+	edited, _ := queryFreeAcrossAnEdit(t)
+	plan := edited.initialSchedule.Plans[0].Identity
+	key, err := state.PlanGapKeyV2(edited.cfg.Redis.StatePrefix, execution.PlanGapIdentity{Plan: plan, StateGeneration: edited.generationBefore})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := edited.redisClient.Get(context.Background(), key).Bytes()
+	if err != nil {
+		t.Fatalf("the generation the Slot ran under has no gap marker: %v", err)
+	}
+	var marker struct {
+		Scopes []struct {
+			Status           string
+			ReasonOriginSlot int64
+		} `json:"scopes"`
+	}
+	if err := json.Unmarshal(raw, &marker); err != nil {
+		t.Fatal(err)
+	}
+	if len(marker.Scopes) == 0 || marker.Scopes[0].Status != "GAPPED" || marker.Scopes[0].ReasonOriginSlot != int64(edited.inFlight) {
+		t.Fatalf("the old generation's marker %s, want it GAPPED from the Slot that ended query-free", raw)
 	}
 }
