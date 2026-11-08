@@ -328,3 +328,20 @@ func TestResumedSeriesUnderALaterSlotsMarkerCompleteAndCountItOnce(t *testing.T)
 		t.Fatalf("Execute = (%+v, %v), want refused", result, err)
 	}
 }
+
+// An attempt whose activation changed under it after evaluation converges and
+// retries; the series it skipped on the way are on that result too, so the
+// completion line and the read hold see them whichever exit the attempt took.
+func TestAConvergedAttemptStillCarriesWhatItSkipped(t *testing.T) {
+	fixture := newFixture(t, true, "")
+	stored := versionFrom(0, 60, "later-slot")
+	fixture.ports.alreadyApplied, fixture.ports.storedVersion = true, &stored
+	fixture.ports.activationChangeAt, fixture.ports.persistActivatedGaps = 2, true
+	result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
+	if err != nil || result.Completed || result.ReasonCode != execution.ReasonCode(contract.ReasonConfigDrift) {
+		t.Fatalf("Execute = (%+v, %v), want the activation change's retry", result, err)
+	}
+	if result.Superseded.Count != 1 || result.Superseded.Sample == nil || result.Superseded.Sample.Stored != stored {
+		t.Fatalf("converged result superseded = %+v, want the skipped series", result.Superseded)
+	}
+}

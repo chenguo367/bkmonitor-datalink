@@ -128,3 +128,18 @@ func TestSupersededLabelsAreClosed(t *testing.T) {
 		}
 	}
 }
+
+// The skip's word is kept as itself wherever a reason is normalized -- on a
+// line and in a metric label -- as the already-applied word beside it is:
+// folded into other, the one success that says a later Slot was there first
+// would read like any unclassified one.
+func TestTheBeforeEvaluationWordsAreKeptOnLinesAndLabels(t *testing.T) {
+	for _, reason := range []ReasonCode{ReasonStateAlreadyAppliedBeforeEvaluation, ReasonStateSupersededBeforeEvaluation} {
+		if got := NormalizeReason(reason, ResultSuccess); got != reason {
+			t.Errorf("line reason %s -> %s", reason, got)
+		}
+		if got := NormalizeMetricReason(ComponentState, reason, ResultSuccess); got != reason {
+			t.Errorf("metric reason %s -> %s", reason, got)
+		}
+	}
+}

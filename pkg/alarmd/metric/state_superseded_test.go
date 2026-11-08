@@ -41,6 +41,9 @@ func TestStateSupersededCountsBySiteAndOperation(t *testing.T) {
 	skip(observability.StateSupersededAtGap, observability.OperationReplay, 3)
 	skip(observability.StateSupersededAtState, observability.OperationSupplement, 1)
 	skip(observability.StateSupersededAtGap, observability.OperationProbe, 0)
+	// A count below zero cannot come from a skip; it is not added, where a
+	// counter would panic taking it.
+	skip(observability.StateSupersededAtGap, observability.OperationRetry, -1)
 	// The completion line's total is the same skips again.
 	recorder.Observe(ctx, observability.Observation{Component: observability.ComponentScheduler, Stage: observability.StageSlotCompleted,
 		Result: observability.ResultSuccess, Operation: observability.OperationNormal,
@@ -50,7 +53,7 @@ func TestStateSupersededCountsBySiteAndOperation(t *testing.T) {
 		count           float64
 	}{
 		{"state", "normal", 2}, {"gap", "replay", 3}, {"state", string(observability.OperationOther), 1},
-		{"gap", "probe", 0}, {"state", "replay", 0}, {"gap", "normal", 0},
+		{"gap", "probe", 0}, {"gap", "retry", 0}, {"state", "replay", 0}, {"gap", "normal", 0},
 	} {
 		if got := redisCounterSum(t, recorder, family, map[string]string{"site": want.site, "operation": want.operation}); got != want.count {
 			t.Errorf("%s{site=%s,operation=%s} = %v, want %v", family, want.site, want.operation, got, want.count)
