@@ -93,6 +93,10 @@ type productionReadHoldGroup struct {
 	prepared       execution.ScheduleSegmentFact
 	lastTransition execution.EvaluationTime
 	predecessors   []execution.QueryGroupIdentity
+	// awaiting is a group whose last Slot waited on a predecessor
+	// (readhold.AwaitingPredecessorError): its predecessors are kept, and
+	// read again on each round before the Slot asks again.
+	awaiting bool
 	queryRoute     string
 	// querySource names the data the query reads (readHoldSource): the
 	// groups that share it are the peers a new group's first hold is seeded
@@ -258,6 +262,25 @@ func (holds *productionReadHolds) forget(qg execution.QueryGroupIdentity, sessio
 	holds.indexSourceLocked(qg, "")
 	delete(holds.groups, qg)
 	holds.controller.Forget(qg)
+}
+
+// readPredecessorsAgain reads again the records of a waiting group's
+// predecessors, once a round: the Segment is prepared, so preparing it reads
+// nothing. A predecessor this Worker holds is skipped: its record here is the
+// one its own Slots write. One it held and has released since is no longer
+// skipped, and is read as any other.
+func (holds *productionReadHolds) readPredecessorsAgain(ctx context.Context, group *productionReadHoldGroup) {
+	holds.mu.Lock()
+	foreign := make([]execution.QueryGroupIdentity, 0, len(group.predecessors))
+	for _, qg := range group.predecessors {
+		if holds.groups[qg] == nil && !slices.Contains(foreign, qg) {
+			foreign = append(foreign, qg)
+		}
+	}
+	holds.mu.Unlock()
+	for _, qg := range foreign {
+		holds.report("predecessor_unreadable", qg, holds.controller.RestoreBatch(ctx, []execution.QueryGroupIdentity{qg}))
+	}
 }
 
 // An inherited bridge is already in the owned fenced record. Foreign
@@ -580,6 +603,9 @@ func (holds *productionReadHolds) PrepareSchedule(ctx context.Context, schedule 
 		return readhold.ErrNotRestored
 	}
 	if reflect.DeepEqual(group.prepared, schedule.Segment) {
+		if group.awaiting {
+			holds.readPredecessorsAgain(ctx, group)
+		}
 		return nil
 	}
 	// The route and delay are the Query Group's, whichever Segment: taken
@@ -741,6 +767,12 @@ func (holds *productionReadHolds) SlotReadHold(ctx context.Context, schedule exe
 		if hold, err = holds.slotReadHold(ctx, schedule, at, fence); err == nil {
 			return hold, nil
 		}
+		// Waiting on a predecessor is not a degraded hold: the Slot is not
+		// frozen, and the next round reads the predecessor again.
+		var awaiting *readhold.AwaitingPredecessorError
+		if errors.As(err, &awaiting) {
+			return 0, err
+		}
 		reason := readhold.DegradedHoldFailed
 		if errors.Is(err, readhold.ErrSegmentStale) {
 			reason = readhold.DegradedStaleSegment
@@ -835,12 +867,19 @@ func (holds *productionReadHolds) slotReadHold(ctx context.Context, schedule exe
 		}
 	}
 	hold, err := holds.controller.SlotReadHold(ctx, schedule, at, fence)
+	// Waiting on a predecessor, the group keeps it, to read it again on its
+	// next round (readPredecessorsAgain).
+	var awaiting *readhold.AwaitingPredecessorError
+	waiting := errors.As(err, &awaiting)
 	holds.mu.Lock()
 	currentGroup := holds.groups[schedule.Segment.QueryGroup]
 	holds.mu.Unlock()
 	if currentGroup != nil {
 		currentGroup.mu.Lock()
-		holds.releasePredecessors(currentGroup)
+		currentGroup.awaiting = waiting
+		if !waiting {
+			holds.releasePredecessors(currentGroup)
+		}
 		currentGroup.mu.Unlock()
 	}
 	if err == nil && hold > holds.controller.ReadHold(schedule.Segment.QueryGroup) {

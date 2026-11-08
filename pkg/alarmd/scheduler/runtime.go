@@ -16,6 +16,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
 )
 
 var ErrSlotInFlight = errors.New("alarmd scheduler: Query Group Slot is already in flight")
@@ -242,6 +243,10 @@ func verifiedOwnershipFrom(
 // no metric would separate that from a deployment where the index is simply
 // not helping.
 type SlotDueFacts struct {
+	// AwaitingPredecessor is a Slot not frozen because its Query Group waits
+	// on the group a moved Plan left (readhold.AwaitingPredecessorError):
+	// which, since and until when, for a reader to see the wait as one.
+	AwaitingPredecessor *readhold.AwaitingPredecessorError
 	// NextSlotUnix is the evaluation time of the Slot a not-due return waits
 	// for, or of the Slot frozen and waiting for its data: the grid point,
 	// as against NotDueUntilUnix, when it becomes runnable. Zero where none.

@@ -639,6 +639,14 @@ func (source *ProductionSlotSource) Next(
 	}
 	decision = "read_hold"
 	hold, err := source.slotReadHoldMillis(ctx, schedule, load.Progress, nextSlot, initialFence)
+	var awaiting *readhold.AwaitingPredecessorError
+	if errors.As(err, &awaiting) {
+		// Not frozen: the group waits on the Query Group a moved Plan left,
+		// whose record is not closed yet, and reads it again at RetryAt.
+		decision = "awaiting_predecessor"
+		return FrozenSlot{}, false, SlotDueFacts{NotDueUntilUnix: (awaiting.RetryAt.UnixMilli() + 999) / 1000,
+			NextSlotUnix: int64(nextSlot), IntervalSeconds: dueInterval, AwaitingPredecessor: awaiting}, nil
+	}
 	if err != nil {
 		return FrozenSlot{}, false, SlotDueFacts{}, &SourceRetryError{Err: err}
 	}

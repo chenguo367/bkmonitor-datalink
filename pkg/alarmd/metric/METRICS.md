@@ -1665,6 +1665,16 @@ Closed-segment attempts overtaken by newer state: refused STATE_STALE_VERSION, o
 
 Slots whose first readiness preserves a preceding segment's completion deadline.
 
+## alarmd_read_hold_transition_waits_total
+
+Labels: `outcome`
+
+A Query Group's waits on the group a moved Plan left, whose read hold record was open or could not be read: waiting when one began, inherited when every predecessor waited on was read closed, bounded when one was still open when the first Slot would have been ready on the hold bound. The Slot is not frozen while it waits. A wait whose group moves to another replica, or is configured for other predecessors, ends neither way here, so waiting can exceed the two.
+
+## alarmd_read_hold_waiting_groups
+
+The Query Groups this replica holds that are waiting on a predecessor's read hold record now: their next Slot is not frozen until it closes or the wait ends.
+
 ## alarmd_rebalance_byte_most_loaded_share
 
 The largest judged worker's sum of retained-byte peaks over the share of its pool the byte constraint allows, as the latest round on this Control Leader read it; above one is overloaded. A lower bound while rebalance_byte_unread_groups is not zero. Meaningful on the Control Leader only; aggregate replicas with max, not sum.
