@@ -181,7 +181,7 @@ func TestEveryEditKindThatKeepsTheQueryGroupLosesNoSlot(t *testing.T) {
 			item["algorithms"] = append(item["algorithms"].([]any), map[string]any{"level": 2, "type": "Threshold", "unit_prefix": "",
 				"config": []any{[]any{map[string]any{"method": "gte", "threshold": 90}}}})
 			first["detects"] = append(first["detects"].([]any), map[string]any{"level": 2, "connector": "and",
-				"trigger_config": map[string]any{"count": 1, "check_window": cutoverStallTriggerWindow},
+				"trigger_config":  map[string]any{"count": 1, "check_window": cutoverStallTriggerWindow},
 				"recovery_config": map[string]any{"check_window": 1}})
 		}, carry: "carried"},
 		{name: "no-data added", edit: func(first map[string]any) {

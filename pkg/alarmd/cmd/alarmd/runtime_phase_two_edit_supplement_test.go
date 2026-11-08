@@ -15,7 +15,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/go-redis/redis/v8"
 
@@ -23,6 +22,7 @@ import (
 	accessuq "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access/uq"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
@@ -32,14 +32,13 @@ const (
 )
 
 // recheckedRead is the read a supplement runs on, read again from the
-// query service as the lookback reads one (uq.Client.Recheck).
+// query service as the lookback reads one (uq.Client.Recheck), under the
+// deadline of the context the supplement is run with.
 type recheckedRead struct{ client *accessuq.Client }
 
 func (read recheckedRead) Keeps(execution.PhysicalQueryDigest) bool { return true }
 
 func (read recheckedRead) Replay(ctx context.Context, spec execution.PhysicalQuerySpec, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
 	return read.client.Recheck(ctx, spec, sink)
 }
 
@@ -124,7 +123,8 @@ func TestASupplementOfASlotBeforeAnEditIsWritten(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := fixture.runner.(*settlingRuntime).phaseTwoQueryGroupRuntime.(*productionPhaseTwoQueryGroup)
-	facts, err := runtime.Supplement(access.WithKeptRead(ctx, recheckedRead{client: client}), held, hold, execution.SupplementScope{Series: series})
+	facts, err := runtime.Supplement(access.WithKeptRead(testwait.Context(t), recheckedRead{client: client}), held, hold,
+		execution.SupplementScope{Series: series})
 	if err != nil {
 		t.Fatalf("Supplement() error = %v", err)
 	}
