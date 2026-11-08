@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -177,14 +178,18 @@ func TestATakeoverAndItsRefusalsAreWrittenWithTheLeaseTheyMet(t *testing.T) {
 	taken := execution.QueryGroupIdentity("query-group-taken")
 	held := execution.QueryGroupIdentity("query-group-held")
 	unsessioned := execution.QueryGroupIdentity("query-group-unsessioned")
-	control := &fakePhaseTwoControl{queryGroups: []execution.QueryGroupIdentity{taken, held, unsessioned}}
+	undesired := execution.QueryGroupIdentity("query-group-undesired")
+	unanswered := execution.QueryGroupIdentity("query-group-unanswered")
+	control := &fakePhaseTwoControl{queryGroups: []execution.QueryGroupIdentity{taken, held, unsessioned, undesired, unanswered}}
 	runner := &epochPhaseTwoQueryGroup{fakePhaseTwoQueryGroup: newFakePhaseTwoQueryGroup(), owner: 4, session: 1758400000123}
 	owner := &fakePhaseTwoOwnership{
-		assigned: []execution.QueryGroupIdentity{taken, held, unsessioned},
+		assigned: []execution.QueryGroupIdentity{taken, held, unsessioned, undesired, unanswered},
 		runners:  map[execution.QueryGroupIdentity]phaseTwoQueryGroupRuntime{taken: runner},
 		openErrors: map[execution.QueryGroupIdentity]error{
 			held:        &ownership.LeaseBusyError{OwnerID: "worker-2", OwnerEpoch: 9, SessionEpoch: 1758400000999},
 			unsessioned: ownership.ErrNoWorkerSession,
+			undesired:   ownership.ErrNotDesired,
+			unanswered:  errors.New("store unanswered"),
 		},
 	}
 	var output syncBuffer
@@ -224,5 +229,12 @@ func TestATakeoverAndItsRefusalsAreWrittenWithTheLeaseTheyMet(t *testing.T) {
 	if line := lines[unsessioned]; line == nil || line["result"] != string(observability.ResultFailed) ||
 		line["holder_unknown"] != observability.LeaseHolderNoWorkerSession {
 		t.Fatalf("the refusal without a session = %v, want holder_unknown %s", line, observability.LeaseHolderNoWorkerSession)
+	}
+	for queryGroup, want := range map[execution.QueryGroupIdentity]string{
+		undesired: observability.LeaseHolderRefusedBeforeRead, unanswered: observability.LeaseHolderNotAnswered,
+	} {
+		if line := lines[queryGroup]; line == nil || line["result"] != string(observability.ResultFailed) || line["holder_unknown"] != want {
+			t.Fatalf("the refusal of %s = %v, want holder_unknown %s", queryGroup, line, want)
+		}
 	}
 }
