@@ -2620,6 +2620,8 @@ func (runner *callbackPhaseTwoQueryGroup) DueBound() scheduler.RunnerDueBound {
 	return runner.dueBound()
 }
 
+func (*callbackPhaseTwoQueryGroup) HeldEpochs() (uint64, uint64) { return 0, 0 }
+
 func (*callbackPhaseTwoQueryGroup) DeclineHung(time.Time, time.Duration) (string, time.Time, bool) {
 	return "", time.Time{}, false
 }
@@ -3075,6 +3077,8 @@ func waitPhaseTwoCondition(t *testing.T, name string, condition func() bool) {
 	t.Helper()
 	testwait.Until(t, name, condition)
 }
+
+func (*fakePhaseTwoQueryGroup) HeldEpochs() (uint64, uint64) { return 0, 0 }
 
 func (*fakePhaseTwoQueryGroup) DeclineHung(time.Time, time.Duration) (string, time.Time, bool) {
 	return "", time.Time{}, false

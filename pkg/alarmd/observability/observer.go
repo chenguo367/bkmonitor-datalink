@@ -2548,6 +2548,7 @@ type TraceFields struct {
 	DuePlanSetDigest        string
 	OwnerID                 string
 	OwnerEpoch              uint64
+	SessionEpoch            uint64
 	EvaluationTime          int64
 	StrategyID              string
 	BusinessID              string

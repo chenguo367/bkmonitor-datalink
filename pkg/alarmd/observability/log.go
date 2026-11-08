@@ -1326,6 +1326,9 @@ func appendTraceFields(attributes []slog.Attr, trace TraceFields) []slog.Attr {
 	if trace.OwnerEpoch > 0 {
 		attributes = append(attributes, slog.Uint64("owner_epoch", trace.OwnerEpoch))
 	}
+	if trace.SessionEpoch > 0 {
+		attributes = append(attributes, slog.Uint64("session_epoch", trace.SessionEpoch))
+	}
 	if trace.EvaluationTime > 0 {
 		attributes = append(attributes, slog.Int64("evaluation_time", trace.EvaluationTime))
 	}

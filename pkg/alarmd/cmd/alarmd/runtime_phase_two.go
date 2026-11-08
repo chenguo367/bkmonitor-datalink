@@ -621,6 +621,11 @@ type phaseTwoQueryGroupRuntime interface {
 	NextDeadline() time.Time
 	MaintainLease(context.Context, time.Duration, time.Duration) error
 	Release(context.Context) error
+	// HeldEpochs is the lease this Query Group is held under: its owner
+	// epoch, and the worker session's epoch when it is held under one (A2).
+	// The takeover lines carry them, so which lease a takeover took is read
+	// on the line that names it rather than off the Slots that follow.
+	HeldEpochs() (ownerEpoch, sessionEpoch uint64)
 	// DeclineHung claims the execution in flight as hung when it is past
 	// its own deadline by more than grace and has not begun to commit, and
 	// returns the stage it is stuck in (execution.SlotStages) and the
@@ -3601,8 +3606,9 @@ func (bundle *phaseTwoWorkerBundle) startQueryGroup(
 	bundle.setRunnerLocked(queryGroup, lifecycle)
 	bundle.maintenanceWG.Add(1)
 	bundle.mu.Unlock()
-	bundle.observeOwnership(ctx, observability.StageTakeoverCompleted, observability.ResultSuccess, queryGroup, nil)
-	bundle.observeOwnership(ctx, observability.StageAssignmentAcquired, observability.ResultSuccess, queryGroup, nil)
+	ownerEpoch, sessionEpoch := runner.HeldEpochs()
+	bundle.observeOwnershipHeld(ctx, observability.StageTakeoverCompleted, queryGroup, ownerEpoch, sessionEpoch)
+	bundle.observeOwnershipHeld(ctx, observability.StageAssignmentAcquired, queryGroup, ownerEpoch, sessionEpoch)
 
 	cfg := bundle.dependencies.Config.PhaseTwo.Ownership
 	go func() {
@@ -4528,6 +4534,25 @@ func (bundle *phaseTwoWorkerBundle) observeOwnership(
 		ReasonCode: reason, Trace: observability.TraceFields{
 			QueryGroupKey: string(queryGroup), OwnerID: bundle.dependencies.Config.PhaseTwo.Worker.ID,
 		}, Err: err,
+	})
+}
+
+// observeOwnershipHeld is a takeover that succeeded, named with the lease it
+// took: the owner epoch, and the session epoch when the lease is held under
+// a worker session.
+func (bundle *phaseTwoWorkerBundle) observeOwnershipHeld(
+	ctx context.Context,
+	stage observability.Stage,
+	queryGroup execution.QueryGroupIdentity,
+	ownerEpoch, sessionEpoch uint64,
+) {
+	observeRuntime(ctx, bundle.dependencies.Observer, observability.Observation{
+		Component: observability.ComponentOwnership, Stage: stage, Result: observability.ResultSuccess,
+		Operation: observability.OperationTransition,
+		Trace: observability.TraceFields{
+			QueryGroupKey: string(queryGroup), OwnerID: bundle.dependencies.Config.PhaseTwo.Worker.ID,
+			OwnerEpoch: ownerEpoch, SessionEpoch: sessionEpoch,
+		},
 	})
 }
 

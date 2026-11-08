@@ -3186,6 +3186,14 @@ func (runtime *productionPhaseTwoQueryGroup) ExecutionDeadline() time.Time {
 	return runtime.runner.ExecutionDeadline()
 }
 
+func (runtime *productionPhaseTwoQueryGroup) HeldEpochs() (ownerEpoch, sessionEpoch uint64) {
+	if runtime == nil || runtime.session == nil {
+		return 0, 0
+	}
+	lease, _ := runtime.session.Current()
+	return lease.Fence.OwnerEpoch, lease.SessionEpoch
+}
+
 func (runtime *productionPhaseTwoQueryGroup) NextDeadline() time.Time {
 	if runtime == nil || runtime.runner == nil {
 		return time.Time{}
