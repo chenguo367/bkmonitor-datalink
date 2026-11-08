@@ -174,3 +174,19 @@ func TestAnOwnershipStepCalledOffIsNotAFailure(t *testing.T) {
 		}
 	}
 }
+
+// A deadline that passed is not a caller calling the work off: an ownership
+// step that ran out of time failed, and is reported.
+func TestACalledOffCheckDoesNotSwallowADeadline(t *testing.T) {
+	expired, stop := context.WithDeadline(context.Background(), time.Now().Add(-time.Second)) // fixed-wait: a deadline already past, not a wait
+	defer stop()
+	failed := 0
+	observeProductionOwnership(expired, observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+		if observation.Result == observability.ResultFailed {
+			failed++
+		}
+	}), observability.StageAssignmentLost, context.DeadlineExceeded)
+	if failed != 1 {
+		t.Fatalf("an ownership step past its deadline was reported failed %d times, want 1", failed)
+	}
+}
