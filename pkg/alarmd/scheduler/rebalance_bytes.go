@@ -400,10 +400,10 @@ func (projection *byteProjection) peakOf(queryGroup execution.QueryGroupIdentity
 }
 
 // fits reports whether the Query Group may land on the Worker. A Worker
-// with no pool is not judged, and nothing is judged while the round has no
-// estimate - no peak read at all - since an unknown then counts as nothing,
-// the rule before the estimate existed; refusing on it would refuse every
-// Worker at the start of every term.
+// with no pool is not judged. While the round has no estimate - no peak
+// read at all - an unknown counts as nothing, the rule before the estimate
+// existed, and with nothing read every sum is zero: nothing is refused at
+// the start of a term.
 func (projection *byteProjection) fits(workerID string, queryGroup execution.QueryGroupIdentity) bool {
 	if projection == nil {
 		return true
@@ -412,13 +412,7 @@ func (projection *byteProjection) fits(workerID string, queryGroup execution.Que
 	if !judged {
 		return true
 	}
-	peak, read := projection.peakOf(queryGroup)
-	if projection.estimate == 0 {
-		if !read {
-			peak = 0
-		}
-		return projection.known[workerID]+peak <= byteLimit(pool)
-	}
+	peak, _ := projection.peakOf(queryGroup)
 	return projectedSum(projection.known[workerID], projection.unread[workerID], projection.estimate)+peak <= byteLimit(pool)
 }
 

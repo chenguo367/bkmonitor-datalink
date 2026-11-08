@@ -200,3 +200,83 @@ func TestARoundCountsThePlacementsThatFitNowhere(t *testing.T) {
 		t.Fatalf("a round with no readings: unfit %d, err %v; want 0", settlement.Unfit, err)
 	}
 }
+
+// A round that places two Query Groups judges the second on the first: the
+// first takes the room left on the Worker it fits, so the second does not
+// fit there too and is reported unfit.
+func TestARoundJudgesEachPlacementOnThePlacementsBeforeIt(t *testing.T) {
+	workers := projectionWorkers("w-1", "w-2")
+	records := map[execution.QueryGroupIdentity]ownership.AssignmentRecord{
+		"held-1": {QueryGroup: "held-1", DesiredWorkerID: "w-1", AssignmentGeneration: 1, RecordRevision: 1, ControlEpoch: 1,
+			PlacementReason: ownership.PlacementRendezvous, AssignedAt: rolloutNow.Add(-time.Hour)},
+		"held-2": {QueryGroup: "held-2", DesiredWorkerID: "w-2", AssignmentGeneration: 1, RecordRevision: 1, ControlEpoch: 1,
+			PlacementReason: ownership.PlacementRendezvous, AssignedAt: rolloutNow.Add(-time.Hour)},
+	}
+	store := &countingAssignmentStore{workers: workers, records: records}
+	reconciler := newRolloutReconciler(t, store)
+	// w-1 holds 700 of 800, w-2 holds 100; the estimate is 700. The first
+	// new Query Group fits only on w-2 (100 + 700); after it, neither fits.
+	readings := func(map[execution.QueryGroupIdentity]string) ByteReadings {
+		return projectionReadings(map[execution.QueryGroupIdentity]uint64{"held-1": 700, "held-2": 100}, "w-1", "w-2")
+	}
+	settlement, err := reconciler.ReconcileRoundSettlingWithBytes(context.Background(), ownership.PublicationAuthority{},
+		[]execution.QueryGroupIdentity{"held-1", "held-2", "new-1", "new-2"}, workers, rolloutNow, ContentScopes{}, readings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	onTwo := 0
+	for _, queryGroup := range []execution.QueryGroupIdentity{"new-1", "new-2"} {
+		if settlement.Records[queryGroup].DesiredWorkerID == "w-2" {
+			onTwo++
+		}
+	}
+	if settlement.Unfit != 1 {
+		t.Fatalf("unfit = %d, want 1: the second placement does not fit once the first took w-2's room (new Query Groups on w-2: %d)",
+			settlement.Unfit, onTwo)
+	}
+}
+
+// The count correction judges each of its moves on the ones before: two
+// moves are allowed, the destination has room for one.
+func TestTheCountCorrectionJudgesEachMoveOnTheMovesBeforeIt(t *testing.T) {
+	router := NewRouter(nil)
+	workers := projectionWorkers("most", "least")
+	owners := map[execution.QueryGroupIdentity]string{}
+	peaks := map[execution.QueryGroupIdentity]uint64{}
+	for index := 0; index < 30; index++ {
+		queryGroup := execution.QueryGroupIdentity(fmt.Sprintf("m-%02d", index))
+		owners[queryGroup], peaks[queryGroup] = "most", 300
+	}
+	for index := 0; index < 2; index++ {
+		queryGroup := execution.QueryGroupIdentity(fmt.Sprintf("l-%02d", index))
+		owners[queryGroup], peaks[queryGroup] = "least", 150
+	}
+	// 32 assigned: a batch of two. least holds 300; one move of 300 brings
+	// it to 600, a second to 900 of 800.
+	plan := router.PlanRebalanceWithBytes(owners, workers, projectionReadings(peaks, "most", "least"), rolloutNow)
+	if plan.Batch != 2 || len(plan.Moves) != 1 {
+		t.Fatalf("batch %d, moves %+v; want a batch of two and one move", plan.Batch, plan.Moves)
+	}
+}
+
+// The estimate is drawn from the peaks of Workers whose pool is known, as
+// the byte constraint draws it: a Worker that registered no pool, holding
+// very large Query Groups, does not make every unread Query Group look large.
+func TestTheEstimateIsDrawnFromJudgedWorkersOnly(t *testing.T) {
+	router := NewRouter(nil)
+	workers := projectionWorkers("w-1", "w-2")
+	top, other := preferred(t, router, "qg-x", workers)
+	owners := map[execution.QueryGroupIdentity]string{"qg-top": top, "qg-other": other}
+	peaks := map[execution.QueryGroupIdentity]uint64{"qg-top": 100, "qg-other": 100}
+	for index := 0; index < 20; index++ {
+		queryGroup := execution.QueryGroupIdentity(fmt.Sprintf("huge-%02d", index))
+		owners[queryGroup], peaks[queryGroup] = "no-pool", 5000
+	}
+	selected, unfit, err := router.selectFitting("qg-x", workers, rolloutNow, newByteProjection(owners, projectionReadings(peaks, "w-1", "w-2")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.WorkerID != top || unfit {
+		t.Fatalf("placed on %s (unfit %v), want %s: the estimate is 100, from the judged Workers", selected.WorkerID, unfit, top)
+	}
+}
