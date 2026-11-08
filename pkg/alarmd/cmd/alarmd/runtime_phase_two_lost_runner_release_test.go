@@ -178,4 +178,22 @@ func TestALostRunnersLateReleaseLeavesItsSuccessorRunning(t *testing.T) {
 	if queried.Load() == before {
 		t.Fatal("the successor's Slot was not queried: the lost Runner's release unbound it")
 	}
+
+	// Shutdown lets the worker session go last, so the Control Leader reads
+	// its holder as gone at once rather than after the TTL.
+	held, _ := bundle.dependencies.Ownership.(*productionPhaseTwoOwnership).workerSession.current()
+	if err := bundle.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	store, err := ownership.NewRedisStoreWithClient(client, productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "ownership"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, err := store.ReadWorkerSessions(ctx, []string{cfg.PhaseTwo.Worker.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if through, lapsed := facts[cfg.PhaseTwo.Worker.ID].LapsedThrough(); !lapsed || through != held.Epoch {
+		t.Fatalf("after shutdown the worker's sessions lapsed through (%d, %t), want through the one it held, %d", through, lapsed, held.Epoch)
+	}
 }

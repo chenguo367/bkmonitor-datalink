@@ -112,6 +112,34 @@ func TestAMoveAwayFromASessionHolderWaitsOnlyWhileItMayStillAct(t *testing.T) {
 	}
 }
 
+// A grace never ends before a deadline the lease still carries. A lease held
+// under a session has none of its own, but one can be left beside the session
+// fields -- by an acquisition of a version that knows nothing of them, during
+// a rolling release -- and its holder acts until it: a grace of one TTL from
+// the move would hand the Query Group over while it still may.
+func TestAGraceIsNeverShorterThanADeadlineTheLeaseStillCarries(t *testing.T) {
+	const ttl = 20 * time.Second
+	store := newIntegrationStore(t)
+	now := time.Now()
+	authority, first, _ := handoverStart(t, store, now)
+	session, err := store.AcquireWorkerSession(context.Background(), "worker-old", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holdUnderSession(t, store, session, ttl)
+	deadline := serverNow(t, store).Add(2 * time.Minute)
+	if err := store.client.HSet(context.Background(), store.ownershipKey(handoverQueryGroup), "deadline_ms",
+		strconv.FormatInt(deadline.UnixMilli(), 10)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	publishMove(t, store, authority, first.RecordRevision, "worker-old", "worker-new", now)
+	effective, _ := assignmentField(t, store, "effective_at_ms")
+	at, _ := strconv.ParseInt(effective, 10, 64)
+	if want := deadline.Add(ContentSwitchMargin).UnixMilli(); at != want {
+		t.Fatalf("grace ends at %d, want the deadline the lease carries and the margin, %d", at, want)
+	}
+}
+
 // A content change under a session holder proven gone is written directly:
 // there is no holder of the old content to protect.
 func TestAContentChangeUnderAGoneSessionHolderIsWrittenDirectly(t *testing.T) {
@@ -225,6 +253,32 @@ func TestTheOwnerReadOfASessionHolderFollowsItsSession(t *testing.T) {
 	if _, ok, err := store.ReadQueryGroupOwner(ctx, handoverQueryGroup); err != nil || ok {
 		t.Fatalf("owner once the session is gone = (%t, %v), want none", ok, err)
 	}
+	// The worker has a session again, a newer one: the lease was taken under
+	// the old one, and its holder is still gone.
+	newer, err := store.AcquireWorkerSession(ctx, "worker-old", time.Now(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := store.ReadQueryGroupOwner(ctx, handoverQueryGroup); err != nil || ok {
+		t.Fatalf("owner under a session older than the worker's live one = (%t, %v), want none", ok, err)
+	}
+	// The live one only one epoch on, as a session taken again within the
+	// same millisecond is: the lease's session is still the one before it.
+	if err := store.client.HSet(ctx, store.workerSessionKey("worker-old"), "session_epoch",
+		strconv.FormatUint(session.Epoch+1, 10)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := store.ReadQueryGroupOwner(ctx, handoverQueryGroup); err != nil || ok {
+		t.Fatalf("owner under the session just before the worker's live one = (%t, %v), want none", ok, err)
+	}
+	if err := store.client.HSet(ctx, store.workerSessionKey("worker-old"), "session_epoch",
+		strconv.FormatUint(newer.Epoch, 10)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	holdUnderSession(t, store, newer, 20*time.Second)
+	if owner, ok, err := store.ReadQueryGroupOwner(ctx, handoverQueryGroup); err != nil || !ok || owner.OwnerID != "worker-old" {
+		t.Fatalf("owner under the worker's live session = (%+v, %t, %v), want worker-old", owner, ok, err)
+	}
 }
 
 // A publication says what held the lease it was published over: a holder
@@ -258,5 +312,61 @@ func TestAPublicationSaysWhatHeldTheLease(t *testing.T) {
 	if _, kind, err = store.PublishAssignmentReporting(ctx, authority, AssignmentDecision{QueryGroup: handoverQueryGroup,
 		DesiredWorkerID: "worker-old", ExpectedRecordRevision: current.RecordRevision, PlacementReason: PlacementRendezvous, DecidedAt: now}); err != nil || kind != "" {
 		t.Fatalf("over no holder = (%q, %v), want none", kind, err)
+	}
+}
+
+// A sweep reads a Query Group's holder before its script runs, and the holder
+// may change in between. The script then holds the Query Group rather than
+// judge the lease by the session of a worker that no longer holds it: here the
+// worker read lapsed, while the one holding now took its session before that,
+// so its epoch is below what the read worker's lapse proves gone.
+func TestASweepHoldsAQueryGroupWhoseHolderChangedSinceItWasRead(t *testing.T) {
+	store := newIntegrationStore(t)
+	if err := store.ConfigureEpochRetention(time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	now := time.Now()
+	authority, err := store.AcquireControlLeader(ctx, "control-1", now, 10*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const queryGroup = execution.QueryGroupIdentity("qg-moved")
+	if _, err := store.PublishAssignment(ctx, authority, AssignmentDecision{QueryGroup: queryGroup, DesiredWorkerID: "worker-now",
+		PlacementReason: PlacementRendezvous, DecidedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Acquire(ctx, queryGroup, "worker-now", now, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	holding, err := store.AcquireWorkerSession(ctx, "worker-now", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holdQueryGroupUnderSession(t, store, queryGroup, holding)
+	// Taken, let go and taken again, so its epoch is above the holder's even
+	// within one millisecond.
+	read, err := store.AcquireWorkerSession(ctx, "worker-read", time.Now(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReleaseWorkerSession(ctx, read); err != nil {
+		t.Fatal(err)
+	}
+	if read, err = store.AcquireWorkerSession(ctx, "worker-read", time.Now(), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if read.Epoch <= holding.Epoch {
+		t.Fatalf("the read worker's session epoch %d is not above the holder's %d; the case needs it above", read.Epoch, holding.Epoch)
+	}
+	if err := store.ReleaseWorkerSession(ctx, read); err != nil {
+		t.Fatal(err)
+	}
+	result, err := reclaimAssignmentScript.Run(ctx, store.client,
+		[]string{store.ownershipKey(ControlLeaderIdentity), store.assignmentKey(queryGroup), store.ownershipKey(queryGroup), store.workerSessionKey("worker-read")},
+		authority.Fence.OwnerID, authority.Fence.OwnerEpoch, authority.Fence.LeaseToken, string(queryGroup),
+		store.epochRetention.Milliseconds(), "worker-read").Text()
+	if err != nil || result != "HELD" {
+		t.Fatalf("reclaim with the holder changed since the read = (%q, %v), want HELD", result, err)
 	}
 }
