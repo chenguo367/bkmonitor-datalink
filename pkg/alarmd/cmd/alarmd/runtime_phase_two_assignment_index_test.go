@@ -52,7 +52,7 @@ func (store *fakePhaseTwoOwnershipStore) SweepAssignments(_ context.Context, _ o
 }
 
 func (store *rebalanceOwnershipStore) SweepAssignments(context.Context, ownership.PublicationAuthority, map[execution.QueryGroupIdentity]struct{}) (ownership.AssignmentSweep, error) {
-	return ownership.AssignmentSweep{}, nil
+	return ownership.AssignmentSweep{}, store.sweepErr
 }
 
 func (store *rebalanceOwnershipStore) PublishAssignmentIndex(_ context.Context, _ ownership.PublicationAuthority, _ time.Time, sets []ownership.AssignedSetWrite) (ownership.AssignmentIndexPublication, error) {

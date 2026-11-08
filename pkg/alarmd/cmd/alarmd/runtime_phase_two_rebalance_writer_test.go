@@ -34,6 +34,8 @@ type rebalanceOwnershipStore struct {
 	decisions     []ownership.AssignmentDecision
 	beforePublish func(ownership.AssignmentDecision)
 	publishErr    error
+	// sweepErr is what every sweep returns when set.
+	sweepErr error
 
 	reads            int
 	readErr          error
