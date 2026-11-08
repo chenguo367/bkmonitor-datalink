@@ -121,8 +121,10 @@ func TestAnEditWhileASlotIsInFlightLosesNoSlot(t *testing.T) {
 	if result, attempted, err := fixture.runner.RunOne(ctx); err != nil || !attempted || !result.Completed {
 		t.Fatalf("the in-flight Slot RunOne = (%+v, %t, %v), want it completed", result, attempted, err)
 	}
-	if after := fixture.progress(ctx); after.LastFullSlot != inFlight {
-		t.Fatalf("Progress after the in-flight Slot = %+v, want it the last full Slot (ended %s)", after, fixture.slotEndings()[inFlight])
+	// Progress moves past a partial gap as past a full Slot; how the Slot
+	// ended is what tells them apart.
+	if ended := fixture.slotEndings()[inFlight]; ended != "FULL_COMPLETED/none" {
+		t.Fatalf("the in-flight Slot ended %q, want FULL_COMPLETED: it was thrown away", ended)
 	}
 
 	// The new Segment's first Slot.
@@ -131,8 +133,8 @@ func TestAnEditWhileASlotIsInFlightLosesNoSlot(t *testing.T) {
 	if result, attempted, err := fixture.runner.RunOne(ctx); err != nil || !attempted || !result.Completed {
 		t.Fatalf("the new Segment's first Slot RunOne = (%+v, %t, %v), want it completed", result, attempted, err)
 	}
-	if after := fixture.progress(ctx); after.LastFullSlot != first {
-		t.Fatalf("Progress after the new Segment's first Slot = %+v, want it the last full Slot (ended %s)", after, fixture.slotEndings()[first])
+	if ended := fixture.slotEndings()[first]; ended != "FULL_COMPLETED/none" {
+		t.Fatalf("the new Segment's first Slot ended %q, want FULL_COMPLETED: it was spent warming up", ended)
 	}
 	if events := fixture.eventsAt(first); len(events) == 0 {
 		t.Fatalf("the new Segment's first Slot wrote no event for the edited strategy; endings %v", fixture.slotEndings())
