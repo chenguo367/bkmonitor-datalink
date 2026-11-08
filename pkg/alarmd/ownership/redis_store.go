@@ -326,7 +326,7 @@ func (store *RedisStore) AcquireUnder(
 	case "NOT_DESIRED":
 		return Lease{}, ErrNotDesired
 	case "BUSY":
-		return Lease{}, ErrLeaseBusy
+		return Lease{}, leaseBusyOf(values)
 	case "PAUSED":
 		return Lease{}, ErrStaleFence
 	case "OWNED":
@@ -655,10 +655,7 @@ func (store *RedisStore) acquire(
 	case "NOT_DESIRED":
 		return Lease{}, ErrNotDesired
 	case "BUSY":
-		// values[2] is the deadline of the lease in the way, on the server's
-		// clock; nothing reads it yet. It is in the reply for a caller that
-		// wants to wait exactly that long instead of retrying blind.
-		return Lease{}, ErrLeaseBusy
+		return Lease{}, leaseBusyOf(values)
 	case "PAUSED":
 		return Lease{}, ErrStaleFence
 	case "OWNED":
@@ -1077,6 +1074,17 @@ func boolText(value bool) string {
 	return "0"
 }
 
+// leaseBusyOf is the BUSY reply of the acquire script as the refusal it is:
+// the holder's owner epoch, deadline, id and session epoch.
+func leaseBusyOf(values []interface{}) error {
+	busy := &LeaseBusyError{OwnerEpoch: uint64(scriptInt(values[1])), DeadlineUnixMilli: scriptInt(values[2]),
+		OwnerID: scriptText(values[3])}
+	if len(values) > 5 {
+		busy.SessionEpoch = uint64(scriptInt(values[5]))
+	}
+	return busy
+}
+
 func scriptValues(value interface{}, minimum int) ([]interface{}, error) {
 	values, ok := value.([]interface{})
 	if !ok || len(values) < minimum {
@@ -1156,7 +1164,7 @@ if require_assignment == '1' then
 end
 local disposition = redis.call('HGET', KEYS[2], 'execution_disposition')
 if disposition and disposition ~= 'ACTIVE' then return {'PAUSED', 0, 0, '', now_ms, 0} end
-local current = redis.call('HMGET', KEYS[2], 'owner_id', 'deadline_ms', 'owner_session_epoch', 'owner_session_token')
+local current = redis.call('HMGET', KEYS[2], 'owner_id', 'deadline_ms', 'owner_session_epoch', 'owner_session_token', 'owner_epoch')
 local current_owner = current[1]
 local current_deadline = tonumber(current[2] or '0')
 if current_owner and current_owner ~= '' then
@@ -1180,7 +1188,10 @@ if current_owner and current_owner ~= '' then
   else
     busy = current_deadline > now_ms
   end
-  if busy then return {'BUSY', 0, current_deadline, '', now_ms, 0, 0} end
+  -- The holder in the way, for the refusal to name: owner epoch, deadline,
+  -- owner id, the store's clock, session epoch (0 for a lease not held
+  -- under a session).
+  if busy then return {'BUSY', tonumber(current[5] or '') or 0, current_deadline, current_owner, now_ms, tonumber(current[3] or '') or 0, 0} end
 end
 if require_assignment == '1' and redis.call('HEXISTS', KEYS[1], 'releasing_worker_id') == 1 then
   -- The holder a move's grace protected has let go or run out, so this

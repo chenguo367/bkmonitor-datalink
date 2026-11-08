@@ -32,6 +32,27 @@ var (
 	ErrContentScopeMoved = errors.New("alarmd ownership: content scope has moved")
 )
 
+// LeaseBusyError is ErrLeaseBusy as the store answered it: the lease in the
+// way, by its holder's id, owner epoch and session epoch (zero for a lease
+// not held under a worker session), and its deadline on the store's clock
+// (zero for one held under a session, which has none of its own). A refused
+// takeover names what refused it with these, where the bare word could not
+// tell one holder from the next.
+type LeaseBusyError struct {
+	OwnerID           string
+	OwnerEpoch        uint64
+	SessionEpoch      uint64
+	DeadlineUnixMilli int64
+}
+
+func (err *LeaseBusyError) Error() string { return ErrLeaseBusy.Error() }
+
+func (err *LeaseBusyError) Unwrap() error { return ErrLeaseBusy }
+
+// ErrNoWorkerSession is ErrLeaseBusy decided before the store was asked: this
+// worker holds no session yet to take a lease under (OpenSessionUnder).
+var ErrNoWorkerSession = fmt.Errorf("%w: no worker session is held yet", ErrLeaseBusy)
+
 // IsLeaseDecision reports whether err is an authoritative answer from the
 // lease store about the fence (stale, not desired, held by another owner)
 // rather than a failure to reach the store. Renewal loops retry only the

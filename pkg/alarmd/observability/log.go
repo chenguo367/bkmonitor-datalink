@@ -100,7 +100,7 @@ func (p *BoundedLogPolicy) Admit(observation Observation) LogAdmission {
 			return LogAdmission{Candidate: true, Unwritten: true}
 		}
 	}
-	if mandatoryLogStage(observation.Stage) {
+	if mandatoryLogStage(observation.Stage) || takeoverHeld(observation) {
 		return LogAdmission{Allowed: true, Candidate: true}
 	}
 	if !repeatedLogObservation(observation) || p == nil || p.repeated == nil {
@@ -974,6 +974,15 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.Int64("hung_ms", facts.HungMS),
 		)
 	}
+	if facts := observation.LeaseHolder; facts != nil {
+		if facts.Unknown != "" {
+			attributes = append(attributes, slog.String("holder_unknown", facts.Unknown))
+		} else {
+			attributes = append(attributes, slog.String("holder_owner_id", facts.OwnerID),
+				slog.Uint64("holder_owner_epoch", facts.OwnerEpoch), slog.Uint64("holder_session_epoch", facts.SessionEpoch),
+				slog.Int64("holder_deadline_ms", facts.DeadlineUnixMilli))
+		}
+	}
 	if facts := observation.SlotDrain; facts != nil {
 		attributes = append(attributes, slog.String("drain_site", facts.Site), slog.Int("drain_waited", facts.Waited))
 		// A drain that has only begun has no outcome yet, and nothing
@@ -1353,6 +1362,18 @@ func appendTraceFields(attributes []slog.Attr, trace TraceFields) []slog.Attr {
 		attributes = append(attributes, slog.Int64("schedule_segment_start", trace.ScheduleSegmentStart))
 	}
 	return attributes
+}
+
+// takeoverHeld is a takeover that took its lease. Each one is written, not
+// sampled: its line is the one place the owner epoch, and the session epoch
+// under a worker session, of the lease a Query Group is held under can be
+// read, and a handover is told apart from the one before it by those epochs
+// alone - one line kept per Query Group an hour would drop exactly the second
+// of two handovers. The volume is the takeovers: one a Query Group a rollout,
+// a few a moved Query Group otherwise. A refused takeover stays under the
+// limiter's window, because it repeats every round while the lease is held.
+func takeoverHeld(observation Observation) bool {
+	return observation.Stage == StageTakeoverCompleted && observation.Result == ResultSuccess
 }
 
 func mandatoryLogStage(stage Stage) bool {

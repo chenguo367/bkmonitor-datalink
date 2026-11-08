@@ -3432,7 +3432,7 @@ func (bundle *phaseTwoWorkerBundle) applyAssignment(
 		)
 		if err != nil {
 			applied.Note(string(queryGroup), false, true)
-			bundle.observeOwnership(ctx, observability.StageTakeoverCompleted, observability.ResultFailed, queryGroup, err)
+			bundle.observeTakeoverRefused(ctx, queryGroup, err)
 			if errors.Is(err, ownership.ErrLeaseBusy) || errors.Is(err, ownership.ErrNotDesired) ||
 				errors.Is(err, ownership.ErrStaleFence) {
 				continue
@@ -4534,6 +4534,36 @@ func (bundle *phaseTwoWorkerBundle) observeOwnership(
 		ReasonCode: reason, Trace: observability.TraceFields{
 			QueryGroupKey: string(queryGroup), OwnerID: bundle.dependencies.Config.PhaseTwo.Worker.ID,
 		}, Err: err,
+	})
+}
+
+// observeTakeoverRefused is a takeover that did not take its lease, named
+// with the lease it ran into when the store said which (its holder's id,
+// owner epoch and session epoch), or with why it is not known. Every
+// refusal's line carries one or the other, so a line without a holder reads
+// as a refusal that could not name one, not as a field left out.
+func (bundle *phaseTwoWorkerBundle) observeTakeoverRefused(
+	ctx context.Context,
+	queryGroup execution.QueryGroupIdentity,
+	err error,
+) {
+	holder := &observability.LeaseHolderFacts{Unknown: observability.LeaseHolderNotAnswered}
+	var busy *ownership.LeaseBusyError
+	switch {
+	case errors.As(err, &busy):
+		holder = &observability.LeaseHolderFacts{OwnerID: busy.OwnerID, OwnerEpoch: busy.OwnerEpoch,
+			SessionEpoch: busy.SessionEpoch, DeadlineUnixMilli: busy.DeadlineUnixMilli}
+	case errors.Is(err, ownership.ErrNoWorkerSession):
+		holder.Unknown = observability.LeaseHolderNoWorkerSession
+	case errors.Is(err, ownership.ErrNotDesired), errors.Is(err, ownership.ErrStaleFence):
+		holder.Unknown = observability.LeaseHolderRefusedBeforeRead
+	}
+	observeRuntime(ctx, bundle.dependencies.Observer, observability.Observation{
+		Component: observability.ComponentOwnership, Stage: observability.StageTakeoverCompleted, Result: observability.ResultFailed,
+		Operation:  observability.OperationTransition,
+		ReasonCode: ownershipObservationReason(err), Trace: observability.TraceFields{
+			QueryGroupKey: string(queryGroup), OwnerID: bundle.dependencies.Config.PhaseTwo.Worker.ID,
+		}, LeaseHolder: holder, Err: err,
 	})
 }
 

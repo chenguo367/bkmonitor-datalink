@@ -2899,6 +2899,9 @@ type Observation struct {
 	// SlotDrain is one wait for in-flight Slots: a handover's, on
 	// handover_drained, or a stop's, on the shutdown line.
 	SlotDrain *SlotDrainFacts
+	// LeaseHolder is the lease a refused takeover ran into, or why it is not
+	// known, on the takeover_completed line that failed.
+	LeaseHolder *LeaseHolderFacts
 	// ExecutionHung is one execution past its deadline and grace declined,
 	// or returning, on execution_hung.
 	ExecutionHung *ExecutionHungFacts

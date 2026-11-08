@@ -150,7 +150,7 @@ func TestWhichSuccessesAreWrittenAndWhichAreCounted(t *testing.T) {
 	for _, observation := range []Observation{
 		{Component: ComponentScheduler, Stage: StageSlotStarted, Result: ResultStarted, Trace: qg},
 		{Component: ComponentEvaluation, Stage: StageEvaluationCompleted, Result: ResultSuccess, Trace: qg},
-		{Component: ComponentOwnership, Stage: StageTakeoverCompleted, Result: ResultSuccess, Trace: qg},
+		{Component: ComponentOwnership, Stage: StageTakeoverStarted, Result: ResultStarted, Trace: qg},
 		{Component: ComponentOwnership, Stage: StageRebalancePlanned, Result: ResultSuccess, Rebalance: &RebalanceFacts{Assigned: 4}},
 		{Component: ComponentControlPlane, Stage: StageSnapshotRefreshed, Result: ResultSuccess,
 			SourceRefresh: &SourceRefreshFacts{Status: SourceRefreshUnchanged}},
@@ -162,7 +162,7 @@ func TestWhichSuccessesAreWrittenAndWhichAreCounted(t *testing.T) {
 		t.Fatalf("routine and unchanged lines were written: %v", lines)
 	}
 	counts := observer.LineCounts()
-	for _, stage := range []Stage{StageSlotStarted, StageEvaluationCompleted, StageTakeoverCompleted, StageRebalancePlanned,
+	for _, stage := range []Stage{StageSlotStarted, StageEvaluationCompleted, StageTakeoverStarted, StageRebalancePlanned,
 		StageSnapshotRefreshed, StageControlReadsSpent} {
 		if counts.Unwritten[stage] != 1 {
 			t.Fatalf("%s unwritten=%d, want 1", stage, counts.Unwritten[stage])

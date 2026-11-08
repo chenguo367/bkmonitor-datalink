@@ -10,7 +10,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -131,5 +134,95 @@ func TestATakeoverLineCarriesTheEpochsOfTheLeaseItTook(t *testing.T) {
 		if !found {
 			t.Fatalf("no successful %s observation in %+v", stage, observations)
 		}
+	}
+}
+
+// syncBuffer is a log destination a test reads while the bundle writes it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) lines(t *testing.T) []map[string]any {
+	t.Helper()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var lines []map[string]any
+	for _, raw := range strings.Split(b.buf.String(), "\n") {
+		if raw == "" {
+			continue
+		}
+		var line map[string]any
+		if err := json.Unmarshal([]byte(raw), &line); err != nil {
+			t.Fatalf("log line %q: %v", raw, err)
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+// Through the production observer, as a deployment's log has it: a takeover
+// that took its lease writes its line, with the owner epoch and the session
+// epoch of that lease; a refused one writes the holder it ran into, or why
+// the store named none. The takeover line used to be counted and not
+// written, so the epochs were on the observation and in no log.
+func TestATakeoverAndItsRefusalsAreWrittenWithTheLeaseTheyMet(t *testing.T) {
+	cfg := validGoAccessRuntimeConfig()
+	taken := execution.QueryGroupIdentity("query-group-taken")
+	held := execution.QueryGroupIdentity("query-group-held")
+	unsessioned := execution.QueryGroupIdentity("query-group-unsessioned")
+	control := &fakePhaseTwoControl{queryGroups: []execution.QueryGroupIdentity{taken, held, unsessioned}}
+	runner := &epochPhaseTwoQueryGroup{fakePhaseTwoQueryGroup: newFakePhaseTwoQueryGroup(), owner: 4, session: 1758400000123}
+	owner := &fakePhaseTwoOwnership{
+		assigned: []execution.QueryGroupIdentity{taken, held, unsessioned},
+		runners:  map[execution.QueryGroupIdentity]phaseTwoQueryGroupRuntime{taken: runner},
+		openErrors: map[execution.QueryGroupIdentity]error{
+			held:        &ownership.LeaseBusyError{OwnerID: "worker-2", OwnerEpoch: 9, SessionEpoch: 1758400000999},
+			unsessioned: ownership.ErrNoWorkerSession,
+		},
+	}
+	var output syncBuffer
+	recorder := metric.NewRecorder(metric.BuildInfo{})
+	observer, err := newPhaseTwoRuntimeObserver(recorder, observability.New(observability.ComponentRuntime, &output))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := newPhaseTwoWorkerBundle(phaseTwoWorkerBundleDependencies{
+		Config: cfg, Health: newPhaseTwoApplicationHealth(), Control: control, Ownership: owner,
+		Recorder: recorder, Observer: observer, Now: time.Now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bundle.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() { _ = bundle.Shutdown(context.Background()) })
+	waitSignal(t, runner.leaseStarted, "query-group lease maintenance")
+
+	lines := map[execution.QueryGroupIdentity]map[string]any{}
+	for _, line := range output.lines(t) {
+		if line["stage"] == string(observability.StageTakeoverCompleted) {
+			lines[execution.QueryGroupIdentity(line["query_group_key"].(string))] = line
+		}
+	}
+	if line := lines[taken]; line == nil || line["result"] != string(observability.ResultSuccess) ||
+		line["owner_epoch"] != float64(4) || line["session_epoch"] != float64(1758400000123) {
+		t.Fatalf("the takeover line = %v, want it written under owner epoch 4 and session epoch 1758400000123", line)
+	}
+	if line := lines[held]; line == nil || line["result"] != string(observability.ResultFailed) ||
+		line["holder_owner_id"] != "worker-2" || line["holder_owner_epoch"] != float64(9) ||
+		line["holder_session_epoch"] != float64(1758400000999) {
+		t.Fatalf("the refusal by a held lease = %v, want worker-2 under owner epoch 9 and session epoch 1758400000999", line)
+	}
+	if line := lines[unsessioned]; line == nil || line["result"] != string(observability.ResultFailed) ||
+		line["holder_unknown"] != observability.LeaseHolderNoWorkerSession {
+		t.Fatalf("the refusal without a session = %v, want holder_unknown %s", line, observability.LeaseHolderNoWorkerSession)
 	}
 }

@@ -89,7 +89,7 @@ func OpenSessionUnder(
 	}
 	worker, held := under()
 	if !held {
-		return nil, ErrLeaseBusy
+		return nil, ErrNoWorkerSession
 	}
 	lease, err := acquirer.AcquireUnder(ctx, queryGroup, worker, at, ttl)
 	if err != nil {

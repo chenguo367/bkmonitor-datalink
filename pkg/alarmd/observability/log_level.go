@@ -219,7 +219,11 @@ var routineStages = map[Stage]bool{
 	StageStateApplied: true, StageFrozenStateRenewed: true, StageSideEffectAdmission: true, StagePlanActivationChecked: true, StageFenceChecked: true,
 	StageEventACKed: true, StageTargetResolved: true,
 	StageLeaseRenewed: true, StageAssignmentAcquired: true, StageAssignmentLost: true,
-	StageTakeoverStarted: true, StageTakeoverCompleted: true,
+	// A takeover's start is counted and not written: every one is followed at
+	// the same site by its completion, which carries the outcome and the
+	// epochs, so a start line would only double a rollout's lines. Its
+	// completion is written (takeoverHeld).
+	StageTakeoverStarted: true,
 }
 
 // unwrittenStage is a stage that has lines counted and not written.
