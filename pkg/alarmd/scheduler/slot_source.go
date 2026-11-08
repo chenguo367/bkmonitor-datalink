@@ -17,6 +17,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
 )
 
 var (
@@ -545,7 +546,7 @@ func (source *ProductionSlotSource) Next(
 			schedule, nextSlot, retired, err = source.firstAvailableSchedule(ctx, schedule)
 			if retired {
 				decision = "retired"
-				source.prepareRetiredReadHold(ctx, initialFence)
+				source.prepareRetiredReadHold(ctx, initialFence, readhold.RetireCloseNext)
 				return FrozenSlot{}, false, SlotDueFacts{Retired: true}, nil
 			}
 		}
@@ -556,7 +557,7 @@ func (source *ProductionSlotSource) Next(
 		}
 		if retired {
 			decision = "retired"
-			source.prepareRetiredReadHold(ctx, initialFence)
+			source.prepareRetiredReadHold(ctx, initialFence, readhold.RetireCloseNext)
 			return FrozenSlot{}, false, SlotDueFacts{Retired: true}, nil
 		}
 		// navigated is the Progress the Slot below was navigated from: the
@@ -575,7 +576,7 @@ func (source *ProductionSlotSource) Next(
 				}
 				if retired {
 					decision = "retired"
-					source.prepareRetiredReadHold(ctx, initialFence)
+					source.prepareRetiredReadHold(ctx, initialFence, readhold.RetireCloseNext)
 					return FrozenSlot{}, false, SlotDueFacts{Retired: true}, nil
 				}
 				navigated = resumed
@@ -1647,7 +1648,7 @@ func (source *ProductionSlotSource) replayDistance(
 // close kept a group whose closing could not succeed unretired for good, and
 // its successor waiting on it. A group that cannot close retires all the
 // same, counted, and a successor reads its unclosed record as the hold bound.
-func (source *ProductionSlotSource) prepareRetiredReadHold(ctx context.Context, fence execution.OwnerFence) {
+func (source *ProductionSlotSource) prepareRetiredReadHold(ctx context.Context, fence execution.OwnerFence, site string) {
 	holds, ok := source.readHolds.(interface {
 		PrepareSchedule(context.Context, execution.FrozenQueryGroupSchedule, execution.OwnerFence) error
 	})
@@ -1668,6 +1669,47 @@ func (source *ProductionSlotSource) prepareRetiredReadHold(ctx context.Context, 
 	if failed, counts := source.readHolds.(interface{ RetireCloseFailed(error) }); err != nil && counts {
 		failed.RetireCloseFailed(err)
 	}
+	if closed, counts := source.readHolds.(interface{ RetireClosed(string) }); err == nil && counts {
+		closed.RetireClosed(site)
+	}
+}
+
+// CloseRetiredReadHold closes the read hold of a Query Group that has retired
+// and drained, before its lease is released: the cursor at or past the
+// retirement and nothing unfinished, as Next judges it. Next closes it only
+// when its round comes back to the Query Group, and a drained Query Group is
+// released without one: its record stayed open, and its successor read it
+// as the hold bound - ten minutes of a moved Plan's Slots held for a
+// predecessor that had nothing left to run. A Query Group that has not
+// drained is not closed here: whoever takes it over closes it at the
+// retirement. It answers whether it closed; a failure is counted as Next's
+// is, and the release goes on.
+func (source *ProductionSlotSource) CloseRetiredReadHold(ctx context.Context) (bool, error) {
+	if source == nil {
+		return false, nil
+	}
+	_, fence, err := source.currentOwnership(ctx, source.now())
+	if err != nil {
+		return false, err
+	}
+	identity := execution.ProgressIdentity{QueryGroup: source.queryGroup}
+	load, err := source.progress.LoadProgress(ctx, identity)
+	if err != nil {
+		return false, err
+	}
+	if err := load.Validate(identity); err != nil {
+		return false, err
+	}
+	if load.Status != execution.ProgressFound || load.Progress == nil ||
+		load.Progress.UnfinishedSlot != nil || load.Progress.UnfinishedRange != nil {
+		return false, nil
+	}
+	retired, err := source.isRetiredBoundary(ctx, load.Progress.NextSlot)
+	if err != nil || !retired {
+		return false, err
+	}
+	source.prepareRetiredReadHold(ctx, fence, readhold.RetireCloseRelease)
+	return true, nil
 }
 
 func (source *ProductionSlotSource) isRetiredBoundary(
@@ -1678,7 +1720,14 @@ func (source *ProductionSlotSource) isRetiredBoundary(
 	if err != nil || !retired {
 		return false, err
 	}
-	return retiredAt == boundary, nil
+	// At or past it: a cursor that completed the last Slot moves to the next
+	// grid point, which lies past a retirement off the grid, and judged by
+	// equality alone that Query Group never took the retired path - its read
+	// hold stayed open. The control plane judges a drained Query Group the
+	// same way (NextSlot >= RetiredBoundary). Walking Segments, the End
+	// reached is never past the retirement (the timeline's own invariant), so
+	// there the two read alike.
+	return boundary >= retiredAt, nil
 }
 
 func (source *ProductionSlotSource) nextSlotAfterProgress(

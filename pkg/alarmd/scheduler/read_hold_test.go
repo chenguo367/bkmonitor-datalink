@@ -10,6 +10,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
 )
 
 type closingReadHolds struct {
@@ -17,6 +18,7 @@ type closingReadHolds struct {
 	closed []execution.FrozenQueryGroupSchedule
 	err    error
 	failed []error
+	sites  []string
 }
 
 func (holds *closingReadHolds) PrepareSchedule(_ context.Context, schedule execution.FrozenQueryGroupSchedule, _ execution.OwnerFence) error {
@@ -27,6 +29,8 @@ func (holds *closingReadHolds) PrepareSchedule(_ context.Context, schedule execu
 }
 
 func (holds *closingReadHolds) RetireCloseFailed(err error) { holds.failed = append(holds.failed, err) }
+
+func (holds *closingReadHolds) RetireClosed(site string) { holds.sites = append(holds.sites, site) }
 
 // A retired group closes its hold at the last boundary, and retires whether
 // or not the closing succeeds: answering retry until it could close kept a
@@ -48,6 +52,59 @@ func TestRetirementClosesTheHoldAndRetiresEvenWhenClosingFails(t *testing.T) {
 		if (closeErr == nil) != (len(holds.failed) == 0) {
 			t.Fatalf("close error %v: failures counted %v", closeErr, holds.failed)
 		}
+	}
+}
+
+// A cursor past a retirement off the grid - where completing the last Slot
+// moves it, to the next grid point - is retired too: judged by equality
+// alone, that group never took the retired path, and its read hold stayed
+// open for its successor to read as the hold bound.
+func TestACursorPastTheRetirementRetiresAndClosesTheHold(t *testing.T) {
+	end := execution.EvaluationTime(630)
+	schedule := schedulerSchedule(t, 60, 60, &end, "snapshot-1", 1)
+	catalog := &fakeSlotCatalog{t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}, retiredAt: &end}
+	holds := &closingReadHolds{testReadHolds: testReadHolds{hold: 150 * time.Second}}
+	source := newProductionSlotSourceForTest(t, catalog, foundProgress(660, 600), time.Unix(660, 0))
+	source.readHolds = holds
+	_, due, facts, err := source.Next(context.Background(), "query-group-1")
+	if err != nil || due || !facts.Retired || len(holds.closed) != 1 || *holds.closed[0].Segment.End != end {
+		t.Fatalf("cursor 660 past retirement 630: retirement=%+v closed=%+v err=%v", facts, holds.closed, err)
+	}
+	if len(holds.sites) != 1 || holds.sites[0] != readhold.RetireCloseNext {
+		t.Fatalf("closed at %v, want once by the round (%s)", holds.sites, readhold.RetireCloseNext)
+	}
+}
+
+// A drained retired group closes its hold when it is released, before any
+// round comes back to it - the release of a group drained in the cutover's
+// own round left its record open for good. One that has not drained is not
+// closed at its release: whoever takes it over closes it at the retirement.
+func TestARetiredGroupClosesItsHoldWhenReleasedOnlyOnceDrained(t *testing.T) {
+	end := execution.EvaluationTime(630)
+	schedule := schedulerSchedule(t, 60, 60, &end, "snapshot-1", 1)
+	// A Slot in flight sits at the cursor (Progress refuses a projection
+	// anywhere else), so one short of the retirement is the case that has one.
+	for name, test := range map[string]struct {
+		progress execution.ProgressLoadResult
+		closes   bool
+	}{
+		"drained past the retirement": {progress: foundProgress(660, 600), closes: true},
+		"drained at the retirement":   {progress: foundProgress(630, 600), closes: true},
+		"short of the retirement":     {progress: foundProgress(600, 540)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			catalog := &fakeSlotCatalog{t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}, retiredAt: &end}
+			holds := &closingReadHolds{testReadHolds: testReadHolds{hold: 150 * time.Second}}
+			source := newProductionSlotSourceForTest(t, catalog, test.progress, time.Unix(700, 0))
+			source.readHolds = holds
+			closed, err := source.CloseRetiredReadHold(context.Background())
+			if err != nil || closed != test.closes || (len(holds.closed) == 1) != test.closes {
+				t.Fatalf("CloseRetiredReadHold() = (%t, %v), closed %+v; want closing %t", closed, err, holds.closed, test.closes)
+			}
+			if test.closes && (len(holds.sites) != 1 || holds.sites[0] != readhold.RetireCloseRelease) {
+				t.Fatalf("closed at %v, want once by the release (%s)", holds.sites, readhold.RetireCloseRelease)
+			}
+		})
 	}
 }
 

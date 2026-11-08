@@ -257,6 +257,9 @@ type Stats struct {
 	// closing failed and that retired all the same.
 	ReadHoldOwnCorrupt        uint64 `json:"read_hold_record_corrupt"`
 	ReadHoldRetireCloseFailed uint64 `json:"read_hold_retire_close_failed"`
+	// ReadHoldRetireClosed is the retired groups whose read hold closed, by
+	// where (readhold.RetireCloseSites).
+	ReadHoldRetireClosed map[string]uint64 `json:"read_hold_retire_closed,omitempty"`
 	// ReadHoldCloseSkipped is the previous Segments a prepare skipped
 	// closing because the record was already past them without their
 	// closing facts.

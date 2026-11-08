@@ -70,6 +70,10 @@ type productionReadHolds struct {
 	linksMu           sync.Mutex
 	links             map[string]uint64
 	retireCloseFailed atomic.Uint64
+	// retireClosed is the retired groups whose read hold closed, by where:
+	// their own round at the retirement, or their release once drained.
+	retireClosedMu sync.Mutex
+	retireClosed   map[string]uint64
 	// closeSkipped is the previous Segments a prepare could not close
 	// because the record is already past them without their closing facts.
 	closeSkipped atomic.Uint64
@@ -863,6 +867,16 @@ func (holds *productionReadHolds) slotReadHold(ctx context.Context, schedule exe
 		}
 	}
 	return hold, err
+}
+
+// RetireClosed counts a retired group whose read hold closed, by where.
+func (holds *productionReadHolds) RetireClosed(site string) {
+	holds.retireClosedMu.Lock()
+	defer holds.retireClosedMu.Unlock()
+	if holds.retireClosed == nil {
+		holds.retireClosed = make(map[string]uint64, len(readhold.RetireCloseSites))
+	}
+	holds.retireClosed[site]++
 }
 
 // RetireCloseFailed counts a retired group that retired without closing.

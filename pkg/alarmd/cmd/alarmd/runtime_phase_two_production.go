@@ -2742,7 +2742,7 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 	runner.WithSlotSkipReport(runtime.dependencies.Observer, runtime.dependencies.LookbackBusy)
 	return &productionPhaseTwoQueryGroup{
 		session: session, runner: runner, observer: runtime.dependencies.Observer, now: runtime.dependencies.Now,
-		release: release, flights: runtime.flights, queryGroup: queryGroup, viewGate: runtime.viewGate,
+		release: release, flights: runtime.flights, queryGroup: queryGroup, viewGate: runtime.viewGate, source: source,
 	}, nil
 }
 
@@ -2847,6 +2847,9 @@ type productionPhaseTwoQueryGroup struct {
 	// forgets it, so it counts neither as executed from the view nor as
 	// short of it.
 	release func()
+	// source closes a retired and drained Query Group's read hold before the
+	// lease goes (CloseRetiredReadHold).
+	source *scheduler.ProductionSlotSource
 }
 
 type observedProductionSlotSource struct {
@@ -3335,6 +3338,13 @@ func (runtime *productionPhaseTwoQueryGroup) clock() time.Time {
 }
 
 func (runtime *productionPhaseTwoQueryGroup) Release(ctx context.Context) error {
+	// While the lease is still held, and before release forgets the Query
+	// Group's read hold: a retired Query Group that drained is let go without
+	// a round coming back to it, and only a round closed its read hold. Its
+	// failure is the slot source's to count; the release goes on.
+	if runtime.source != nil {
+		_, _ = runtime.source.CloseRetiredReadHold(ctx)
+	}
 	if runtime.release != nil {
 		runtime.release()
 	}

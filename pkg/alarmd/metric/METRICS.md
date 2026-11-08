@@ -1639,6 +1639,12 @@ Query Groups whose own read hold record did not decode: read as missing, the hol
 
 Retired Query Groups whose read hold closing failed; they retire all the same, and a successor reads the unclosed record as the hold bound.
 
+## alarmd_read_hold_retire_closes_total
+
+Labels: `site`
+
+Retired Query Groups whose read hold closed, by site: next, their own round at the retirement; release, their owner releasing them once drained, before a round came back to them. A drained group closed by neither leaves its successor reading the open record as the hold bound.
+
 ## alarmd_read_hold_seeds_total
 
 Labels: `origin`

@@ -180,6 +180,12 @@ func productionLookbackStats(engine *lookback.Engine, holds *productionReadHolds
 			readhold.ClampFallback: controller.Clamped[readhold.ClampFallback]}
 		stats.ReadHoldOwnCorrupt, stats.ReadHoldRetireCloseFailed = controller.OwnCorrupt, holds.retireCloseFailed.Load()
 		stats.ReadHoldCloseSkipped = holds.closeSkipped.Load()
+		stats.ReadHoldRetireClosed = make(map[string]uint64, len(readhold.RetireCloseSites))
+		holds.retireClosedMu.Lock()
+		for _, site := range readhold.RetireCloseSites {
+			stats.ReadHoldRetireClosed[site] = holds.retireClosed[site]
+		}
+		holds.retireClosedMu.Unlock()
 		stats.ReadHoldGroups = holds.groupsBySource(engine)
 		stats.ReadHoldDegraded = make(map[string]uint64, len(readhold.DegradedReasons))
 		holds.degradedMu.Lock()

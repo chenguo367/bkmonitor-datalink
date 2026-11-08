@@ -72,6 +72,16 @@ const (
 // ClampSources is the closed list of them.
 var ClampSources = []string{ClampKnown, ClampFallback}
 
+// Where a retired Query Group's read hold was closed: by its own round that
+// reached the retirement, or by its owner releasing it once it had drained,
+// before the round ever came back to it. RetireCloseSites is the closed list.
+const (
+	RetireCloseNext    = "next"
+	RetireCloseRelease = "release"
+)
+
+var RetireCloseSites = []string{RetireCloseNext, RetireCloseRelease}
+
 // A Slot whose group's hold could not be prepared or written is frozen with
 // the hold the group last read, by what failed: the group's route and delay
 // (spec_unreadable), its previous Segment's schedule (previous_unreadable),
