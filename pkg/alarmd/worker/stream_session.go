@@ -76,6 +76,12 @@ type streamedExecution struct {
 	// seriesCensus is where this Slot's series went, counted where each
 	// decision is made rather than inferred afterwards. See seriesCensus.
 	seriesCensus seriesCensus
+	// superseded is the series this attempt skipped because their State is
+	// a later Slot's, for its result; supersededGaps the Plans whose gap
+	// marker a resumed series found from a later Slot, so a Plan of many
+	// resumed series counts its one marker once. See superseded_series.go.
+	superseded     execution.SupersededSeries
+	supersededGaps map[execution.PlanGapIdentity]struct{}
 	// noDataPlansSeen is how many of this Slot's Plans detect no-data,
 	// counted where they are found rather than where they are judged.
 	noDataPlansSeen      int
@@ -1815,6 +1821,18 @@ func (stream *streamedExecution) evaluateCompletedSeriesBatch(ctx context.Contex
 		if stream.supplement != nil && stream.supplementReached(view) {
 			continue
 		}
+		// Before the evaluation and beside the supplement's own skip, for the
+		// same reason: a series whose State is already past this Slot has
+		// nothing for this Slot to decide. It used to reach the State
+		// preflight and fail the whole Slot as STATE_STALE_VERSION, which the
+		// store answers the same way on every retry -- it does not go back --
+		// so the Query Group stood still until the replay expired.
+		if execution.SupersededBy(view.PersistedApplyVersion, entry.item.ApplyVersion) {
+			if err := stream.skipSupersededSeries(ctx, entry, view); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := stream.evaluateLoadedSeries(ctx, entry, view); err != nil {
 			return err
 		}
@@ -1825,12 +1843,15 @@ func (stream *streamedExecution) evaluateCompletedSeriesBatch(ctx context.Contex
 func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry completedSeries, view execution.RuntimeStateView) error {
 	due, series, inputs := entry.due, entry.series, entry.inputs
 	if view.VersionComparison == execution.ApplyVersionEqual {
-		resumed, err := resumedSeriesResult(stream.header, due, view, stream.gaps)
+		resumed, gapSuperseded, err := resumedSeriesResult(stream.header, due, view, stream.gaps)
 		if err != nil {
 			return err
 		}
 		if err := stream.mergeProvisional(ctx, resumed, 0); err != nil {
 			return err
+		}
+		if gapSuperseded {
+			stream.noteSupersededGap(ctx, due.GapIdentity())
 		}
 		stream.coordinator.observe(ctx, observability.ComponentState, observability.StageMutationCompared,
 			stream.request.Operation, time.Now(), observability.ResultSuccess,

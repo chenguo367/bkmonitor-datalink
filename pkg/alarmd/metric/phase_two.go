@@ -47,6 +47,7 @@ type phaseTwoMetrics struct {
 	stateWriteReuse                *prometheus.CounterVec
 	stateAlreadyApplied            *prometheus.CounterVec
 	stateVersionConflict           *prometheus.CounterVec
+	stateSuperseded                *prometheus.CounterVec
 	ownershipRefusals              *prometheus.CounterVec
 	sourceObservations             *prometheus.CounterVec
 	sourceRefreshes                *prometheus.CounterVec
@@ -431,6 +432,19 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"them and each points at a different fix. Every pair is published at zero so absent and zero " +
 				"read apart. Population is mutations, not Redis commands.",
 		}, []string{"site", "kind"}),
+		stateSuperseded: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Subsystem: metricSubsystem, Name: "state_superseded_total",
+			Help: "What a Slot did not write because a later Slot had already written it, by site and the Slot's " +
+				"operation. site: state is a series whose Runtime State is a later Slot's -- it compared " +
+				"PERSISTED_NEWER and its evaluation time is after this Slot's -- so it was not evaluated, sent " +
+				"nothing and wrote nothing, and the rest of the Slot went on; gap is a Plan gap marker a later " +
+				"Slot wrote, left as it was. These used to be refused as STATE_STALE_VERSION or " +
+				"GAP_APPLY_STALE_VERSION and retried until the replay expired. Non-zero says the store went " +
+				"back behind Progress -- a Redis failover that lost a Slot's tail while the next Slot ran on " +
+				"what was left -- or a replay crossed a later write: read operation=normal against the time of " +
+				"a failover. A newer state apply epoch at a time not after the Slot's is not counted here; it " +
+				"is still refused. Every pair is published at zero.",
+		}, []string{"site", "operation"}),
 		sourceObservations: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: metricSubsystem, Name: "source_observation_total",
 			Help: "Phase-two source health episode transitions by bounded source, result and reason class.",
@@ -1940,6 +1954,11 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			metrics.stateVersionConflict.WithLabelValues(string(site), string(kind))
 		}
 	}
+	for _, site := range observability.AllStateSupersededSites() {
+		for _, operation := range observability.StateSupersededOperations {
+			metrics.stateSuperseded.WithLabelValues(string(site), string(operation))
+		}
+	}
 	for _, site := range ownershipRefusalSites {
 		for _, refusal := range ownership.RefusalReasons {
 			metrics.ownershipRefusals.WithLabelValues(site, refusal)
@@ -2091,7 +2110,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.queryCooldown,
 		m.slotReadiness.slack, m.slotReadiness.boundary,
 		m.slotTiming, m.slotWait,
-		m.work, m.busy, m.lastProgress, m.capacity, m.stateWriteReuse, m.stateAlreadyApplied, m.stateVersionConflict, m.sourceObservations, m.sourceRefreshes, m.sourceCompiles,
+		m.work, m.busy, m.lastProgress, m.capacity, m.stateWriteReuse, m.stateAlreadyApplied, m.stateVersionConflict, m.stateSuperseded, m.sourceObservations, m.sourceRefreshes, m.sourceCompiles,
 		m.sourceReads, m.sourceRefreshBuilds, m.sourceStrategiesRead, m.sourceChangeSignalAge,
 		m.activationFailures, m.unmappedSeverity,
 		m.ownedQueryGroups, m.ownershipTransitions, m.leaseRenewals, m.ownershipRefusals,
@@ -2545,6 +2564,10 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		for key, count := range facts.Counts {
 			m.stateVersionConflict.WithLabelValues(string(key.Site), string(observability.NormalizeStateVersionConflictKind(key.Kind))).Add(float64(count))
 		}
+	}
+	if facts := observation.StateSuperseded; facts != nil && facts.Count > 0 {
+		m.stateSuperseded.WithLabelValues(string(observability.NormalizeStateSupersededSite(facts.Site)),
+			string(observability.NormalizeStateSupersededOperation(observation.Operation))).Add(float64(facts.Count))
 	}
 	if observation.Component == observability.ComponentResource && observation.CapacityBudget != "" {
 		result := "other"

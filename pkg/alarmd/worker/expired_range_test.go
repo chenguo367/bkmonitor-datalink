@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -199,9 +198,11 @@ func testRangeTailGuardCommitConflict(t *testing.T, distance, committedFirst boo
 	if err != nil || load.Progress.NextSlot != request.ExpiredRange.Next || load.Progress.UnfinishedRange != nil || load.Progress.CurrentOrRecentGap.Count != 3 || load.Progress.LastFullSlot != prior.Slot.EvaluationTime {
 		t.Fatalf("final=%+v err=%v", load, err)
 	}
-	// Counterexample: retain the actual tail Guard but represent Progress as
-	// the old head-only pending value. A restart cannot safely recover it by
-	// running the head: the existing Guard comparison rejects its older version.
+	// Retain the actual tail Guard but represent Progress as the old
+	// head-only pending value. Running the head meets a Guard a later Slot of
+	// the same activation wrote: it used to refuse it, unnamed, on every
+	// retry; the Guard already holds the Plan past the head, so the head
+	// completes on it and leaves it exactly as it was.
 	control.raw = initialRaw
 	head := request
 	head.ExpiredRange = nil
@@ -213,9 +214,11 @@ func testRangeTailGuardCommitConflict(t *testing.T, distance, committedFirst boo
 	fixture.ports.finalization.Contract = head.Contract
 	fixture.ports.finalization.Targets = head.DuePlanTargets.Clone()
 	fixture.ports.activations[0].Contract = head.Contract
+	guards := len(fixture.ports.mutations)
 	result, err = newCoordinator(newStore()).Execute(ctx, head)
-	if err == nil || result.Completed || !strings.Contains(err.Error(), "marker is newer than the Slot") {
-		t.Fatalf("head-only unsafe representation result=%+v err=%v", result, err)
+	if err != nil || !result.Completed || len(fixture.ports.mutations) != guards {
+		t.Fatalf("head under the tail Guard result=%+v err=%v guards %d -> %d, want completed with the Guard untouched",
+			result, err, guards, len(fixture.ports.mutations))
 	}
 }
 

@@ -712,6 +712,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("executions_hung_total"):               len(observability.ExecutionHungOutcomes),
 		fqName("control_tier_paused_total"):           len(ControlTierFunctions),
 		fqName("assignment_moves_total"):              8,
+		fqName("state_superseded_total"):              len(observability.AllStateSupersededSites()) * len(observability.StateSupersededOperations),
 		fqName("rebalance_byte_overloaded_workers"):   1,
 		fqName("rebalance_byte_most_loaded_share"):    1,
 		fqName("rebalance_byte_unread_groups"):        1,

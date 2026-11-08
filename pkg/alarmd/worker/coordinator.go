@@ -526,6 +526,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 			}
 			result.InPlaceWait = completion.InPlaceWait
 			result.PhysicalQueryLoss = physicalLoss
+			result.Superseded = stream.superseded
 			return result, nil
 		}
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: execute frozen Slot: %w", err)
@@ -537,6 +538,10 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	result.Timing = stream.timing()
 	result.InPlaceWait = completion.InPlaceWait
 	result.PhysicalQueryLoss = physicalLoss
+	// What the attempt skipped as superseded, whatever it then committed:
+	// the completion line names it, and the read hold counts it as an
+	// attempt overtaken by newer state.
+	result.Superseded = stream.superseded
 	return result, nil
 }
 
@@ -1136,6 +1141,8 @@ func (coordinator *SlotExecutionCoordinator) ensureActivatedPlanGaps(
 	}
 	mutations := make([]execution.PlanGapMutation, 0, len(items))
 	requireAlready := make(map[execution.PlanGapIdentity]struct{})
+	superseded := 0
+	defer func() { coordinator.observeSupersededGaps(ctx, request.Operation, superseded) }()
 	for _, item := range items {
 		marker, found := loaded.Find(item.Identity)
 		if !found {
@@ -1165,7 +1172,26 @@ func (coordinator *SlotExecutionCoordinator) ensureActivatedPlanGaps(
 		if marker.Status == execution.GapFound || marker.Status == execution.GapClearedTombstone {
 			switch execution.CompareApplyVersion(marker.PersistedApplyVersion, mutation.ApplyVersion) {
 			case execution.ApplyVersionPersistedNewer:
-				return false, errors.New("alarmd worker: activated Plan gap marker is newer than the Slot")
+				// A later Slot's marker already holds the Plan at least as
+				// far as this Slot would: it is enough, as a forced warming
+				// takes a marker at or past its activation
+				// (unsatisfiedForcedWarmingActivations), and the expired
+				// replay, skipped range or warming this Slot is finishing
+				// completes on it instead of retrying against a marker that
+				// will never be older.
+				if execution.SupersededBy(marker.PersistedApplyVersion, mutation.ApplyVersion) {
+					superseded++
+					continue
+				}
+				// Any other newer marker -- written under an activation this
+				// Slot has not reached, or by another Slot of the same moment
+				// -- is refused as the store refuses it, by name: it read
+				// internal_unknown, and an expired replay it held up was
+				// retried with nothing to say why.
+				return false, fmt.Errorf("alarmd worker: %w", &GapApplyRefusal{
+					Stage: "activated Plan gap marker is newer than the Slot", Status: execution.GapGuardStale,
+					Site: GapSiteBeforeEvents, Plan: item.Identity.Plan, StateGeneration: item.Identity.StateGeneration,
+					ExpectedRevision: marker.MarkerRevision})
 			case execution.ApplyVersionEqual:
 				if marker.Status == execution.GapFound && marker.PersistedMutationDigest == mutation.MutationDigest {
 					requireAlready[item.Identity] = struct{}{}
@@ -1222,11 +1248,18 @@ func (coordinator *SlotExecutionCoordinator) applyActivatedPlanGaps(
 	extensions ...map[execution.PlanGapIdentity]*observability.GapExtensionFacts,
 ) (bool, error) {
 	allAlready := len(items) > 0
+	superseded := 0
 	// These markers are written from the activation record alone, which
 	// carries no retention: the request says so, and the store writes them
 	// for its ceiling, which outlives any Plan's next round.
 	err := coordinator.applyGapChunks(ctx, operation, contractRef, items, execution.GenerationRetention{Unknown: true}, "activated Plan gap guard",
 		func(item execution.GapGuardApplyItemResult) error {
+			// A later Slot wrote the marker after this one read it: enough,
+			// by the rule ensureActivatedPlanGaps applies to what it read.
+			if item.Status == execution.GapGuardSuperseded {
+				superseded++
+				return nil
+			}
 			if item.Status != execution.GapGuardAlreadyApplied {
 				allAlready = false
 			}
@@ -1239,6 +1272,7 @@ func (coordinator *SlotExecutionCoordinator) applyActivatedPlanGaps(
 			}
 			return nil
 		}, extensions...)
+	coordinator.observeSupersededGaps(ctx, operation, superseded)
 	if err != nil {
 		return false, fmt.Errorf("alarmd worker: apply activated Plan gap guard: %w", err)
 	}
@@ -1993,14 +2027,24 @@ func (coordinator *SlotExecutionCoordinator) applyGap(
 	retention execution.GenerationRetention,
 	site string,
 ) error {
+	superseded := 0
 	err := coordinator.applyGapChunks(ctx, operation, contractRef, items, retention, "gap guard",
 		func(item execution.GapGuardApplyItemResult) error {
+			// A later Slot's marker is left as it is (superseded_series.go);
+			// the Plan's events and State go on as they would have.
+			if item.Status == execution.GapGuardSuperseded {
+				superseded++
+				return nil
+			}
 			if item.Status != execution.GapGuardApplied && item.Status != execution.GapGuardAlreadyApplied {
 				return &GapApplyRefusal{Stage: "gap guard did not complete", Status: item.Status, Site: site,
 					Plan: item.Identity.Plan, StateGeneration: item.Identity.StateGeneration}
 			}
 			return nil
 		})
+	// Counted whether or not a later chunk failed: what was skipped was
+	// skipped.
+	coordinator.observeSupersededGaps(ctx, operation, superseded)
 	if err != nil {
 		return fmt.Errorf("alarmd worker: apply gap guard: %w", err)
 	}
@@ -2990,12 +3034,12 @@ func historyCoverageFacts(coverage execution.HistoryCoverage) *observability.His
 	// knows why. Gating on Levels alone made the extreme case -- every series
 	// resumed, or none of their State loadable -- report no coverage at all,
 	// which is the one reading that most needed to be visible.
-	if coverage.Levels == 0 && coverage.Resumed == 0 && coverage.Constrained == 0 {
+	if coverage.Levels == 0 && coverage.Resumed == 0 && coverage.Constrained == 0 && coverage.Superseded == 0 {
 		return nil
 	}
 	facts := &observability.HistoryCoverageFacts{
 		Levels: coverage.Levels, Short: coverage.Short, Empty: coverage.Empty,
-		Resumed: coverage.Resumed, Constrained: coverage.Constrained,
+		Resumed: coverage.Resumed, Constrained: coverage.Constrained, Superseded: coverage.Superseded,
 		WorstValid: coverage.WorstValid, WorstRequired: coverage.WorstRequired,
 		Guarded: coverage.Guarded,
 		Fresh:   coverage.Fresh, ShortFresh: coverage.ShortFresh,

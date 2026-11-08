@@ -1653,7 +1653,7 @@ Slots frozen at the group's hold limit because a transition asked for more, by s
 
 ## alarmd_read_hold_transition_overtaken_total
 
-Closed-segment attempts refused because newer state has already applied.
+Closed-segment attempts overtaken by newer state: refused STATE_STALE_VERSION, or having skipped series whose State a later Slot had already written (state_superseded_total{site="state"}).
 
 ## alarmd_read_hold_transition_total
 
@@ -2090,6 +2090,12 @@ Slots whose retained bytes reached at least 95 percent of the one-object share o
 ## alarmd_state_series_held
 
 Series the Query Groups this replica holds now bound in their latest evaluated rounds: each Plan's series_matched, summed over the Query Groups this replica runs. A lower bound of the runtime State keys it owns: no-data series it synthesizes and series absent from the latest round are not in it. Per replica; read the largest replica against the State cache's budget.
+
+## alarmd_state_superseded_total
+
+Labels: `site`, `operation`
+
+What a Slot did not write because a later Slot had already written it, by site and the Slot's operation. site: state is a series whose Runtime State is a later Slot's -- it compared PERSISTED_NEWER and its evaluation time is after this Slot's -- so it was not evaluated, sent nothing and wrote nothing, and the rest of the Slot went on; gap is a Plan gap marker a later Slot wrote, left as it was. These used to be refused as STATE_STALE_VERSION or GAP_APPLY_STALE_VERSION and retried until the replay expired. Non-zero says the store went back behind Progress -- a Redis failover that lost a Slot's tail while the next Slot ran on what was left -- or a replay crossed a later write: read operation=normal against the time of a failover. A newer state apply epoch at a time not after the Slot's is not counted here; it is still refused. Every pair is published at zero.
 
 ## alarmd_state_version_conflict_total
 

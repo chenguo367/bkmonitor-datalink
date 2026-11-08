@@ -94,7 +94,9 @@ func newLookbackCollector() *lookbackCollector {
 	}
 	return &lookbackCollector{
 		readHoldTransition: desc("read_hold_transition_total", "Slots whose first readiness preserves a preceding segment's completion deadline."),
-		readHoldOvertaken:  desc("read_hold_transition_overtaken_total", "Closed-segment attempts refused because newer state has already applied."),
+		readHoldOvertaken: desc("read_hold_transition_overtaken_total", "Closed-segment attempts overtaken by newer state: refused "+
+			"STATE_STALE_VERSION, or having skipped series whose State a later Slot had already written "+
+			"(state_superseded_total{site=\"state\"})."),
 		readHoldPredecessor: desc("read_hold_predecessor_total",
 			"Moved Plans a successor Query Group seeded, by what it took the Plan's previous hold from: inherited (the "+
 				"old group's closed record, exactly), zero (no record: a group never held), or -- each read as the hold "+

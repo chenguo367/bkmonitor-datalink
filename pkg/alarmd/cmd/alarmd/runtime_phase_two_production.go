@@ -2958,7 +2958,13 @@ func (executor observedProductionSlotExecutor) Execute(
 	ctx, budget := observability.ContextWithBudgetCapture(ctx)
 	result, err := executor.next.Execute(ctx, request)
 	if executor.readHolds != nil {
-		if reason, known := worker.StateConflictReason(err); known && reason == execution.ReasonCode(contract.ReasonStateStaleVersion) {
+		// Overtaken by newer state: refused for it, as a State write that met
+		// a later one still is, or -- the shape the preflight refusal used to
+		// take -- having skipped series a later Slot had already written.
+		// Read from the refusal alone, the reading went silent the day the
+		// preflight stopped refusing.
+		if reason, known := worker.StateConflictReason(err); (known && reason == execution.ReasonCode(contract.ReasonStateStaleVersion)) ||
+			result.Superseded.Count > 0 {
 			executor.readHolds.observeOvertaken(request.Contract)
 		}
 	}
@@ -3103,6 +3109,9 @@ func (executor observedProductionSlotExecutor) Execute(
 		SlotTiming:      slotTimingFacts(result.Timing),
 		InPlaceWait:     inPlaceWaitFacts(result.InPlaceWait),
 		FollowingSlot:   int64(execution.FollowingSlotOf(ctx)),
+		// The series this attempt left to the later Slot that had written
+		// them, and one of them with both versions.
+		SlotSuperseded: result.Superseded.Facts(),
 	})
 	observability.EmitTargetFlow(ctx, "execution_outcome", trace, observability.TargetFlowFacts{ExecutionOutcomeKnown: true, Attempted: true, Completed: result.Completed, Completion: string(result.CompletionKind)})
 	return result, err

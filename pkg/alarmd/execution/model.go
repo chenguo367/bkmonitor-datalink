@@ -963,6 +963,29 @@ func CompareApplyVersion(persisted, candidate ApplyVersion) ApplyVersionComparis
 	return ApplyVersionEqual
 }
 
+// SupersededBy says the stored version is a later Slot's: it compares
+// PERSISTED_NEWER and its EvaluationTime is after the candidate's. That is
+// what a store rolled back by a Redis failover leaves -- a later Slot ran on
+// the older State it found, wrote its own, and Progress came back behind it
+// -- and the Slot that runs again behind it has nothing left to decide for
+// that key: the later Slot already decided it, from what it had.
+//
+// The other two ways to compare PERSISTED_NEWER are not this, and refusing
+// them stays right. A newer StateApplyEpoch at a time no later than the
+// candidate's is this Slot running on an older activation than the write
+// was made under; skipping would drop its decision for the key, where
+// refusing waits for the activation to catch up. The same epoch and time
+// with a larger SlotDigest is the tie rule between two Slots of the same
+// moment, which says nothing about which came first.
+//
+// The epoch is compared and never trusted alone: it is the Plan's
+// publication epoch, not an owner fence, so a second writer is kept out by
+// admission and the owner fence at the write, not here.
+func SupersededBy(persisted, candidate ApplyVersion) bool {
+	return CompareApplyVersion(persisted, candidate) == ApplyVersionPersistedNewer &&
+		persisted.EvaluationTime > candidate.EvaluationTime
+}
+
 func ClassifyStatePreflight(request StatePreflightRequest, result StatePreflightResult) (StatePreflightResult, error) {
 	if request.Contract.Validate() != nil || len(result.Items) != len(request.Items) {
 		return StatePreflightResult{}, errors.New("alarmd execution: invalid state preflight result cardinality")
@@ -1911,6 +1934,14 @@ type HistoryCoverage struct {
 	// to go back to the logs.
 	Resumed     uint32
 	Constrained uint32
+	// Superseded is a series this Slot did not evaluate because its State is
+	// a later Slot's (SupersededBy): it is in the round and has no Level
+	// outcome, window or write in it. Counted beside the two above because it
+	// is the third way the evaluated set is smaller than the handled one, and
+	// apart from them because it says something neither does -- that the
+	// store held a write from after this Slot, which is a rollback or a
+	// replay crossing a later write.
+	Superseded uint32
 	// WorstValid and WorstRequired are one Level's pair -- the Level with the
 	// largest shortfall -- and not a minimum over one field beside a maximum
 	// over the other. Taken independently they describe a Level that may not
@@ -2302,11 +2333,12 @@ func (coverage *HistoryCoverage) Merge(other HistoryCoverage) {
 	// it did not, so the short-circuit asks whether anything was reported at
 	// all rather than whether a window was. Reading Levels alone here would
 	// have dropped exactly the counts that exist to explain a low Levels.
-	if coverage == nil || (other.Levels == 0 && other.Resumed == 0 && other.Constrained == 0) {
+	if coverage == nil || (other.Levels == 0 && other.Resumed == 0 && other.Constrained == 0 && other.Superseded == 0) {
 		return
 	}
 	coverage.Resumed += other.Resumed
 	coverage.Constrained += other.Constrained
+	coverage.Superseded += other.Superseded
 	coverage.Levels += other.Levels
 	coverage.Short += other.Short
 	coverage.Empty += other.Empty
@@ -3160,6 +3192,12 @@ const (
 	GapGuardConflict       GapGuardApplyStatus = "CONFLICT"
 	GapGuardRetryable      GapGuardApplyStatus = "RETRYABLE_IO"
 	GapGuardRejected       GapGuardApplyStatus = "DETERMINISTIC_INVALID"
+	// GapGuardSuperseded is a marker a later Slot already wrote
+	// (SupersededBy): nothing was written, and nothing is wrong with the
+	// Slot that asked. Told apart from STALE_VERSION, which stays the answer
+	// for every other newer marker, because the two need opposite handling:
+	// this one is skipped, that one is refused and retried.
+	GapGuardSuperseded GapGuardApplyStatus = "SUPERSEDED"
 )
 
 type GapGuardApplyItemResult struct {
@@ -3182,7 +3220,7 @@ func (result GapGuardApplyResult) Validate() error {
 			err = requireReasonClass(item.ReasonCode, contract.ReasonClassRetryable)
 		case GapGuardRejected:
 			err = requireReasonClass(item.ReasonCode, contract.ReasonClassDeterministic)
-		case GapGuardStale, GapGuardConflict:
+		case GapGuardStale, GapGuardSuperseded, GapGuardConflict:
 			err = requireReasonNone(item.ReasonCode)
 		default:
 			err = errors.New("alarmd execution: unknown gap guard apply status")
@@ -4606,6 +4644,60 @@ type SlotExecutionResult struct {
 	// Supplement is what a supplement execution did with each series it was
 	// given; nil for every other operation.
 	Supplement *SupplementFacts
+	// Superseded is the series this attempt did not evaluate because their
+	// State was a later Slot's, whether or not the attempt went on to
+	// commit. Observation only: the completion line reports it, and the read
+	// hold reads it as a Slot overtaken by newer state, which it used to
+	// learn from the STATE_STALE_VERSION refusal this skip replaced.
+	Superseded SupersededSeries
+}
+
+// SupersededSeries is how many series a Slot skipped as superseded, and the
+// first of them: one Slot's skips share one cause -- the store went back, or
+// a replay crossed a later write -- so one sample says which.
+type SupersededSeries struct {
+	Count  uint32
+	Sample *SupersededSample
+}
+
+// Record counts one skipped series, keeping the first as the sample.
+func (series *SupersededSeries) Record(sample SupersededSample) {
+	series.Count++
+	if series.Sample == nil {
+		series.Sample = &sample
+	}
+}
+
+// Facts is the count and sample as a completion line carries them; nil when
+// nothing was skipped, so the line says nothing rather than zero.
+func (series SupersededSeries) Facts() *observability.SlotSupersededFacts {
+	if series.Count == 0 {
+		return nil
+	}
+	facts := &observability.SlotSupersededFacts{Series: series.Count}
+	if series.Sample != nil {
+		facts.Sample = series.Sample.Facts()
+	}
+	return facts
+}
+
+// SupersededSample is one superseded series: which, the version this Slot
+// would have written, and the later one the store holds.
+type SupersededSample struct {
+	Series SeriesIdentityDigest
+	Slot   ApplyVersion
+	Stored ApplyVersion
+}
+
+// Facts is the sample as a line carries it.
+func (sample SupersededSample) Facts() *observability.StateSupersededSample {
+	return &observability.StateSupersededSample{Series: string(sample.Series),
+		Slot: applyVersionFacts(sample.Slot), Stored: applyVersionFacts(sample.Stored)}
+}
+
+func applyVersionFacts(version ApplyVersion) observability.ApplyVersionFacts {
+	return observability.ApplyVersionFacts{StateApplyEpoch: uint64(version.StateApplyEpoch),
+		EvaluationTime: int64(version.EvaluationTime), SlotDigest: string(version.SlotDigest)}
 }
 
 // SlotTiming is where one Slot's wall clock went, in milliseconds.

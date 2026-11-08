@@ -1409,8 +1409,14 @@ func (ports *recordingPorts) LoadActivations(
 
 type recordingPorts struct {
 	// refuseGapStage refuses one of the Slot's two gap applies ("gap_before"
-	// or "gap_after"), so a case can tell which of them a refusal came from.
-	refuseGapStage string
+	// or "gap_after"), so a case can tell which of them a refusal came from;
+	// refuseGapStatus is the status it answers with, CONFLICT when empty.
+	refuseGapStage  string
+	refuseGapStatus execution.GapGuardApplyStatus
+	// storedVersion, with alreadyApplied, is the ApplyVersion the found
+	// State was written at, under another statement's digest: a State some
+	// other Slot wrote.
+	storedVersion *execution.ApplyVersion
 	// finalizationMode lets a test put the Slot on the query-free path, which
 	// is where the evidence is read. Empty means the ordinary query path.
 	finalizationMode execution.FinalizationMode
@@ -1898,6 +1904,10 @@ func (ports *recordingPorts) LoadRuntime(ctx context.Context, request execution.
 				LevelID: 5, LevelStateCompatibility: refs[0].LevelStateCompatibility, HistoryCompleteness: execution.HistoryFull,
 				WarmupRequirementRef: refs[0].WarmupRequirementRef,
 			}}
+			if ports.storedVersion != nil {
+				items[index].PersistedApplyVersion = *ports.storedVersion
+				items[index].PersistedMutationDigest = "another-slot-statement"
+			}
 		}
 	}
 	if timing := execution.PreflightTimingFrom(ctx); timing != nil {
@@ -2004,6 +2014,9 @@ func (ports *recordingPorts) ApplyGap(_ context.Context, request execution.GapGu
 		items[index] = execution.GapGuardApplyItemResult{Identity: item.Identity, Status: execution.GapGuardApplied}
 		if ports.refuseGapStage != "" && ports.refuseGapStage == stage {
 			items[index].Status = execution.GapGuardConflict
+			if ports.refuseGapStatus != "" {
+				items[index].Status = ports.refuseGapStatus
+			}
 		}
 		if ports.persistActivatedGaps && (item.Identity.StateGeneration != "state-v1" || ports.persistReentryGaps) {
 			if ports.activatedGapMarkers == nil {

@@ -91,7 +91,8 @@ func (p *BoundedLogPolicy) Admit(observation Observation) LogAdmission {
 			return LogAdmission{Allowed: true, Candidate: true, ReasonChanged: true, PreviousReasons: previous}
 		}
 	}
-	if routineResult(observation.Result) && !evaluationHeldQuery(observation) && !readAtLimitRound(observation) {
+	if routineResult(observation.Result) && !evaluationHeldQuery(observation) && !readAtLimitRound(observation) &&
+		!supersededRound(observation) {
 		switch {
 		case roundStages[observation.Stage] && roundChanged(observation):
 			return LogAdmission{Allowed: true, Candidate: true}
@@ -386,11 +387,12 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	// Levels rides along so the identity a reader checks -- levels plus these
 	// two against the series the Slot handled -- is on one line rather than a
 	// join across three.
-	if c := observation.HistoryCoverage; c != nil && (c.Resumed > 0 || c.Constrained > 0) {
+	if c := observation.HistoryCoverage; c != nil && (c.Resumed > 0 || c.Constrained > 0 || c.Superseded > 0) {
 		attributes = append(attributes,
 			slog.Uint64("history_levels", uint64(c.Levels)),
 			slog.Uint64("history_resumed", uint64(c.Resumed)),
-			slog.Uint64("history_constrained", uint64(c.Constrained)))
+			slog.Uint64("history_constrained", uint64(c.Constrained)),
+			slog.Uint64("history_superseded", uint64(c.Superseded)))
 	}
 	if c := observation.HistoryCoverage; c != nil && len(c.Windows) > 0 {
 		// The worst named window, on the line: which series, and which minutes
@@ -465,6 +467,21 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		}
 		if f.Skew != nil {
 			attributes = append(attributes, slog.Any("state_revision_skew", f.Skew))
+		}
+	}
+	// A skip of what a later Slot already wrote, on the skip's own line and
+	// on the Slot's completion: which site, how many, and the sample whose
+	// two versions say how far ahead the store was.
+	if f := observation.StateSuperseded; f != nil && f.Count > 0 {
+		attributes = append(attributes, slog.Int64("state_superseded_"+string(NormalizeStateSupersededSite(f.Site)), f.Count))
+		if f.Sample != nil {
+			attributes = append(attributes, slog.Any("state_superseded_sample", f.Sample))
+		}
+	}
+	if f := observation.SlotSuperseded; f != nil && f.Series > 0 {
+		attributes = append(attributes, slog.Uint64("superseded_series", uint64(f.Series)))
+		if f.Sample != nil {
+			attributes = append(attributes, slog.Any("superseded_sample", f.Sample))
 		}
 	}
 	if f := observation.StateVersionConflict; f != nil && !f.Empty() {
@@ -1396,6 +1413,17 @@ func mandatoryLogStage(stage Stage) bool {
 // it holds back into the next line it writes.
 func readAtLimitRound(observation Observation) bool {
 	return observation.ReadAtLimit
+}
+
+// supersededRound is the slot_completed line of an attempt that skipped
+// series a later Slot had already written (Observation.SlotSuperseded). Its
+// result is success and it is not routine: the store held writes from after
+// the Slot, which is a rollback or a replay crossing a later write, and this
+// line is the one that carries how many and a sample with both versions.
+// Written under the repeated-line limit of its Query Group, as a round read
+// at its limit is.
+func supersededRound(observation Observation) bool {
+	return observation.SlotSuperseded != nil && observation.SlotSuperseded.Series > 0
 }
 
 func repeatedLogObservation(observation Observation) bool {

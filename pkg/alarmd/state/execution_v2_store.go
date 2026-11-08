@@ -614,7 +614,14 @@ func (store *ExecutionStore) ApplyGap(ctx context.Context, request execution.Gap
 			_ = json.Unmarshal(raw, &previous)
 			comparison := execution.CompareApplyVersion(previous.ApplyVersion, mutation.ApplyVersion)
 			if comparison == execution.ApplyVersionPersistedNewer {
+				// A later Slot's marker is answered as such, not as a stale
+				// write: the Slot asking is one Progress came back to after
+				// that Slot ran, and refusing it would refuse it identically
+				// on every retry until its replay expired.
 				item.Status = execution.GapGuardStale
+				if execution.SupersededBy(previous.ApplyVersion, mutation.ApplyVersion) {
+					item.Status = execution.GapGuardSuperseded
+				}
 				result.Items[index] = item
 				continue
 			}
