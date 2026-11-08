@@ -522,7 +522,12 @@ func (runtime *productionPhaseTwoControl) refresh(
 ) (refreshResult phaseTwoControlRefreshResult, refreshErr error) {
 	defer func() {
 		// Renewal is guarded by the Activation CAS and must not replace the
-		// Source/activation result.
+		// Source/activation result. A round called off renews nothing: the
+		// renewal would only fail on the same context, and the next round,
+		// or the next Leader's, renews.
+		if calledOff(ctx) {
+			return
+		}
 		runtime.observeCurrentObjectRenewal(ctx, runtime.renewCurrentObjects(ctx))
 	}()
 	result, err := runtime.dependencies.Reconciler.Refresh(
@@ -539,6 +544,10 @@ func (runtime *productionPhaseTwoControl) refresh(
 		// episode: a source failing every round for hours was one line and
 		// one increment, and the line had scrolled out of reach. The log
 		// limiter bounds these lines per window; the metric counts them all.
+		// A round called off is not a failed round.
+		if calledOff(ctx) {
+			return phaseTwoControlRefreshResult{}, err
+		}
 		observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{
 			Component: observability.ComponentControlPlane, Stage: observability.StageSnapshotRefreshed,
 			Result:     observability.ResultFailed,
@@ -558,7 +567,8 @@ func (runtime *productionPhaseTwoControl) refresh(
 	// then a difference between that fact and the clock, which survives this
 	// process. A write that fails leaves the previous mark standing, so the
 	// age reads too old rather than too young, and the failure is reported.
-	if markErr := runtime.dependencies.Repository.MarkSourceRefreshSuccess(ctx, runtime.dependencies.Now()); markErr != nil {
+	if markErr := runtime.dependencies.Repository.MarkSourceRefreshSuccess(ctx, runtime.dependencies.Now()); markErr != nil &&
+		!calledOff(ctx) {
 		observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{
 			Component: observability.ComponentControlPlane, Stage: observability.StageSnapshotRefreshed,
 			Result:     observability.ResultFailed,
@@ -1833,6 +1843,9 @@ func (runtime *productionPhaseTwoOwnership) sweepRetiredAssignments(
 		runtime.sweepOwed = true
 		runtime.lastAssignmentSweep = published
 		runtime.mu.Unlock()
+		if calledOff(ctx) {
+			return
+		}
 		observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{
 			Component: observability.ComponentOwnership, Stage: observability.StageAssignmentSwept,
 			Result: observability.ResultFailed, Operation: observability.OperationWrite, Duration: sweep.Duration, DurationKnown: true,
@@ -2264,6 +2277,9 @@ func (runtime *productionPhaseTwoOwnership) publishAssignmentIndex(
 		if errors.Is(err, ownership.ErrStaleFence) {
 			runtime.clearControlAuthority(authority)
 		}
+		if calledOff(ctx) {
+			return
+		}
 		observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{
 			Component: observability.ComponentOwnership, Stage: observability.StageAssignmentIndexWritten,
 			Result: observability.ResultFailed, Operation: observability.OperationWrite, Err: err, AssignmentIndex: facts,
@@ -2427,6 +2443,9 @@ func (runtime *productionPhaseTwoOwnership) AssignedQueryGroups(
 	var result observability.Result = observability.ResultSuccess
 	if readErr != nil {
 		result = observability.ResultFailed
+	}
+	if readErr != nil && calledOff(ctx) {
+		return nil, readErr
 	}
 	if !usable {
 		assigned, err := runtime.readAllAssignments(ctx, ordered)
@@ -3295,12 +3314,26 @@ func leaseTrace(fence execution.OwnerFence) observability.TraceFields {
 	return observability.TraceFields{QueryGroupKey: string(fence.QueryGroup), OwnerID: fence.OwnerID, OwnerEpoch: fence.OwnerEpoch}
 }
 
+// calledOff reports that the caller called the work off: the process is
+// stopping, or the round that ran it was abandoned. A call that failed under
+// such a context did not fail - nothing it depends on is down - and is not
+// written as a failure, so a stop does not read as an incident. A context
+// whose deadline passed is not this: a read that ran out of time is a real
+// failure, and checking for cancellation by name keeps a deadline added
+// later from being swallowed by it.
+func calledOff(ctx context.Context) bool {
+	return ctx != nil && errors.Is(ctx.Err(), context.Canceled)
+}
+
 func observeProductionRenewalFailure(
 	ctx context.Context,
 	observer observability.Observer,
 	stage observability.Stage,
 	err error,
 ) {
+	if calledOff(ctx) {
+		return
+	}
 	observeRuntime(ctx, observer, observability.Observation{
 		Component: observability.ComponentOwnership, Stage: stage, Result: observability.ResultFailed,
 		ReasonCode: phaseTwoControlDependencyReason, Err: err,
@@ -3319,6 +3352,9 @@ func observeProductionOwnership(
 ) {
 	result := observability.Result(observability.ResultSuccess)
 	if err != nil {
+		if calledOff(ctx) {
+			return
+		}
 		result = observability.ResultFailed
 	}
 	observeRuntime(ctx, observer, observability.Observation{

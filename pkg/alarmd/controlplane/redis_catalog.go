@@ -213,9 +213,16 @@ func (repository *RedisCatalogRepository) ConfigureObserver(observer observabili
 }
 
 func (repository *RedisCatalogRepository) observe(ctx context.Context, observation observability.Observation) {
-	if repository != nil && repository.observer != nil {
-		repository.observer.Observe(ctx, observation)
+	if repository == nil || repository.observer == nil {
+		return
 	}
+	// A repository call that failed because its caller called it off is not
+	// a failure of the store: a stop writes no ERROR and counts nothing failed.
+	if (observation.Result == observability.ResultFailed || observation.Result == observability.ResultTimeout) &&
+		ctx != nil && errors.Is(ctx.Err(), context.Canceled) {
+		return
+	}
+	repository.observer.Observe(ctx, observation)
 }
 
 func NewRedisCatalogRepository(client redis.Cmdable, prefix string, ttl time.Duration) (*RedisCatalogRepository, error) {
