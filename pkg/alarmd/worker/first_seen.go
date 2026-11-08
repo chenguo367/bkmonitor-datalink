@@ -86,8 +86,11 @@ func (stream *streamedExecution) unseenPlans() map[execution.PlanKey]struct{} {
 
 // firstSeenActivations splits the Plans this Slot forces to warm up into
 // those that ran before under their generation - still forced - and those
-// that never did: no gap marker at all, and nothing read from before the
-// Slot. Only a Plan without a marker can be new; one with a marker ran.
+// that never did: new to their activation (Arrived), no gap marker at all,
+// and nothing read from before the Slot. Only a Plan without a marker can be
+// new; one with a marker ran. A Plan that stayed active while its generation
+// moved ran too, under the generation before: its new generation holds
+// nothing because nothing was carried, and it warms up.
 func firstSeenActivations(
 	forced execution.PlanActivationResult,
 	loadedGaps execution.GapLoadResult,
@@ -98,7 +101,7 @@ func firstSeenActivations(
 	for _, fact := range forced.Facts {
 		marker, found := loadedGaps.Find(fact.GapIdentity())
 		_, nothingBefore := unseen[fact.Key()]
-		if nothingBefore && (!found || marker.Status == execution.GapMissing) {
+		if fact.Selected.Arrived && nothingBefore && (!found || marker.Status == execution.GapMissing) {
 			firstSeen[fact.Key()] = fact
 			continue
 		}

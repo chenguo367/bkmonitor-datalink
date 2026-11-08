@@ -189,6 +189,17 @@ type ActivatedPlan struct {
 	ScheduleRevision  PlanScheduleRevision
 	RequiredFullSlots uint32
 	ForceWarming      bool
+	// Arrived is a Plan this activation found active for the first time: new,
+	// or deleted and put back. The control plane cannot tell the two apart -
+	// the state is one key per series, with no index by Plan - so it forces
+	// the Plan to warm up, and the Worker tells them apart at the Plan's first
+	// Slot by what it finds of it (worker/first_seen.go). Every other forced
+	// warm-up - a generation that moved under a Plan that stayed active and
+	// was not carried, a Query Group that reopened a retired timeline, a held
+	// Plan back - warms up whatever the Worker finds. False, and omitted,
+	// everywhere else, so a record without it serializes as before and is
+	// read as one to warm up.
+	Arrived bool `json:",omitempty"`
 	// Shard is the piece of a split strategy this activation is for, nil for
 	// a Plan that is not split. Activation records are persisted and compared
 	// by their bytes, so it is a pointer omitted when nil: every record of an
@@ -304,7 +315,7 @@ func (plan ActivatedPlan) Equal(other ActivatedPlan) bool {
 	return plan.Identity == other.Identity && plan.StateGeneration == other.StateGeneration &&
 		plan.StateApplyEpoch == other.StateApplyEpoch && plan.ScheduleRevision == other.ScheduleRevision &&
 		plan.RequiredFullSlots == other.RequiredFullSlots && plan.ForceWarming == other.ForceWarming &&
-		ShardsEqual(plan.Shard, other.Shard) && carriesEqual(plan.Carry, other.Carry) &&
+		plan.Arrived == other.Arrived && ShardsEqual(plan.Shard, other.Shard) && carriesEqual(plan.Carry, other.Carry) &&
 		noDataCarriesEqual(plan.NoDataCarry, other.NoDataCarry)
 }
 

@@ -15,6 +15,7 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/go-redis/redis/v8"
 
@@ -138,5 +139,62 @@ func TestAnEditWhileASlotIsInFlightLosesNoSlot(t *testing.T) {
 	}
 	if events := fixture.eventsAt(first); len(events) == 0 {
 		t.Fatalf("the new Segment's first Slot wrote no event for the edited strategy; endings %v", fixture.slotEndings())
+	}
+}
+
+// An edit that carries nothing - every Level renumbered, so no Level is
+// common to both versions (none_no_common_level) - still warms the Plan up:
+// the new Segment's first Slot is spent on the warm-up marker
+// (CONFIG_DRIFT). The new generation holds no state and no marker, as a new
+// strategy's does, but the Plan stayed active and ran under the generation
+// before; only a Plan new to its activation is judged by what its first Slot
+// finds.
+func TestAnEditThatCarriesNothingStillWarmsUpItsFirstSlot(t *testing.T) {
+	fixture := startCutoverFixture(t, nil)
+	ctx := context.Background()
+	installEditedStrategies(t, ctx, fixture.redisClient, 1725000600, func(first map[string]any) {
+		for _, algorithm := range first["items"].([]any)[0].(map[string]any)["algorithms"].([]any) {
+			algorithm.(map[string]any)["level"] = 2
+		}
+		for _, detect := range first["detects"].([]any) {
+			detect.(map[string]any)["level"] = 2
+		}
+	})
+	boundary := fixture.base + 59
+	fixture.clock.Store(boundary * 1000)
+	for round := 0; round < 2; round++ {
+		if err := fixture.bundle.refreshAndReconcile(ctx, true); err != nil {
+			t.Fatalf("leader round %d: %v", round, err)
+		}
+	}
+	activation, err := fixture.repository.LoadActivation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range activation.Plans {
+		if record.Fact.Plan.StrategyID == "1001" && (!record.Fact.Selected.ForceWarming || record.Fact.Selected.Carry != nil || record.Fact.Selected.Arrived) {
+			t.Fatalf("the renumbered Plan's activation = %+v, want it forced to warm up, carrying nothing, not new", record.Fact.Selected)
+		}
+	}
+	first := execution.EvaluationTime(boundary + 1)
+	fixture.clock.Store(firstRoundAtMillis(fixture.cfg, fixture.queryGroup, int64(first), 60))
+	for attempt := 0; attempt < 20; attempt++ {
+		if _, ended := fixture.slotEndings()[first]; ended {
+			break
+		}
+		if nextAt := fixture.runner.NextReadyAt(); nextAt.After(fixture.now()) {
+			fixture.clock.Store(nextAt.UnixMilli() + 1)
+		}
+		if _, attempted, err := fixture.runner.RunOne(ctx); err != nil {
+			t.Fatal(err)
+		} else if !attempted {
+			fixture.clock.Store(fixture.now().Add(time.Second).UnixMilli())
+		}
+	}
+	if ended := fixture.slotEndings()[first]; ended != "COMPLETED_WITH_PARTIAL_GAP/CONFIG_DRIFT" {
+		t.Fatalf("the new Segment's first Slot ended %q, want it spent on the warm-up marker; endings %v", ended, fixture.slotEndings())
+	}
+	if events := fixture.eventsAt(first); len(events) != 0 {
+		t.Fatalf("the warm-up Slot wrote events: %+v", events)
 	}
 }

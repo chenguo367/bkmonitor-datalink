@@ -194,6 +194,11 @@ func TestAMovedGenerationCarriesTheLevelsBothVersionsHave(t *testing.T) {
 			if before.StateGeneration == after.StateGeneration || after.ForceWarming != !test.carried {
 				t.Fatalf("the edit did not move the generation, or warmed what it carried: before=%+v after=%+v", before, after)
 			}
+			// After the edit the Plan has run, under the generation before, and
+			// no Worker may take it for one that never did.
+			if after.Arrived {
+				t.Fatalf("the edited Plan is marked arrived: %+v", after)
+			}
 			if !test.carried {
 				if after.Carry != nil || after.RequiredFullSlots != before.RequiredFullSlots {
 					t.Fatalf("the edit carried: %+v, want the Plan to warm up whole on %d Slots", after, before.RequiredFullSlots)
@@ -461,8 +466,9 @@ func TestAPlanBackFromAHoldReadsAsActivatedOnItsReturnWithoutACarry(t *testing.T
 	now = time.Unix(240, 0)
 	set(t, "bkmonitor.cache.strategy_1001", string(edited))
 	reopened, err := cutover.Ensure(ctx, publish(t))
-	if err != nil || len(reopened.Plans) != 1 || !reopened.Plans[0].Fact.Selected.ForceWarming || reopened.Plans[0].Fact.Selected.Carry != nil {
-		t.Fatalf("return = (%+v, %v), want the Plan back, warming, carrying nothing", reopened.Plans, err)
+	if err != nil || len(reopened.Plans) != 1 || !reopened.Plans[0].Fact.Selected.ForceWarming || reopened.Plans[0].Fact.Selected.Carry != nil ||
+		reopened.Plans[0].Fact.Selected.Arrived {
+		t.Fatalf("return = (%+v, %v), want the Plan back, warming, carrying nothing, and not new", reopened.Plans, err)
 	}
 	for _, draining := range reopened.Draining {
 		if draining.QueryGroup == group {

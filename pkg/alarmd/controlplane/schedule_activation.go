@@ -356,6 +356,9 @@ func (reconciler *ScheduleActivationReconciler) ensure(
 			previousRecord.Fact.Selected.StateGeneration != records[index].Fact.Selected.StateGeneration {
 			records[index].Fact.Selected.ForceWarming = true
 		}
+		// Only a Plan that was not active before may be one that never ran;
+		// one whose generation moved under it ran, and warms up.
+		records[index].Fact.Selected.Arrived = !continuouslyActive
 		// A generation that moved under a Plan that stayed active: what of
 		// its state is still the same facts. See stateCarry.
 		if continuouslyActive && previousRecord.Fact.Selected.StateGeneration != records[index].Fact.Selected.StateGeneration {
@@ -397,6 +400,7 @@ func (reconciler *ScheduleActivationReconciler) ensure(
 		for index := range records {
 			if _, back := returning[planGroups[records[index].Fact.Key()]]; back {
 				records[index].Fact.Selected.ForceWarming = true
+				records[index].Fact.Selected.Arrived = false
 				returned[index] = struct{}{}
 			}
 		}
@@ -544,6 +548,7 @@ func (reconciler *ScheduleActivationReconciler) reactivateHeld(
 			continue
 		}
 		record.Fact.Selected.ForceWarming = true
+		record.Fact.Selected.Arrived = false
 		// Held and back: the hold is a hole, so nothing is carried across it.
 		record.Fact.Selected.Carry = nil
 		record.Fact.Selected.NoDataCarry = nil

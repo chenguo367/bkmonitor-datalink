@@ -198,6 +198,11 @@ func TestASharedQueryGroupsClosedSegmentAnswersOnlyThePlansThatStayed(t *testing
 	first := fixture.publish(onlyA)
 	firstSlot := fixture.openStart(group)
 	second := fixture.publish(both)
+	// B is new to the second activation, and forced to warm up as one the
+	// Worker may find never ran; A stayed, and is neither.
+	if b, a := activationRecordFact(t, second, "1002").Selected, activationRecordFact(t, second, "1001").Selected; !b.Arrived || !b.ForceWarming || a.Arrived {
+		t.Fatalf("B arrived=%t warming=%t, A arrived=%t; want only B new to the activation", b.Arrived, b.ForceWarming, a.Arrived)
+	}
 	secondSlot := fixture.openStart(group)
 	added, closed := fixture.contractAt(group, firstSlot)
 	if !closed {
