@@ -7,9 +7,12 @@ package controlplane_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -478,6 +481,136 @@ func TestAPlanBackFromAHoldReadsAsActivatedOnItsReturnWithoutACarry(t *testing.T
 	back := read(t)
 	if back.ActivatedAt != 240 || !back.ActivationFound || back.CarriedFrom != nil {
 		t.Fatalf("after the return = %+v (from %+v), want activated at 240s with no carry", back, back.CarriedFrom)
+	}
+}
+
+// A Plan deleted and put back while its Query Group's retired timeline is
+// still kept reopens that timeline. It is forced to warm up as every Plan of
+// a reopened Query Group is, and is not one the Worker may take for new: the
+// state it left is under the same identity and generation, across the hole.
+func TestAPlanPutBackIntoItsRetiredGroupWarmsUpAndIsNotNew(t *testing.T) {
+	ctx := context.Background()
+	client := newControlplaneRedis(t)
+	documents := realThresholdDocuments(t)
+	set := func(t *testing.T, key, value string) {
+		t.Helper()
+		if err := client.Set(ctx, key, value, 0).Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var other map[string]any
+	if err := json.Unmarshal(documents[0], &other); err != nil {
+		t.Fatal(err)
+	}
+	other["id"] = 1002
+	other["items"].([]any)[0].(map[string]any)["query_configs"].([]any)[0].(map[string]any)["metric_field"] = "idle"
+	otherDocument, err := json.Marshal(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The active set as the cache writer publishes it: with its statement
+	// about the set, so a strategy left out of it is deleted at once rather
+	// than after the absence grace.
+	ids := func(t *testing.T, value string, lastUpdated int64) {
+		t.Helper()
+		sum := sha256.Sum256([]byte(value))
+		set(t, "bkmonitor.cache.strategy_ids", value)
+		set(t, "bkmonitor.cache.publication_semantics", `{"hold_last_good":true,"last_updated":`+strconv.FormatInt(lastUpdated, 10)+
+			`,"strategy_ids_sha256":"`+hex.EncodeToString(sum[:])+`","version":1}`)
+		set(t, "bkmonitor.cache.last_updated", strconv.FormatInt(lastUpdated, 10))
+	}
+	ids(t, `[1001,1002]`, 1)
+	set(t, "bkmonitor.cache.strategy_1001", string(documents[0]))
+	set(t, "bkmonitor.cache.strategy_1002", string(otherDocument))
+	source := newRedisStrategySource(t, client)
+	planner, err := controlplane.NewLegacyPrimaryQueryCompiler("uq-primary-v1", "UTC", testLegacyQueryRuntimeFacts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := controlplane.NewRedisCatalogRepository(client, "alarmd:control:state-carry-put-back", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiler, semantics := runtimePlanCompiler(t)
+	reconciler, err := controlplane.NewSourceReconciler(repository, compiler, semantics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publish := func(t *testing.T) controlplane.SnapshotPublicationRef {
+		t.Helper()
+		result, err := reconciler.Refresh(ctx, source, planner)
+		if err != nil || result.Status != controlplane.SourceRefreshPublished {
+			t.Fatalf("publish = (%+v, %v)", result, err)
+		}
+		return result.Publication
+	}
+	initialActivator, err := controlplane.NewInitialScheduleActivator(repository, compiler, semantics, func() time.Time { return time.Unix(60, 0) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := initialActivator.Ensure(ctx, publish(t)); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := repository.LoadActivation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups, err := repository.LoadActiveQueryGroupSet(ctx, initial.ActiveQGSetRef)
+	if err != nil || len(groups) != 2 {
+		t.Fatalf("active groups = (%v, %v), want two", groups, err)
+	}
+	var group execution.QueryGroupIdentity
+	for _, candidate := range groups {
+		if reading, err := repository.PlanCarries(ctx, candidate, controlplane.MaxPlanCarries); err == nil &&
+			len(reading.Plans) == 1 && reading.Plans[0].Plan.StrategyID == "1001" {
+			group = candidate
+		}
+	}
+	if group == "" {
+		t.Fatal("no Query Group holds 1001")
+	}
+	progress := &activationProgressReader{byGroup: map[execution.QueryGroupIdentity]execution.ProgressLoadResult{}}
+	now := time.Unix(120, 0)
+	cutover, err := controlplane.NewScheduleActivationReconcilerWithProgress(repository, compiler, semantics, progress, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Deleted at 120s: its Query Group retires and drains.
+	ids(t, `[1002]`, 2)
+	retired, err := cutover.Ensure(ctx, publish(t))
+	if err != nil || len(retired.Draining) != 1 || retired.Draining[0].QueryGroup != group {
+		t.Fatalf("retirement = (%+v, %v), want %s draining", retired.Draining, err, group)
+	}
+	progress.byGroup[group] = execution.ProgressLoadResult{Status: execution.ProgressFound, Progress: &execution.ScheduleProgress{
+		Identity: execution.ProgressIdentity{QueryGroup: group}, NextSlot: 120, LastFullSlot: 60,
+		LastCompletionKind: execution.CompletionFull,
+	}}
+
+	// Put back unchanged at 180s.
+	now = time.Unix(180, 0)
+	ids(t, `[1001,1002]`, 3)
+	back, err := cutover.Ensure(ctx, publish(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, record := range back.Plans {
+		if record.Fact.Plan.StrategyID != "1001" {
+			continue
+		}
+		found = true
+		if !record.Fact.Selected.ForceWarming || record.Fact.Selected.Arrived {
+			t.Fatalf("put back = %+v, want it warming, and not new", record.Fact.Selected)
+		}
+	}
+	if !found {
+		t.Fatalf("1001 is not in the activation after it was put back: %+v", back.Plans)
+	}
+	for _, draining := range back.Draining {
+		if draining.QueryGroup == group {
+			t.Fatalf("%s still draining after the put back: it did not reopen its timeline", group)
+		}
 	}
 }
 

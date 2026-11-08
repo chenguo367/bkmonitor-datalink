@@ -547,8 +547,9 @@ func (reconciler *ScheduleActivationReconciler) reactivateHeld(
 		if _, returning := returningPlans[record.Fact.Key()]; !returning {
 			continue
 		}
+		// Freshly compiled, the record carries no Arrived mark: held and back,
+		// it warms up whatever the Worker finds of it.
 		record.Fact.Selected.ForceWarming = true
-		record.Fact.Selected.Arrived = false
 		// Held and back: the hold is a hole, so nothing is carried across it.
 		record.Fact.Selected.Carry = nil
 		record.Fact.Selected.NoDataCarry = nil
