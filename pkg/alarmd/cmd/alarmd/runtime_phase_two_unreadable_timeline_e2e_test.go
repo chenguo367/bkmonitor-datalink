@@ -99,6 +99,15 @@ func TestAnUnreadableTimelineIsReportedRewrittenAndDetectedAgain(t *testing.T) {
 	if stamped, err := fixture.redisClient.HGet(ctx, recordKey, "timeline_record_revision").Result(); err != nil || stamped != "6" {
 		t.Fatalf("the Assignment record names timeline revision %q (%v), want 6: one above what it named", stamped, err)
 	}
+	// The rewrite was this process's own cutover: the Leader's copy of the
+	// records took the revision it wrote as written, and no round read the
+	// record again as another process's activation.
+	for _, observation := range fixture.observed() {
+		if facts := observation.ControlReads; observation.Stage == observability.StageControlReadsSpent && facts != nil &&
+			facts.RecordReads["foreign_cutover"] != 0 {
+			t.Fatalf("a round read records as another process's activation: %+v", facts.RecordReads)
+		}
+	}
 
 	// The Worker detects again, past a recorded skip.
 	fixture.clock.Store((base + 121) * 1000)

@@ -220,6 +220,27 @@ func testRangeTailGuardCommitConflict(t *testing.T, distance, committedFirst boo
 		t.Fatalf("head under the tail Guard result=%+v err=%v guards %d -> %d, want completed with the Guard untouched",
 			result, err, guards, len(fixture.ports.mutations))
 	}
+	// Completed is not evaluated. The head runs alone, with no range: it is
+	// judged by its own replay age, which is past, so it ends as an expired
+	// replay - snapshot unavailable - whatever the range it was cut from was
+	// judged by. The cursor moves one Slot, the last full Slot stays the prior
+	// one, and the head is the gap's one Slot under those words.
+	wantKind, wantReason := execution.CompletionSnapshotUnavailable, execution.ReasonCode(contract.ReasonSnapshotUnavailable)
+	if result.CompletionKind != wantKind || result.ReasonCode != wantReason {
+		t.Fatalf("head completed as %s/%s, want %s/%s", result.CompletionKind, result.ReasonCode, wantKind, wantReason)
+	}
+	load, err = newStore().LoadProgress(ctx, execution.ProgressIdentity{QueryGroup: prior.Slot.QueryGroup})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, gap := load.Progress, load.Progress.CurrentOrRecentGap
+	if after.NextSlot != head.Contract.Slot.EvaluationTime+60 || after.LastFullSlot != prior.Slot.EvaluationTime ||
+		after.LastCompletionKind != wantKind || gap == nil || gap.Count != 1 ||
+		gap.FirstSlot != head.Contract.Slot.EvaluationTime || gap.LastSlot != head.Contract.Slot.EvaluationTime ||
+		gap.Kind != wantKind || gap.ReasonCode != wantReason {
+		t.Fatalf("after the head: progress %+v gap %+v; want the cursor one Slot on, the prior still the last full Slot, "+
+			"and the head the gap's one Slot under the expired replay's words", after, gap)
+	}
 }
 
 // A range commit the store refuses for a stale owner is the handover's
