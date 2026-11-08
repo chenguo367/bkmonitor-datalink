@@ -189,8 +189,10 @@ func TestAMovedGenerationCarriesTheLevelsBothVersionsHave(t *testing.T) {
 				t.Fatalf("carry outcomes %v, want one %s", outcomes, test.outcome)
 			}
 			before, after := initial.Plans[0].Fact.Selected, changed.Plans[0].Fact.Selected
-			if before.StateGeneration == after.StateGeneration || !after.ForceWarming {
-				t.Fatalf("the edit did not move the generation: before=%+v after=%+v", before, after)
+			// A carried edit does not warm up; one that carried nothing warms
+			// up whole.
+			if before.StateGeneration == after.StateGeneration || after.ForceWarming != !test.carried {
+				t.Fatalf("the edit did not move the generation, or warmed what it carried: before=%+v after=%+v", before, after)
 			}
 			if !test.carried {
 				if after.Carry != nil || after.RequiredFullSlots != before.RequiredFullSlots {
