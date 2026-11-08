@@ -167,8 +167,9 @@ func (session *Session) SessionEnded() bool {
 
 // confirm records what a fence check that began at and answered with record
 // says about a lease held under a session: it may act for its TTL from at,
-// or until a change pending for it takes effect. An answer older than the
-// one in hand is dropped whole.
+// until a change pending for it takes effect, or, on content the record has
+// moved past, not at all. An answer older than the one in hand is dropped
+// whole.
 func (session *Session) confirm(at time.Time, record AssignmentRecord) {
 	if session == nil || session.under == nil {
 		return
@@ -189,6 +190,14 @@ func (session *Session) confirm(at time.Time, record AssignmentRecord) {
 		if capAt.Before(horizon) {
 			horizon = capAt
 		}
+	}
+	// The content declared is neither the record's nor pending as it: the
+	// change it was running toward has been promoted, perhaps with another
+	// pending behind it. The fence refuses that content as moved, so nothing
+	// it runs may go out, and a cap at the next change would let it.
+	if moved := session.declared != "" && record.ContentScope != "" && record.ContentScope != session.declared &&
+		!(record.ContentChangePending() && record.PendingContentScope == session.declared); moved {
+		horizon = at
 	}
 	session.confirmed = at
 	session.lease.Deadline = horizon

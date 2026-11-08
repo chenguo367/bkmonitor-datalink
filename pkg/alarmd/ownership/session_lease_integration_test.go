@@ -371,3 +371,114 @@ func TestAConfirmationNamesItsFenceCheckAndARoundsCheckDoesNot(t *testing.T) {
 		t.Fatalf("fence checks named %q, want %q", store.callers, want)
 	}
 }
+
+// What a confirmation leaves a lease held under a session, by the content its
+// Slot declares against the content the record names: its TTL on content the
+// record still authorizes; up to the change's effective time on the content a
+// pending change replaces, or that declares none; and nothing on content the
+// record has moved past, because the fence refuses it as moved and its output
+// must not go out under a horizon the next change would give it. The lease
+// itself is not lost on any of them: the session holds, and the next round
+// runs on the record's content.
+func TestAConfirmationGivesALeaseWhatTheRecordAuthorizesForItsContent(t *testing.T) {
+	const queryGroup = execution.QueryGroupIdentity("query-group-1")
+	const ttl = 10 * time.Second
+	for _, tc := range []struct {
+		name     string
+		declared string
+		// promote moves the record on to view-b before the confirmation;
+		// thenPublish is the change published after, if any.
+		promote     bool
+		thenPublish string
+		want        string
+	}{
+		{name: "the record's content with a change pending", declared: "view-a", want: "capped"},
+		{name: "the pending content", declared: "view-b", want: "ttl"},
+		// As a renewal caps a lease that declares none: it is not on the
+		// pending content.
+		{name: "a closed Segment's, which declares none", declared: "", want: "capped"},
+		{name: "none, after a promotion", declared: "", promote: true, want: "ttl"},
+		{name: "content the record moved past", declared: "view-a", promote: true, want: "none"},
+		{name: "content the record moved past with another change pending", declared: "view-a", promote: true, thenPublish: "view-c", want: "none"},
+		{name: "the promoted content with another change pending", declared: "view-b", promote: true, thenPublish: "view-c", want: "capped"},
+		{name: "the content pending after a promotion", declared: "view-c", promote: true, thenPublish: "view-c", want: "ttl"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newIntegrationStore(t)
+			if err := store.ConfigureLeaseTTL(ttl); err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			authority, err := store.AcquireControlLeader(ctx, "control-1", time.Now(), 10*time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			record := publishScope(t, store, authority, 0, "worker-1", "view-a", time.Now())
+			worker, err := store.AcquireWorkerSession(ctx, "worker-1", time.Now(), time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			holder := &heldWorkerSession{}
+			holder.set(worker, true)
+			session, err := OpenSessionUnder(ctx, store, queryGroup, holder.current, time.Now(), time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			session.NoteContentScope(tc.declared)
+			record = publishScope(t, store, authority, record.RecordRevision, "worker-1", "view-b", time.Now())
+			if record.PendingContentScope != "view-b" {
+				t.Fatalf("record after the change = %+v, want view-b pending", record)
+			}
+			// The change falls due in two seconds on the server's clock, so a
+			// cap at it is shorter than the TTL.
+			due := serverNow(t, store).Add(2 * time.Second)
+			if tc.promote {
+				due = serverNow(t, store).Add(-time.Millisecond)
+			}
+			if err := store.client.HSet(ctx, store.assignmentKey(queryGroup), "effective_at_ms", due.UnixMilli()).Err(); err != nil {
+				t.Fatal(err)
+			}
+			if tc.promote {
+				if err := store.CheckFenceForContentScope(ctx, session.lease.Fence, "view-b"); err != nil {
+					t.Fatalf("the check that promotes view-b = %v", err)
+				}
+				if tc.thenPublish != "" {
+					current, err := store.ReadAssignment(ctx, queryGroup)
+					if err != nil || current.ContentScope != "view-b" || current.ContentChangePending() {
+						t.Fatalf("record after the promotion = (%+v, %v), want view-b and nothing pending", current, err)
+					}
+					next := publishScope(t, store, authority, current.RecordRevision, "worker-1", tc.thenPublish, time.Now())
+					if next.ContentScope != "view-b" || next.PendingContentScope != tc.thenPublish {
+						t.Fatalf("record after the next change = %+v, want view-b current and %s pending", next, tc.thenPublish)
+					}
+					if err := store.client.HSet(ctx, store.assignmentKey(queryGroup), "effective_at_ms",
+						serverNow(t, store).Add(2*time.Second).UnixMilli()).Err(); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			at := time.Now()
+			if err := session.Confirm(ctx, at); err != nil {
+				t.Fatalf("Confirm() = %v, want the fence to pass", err)
+			}
+			deadline := session.Deadline()
+			switch tc.want {
+			case "ttl":
+				if deadline.Before(at.Add(ttl - time.Second)) {
+					t.Fatalf("Deadline() = %s after the confirmation, want its TTL of %s", deadline.Sub(at), ttl)
+				}
+			case "capped":
+				if !deadline.After(at) || deadline.After(at.Add(3*time.Second)) {
+					t.Fatalf("Deadline() = %s after the confirmation, want it capped at the change two seconds on", deadline.Sub(at))
+				}
+			case "none":
+				if deadline.After(at) {
+					t.Fatalf("Deadline() = %s after the confirmation, want none on content the record moved past", deadline.Sub(at))
+				}
+			}
+			if !session.Alive(at) {
+				t.Fatalf("Alive() = false after the confirmation, want the lease held: only its output waits")
+			}
+		})
+	}
+}
