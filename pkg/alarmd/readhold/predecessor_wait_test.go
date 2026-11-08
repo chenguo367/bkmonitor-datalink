@@ -262,3 +262,21 @@ func TestAForgottenPredecessorIsReadAgainNotTakenForUnreadable(t *testing.T) {
 	fixture.counts(map[string]uint64{TransitionWaitWaiting: 1, TransitionWaitBounded: 1},
 		map[string]uint64{PredecessorRecordOpen: 1})
 }
+
+// A group configured again for links it no longer has forgets their waits:
+// it is not counted waiting, and its next Slot, with no predecessor left,
+// freezes at once and ends no wait.
+func TestAGroupConfiguredWithoutItsPredecessorForgetsTheWait(t *testing.T) {
+	fixture := newWaitFixture(t, 10*time.Minute)
+	fixture.at(1231)
+	fixture.awaiting(PredecessorRecordOpen, 1_795_000)
+	spec := groupSpec("new", 0)
+	if err := fixture.c.Configure(spec); err != nil {
+		t.Fatal(err)
+	}
+	if waiting := fixture.c.Stats().WaitingGroups; waiting != 0 {
+		t.Fatalf("waiting groups %d after the predecessor left the spec, want 0", waiting)
+	}
+	fixture.frozen(0)
+	fixture.counts(map[string]uint64{TransitionWaitWaiting: 1}, map[string]uint64{})
+}

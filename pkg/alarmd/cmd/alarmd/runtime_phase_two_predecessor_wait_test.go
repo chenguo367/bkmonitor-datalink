@@ -425,3 +425,46 @@ func TestASuccessorWhosePredecessorNeverClosesWaitsUntilTheBoundAndSaysSo(t *tes
 		}
 	}
 }
+
+// The old group's held Slot completes while the new group waits, and the old
+// group, drained, is released before a round comes back to it: it closes its
+// record and this Worker forgets it. The new group's next look reads the
+// record again, from the store now, finds it closed and inherits the hold -
+// a predecessor forgotten is read again, not taken for one that never closes.
+func TestASuccessorReadsAgainAPredecessorReleasedWhileItWaits(t *testing.T) {
+	fixture := newPredecessorWaitFixture(t)
+	boundary := fixture.editQuery()
+	first := fixture.first(boundary)
+	fixture.clock.Store(firstRoundAtMillis(fixture.cfg, fixture.next, int64(first), 60))
+	if _, attempted := fixture.round(); attempted {
+		t.Fatal("the new group's first Slot ran with its predecessor's record open")
+	}
+
+	fixture.runOld()
+	holds := fixture.bundle.dependencies.ReadHolds
+	released := func() uint64 {
+		holds.retireClosedMu.Lock()
+		defer holds.retireClosedMu.Unlock()
+		return holds.retireClosed[readhold.RetireCloseRelease]
+	}
+	for deadline := time.Now().Add(10 * time.Second); released() == 0 && time.Now().Before(deadline); {
+		if err := fixture.bundle.refreshAndReconcile(context.Background(), true); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if released() != 1 || holds.controller.Inspect(fixture.old).Loaded {
+		t.Fatalf("retire closes by release %d, old group's state loaded %t: want it closed by its release and forgotten",
+			released(), holds.controller.Inspect(fixture.old).Loaded)
+	}
+	fixture.runNewUntil(first)
+	ended, hold := fixture.completion(first)
+	if want := fixture.inheritedHold(first, true); ended != fullEnding || hold != want {
+		t.Fatalf("the new group's first Slot ended %q with a %d ms hold, want FULL with the %d ms the old group's hold leaves", ended, hold, want)
+	}
+	predecessors, waits := fixture.predecessorCounts()
+	if predecessors[readhold.PredecessorInherited] != 1 || predecessors[readhold.PredecessorUnreadable] != 0 ||
+		waits[readhold.TransitionWaitWaiting] != 1 || waits[readhold.TransitionWaitInherited] != 1 {
+		t.Fatalf("predecessors %v waits %v, want one wait, ended inherited, and nothing unreadable", predecessors, waits)
+	}
+}
