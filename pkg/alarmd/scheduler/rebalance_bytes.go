@@ -416,19 +416,15 @@ func (projection *byteProjection) fits(workerID string, queryGroup execution.Que
 	return projectedSum(projection.known[workerID], projection.unread[workerID], projection.estimate)+peak <= byteLimit(pool)
 }
 
-// move takes the Query Group's projected peak off one Worker and onto another.
-func (projection *byteProjection) move(queryGroup execution.QueryGroupIdentity, from, to string) {
+// land adds the Query Group's projected peak to the Worker it moves or is
+// placed onto. The Worker it leaves is not taken down: within a round it is
+// never a destination again - a holder that left the ready set, one no
+// longer eligible, or the count correction's most loaded Worker.
+func (projection *byteProjection) land(queryGroup execution.QueryGroupIdentity, to string) {
 	if projection == nil {
 		return
 	}
 	peak, read := projection.peakOf(queryGroup)
-	if from != "" {
-		if read {
-			projection.known[from] -= min(peak, projection.known[from])
-		} else if projection.unread[from] > 0 {
-			projection.unread[from]--
-		}
-	}
 	if read {
 		projection.known[to] += peak
 	} else {

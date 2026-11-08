@@ -734,11 +734,7 @@ func (reconciler *Reconciler) settle(
 	}
 	record, holder, err := reconciler.store.PublishAssignmentReporting(ctx, authority, decision)
 	if err == nil {
-		from := ""
-		if hasCurrent {
-			from = current.DesiredWorkerID
-		}
-		projection.move(queryGroup, from, selected.WorkerID)
+		projection.land(queryGroup, selected.WorkerID)
 		if placedUnfit && unfit != nil {
 			*unfit++
 		}
