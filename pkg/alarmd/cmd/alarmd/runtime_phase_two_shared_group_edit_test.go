@@ -427,3 +427,72 @@ func TestABacklogAcrossAnEditPastItsSnapshotEndsUnavailable(t *testing.T) {
 	}
 	fixture.wantEvents(backlog[0], nil, []string{"1001", "1003"})
 }
+
+// A warm-up Slot of one strategy of a shared Query Group is two attempts: the
+// first writes the others' events and State and then the warmed-up
+// strategy's marker, and returns the Slot unfinished; the second, the same
+// Slot, finds the marker it wrote at its own version and commits. Retried,
+// the warmed-up strategy is still skipped - judged satisfied, it would write
+// its own key again at the same version and conflict on every attempt - the
+// Slot keeps the first attempt's word, and the others' events are not sent
+// again. Both words: a strategy back to a marker it had (PLAN_REACTIVATED),
+// and one back without one (CONFIG_DRIFT).
+func TestAWarmUpSlotRetriedKeepsItsWordAndSendsNothingTwice(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		word    string
+		away    string
+		staying []string
+		setUp   func(fixture *cutoverStallFixture, ctx context.Context) execution.EvaluationTime
+	}{
+		{name: "back to its marker", word: contract.ReasonPlanReactivated, away: "1004", staying: []string{"1001", "1003"},
+			setUp: func(fixture *cutoverStallFixture, ctx context.Context) execution.EvaluationTime {
+				ran := execution.EvaluationTime(fixture.base + 60)
+				fixture.joinedAndRan(ctx, ran)
+				fixture.leaveAndComeBack(ctx, ran+1)
+				return ran + 60
+			}},
+		{name: "back without a marker", word: contract.ReasonConfigDrift, away: "1001", staying: []string{"1003"},
+			setUp: func(fixture *cutoverStallFixture, ctx context.Context) execution.EvaluationTime {
+				installSharedGroup(fixture.t, ctx, fixture.redisClient, sharedGroupOf(fixture.t, 1003))
+				fixture.cutOverAt(ctx, execution.EvaluationTime(fixture.base+30))
+				installSharedGroup(fixture.t, ctx, fixture.redisClient, sharedGroupOf(fixture.t, 1001, 1003))
+				fixture.cutOverAt(ctx, execution.EvaluationTime(fixture.base+31))
+				return execution.EvaluationTime(fixture.base + 60)
+			}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := startSharedGroupFixture(t)
+			ctx := context.Background()
+			slot := test.setUp(fixture, ctx)
+			before := len(fixture.observed())
+			ended := fixture.runUntilEnded(ctx, slot)
+			if want := "COMPLETED_WITH_PARTIAL_GAP/" + test.word; ended != want {
+				t.Fatalf("the warm-up Slot ended %q, want %q", ended, want)
+			}
+			retries := 0
+			for _, observation := range fixture.observed()[before:] {
+				if observation.ReasonCode == observability.ReasonCode(contract.ReasonGapGuardConflict) {
+					t.Fatalf("the warm-up Slot's attempts conflicted on a marker: %+v", observation)
+				}
+				if observation.Stage == observability.StageSlotCompleted && observation.Result == "retrying" &&
+					execution.EvaluationTime(observation.Trace.EvaluationTime) == slot {
+					retries++
+				}
+			}
+			if retries == 0 {
+				t.Fatal("the warm-up Slot completed in one attempt: the retry after the marker is not exercised")
+			}
+			fixture.wantEvents(slot, test.staying, []string{test.away})
+			for _, strategy := range test.staying {
+				events, ids := fixture.eventsFor(slot, strategy), map[string]bool{}
+				for _, event := range events {
+					if ids[event.EventID] {
+						t.Fatalf("strategy %s's event %s was sent twice for the warm-up Slot", strategy, event.EventID)
+					}
+					ids[event.EventID] = true
+				}
+			}
+		})
+	}
+}
