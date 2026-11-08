@@ -14,7 +14,11 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/go-redis/redis/v8"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // editedInFlight is strategy 1001 edited while a Slot of its Query Group is
@@ -228,5 +232,71 @@ func TestASeriesWithNoPreviousRecordStartsOnItsOwnWindow(t *testing.T) {
 	}
 	if ended := fixture.slotEndings()[first]; ended != fullEnding {
 		t.Fatalf("the new Segment's first Slot ended %q, want it evaluated (FULL)", ended)
+	}
+}
+
+// countTwoOfThree fires strategy 1001 on every Slot and alerts on the
+// second anomaly within three: one stored anomaly decides whether a Slot's
+// own makes an alert.
+func countTwoOfThree(first map[string]any) {
+	thresholdTo(1)(first)
+	for _, detect := range first["detects"].([]any) {
+		trigger := detect.(map[string]any)["trigger_config"].(map[string]any)
+		trigger["count"], trigger["check_window"] = 2, 3
+	}
+}
+
+// A query edit moves the Plan to a new Query Group and leaves its state
+// generation (design 013 section 5): the state is keyed without the Query
+// Group, as Python's detection results are, so the new group's first Slot
+// reads the state the old one wrote, is not warmed up, and alerts on the
+// anomaly the old group stored with its own - one anomaly of its own alone
+// would not make the second of two.
+func TestAQueryEditReadsTheStateTheOldGroupWrote(t *testing.T) {
+	fixture := startCutoverFixtureWith(t, nil, observability.Discard(observability.ComponentRuntime), func(ctx context.Context, client *redis.Client, _ config.Config) {
+		installEditedStrategies(t, ctx, client, 1725000000, countTwoOfThree)
+	})
+	ctx := context.Background()
+	if events := fixture.eventsAt(execution.EvaluationTime(fixture.base)); len(events) != 0 {
+		t.Fatalf("one anomaly made an alert: %+v", events)
+	}
+	before, err := fixture.repository.LoadActivation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installEditedStrategies(t, ctx, fixture.redisClient, 1725000600, func(first map[string]any) {
+		countTwoOfThree(first)
+		first["items"].([]any)[0].(map[string]any)["query_configs"].([]any)[0].(map[string]any)["agg_method"] = "max"
+	})
+	old := fixture.queryGroup
+	fixture.clock.Store((fixture.base + 59) * 1000)
+	for round := 0; round < 2; round++ {
+		if err := fixture.bundle.refreshAndReconcile(ctx, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after, err := fixture.repository.LoadActivation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activationGenerationOf(t, after.Plans, "1001") != activationGenerationOf(t, before.Plans, "1001") {
+		t.Fatal("the query edit moved the state generation; the case needs one that leaves it")
+	}
+	for _, candidate := range fixture.bundle.queryGroups {
+		schedule, err := fixture.production.dependencies.Catalog.ReadInitialFrozenSchedule(ctx, candidate)
+		if err == nil && candidate != old && len(schedule.Plans) == 1 && schedule.Plans[0].Identity.StrategyID == "1001" {
+			fixture.queryGroup = candidate
+		}
+	}
+	if fixture.queryGroup == old {
+		t.Fatal("the query edit did not move the Plan to a new Query Group")
+	}
+	fixture.runner = settledRunner(fixture.bundle, fixture.queryGroup)
+	first := execution.EvaluationTime(fixture.base + 60)
+	if ended := runSlot(t, fixture, fixture.queryGroup, fixture.runner, first); ended != fullEnding {
+		t.Fatalf("the new group's first Slot ended %q, want FULL: not warmed up", ended)
+	}
+	if events := fixture.eventsAt(first); len(events) == 0 {
+		t.Fatal("the new group's first Slot made no alert: it did not read the anomaly the old group stored")
 	}
 }
