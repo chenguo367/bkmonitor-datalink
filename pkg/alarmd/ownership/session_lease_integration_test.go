@@ -482,3 +482,41 @@ func TestAConfirmationGivesALeaseWhatTheRecordAuthorizesForItsContent(t *testing
 		})
 	}
 }
+
+// A record that names no content scope refuses no content -- the fence judges
+// content moved only against a scope the record names -- so a confirmation of
+// a Slot that declares one gives the lease its TTL.
+func TestAConfirmationOnARecordThatNamesNoContentGivesTheLeaseItsTTL(t *testing.T) {
+	const queryGroup = execution.QueryGroupIdentity("query-group-1")
+	const ttl = 10 * time.Second
+	store := newIntegrationStore(t)
+	if err := store.ConfigureLeaseTTL(ttl); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	authority, err := store.AcquireControlLeader(ctx, "control-1", time.Now(), 10*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record := publishScope(t, store, authority, 0, "worker-1", "", time.Now()); record.ContentScope != "" {
+		t.Fatalf("record = %+v, want no content scope", record)
+	}
+	worker, err := store.AcquireWorkerSession(ctx, "worker-1", time.Now(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holder := &heldWorkerSession{}
+	holder.set(worker, true)
+	session, err := OpenSessionUnder(ctx, store, queryGroup, holder.current, time.Now(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.NoteContentScope("view-a")
+	at := time.Now()
+	if err := session.Confirm(ctx, at); err != nil {
+		t.Fatalf("Confirm() = %v, want the fence to pass", err)
+	}
+	if deadline := session.Deadline(); deadline.Before(at.Add(ttl - time.Second)) {
+		t.Fatalf("Deadline() = %s after the confirmation, want its TTL of %s", deadline.Sub(at), ttl)
+	}
+}
