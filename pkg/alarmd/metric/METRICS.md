@@ -2063,6 +2063,10 @@ Times this process forgot every generation-scoped key life it had remembered, be
 
 Slots whose retained bytes reached at least 95 percent of the one-object share of the retained pool they were admitted under: completed Slots at or past the threshold, and Slots given up because the share refused them (RESOURCE_SHARE_EXCEEDED), which are past it. The objects are listed by name under RETAINED_SHARE_APPROACHING on the page and in fleet.get.
 
+## alarmd_state_series_held
+
+Series the Query Groups this replica holds now bound in their latest evaluated rounds: each Plan's series_matched, summed over the Query Groups this replica runs. A lower bound of the runtime State keys it owns: no-data series it synthesizes and series absent from the latest round are not in it. Per replica; read the largest replica against the State cache's budget.
+
 ## alarmd_state_version_conflict_total
 
 Labels: `site`, `kind`

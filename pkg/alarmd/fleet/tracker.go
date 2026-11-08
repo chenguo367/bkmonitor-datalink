@@ -2893,6 +2893,27 @@ func (tracker *Tracker) Forget(owned map[string]struct{}) {
 	}
 }
 
+// SeriesMatchedIn is the series the latest rounds of the Query Groups in held
+// bound, summed over their Plans' series_matched: how many series those
+// Query Groups evaluate, read off the rounds this tracker already keeps.
+func (tracker *Tracker) SeriesMatchedIn(held map[string]struct{}) uint64 {
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	total := uint64(0)
+	for queryGroup := range held {
+		state := tracker.groups[queryGroup]
+		if state == nil {
+			continue
+		}
+		for _, plan := range state.planSeries {
+			if plan.Matched > 0 {
+				total += uint64(plan.Matched)
+			}
+		}
+	}
+	return total
+}
+
 // HasConclusion reports whether the object already has conclusive evidence.
 // Merely seeing a not-due round or strategy metadata must not prevent restore.
 func (tracker *Tracker) HasConclusion(queryGroup string) bool {

@@ -1266,6 +1266,17 @@ func openProductionPhaseTwoBundleAssembly(
 		return nil, err
 	}
 	bundle.addressDiffers = addressDiffers
+	// The series this replica's Query Groups bind, for the State cache's
+	// budget to be read against: the tracker's per-Plan counts over the Query
+	// Groups this replica runs now, at scrape time.
+	recorder.SetStateSeriesHeldSource(func() uint64 {
+		owned := bundle.ownedQueryGroups()
+		held := make(map[string]struct{}, len(owned))
+		for _, queryGroup := range owned {
+			held[string(queryGroup)] = struct{}{}
+		}
+		return fleetTracker.SeriesMatchedIn(held)
+	})
 	lookbackOwner.bind(bundle)
 	// A Slot a supplement or maintenance turned away from its flight runs as
 	// soon as the hold ends, not at its next turn.
