@@ -394,6 +394,9 @@ type AssignmentRecord struct {
 	// on a record no leader has written it to yet: a reader treats zero as
 	// "not said", never as revision zero, which no timeline has.
 	TimelineRecordRevision uint64
+	// ObservedAt is the server instant a fence check read the record at, on
+	// the clock EffectiveAt is on; zero for a record read any other way.
+	ObservedAt time.Time
 }
 
 // ContentChangePending reports whether the record carries a content change
@@ -485,6 +488,11 @@ type Lease struct {
 	// the Query Group is on, as of this renewal; zero when the record does
 	// not say. See AssignmentRecord.TimelineRecordRevision.
 	TimelineRecordRevision uint64
+	// SessionEpoch is the worker session the lease was taken under (A2), and
+	// TTL how long a confirmation lets its holder act; both zero for a lease
+	// its holder renews itself.
+	SessionEpoch uint64
+	TTL          time.Duration
 }
 
 // ContentChangePending reports whether the lease was renewed under a content

@@ -2607,7 +2607,16 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 	if !runtime.hasRole(roles.Worker) {
 		return nil, errors.New("phase-two Query Group execution requires worker role")
 	}
-	session, err := ownership.OpenSession(ctx, runtime.dependencies.Store, queryGroup, runtime.dependencies.WorkerID, at, ttl)
+	// Under the worker session once this process holds one (A2); a runtime
+	// that never started its session -- a store without sessions -- takes
+	// a lease it renews itself.
+	var session *ownership.Session
+	var err error
+	if runtime.workerSession.running() {
+		session, err = ownership.OpenSessionUnder(ctx, runtime.dependencies.Store, queryGroup, runtime.workerSession.current, at, ttl)
+	} else {
+		session, err = ownership.OpenSession(ctx, runtime.dependencies.Store, queryGroup, runtime.dependencies.WorkerID, at, ttl)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -3181,6 +3190,23 @@ func (runtime *productionPhaseTwoQueryGroup) MaintainLease(
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	// A lease held under the worker session has no renewal of its own (A2):
+	// it ends when the session it was taken under does, and that is the loss
+	// this loop reports, through the path a lost renewal takes. The session's
+	// own loop decides when it is lost; a deadline that passed on this clock
+	// before that loop renewed is not a loss here.
+	if runtime.session.HeldUnderSession() {
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-ticker.C:
+			}
+			if runtime.session.SessionEnded() {
+				return ownership.ErrStaleFence
+			}
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():

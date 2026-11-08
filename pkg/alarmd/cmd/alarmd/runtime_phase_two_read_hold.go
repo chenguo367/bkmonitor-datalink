@@ -171,8 +171,8 @@ func (holds *productionReadHolds) owner(qg execution.QueryGroupIdentity) (readho
 		session = group.session
 	}
 	holds.mu.Unlock()
-	lease, accepting := session.Current()
-	if !accepting || !lease.Deadline.After(holds.now()) {
+	lease, _ := session.Current()
+	if !session.Alive(holds.now()) {
 		return readhold.Owner{}, ownership.ErrStaleFence
 	}
 	return readhold.Owner{Fence: lease.Fence, ContentScope: lease.ContentScope}, nil

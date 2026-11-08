@@ -47,6 +47,21 @@ type workerSessionHolder struct {
 	mu      sync.Mutex
 	session ownership.WorkerSession
 	held    bool
+	// started is set once this process maintains a session, from then on
+	// the session its Query Group leases are taken under.
+	started bool
+}
+
+func (holder *workerSessionHolder) start() {
+	holder.mu.Lock()
+	defer holder.mu.Unlock()
+	holder.started = true
+}
+
+func (holder *workerSessionHolder) running() bool {
+	holder.mu.Lock()
+	defer holder.mu.Unlock()
+	return holder.started
 }
 
 func (holder *workerSessionHolder) set(session ownership.WorkerSession, held bool) {
@@ -76,6 +91,7 @@ func (runtime *productionPhaseTwoOwnership) MaintainWorkerSession(ctx context.Co
 	if !ok {
 		return nil
 	}
+	runtime.workerSession.start()
 	leaseCtx := observability.ContextWithTraceFields(ctx, observability.TraceFields{
 		QueryGroupKey: string(ownership.WorkerSessionIdentity(workerID)), OwnerID: workerID,
 	})

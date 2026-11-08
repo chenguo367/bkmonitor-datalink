@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -123,5 +124,77 @@ func TestARebalanceMoveNamesTheWorkerItTakesFrom(t *testing.T) {
 	}
 	if len(store.decisions) != 1 || store.decisions[0].HolderWorkerID != "worker-from" {
 		t.Fatalf("published decisions %+v, want one naming worker-from as the holder", store.decisions)
+	}
+}
+
+// restateWorkerSession renews the bundle's worker session now, on the clock
+// the bundle runs by: a test that moves that clock past the session's TTL
+// faster than the session's renewal ticks keeps it alive with this, as the
+// renewal would on a clock that ran.
+func restateWorkerSession(t *testing.T, bundle *phaseTwoWorkerBundle) {
+	t.Helper()
+	production, ok := bundle.dependencies.Ownership.(*productionPhaseTwoOwnership)
+	if !ok {
+		t.Fatal("the bundle holds no production ownership")
+	}
+	session, held := production.workerSession.current()
+	store, sessions := production.dependencies.Store.(workerSessionStore)
+	if !held || !sessions {
+		t.Fatal("the bundle holds no worker session")
+	}
+	renewed, err := store.RenewWorkerSession(context.Background(), session, production.dependencies.Now(),
+		bundle.dependencies.Config.PhaseTwo.Ownership.LeaseTTL.Duration())
+	if err != nil {
+		t.Fatal(err)
+	}
+	production.workerSession.set(renewed, true)
+}
+
+// A Query Group's lease held under the worker session is lost as the session
+// is: its loop does not call it lost because the session's deadline passed
+// on the process's clock -- a renewal may yet restate it -- and reports the
+// loss once the session's own loop lets the session go.
+func TestALeaseUnderTheSessionIsLostOnlyWhenTheSessionIs(t *testing.T) {
+	ctx := context.Background()
+	store := newViewGateTestStore(t)
+	now := time.Now()
+	authority, err := store.AcquireControlLeader(ctx, "control-1", now, 10*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PublishAssignment(ctx, authority, ownership.AssignmentDecision{
+		QueryGroup: "qg-1", DesiredWorkerID: "worker-1", PlacementReason: ownership.PlacementRendezvous, DecidedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	worker, err := store.AcquireWorkerSession(ctx, "worker-1", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holder := &workerSessionHolder{}
+	holder.set(worker, true)
+	session, err := ownership.OpenSessionUnder(ctx, store, "qg-1", holder.current, now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &productionPhaseTwoQueryGroup{session: session, queryGroup: "qg-1", now: time.Now}
+	stale := worker
+	stale.Deadline = time.Now().Add(-time.Second)
+	holder.set(stale, true)
+	done := make(chan error, 1)
+	go func() { done <- runtime.MaintainLease(ctx, 20*time.Millisecond, time.Second) }()
+	select {
+	case err := <-done:
+		t.Fatalf("MaintainLease() = %v for a session whose deadline only passed on this clock", err)
+	case <-time.After(150 * time.Millisecond): // fixed-wait: several of the loop's ticks, none of which may report a loss
+	}
+	holder.set(worker, false)
+	select {
+	case err := <-done:
+		if !errors.Is(err, ownership.ErrStaleFence) {
+			t.Fatalf("MaintainLease() = %v once the session was let go, want ErrStaleFence", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the loss of the session was not reported")
 	}
 }

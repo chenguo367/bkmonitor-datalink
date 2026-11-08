@@ -151,6 +151,11 @@ func TestALostRunnersLateReleaseLeavesItsSuccessorRunning(t *testing.T) {
 	if settledRunner(bundle, queryGroup) == nil {
 		t.Fatal("the reconcile did not open a successor")
 	}
+	// The worker holds its session, so the successor's lease is held under
+	// it (A2).
+	if runtime, ok := bundle.runners[queryGroup].runner.(*productionPhaseTwoQueryGroup); !ok || !runtime.session.HeldUnderSession() {
+		t.Fatal("the successor's lease is not held under the worker session")
+	}
 	// The lost Runner's release, late.
 	if err := lost.runner.Release(ctx); err != nil {
 		t.Fatalf("the lost Runner's release: %v", err)
@@ -158,6 +163,7 @@ func TestALostRunnersLateReleaseLeavesItsSuccessorRunning(t *testing.T) {
 
 	before := queried.Load()
 	clock.Store((base+30)*1000 + 5*60*1000)
+	restateWorkerSession(t, bundle)
 	if _, _, err := settledRunner(bundle, queryGroup).RunOne(ctx); err != nil {
 		t.Fatalf("the successor's round: %v", err)
 	}

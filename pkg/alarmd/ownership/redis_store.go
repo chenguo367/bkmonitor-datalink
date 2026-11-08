@@ -294,6 +294,59 @@ func (store *RedisStore) ListReadyWorkers(
 	return workers, stats, nil
 }
 
+// AcquireUnder takes the Query Group's lease under this process's worker
+// session (A2): no deadline of its own, held while the session is and its
+// confirmations are, by the lease TTL the Leader published (ttl when the
+// record names none). Deadline is the first confirmation's horizon.
+func (store *RedisStore) AcquireUnder(
+	ctx context.Context,
+	queryGroup execution.QueryGroupIdentity,
+	session WorkerSession,
+	at time.Time,
+	ttl time.Duration,
+) (Lease, error) {
+	if queryGroup == "" || session.WorkerID == "" || session.Epoch == 0 || session.Token == "" || at.IsZero() || ttl <= 0 {
+		return Lease{}, errors.New("alarmd ownership: invalid lease acquisition under a session")
+	}
+	token, err := leaseToken()
+	if err != nil {
+		return Lease{}, err
+	}
+	result, err := acquireScript.Run(ctx, store.client, []string{
+		store.assignmentKey(queryGroup), store.ownershipKey(queryGroup),
+	}, boolText(true), session.WorkerID, ttl.Milliseconds(), token, strconv.FormatUint(session.Epoch, 10), session.Token).Result()
+	if err != nil {
+		return Lease{}, err
+	}
+	values, err := scriptValues(result, 6)
+	if err != nil {
+		return Lease{}, err
+	}
+	switch scriptText(values[0]) {
+	case "NOT_DESIRED":
+		return Lease{}, ErrNotDesired
+	case "BUSY":
+		return Lease{}, ErrLeaseBusy
+	case "PAUSED":
+		return Lease{}, ErrStaleFence
+	case "OWNED":
+		if len(values) < 7 {
+			return Lease{}, errors.New("alarmd ownership: invalid lease acquisition response")
+		}
+		return Lease{
+			Fence: execution.OwnerFence{
+				QueryGroup: queryGroup, OwnerID: session.WorkerID, OwnerEpoch: uint64(scriptInt(values[1])), LeaseToken: token,
+			},
+			Deadline:               onCallerClock(at, scriptInt(values[4]), scriptInt(values[2])),
+			ContentScope:           scriptText(values[3]),
+			TimelineRecordRevision: uint64(scriptInt(values[5])),
+			SessionEpoch:           session.Epoch,
+			TTL:                    time.Duration(scriptInt(values[6])) * time.Millisecond,
+		}, nil
+	}
+	return Lease{}, errors.New("alarmd ownership: invalid lease acquisition response")
+}
+
 func (store *RedisStore) AcquireControlLeader(
 	ctx context.Context,
 	leaderID string,
@@ -713,7 +766,13 @@ func (store *RedisStore) CheckFenceWithAssignment(
 	if err != nil {
 		return AssignmentRecord{}, err
 	}
-	return assignmentFromReply(fence.QueryGroup, values[1:7], values[7:11])
+	record, err := assignmentFromReply(fence.QueryGroup, values[1:7], values[7:11])
+	if err == nil && len(values) > 11 {
+		if observed := scriptInt(values[11]); observed > 0 {
+			record.ObservedAt = time.UnixMilli(observed)
+		}
+	}
+	return record, err
 }
 
 // CheckFenceForContentScope is CheckFence for a writer that declares the
@@ -1047,6 +1106,9 @@ local require_assignment = ARGV[1]
 local owner_id = ARGV[2]
 local ttl_ms = tonumber(ARGV[3])
 local token = ARGV[4]
+-- A lease taken under a worker session (A2): the session it is taken under.
+local session_epoch = ARGV[5] or ''
+local session_token = ARGV[6] or ''
 local now_ms = redis_now_ms()
 local deadline_ms = now_ms + ttl_ms
 local scope, timeline = '', 0
@@ -1058,9 +1120,32 @@ if require_assignment == '1' then
 end
 local disposition = redis.call('HGET', KEYS[2], 'execution_disposition')
 if disposition and disposition ~= 'ACTIVE' then return {'PAUSED', 0, 0, '', now_ms, 0} end
-local current_owner = redis.call('HGET', KEYS[2], 'owner_id')
-local current_deadline = tonumber(redis.call('HGET', KEYS[2], 'deadline_ms') or '0')
-if current_owner and current_owner ~= '' and current_deadline > now_ms then return {'BUSY', 0, current_deadline, '', now_ms, 0} end
+local current = redis.call('HMGET', KEYS[2], 'owner_id', 'deadline_ms', 'owner_session_epoch', 'owner_session_token')
+local current_owner = current[1]
+local current_deadline = tonumber(current[2] or '0')
+if current_owner and current_owner ~= '' then
+  local busy
+  if current[3] and current[3] ~= '' then
+    -- Held under a session, which has no deadline here to lapse. The same
+    -- worker takes it back from a session that ended before its own (an
+    -- epoch is issued only after the one before it lapsed) or from itself,
+    -- the very process. Another worker is kept out only while the record
+    -- protects the holder: it is not desired here (this caller is), so only
+    -- a move's grace that has not ended does.
+    if current_owner == owner_id then
+      local mine = session_epoch ~= '' and tonumber(session_epoch) or 0
+      busy = not (tonumber(current[3]) < mine or (current[3] == session_epoch and current[4] == session_token))
+    elseif require_assignment == '1' then
+      local grace = redis.call('HMGET', KEYS[1], 'releasing_worker_id', 'effective_at_ms')
+      busy = grace[1] == current_owner and tonumber(grace[2] or '0') > now_ms
+    else
+      busy = true
+    end
+  else
+    busy = current_deadline > now_ms
+  end
+  if busy then return {'BUSY', 0, current_deadline, '', now_ms, 0, 0} end
+end
 if require_assignment == '1' and redis.call('HEXISTS', KEYS[1], 'releasing_worker_id') == 1 then
   -- The holder a move's grace protected has let go or run out, so this
   -- grant ends the grace. The content the move brought is promoted now
@@ -1075,10 +1160,26 @@ if require_assignment == '1' and redis.call('HEXISTS', KEYS[1], 'releasing_worke
   redis.call('HDEL', KEYS[1], 'releasing_worker_id', 'pending_content_scope', 'effective_at_ms')
 end
 local epoch = tonumber(redis.call('HGET', KEYS[2], 'owner_epoch') or '0') + 1
-redis.call('HSET', KEYS[2], 'owner_id', owner_id, 'owner_epoch', epoch, 'lease_token', token,
-  'deadline_ms', deadline_ms, 'execution_disposition', 'ACTIVE')
+local lease_ttl = ttl_ms
+if session_epoch ~= '' then
+  -- The TTL the Leader published is the one this lease is held by, so the
+  -- holder and the Leader reckon one grace by one number.
+  if require_assignment == '1' then
+    local published = tonumber(redis.call('HGET', KEYS[1], 'lease_ttl_ms') or '0')
+    if published > 0 then lease_ttl = published end
+  end
+  deadline_ms = now_ms + lease_ttl
+  redis.call('HSET', KEYS[2], 'owner_id', owner_id, 'owner_epoch', epoch, 'lease_token', token,
+    'execution_disposition', 'ACTIVE', 'owner_session_epoch', session_epoch, 'owner_session_token', session_token,
+    'owner_lease_ttl_ms', lease_ttl)
+  redis.call('HDEL', KEYS[2], 'deadline_ms')
+else
+  redis.call('HSET', KEYS[2], 'owner_id', owner_id, 'owner_epoch', epoch, 'lease_token', token,
+    'deadline_ms', deadline_ms, 'execution_disposition', 'ACTIVE')
+  redis.call('HDEL', KEYS[2], 'owner_session_epoch', 'owner_session_token', 'owner_lease_ttl_ms')
+end
 redis.call('PERSIST', KEYS[2])
-return {'OWNED', epoch, deadline_ms, scope, now_ms, timeline}
+return {'OWNED', epoch, deadline_ms, scope, now_ms, timeline, lease_ttl}
 `)
 
 // renewScript extends a lease, and is where a holder learns about a content
@@ -1169,14 +1270,15 @@ if require_assignment == '1' then
     if facts[name] then record[index] = facts[name] end
   end
 end
-return {'VALID', record[1], record[2], record[3], record[4], record[5], record[6], record[7], record[8], record[9], record[10]}
+return {'VALID', record[1], record[2], record[3], record[4], record[5], record[6], record[7], record[8], record[9], record[10], now_ms}
 `)
 
 var releaseScript = redisscript.New("ownership_release", `
 if redis.call('HGET', KEYS[1], 'owner_id') ~= ARGV[1] or
    redis.call('HGET', KEYS[1], 'owner_epoch') ~= ARGV[2] or
    redis.call('HGET', KEYS[1], 'lease_token') ~= ARGV[3] then return 'STALE' end
-redis.call('HDEL', KEYS[1], 'owner_id', 'lease_token', 'deadline_ms')
+redis.call('HDEL', KEYS[1], 'owner_id', 'lease_token', 'deadline_ms', 'owner_session_epoch', 'owner_session_token',
+  'owner_lease_ttl_ms')
 return 'RELEASED'
 `)
 

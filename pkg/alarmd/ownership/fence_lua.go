@@ -58,7 +58,11 @@ const ContentSwitchMargin = execution.MaxClockSkew
 //	    order: NOT_DESIRED when the assignment names another worker and is
 //	    not draining the caller (below); STALE for a lease that is paused,
 //	    belongs to someone else, carries another epoch or token, or has
-//	    passed its deadline; CONTENT_MOVED, last, when the lease holds but
+//	    passed its deadline (a lease its holder renews itself; one held under
+//	    a worker session, A2, has none: its holder stops acting when its
+//	    session or its last confirmation runs out, and the Control Leader
+//	    hands the Query Group over only once the session is proven gone);
+//	    CONTENT_MOVED, last, when the lease holds but
 //	    the caller declared a content scope that is neither the scope the
 //	    record names now nor the one it has pending.
 //
@@ -158,9 +162,12 @@ local function fence_refusal(assignment_key, ownership_key, require_assignment, 
     local draining = facts['releasing_worker_id'] == owner_id and tonumber(facts['effective_at_ms'] or '0') > now_ms
     if desired ~= owner_id and not draining then return 'NOT_DESIRED', facts end
   end
-  local held = redis.call('HMGET', ownership_key, 'execution_disposition', 'owner_id', 'owner_epoch', 'lease_token', 'deadline_ms')
+  local held = redis.call('HMGET', ownership_key, 'execution_disposition', 'owner_id', 'owner_epoch', 'lease_token', 'deadline_ms',
+    'owner_session_epoch')
   if held[1] ~= 'ACTIVE' then return 'STALE', facts end
-  if held[2] ~= owner_id or held[3] ~= epoch or held[4] ~= token or tonumber(held[5] or '0') <= now_ms then return 'STALE', facts end
+  local self_renewed = not held[6] or held[6] == ''
+  if held[2] ~= owner_id or held[3] ~= epoch or held[4] ~= token or
+     (self_renewed and tonumber(held[5] or '0') <= now_ms) then return 'STALE', facts end
   if require_assignment == '1' and content_scope and content_scope ~= '' then
     local scope = facts['content_scope'] or ''
     local pending = facts['pending_content_scope']
