@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,7 +26,8 @@ import (
 
 // The production bundle binds the series-held reading to the Query Groups it
 // runs and the rounds its fleet tracker keeps: a Query Group it runs whose
-// Plan bound four series reads four.
+// Plan bound four series reads four, and reads nothing once that Plan's last
+// round is older than the longest interval alarmd evaluates at.
 func TestTheProductionBundleReportsTheSeriesItsQueryGroupsBind(t *testing.T) {
 	address, client := startPhaseTwoRedis(t)
 	ctx := context.Background()
@@ -35,6 +37,7 @@ func TestTheProductionBundleReportsTheSeriesItsQueryGroupsBind(t *testing.T) {
 	withCompatibilityOutput(&cfg, address)
 	cfg.Redis.StatePrefix = "alarmd-series-held-wiring"
 	recorder := metric.NewRecorder(metric.BuildInfo{})
+	var ahead atomic.Int64
 	bundle, err := openProductionPhaseTwoBundleWithDependencies(
 		ctx, cfg, recorder,
 		observability.Discard(observability.ComponentRuntime), newPhaseTwoApplicationHealth(),
@@ -42,7 +45,8 @@ func TestTheProductionBundleReportsTheSeriesItsQueryGroupsBind(t *testing.T) {
 			return controlplane.NewLegacyRedisStrategySource(client, prefix)
 		},
 		phaseTwoProductionExternalDependencies{
-			Now: time.Now, HTTPClient: http.DefaultClient,
+			Now:        func() time.Time { return time.Now().Add(time.Duration(ahead.Load())) },
+			HTTPClient: http.DefaultClient,
 			PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
 				return &recordingPhaseTwoEventSink{}, nil
 			}),
@@ -52,6 +56,7 @@ func TestTheProductionBundleReportsTheSeriesItsQueryGroupsBind(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
+		ahead.Store(0)
 		if err := bundle.Shutdown(context.Background()); err != nil {
 			t.Error(err)
 		}
@@ -91,5 +96,9 @@ func TestTheProductionBundleReportsTheSeriesItsQueryGroupsBind(t *testing.T) {
 	})
 	if got := held(); got != 4 {
 		t.Fatalf("series held = %v, want the four its Plan bound", got)
+	}
+	ahead.Store(int64(phaseTwoMaxSupportedEvaluationInterval + time.Second))
+	if got := held(); got != 0 {
+		t.Fatalf("series held a day and a second after the Plan's last round = %v, want 0", got)
 	}
 }
