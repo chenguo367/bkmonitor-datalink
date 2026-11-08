@@ -33,6 +33,23 @@ type readLoggingStore struct {
 	leaderEpoch uint64
 }
 
+// PublishAssignment answers a content scope publication as the store does,
+// the record at the next revision carrying the scope; any other is the
+// round fake's.
+func (store *readLoggingStore) PublishAssignment(ctx context.Context, authority ownership.PublicationAuthority, decision ownership.AssignmentDecision) (ownership.AssignmentRecord, error) {
+	current, exists := store.assignments[decision.QueryGroup]
+	if decision.ContentScope == "" || !exists {
+		return store.rebalanceOwnershipStore.PublishAssignment(ctx, authority, decision)
+	}
+	if current.RecordRevision != decision.ExpectedRecordRevision {
+		return ownership.AssignmentRecord{}, ownership.ErrAssignmentConflict
+	}
+	current.ContentScope = decision.ContentScope
+	current.RecordRevision++
+	store.assignments[decision.QueryGroup] = current
+	return current, nil
+}
+
 func (store *readLoggingStore) AcquireControlLeader(ctx context.Context, leaderID string, at time.Time, ttl time.Duration) (ownership.PublicationAuthority, error) {
 	authority, err := store.rebalanceOwnershipStore.AcquireControlLeader(ctx, leaderID, at, ttl)
 	if store.leaderEpoch != 0 {
@@ -649,5 +666,60 @@ func TestADeltaThatCannotSayHasEveryHeldRecordReadAgainWhoeverReadsFirst(t *test
 		if got := settlement.Records[queryGroup].TimelineRecordRevision; got != 9 {
 			t.Fatalf("%s answers timeline revision %d, want the 9 the activation wrote", queryGroup, got)
 		}
+	}
+}
+
+// The content scopes the refresh publishes ahead of a cutover read the
+// records from the copy and keep what each publication answered: no record
+// is read, and the copy answers the publication's record after it.
+func TestTheContentScopesPublicationsAreTheCopysAndReadNothing(t *testing.T) {
+	production, store, observations := recordCacheRound(t, nil)
+	recordRound(t, production, observations, recordCacheGroups)
+	store.workers[0].Capabilities = []string{ownership.CapabilityContentScope}
+	asked := len(store.asked)
+	production.PublishContentScopes(context.Background(), map[execution.QueryGroupIdentity]execution.ObjectDigest{"query-group-2": "content-b"})
+	published := store.assignments["query-group-2"]
+	if published.ContentScope != "content-b" || len(store.asked) != asked {
+		t.Fatalf("the content scopes stored %+v after %d reads, want the scope published and no record read", published, len(store.asked)-asked)
+	}
+	answer, _, err := production.records.ReadAssignments(context.Background(), []execution.QueryGroupIdentity{"query-group-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(store.asked) != asked || answer["query-group-2"] != published {
+		t.Fatalf("after the publication the copy answers %+v after %d reads, want %+v and no read", answer["query-group-2"], len(store.asked)-asked, published)
+	}
+}
+
+// A copy begun by a read before any header was read - the content scopes'
+// in a term's first tick - has no revision to start from: once one is read,
+// every record it holds is read again, as the term's start, and the deltas
+// are read from that header on.
+func TestACopyBegunBeforeAnyHeaderIsReadAgainAsTheTermsStart(t *testing.T) {
+	store := racingRecords()
+	activations := &fakeLeaderActivations{changes: controlplane.ActivationChanges{Revision: 5}}
+	cache := newLeaderRecordCache(store, activations)
+	authority := ownership.PublicationAuthority{Fence: execution.OwnerFence{OwnerEpoch: 1}}
+	groups := []execution.QueryGroupIdentity{"qg-1", "qg-2"}
+	cache.lead(1)
+	if _, _, err := cache.ReadAssignments(context.Background(), groups); err != nil {
+		t.Fatal(err)
+	}
+	cache.takeRoundFacts()
+	if err := cache.prepareRound(context.Background(), authority, groups); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := cache.ReadAssignments(context.Background(), groups); err != nil {
+		t.Fatal(err)
+	}
+	if reads, _, _ := cache.takeRoundFacts(); !reflect.DeepEqual(reads, map[string]int{"term_start": 2}) {
+		t.Fatalf("after the first header the copy read %v, want both again as term_start", reads)
+	}
+	activations.changes = controlplane.ActivationChanges{Revision: 5, Complete: true}
+	if err := cache.prepareRound(context.Background(), authority, groups); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(activations.since, []uint64{0, 5}) {
+		t.Fatalf("the activations were read since %v, want 0 and then the header read", activations.since)
 	}
 }
