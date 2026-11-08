@@ -244,7 +244,7 @@ func roundChanged(observation Observation) bool {
 	case StageRebalancePlanned:
 		facts := observation.Rebalance
 		return facts != nil && (facts.PlannedMoves > 0 || facts.PublishedMoves > 0 || facts.Conflicts > 0 || facts.Paused ||
-			facts.Placed > 0 || facts.Replaced > 0 || (facts.Bytes != nil && facts.Bytes.PublishedMoves > 0))
+			facts.Placed > 0 || facts.Replaced > 0 || facts.Unfit > 0 || (facts.Bytes != nil && facts.Bytes.PublishedMoves > 0))
 	case StageAssignmentIndexRead:
 		// A worker that reads just before the Leader writes sees the previous
 		// round once: stale for one round is the ordinary race, the same

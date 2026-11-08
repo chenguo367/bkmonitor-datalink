@@ -1437,6 +1437,10 @@ Labels: `transition`, `result`, `reason_class`
 
 Ownership lifecycle transitions by bounded transition, result and reason class.
 
+## alarmd_placement_unfit_total
+
+Placements the Control Leader made although the Query Group fit no eligible ready worker under the byte constraint's projection (retained-byte peaks reported, each unread Query Group at the round's estimate), so it went to its rendezvous choice: a placement cannot wait on a fit, and the byte constraint moves it on a later round if the worker is then overloaded. Not counted while the round has no estimate, when nothing is judged.
+
 ## alarmd_platform_settings_authoritative_age_seconds
 
 Seconds since the last publication of the platform's settings was read. Absent until there has been one. Past 10m0s without one the copy is stale beyond its bound and fleet health degrades.

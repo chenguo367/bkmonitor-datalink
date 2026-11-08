@@ -794,7 +794,7 @@ func TestEveryWayARoundMovesAQueryGroupIsCountedByReason(t *testing.T) {
 		Component: observability.ComponentOwnership, Stage: observability.StageRebalancePlanned, Result: observability.ResultSuccess,
 		Operation: observability.OperationLoad,
 		Rebalance: &observability.RebalanceFacts{
-			Placed: 3, PlacedFromSessionHolders: 1, Replaced: 2, ReplacedFromSessionHolders: 2,
+			Placed: 3, PlacedFromSessionHolders: 1, Replaced: 2, ReplacedFromSessionHolders: 2, Unfit: 2,
 			Bytes: &observability.ByteConstraintFacts{PublishedMoves: 1, PublishedFromSessionHolders: 1,
 				Overloaded: []string{"worker-1"}, MostLoadedShare: 1.25, Unread: 7},
 		},
@@ -813,7 +813,7 @@ func TestEveryWayARoundMovesAQueryGroupIsCountedByReason(t *testing.T) {
 		}
 	}
 	scraped := scrape(t, recorder)
-	for _, line := range []string{"alarmd_rebalance_byte_overloaded_workers 1", "alarmd_rebalance_byte_most_loaded_share 1.25", "alarmd_rebalance_byte_unread_groups 7"} {
+	for _, line := range []string{"alarmd_rebalance_byte_overloaded_workers 1", "alarmd_rebalance_byte_most_loaded_share 1.25", "alarmd_rebalance_byte_unread_groups 7", "alarmd_placement_unfit_total 2"} {
 		if !strings.Contains(scraped, line) {
 			t.Fatalf("scrape lacks %q:\n%s", line, scraped)
 		}

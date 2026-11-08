@@ -714,6 +714,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("rebalance_byte_overloaded_workers"):   1,
 		fqName("rebalance_byte_most_loaded_share"):    1,
 		fqName("rebalance_byte_unread_groups"):        1,
+		fqName("placement_unfit_total"):               1,
 		fqName("rebalance_paused_total"):              1,
 		fqName("control_read_round_trips_total"):      len(ControlReadKinds),
 		fqName("control_read_keys_total"):             len(ControlReadKinds),

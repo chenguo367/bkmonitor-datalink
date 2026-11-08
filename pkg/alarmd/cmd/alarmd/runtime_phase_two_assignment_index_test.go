@@ -87,6 +87,13 @@ func (store *rebalanceOwnershipStore) ReadAssignedSet(_ context.Context, workerI
 
 func newIndexOwnershipHarness(t *testing.T, now time.Time, store *rebalanceOwnershipStore) (*productionPhaseTwoOwnership, *[]observability.Observation) {
 	t.Helper()
+	return newIndexOwnershipHarnessWithCosts(t, now, store, nil)
+}
+
+// newIndexOwnershipHarnessWithCosts is newIndexOwnershipHarness with the
+// cost ledger the Leader reads the byte readings from.
+func newIndexOwnershipHarnessWithCosts(t *testing.T, now time.Time, store *rebalanceOwnershipStore, costs *scheduler.CostLedger) (*productionPhaseTwoOwnership, *[]observability.Observation) {
+	t.Helper()
 	limits := validGoAccessRuntimeConfig().PhaseTwo.Scheduler.RecoveryLimits()
 	flights, err := scheduler.NewFlightCoordinatorWithRecovery(limits, func() time.Time { return now })
 	if err != nil {
@@ -107,7 +114,7 @@ func newIndexOwnershipHarness(t *testing.T, now time.Time, store *rebalanceOwner
 		ControlLeaderTTL: time.Minute, Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
 			*observations = append(*observations, observation)
 		}), Reconcile: reconciler, Flights: flights, RecoveryLimits: limits, PostRecoveryTerminalDelay: time.Minute,
-		QueryDeadlineReserve: 5 * time.Second, SnapshotRetention: time.Hour, PublicationDelayAllowance: time.Minute, SettlingWait: 30 * time.Second, LeaseTTL: 30 * time.Second, ReconcileInterval: 5 * time.Second, ContentScopes: noContentScopes,
+		QueryDeadlineReserve: 5 * time.Second, SnapshotRetention: time.Hour, PublicationDelayAllowance: time.Minute, SettlingWait: 30 * time.Second, LeaseTTL: 30 * time.Second, ReconcileInterval: 5 * time.Second, ContentScopes: noContentScopes, Costs: costs,
 	})
 	if err != nil {
 		t.Fatal(err)

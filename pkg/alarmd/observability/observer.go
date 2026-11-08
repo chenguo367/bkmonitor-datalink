@@ -1562,6 +1562,9 @@ type RebalanceFacts struct {
 	Placed                     int `json:"placed"`
 	PlacedFromSessionHolders   int `json:"placed_from_session_holders"`
 	ReplacedFromSessionHolders int `json:"replaced_from_session_holders"`
+	// Unfit is how many placements fit no worker under the byte constraint's
+	// projection and went to the rendezvous choice regardless.
+	Unfit int `json:"placement_unfit"`
 	// DeclinedEverywhere is the part of Unplaceable whose every eligible
 	// worker declines it - an execution of it hung on each in turn, the
 	// Query Group's own bug (design 02 section 6.5) - and the first few by

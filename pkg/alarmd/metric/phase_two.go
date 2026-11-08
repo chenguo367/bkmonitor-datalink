@@ -139,6 +139,7 @@ type phaseTwoMetrics struct {
 	byteOverloadedWorkers           *loadedGauge
 	byteMostLoadedShare             *loadedGauge
 	byteUnreadGroups                *loadedGauge
+	placementUnfit                  prometheus.Counter
 	rebalancePaused                 *prometheus.CounterVec
 	controlReadRoundTrips           *prometheus.CounterVec
 	controlReadKeys                 *prometheus.CounterVec
@@ -1163,6 +1164,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	}
 	metrics.byteOverloadedWorkers = newLoadedGauge(prometheus.GaugeOpts{Subsystem: metricSubsystem, Name: "rebalance_byte_overloaded_workers", Help: "Ready workers whose Query Groups' retained-byte peaks sum past their share of the pool, as the latest round on this Control Leader judged them; each gives one Query Group away per round (assignment_moves_total{reason=\"bytes\"}). Meaningful on the Control Leader only; aggregate replicas with max, not sum."})
 	metrics.byteMostLoadedShare = newLoadedGauge(prometheus.GaugeOpts{Subsystem: metricSubsystem, Name: "rebalance_byte_most_loaded_share", Help: "The largest judged worker's sum of retained-byte peaks over the share of its pool the byte constraint allows, as the latest round on this Control Leader read it; above one is overloaded. A lower bound while rebalance_byte_unread_groups is not zero. Meaningful on the Control Leader only; aggregate replicas with max, not sum."})
+	metrics.placementUnfit = prometheus.NewCounter(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "placement_unfit_total", Help: "Placements the Control Leader made although the Query Group fit no eligible ready worker under the byte constraint's projection (retained-byte peaks reported, each unread Query Group at the round's estimate), so it went to its rendezvous choice: a placement cannot wait on a fit, and the byte constraint moves it on a later round if the worker is then overloaded. Not counted while the round has no estimate, when nothing is judged."})
 	metrics.byteUnreadGroups = newLoadedGauge(prometheus.GaugeOpts{Subsystem: metricSubsystem, Name: "rebalance_byte_unread_groups", Help: "Query Groups with no reported retained-byte peak in the latest round on this Control Leader: they count nothing toward their worker's sum, so the byte readings beside it are lower bounds. Meaningful on the Control Leader only; aggregate replicas with max, not sum."})
 	metrics.rebalancePaused.WithLabelValues("set_unstable")
 	metrics.controlReadRoundTrips = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "control_read_round_trips_total", Help: "Redis round trips the Control Leader's reconcile round spent reading the records it places Query Groups from, by read: assignment (one Assignment record per Query Group of the population) or registry (the index plus one registration per ready worker). Counted where the calls are issued, so it is this round's own number and not a share of a client-wide total. Read it against control_read_keys_total on the same read: keys rising while round trips stay flat is the batch doing its job, both rising together is a batch that is not batching."}, []string{"read"})
@@ -2061,7 +2063,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.scheduleCutoverFirstTimelines, m.replayExpiries, m.replayTakeovers, m.slotDiversions, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
 		m.queryFailures,
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectCatalogWrittenBytes, m.objectReads, m.stateGenerationSkew, m.stateCarry,
-		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.byteOverloadedWorkers, m.byteMostLoadedShare, m.byteUnreadGroups, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
+		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.byteOverloadedWorkers, m.byteMostLoadedShare, m.byteUnreadGroups, m.placementUnfit, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.recoveryWithheld, m.noDataEnd, m.openAlertGate,
 	}...), append(append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), append(m.handover.collectors(), m.sreActions.actions, m.sreActions.rollouts, m.sreActions.watched, m.sreActions.receipts, m.cliAuth.total, m.cliAuth.rosterApplied)...), append(m.controlFacts.collectors(), m.traceExport.collectors()...)...),
 		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.activeCopy, m.fleetTracker, m.effectiveTimeRefresh, m.activationRebuild, m.timelineRepair, m.activationSkippedTimelines, m.timelineUnreadableReports, m.activationHeader, m.activationBlocked, m.liveReserve, m.roundMemory, m.targetGroup, m.effectiveClose, m.logLines, m.observerPanics, m.absentClose, m.editClose, m.noDataCloseAPI, m.linkdFilterClose, m.linkdFilterCloseRequests, m.openEpisodeRecord, m.newOpens, m.frontRefused, m.processMemory, m.strategyScopeClose, m.targetScopeClose, m.controlSourceRounds, m.apmCarried, m.apmCarriedBytes, m.sourceLivenessChecks, m.sourceLivenessSeconds, m.sourceLivenessDeferred, m.sourceLivenessEvicted, m.sourceLivenessHeldEvicted, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.controlFactsWrites, m.planCarriesReads, m.queryCooldownLoads, m.eventBusinessAttribution, m.detectionSnapshots, m.detectionSnapshotStates, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
@@ -2145,6 +2147,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		m.addAssignmentMoves(AssignmentMoveRebalance, facts.PublishedMoves, facts.PublishedFromSessionHolders)
 		m.addAssignmentMoves(AssignmentMoveIneligible, facts.Replaced, facts.ReplacedFromSessionHolders)
 		m.addAssignmentMoves(AssignmentMoveHolderGone, facts.Placed, facts.PlacedFromSessionHolders)
+		if facts.Unfit > 0 {
+			m.placementUnfit.Add(float64(facts.Unfit))
+		}
 		if bytes := facts.Bytes; bytes != nil {
 			m.addAssignmentMoves(AssignmentMoveBytes, bytes.PublishedMoves, bytes.PublishedFromSessionHolders)
 			m.byteOverloadedWorkers.Set(float64(len(bytes.Overloaded)))

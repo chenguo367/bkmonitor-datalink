@@ -13,6 +13,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -63,19 +64,37 @@ func (router *Router) Select(
 	workers []ownership.WorkerRegistration,
 	at time.Time,
 ) (ownership.WorkerRegistration, error) {
-	if router == nil || queryGroup == "" || at.IsZero() {
-		return ownership.WorkerRegistration{}, errors.New("alarmd scheduler: invalid routing request")
+	ranked, err := router.ranked(queryGroup, workers, at)
+	if err != nil {
+		return ownership.WorkerRegistration{}, err
 	}
-	var selected ownership.WorkerRegistration
-	var selectedScore [sha256.Size]byte
-	found, declined := false, false
+	return ranked[0], nil
+}
+
+// ranked is the Workers Select may choose, highest rendezvous score first:
+// a valid READY registration that has not expired, eligible, and not
+// declining the Query Group.
+func (router *Router) ranked(
+	queryGroup execution.QueryGroupIdentity,
+	workers []ownership.WorkerRegistration,
+	at time.Time,
+) ([]ownership.WorkerRegistration, error) {
+	if router == nil || queryGroup == "" || at.IsZero() {
+		return nil, errors.New("alarmd scheduler: invalid routing request")
+	}
+	type scored struct {
+		worker ownership.WorkerRegistration
+		score  [sha256.Size]byte
+	}
+	candidates := make([]scored, 0, len(workers))
+	declined := false
 	seen := make(map[string]struct{}, len(workers))
 	for _, worker := range workers {
 		if err := worker.Validate(); err != nil {
-			return ownership.WorkerRegistration{}, err
+			return nil, err
 		}
 		if _, duplicate := seen[worker.WorkerID]; duplicate {
-			return ownership.WorkerRegistration{}, errors.New("alarmd scheduler: duplicate worker identity")
+			return nil, errors.New("alarmd scheduler: duplicate worker identity")
 		}
 		seen[worker.WorkerID] = struct{}{}
 		if worker.AssignmentReadiness != ownership.WorkerReady || !worker.ExpiresAt.After(at) {
@@ -90,18 +109,45 @@ func (router *Router) Select(
 			declined = true
 			continue
 		}
-		score := sha256.Sum256([]byte(string(queryGroup) + "\x00" + worker.WorkerID))
-		if !found || bytes.Compare(score[:], selectedScore[:]) > 0 {
-			selected, selectedScore, found = worker, score, true
-		}
+		candidates = append(candidates, scored{worker: worker, score: sha256.Sum256([]byte(string(queryGroup) + "\x00" + worker.WorkerID))})
 	}
-	if !found {
+	if len(candidates) == 0 {
 		if declined {
-			return ownership.WorkerRegistration{}, ErrDeclinedEverywhere
+			return nil, ErrDeclinedEverywhere
 		}
-		return ownership.WorkerRegistration{}, ErrNoEligibleWorker
+		return nil, ErrNoEligibleWorker
 	}
-	return selected, nil
+	sort.Slice(candidates, func(left, right int) bool {
+		return bytes.Compare(candidates[left].score[:], candidates[right].score[:]) > 0
+	})
+	ranked := make([]ownership.WorkerRegistration, len(candidates))
+	for index, candidate := range candidates {
+		ranked[index] = candidate.worker
+	}
+	return ranked, nil
+}
+
+// selectFitting is Select under the round's byte projection: the highest
+// rendezvous score the Query Group fits (byteProjection.fits). When it fits
+// none, a placement still has to be made - an unknown fit is not a reason
+// to leave a Query Group unplaced - and Select's own choice is returned,
+// reported unfit, for the byte constraint to correct on a later round.
+func (router *Router) selectFitting(
+	queryGroup execution.QueryGroupIdentity,
+	workers []ownership.WorkerRegistration,
+	at time.Time,
+	projection *byteProjection,
+) (ownership.WorkerRegistration, bool, error) {
+	ranked, err := router.ranked(queryGroup, workers, at)
+	if err != nil {
+		return ownership.WorkerRegistration{}, false, err
+	}
+	for _, worker := range ranked {
+		if projection.fits(worker.WorkerID, queryGroup) {
+			return worker, false, nil
+		}
+	}
+	return ranked[0], true, nil
 }
 
 // incumbentEligible reports whether the Worker named by workerID is in the
@@ -390,7 +436,7 @@ func (reconciler *Reconciler) ReconcileWith(
 	if !hasCurrent && !errors.Is(err, ownership.ErrAssignmentAbsent) {
 		return ownership.AssignmentRecord{}, err
 	}
-	record, outcome, _, err := reconciler.settle(ctx, authority, queryGroup, current, hasCurrent, indexReadyWorkers(workers), at, ContentScopes{}, nil)
+	record, outcome, _, err := reconciler.settle(ctx, authority, queryGroup, current, hasCurrent, indexReadyWorkers(workers), at, ContentScopes{}, nil, nil, nil)
 	if err == nil && outcome == settleUnplaceable {
 		return ownership.AssignmentRecord{}, ErrNoEligibleWorker
 	}
@@ -456,6 +502,9 @@ type RoundSettlement struct {
 	// from a holder holding the lease under a worker session.
 	Placed                                               int
 	PlacedFromSessionHolders, ReplacedFromSessionHolders int
+	// Unfit counts the placements that fit no Worker under the round's byte
+	// projection and went to the rendezvous choice regardless.
+	Unfit int
 	// Unplaceable counts the Query Groups no ready worker can take this
 	// round. Each keeps the record it had, or stays without one; the round
 	// goes on with the rest.
@@ -506,6 +555,23 @@ func (reconciler *Reconciler) ReconcileRoundSettling(
 	at time.Time,
 	scopes ContentScopes,
 ) (RoundSettlement, error) {
+	return reconciler.ReconcileRoundSettlingWithBytes(ctx, authority, queryGroups, workers, at, scopes, nil)
+}
+
+// ReconcileRoundSettlingWithBytes is ReconcileRoundSettling with its
+// placements judged under the byte constraint's projection: readings gives
+// the round's byte readings for the owners the records name before the
+// round, and a Query Group placed goes to the highest rendezvous score it
+// fits on (selectFitting). Nil readings judge nothing.
+func (reconciler *Reconciler) ReconcileRoundSettlingWithBytes(
+	ctx context.Context,
+	authority ownership.PublicationAuthority,
+	queryGroups []execution.QueryGroupIdentity,
+	workers []ownership.WorkerRegistration,
+	at time.Time,
+	scopes ContentScopes,
+	readings func(map[execution.QueryGroupIdentity]string) ByteReadings,
+) (RoundSettlement, error) {
 	if reconciler == nil {
 		return RoundSettlement{}, errors.New("alarmd scheduler: initialized reconciler is required")
 	}
@@ -516,10 +582,18 @@ func (reconciler *Reconciler) ReconcileRoundSettling(
 	}
 	index := indexReadyWorkers(workers)
 	budget := rebalanceBatch(len(queryGroups))
+	var projection *byteProjection
+	if readings != nil {
+		owners := make(map[execution.QueryGroupIdentity]string, len(current))
+		for queryGroup, record := range current {
+			owners[queryGroup] = record.DesiredWorkerID
+		}
+		projection = newByteProjection(owners, readings(owners))
+	}
 	settled := make(map[execution.QueryGroupIdentity]ownership.AssignmentRecord, len(queryGroups))
 	for _, queryGroup := range queryGroups {
 		existing, hasCurrent := current[queryGroup]
-		record, outcome, holder, settleErr := reconciler.settle(ctx, authority, queryGroup, existing, hasCurrent, index, at, scopes, &budget)
+		record, outcome, holder, settleErr := reconciler.settle(ctx, authority, queryGroup, existing, hasCurrent, index, at, scopes, &budget, projection, &settlement.Unfit)
 		if settleErr != nil {
 			return settlement, settleErr
 		}
@@ -593,6 +667,8 @@ func (reconciler *Reconciler) settle(
 	at time.Time,
 	scopes ContentScopes,
 	budget *int,
+	projection *byteProjection,
+	unfit *int,
 ) (ownership.AssignmentRecord, settleOutcome, ownership.HolderKind, error) {
 	expectedRevision := uint64(0)
 	if hasCurrent {
@@ -613,7 +689,7 @@ func (reconciler *Reconciler) settle(
 		)
 		return record, settleKept, "", err
 	}
-	selected, err := reconciler.router.Select(queryGroup, workers.ordered, at)
+	selected, placedUnfit, err := reconciler.router.selectFitting(queryGroup, workers.ordered, at, projection)
 	if errors.Is(err, ErrDeclinedEverywhere) {
 		return current, settleDeclinedEverywhere, "", nil
 	}
@@ -657,5 +733,15 @@ func (reconciler *Reconciler) settle(
 		decision.WithdrawContentScope = true
 	}
 	record, holder, err := reconciler.store.PublishAssignmentReporting(ctx, authority, decision)
+	if err == nil {
+		from := ""
+		if hasCurrent {
+			from = current.DesiredWorkerID
+		}
+		projection.move(queryGroup, from, selected.WorkerID)
+		if placedUnfit && unfit != nil {
+			*unfit++
+		}
+	}
 	return record, outcome, holder, err
 }

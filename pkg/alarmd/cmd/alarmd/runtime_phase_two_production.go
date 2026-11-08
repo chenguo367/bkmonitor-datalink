@@ -1619,7 +1619,12 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 	// decisions over it. Reading them one at a time cost the round a Redis
 	// round trip per Query Group, all of it waiting, all of it before any
 	// decision could be taken.
-	settlement, err := runtime.reconciler.ReconcileRoundSettling(ctx, authority, ordered, workers, at, scopes)
+	// Placements are judged under the byte constraint's projection, from the
+	// readings for the owners the records name before the round (L100).
+	settlement, err := runtime.reconciler.ReconcileRoundSettlingWithBytes(ctx, authority, ordered, workers, at, scopes,
+		func(owners map[execution.QueryGroupIdentity]string) scheduler.ByteReadings {
+			return runtime.dependencies.Costs.Readings(owners, workers)
+		})
 	records := settlement.Records
 	runtime.observeControlReads(ctx, settlement.Stats, registryReads, len(ordered))
 	if err != nil {
@@ -2042,8 +2047,8 @@ func (runtime *productionPhaseTwoOwnership) observeRebalance(
 		Paused: outcome.paused, PausedForSeconds: outcome.pausedFor.Seconds(),
 		Replaced: settlement.Replaced, Deferred: settlement.Deferred, Unplaceable: settlement.Unplaceable,
 		Placed: settlement.Placed, PlacedFromSessionHolders: settlement.PlacedFromSessionHolders,
-		ReplacedFromSessionHolders: settlement.ReplacedFromSessionHolders,
-		DeclinedEverywhere:         settlement.DeclinedEverywhere, DeclinedEverywhereSample: declinedEverywhereSamples(settlement),
+		ReplacedFromSessionHolders: settlement.ReplacedFromSessionHolders, Unfit: settlement.Unfit,
+		DeclinedEverywhere: settlement.DeclinedEverywhere, DeclinedEverywhereSample: declinedEverywhereSamples(settlement),
 		Bytes:      byteConstraintFacts(bytePlan, byteOutcome),
 		ShardAware: &observability.ShardAwareFacts{Ready: shardGate.Ready, Unaware: shardGate.Unaware},
 	}

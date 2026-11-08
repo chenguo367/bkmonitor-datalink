@@ -118,18 +118,6 @@ func byteLimit(pool uint64) uint64 {
 	return pool / 100 * byteConstraintPercent
 }
 
-// fits reports whether a Query Group of the given peak may land on a
-// Worker whose sum is already what it is: true when the Worker is not
-// judged, since an unknown pool refuses nothing, and true for a Query Group
-// with no reading, which adds nothing to the sum it is judged by.
-func (readings ByteReadings) fits(workerID string, sum, peak uint64) bool {
-	pool, judged := readings.pool(workerID)
-	if !judged {
-		return true
-	}
-	return sum+peak <= byteLimit(pool)
-}
-
 // ByteMove names one Query Group a round moves for the byte constraint,
 // with the peak it was judged by.
 type ByteMove struct {
@@ -325,13 +313,10 @@ func (router *Router) byteDestination(
 		if workerID == from {
 			continue
 		}
-		projected := sum[workerID]
-		if unread := unreadBy[workerID]; unread > 0 {
-			if unreadEstimate == 0 {
-				continue
-			}
-			projected += uint64(unread) * unreadEstimate
+		if unreadBy[workerID] > 0 && unreadEstimate == 0 {
+			continue
 		}
+		projected := projectedSum(sum[workerID], unreadBy[workerID], unreadEstimate)
 		pool, _ := readings.pool(workerID)
 		limit := byteLimit(pool)
 		if projected > limit || peak > limit-projected {
@@ -364,6 +349,99 @@ func (reconciler *Reconciler) PlanByteMoves(
 
 // unreadEstimate is the nearest-rank ninetieth percentile of the peaks read
 // this round, or zero when none was read.
+// projectedSum is what a Worker is judged to hold as a destination: the
+// peaks it has reported and, for each Query Group with none yet, the
+// round's estimate (decision-020 section 5.7). Every planner that asks
+// whether a Query Group fits a Worker - the byte constraint, the count
+// correction and a placement - asks it of this one sum, so none of them
+// fills a Worker another would then move a Query Group off again.
+func projectedSum(known uint64, unread int, estimate uint64) uint64 {
+	return known + uint64(unread)*estimate
+}
+
+// byteProjection is one round's projected sums over the owners it began
+// with, kept current as the round moves and places Query Groups, for the
+// planners that choose a destination by whether a Query Group fits.
+type byteProjection struct {
+	readings ByteReadings
+	known    map[string]uint64
+	unread   map[string]int
+	estimate uint64
+}
+
+// newByteProjection projects the owners' Workers. The estimate is the one
+// the byte constraint uses: the ninetieth percentile of the peaks read this
+// round on Workers whose pool is known.
+func newByteProjection(owners map[execution.QueryGroupIdentity]string, readings ByteReadings) *byteProjection {
+	projection := &byteProjection{readings: readings, known: map[string]uint64{}, unread: map[string]int{}}
+	peaks := make([]uint64, 0, len(owners))
+	for queryGroup, owner := range owners {
+		if _, judged := readings.pool(owner); !judged {
+			continue
+		}
+		if peak, read := readings.peak(queryGroup); read {
+			projection.known[owner] += peak
+			peaks = append(peaks, peak)
+			continue
+		}
+		projection.unread[owner]++
+	}
+	projection.estimate = unreadEstimate(peaks)
+	return projection
+}
+
+// peakOf is the Query Group's reported peak, or the estimate when it has
+// none yet.
+func (projection *byteProjection) peakOf(queryGroup execution.QueryGroupIdentity) (uint64, bool) {
+	if peak, read := projection.readings.peak(queryGroup); read {
+		return peak, true
+	}
+	return projection.estimate, false
+}
+
+// fits reports whether the Query Group may land on the Worker. A Worker
+// with no pool is not judged, and nothing is judged while the round has no
+// estimate - no peak read at all - since an unknown then counts as nothing,
+// the rule before the estimate existed; refusing on it would refuse every
+// Worker at the start of every term.
+func (projection *byteProjection) fits(workerID string, queryGroup execution.QueryGroupIdentity) bool {
+	if projection == nil {
+		return true
+	}
+	pool, judged := projection.readings.pool(workerID)
+	if !judged {
+		return true
+	}
+	peak, read := projection.peakOf(queryGroup)
+	if projection.estimate == 0 {
+		if !read {
+			peak = 0
+		}
+		return projection.known[workerID]+peak <= byteLimit(pool)
+	}
+	return projectedSum(projection.known[workerID], projection.unread[workerID], projection.estimate)+peak <= byteLimit(pool)
+}
+
+// move takes the Query Group's projected peak off one Worker and onto another.
+func (projection *byteProjection) move(queryGroup execution.QueryGroupIdentity, from, to string) {
+	if projection == nil {
+		return
+	}
+	peak, read := projection.peakOf(queryGroup)
+	if from != "" {
+		if read {
+			projection.known[from] -= min(peak, projection.known[from])
+		} else if projection.unread[from] > 0 {
+			projection.unread[from]--
+		}
+	}
+	if read {
+		projection.known[to] += peak
+	} else {
+		projection.unread[to]++
+	}
+}
+
 func unreadEstimate(peaks []uint64) uint64 {
 	if len(peaks) == 0 {
 		return 0
