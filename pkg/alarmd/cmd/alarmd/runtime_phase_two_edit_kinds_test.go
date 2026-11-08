@@ -13,12 +13,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/go-redis/redis/v8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/state"
@@ -433,5 +436,64 @@ func TestAnEditWithNoCommonLevelStillWarmsUp(t *testing.T) {
 	}
 	if ended := endings[edited.first]; ended != "COMPLETED_WITH_PARTIAL_GAP/CONFIG_DRIFT" {
 		t.Fatalf("the new Segment's first Slot ended %q, want it spent warming up (CONFIG_DRIFT); endings %v", ended, endings)
+	}
+}
+
+// planCarriesOf is strategy 1001's plan carries as object.get names them.
+func planCarriesOf(t *testing.T, fixture *cutoverStallFixture) *controlplane.PlanCarryFact {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	fixture.bundle.dependencies.FleetAPI.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/objects/"+string(fixture.queryGroup), nil))
+	var body struct {
+		PlanCarries *controlplane.PlanCarriesReading `json:"plan_carries"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil || body.PlanCarries == nil {
+		t.Fatalf("object detail %s: %v", recorder.Body.String(), err)
+	}
+	for index, plan := range body.PlanCarries.Plans {
+		if plan.Plan.StrategyID == "1001" {
+			return &body.PlanCarries.Plans[index]
+		}
+	}
+	t.Fatal("object.get names no plan carries for strategy 1001")
+	return nil
+}
+
+// object.get says a Plan runs since the edit that carried its state into
+// the generation it runs under (design 013 section 4.7): the carry is that
+// generation's activation, though it did not warm up. An edit after it that
+// leaves the generation activates nothing: the Plan still runs since the
+// carry, carried from the generation before it.
+func TestAPlanRunsSinceTheEditThatCarriedItsState(t *testing.T) {
+	edited := editInFlight(t, thresholdTo(81))
+	carriedAt := edited.inFlight + 1
+	found := planCarriesOf(t, edited.cutoverStallFixture)
+	if found.ActivatedAt != carriedAt || found.CarriedFrom == nil || found.CarriedFrom.StateGeneration != edited.generationBefore {
+		t.Fatalf("after the carried edit object.get says %+v (carried from %+v), want it run since %d, carried from %s",
+			found, found.CarriedFrom, carriedAt, edited.generationBefore)
+	}
+	ctx := context.Background()
+	installEditedStrategies(t, ctx, edited.redisClient, 1725000700, func(first map[string]any) {
+		thresholdTo(81)(first)
+		for _, detect := range first["detects"].([]any) {
+			detect.(map[string]any)["trigger_config"].(map[string]any)["uptime"] = map[string]any{
+				"time_ranges": []any{map[string]any{"start": "00:00", "end": "23:59"}}, "calendars": []any{}}
+		}
+	})
+	later := edited.first + 1
+	edited.clock.Store(int64(later) * 1000)
+	for round := 0; round < 2; round++ {
+		if err := edited.bundle.refreshAndReconcile(ctx, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if closed, err := edited.production.dependencies.Catalog.ReadFrozenSchedule(ctx, edited.queryGroup, edited.first); err != nil ||
+		closed.Segment.End == nil || *closed.Segment.End != later {
+		t.Fatalf("the carried Segment after the second edit = (%+v, %v), want it closed at %d", closed.Segment, err, later)
+	}
+	found = planCarriesOf(t, edited.cutoverStallFixture)
+	if found.ActivatedAt != carriedAt || found.CarriedFrom == nil || found.CarriedFrom.StateGeneration != edited.generationBefore {
+		t.Fatalf("after an edit that left the generation object.get says %+v (carried from %+v), want it still run since %d, carried from %s",
+			found, found.CarriedFrom, carriedAt, edited.generationBefore)
 	}
 }
