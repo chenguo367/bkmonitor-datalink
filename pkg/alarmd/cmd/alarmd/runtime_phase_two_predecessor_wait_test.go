@@ -17,6 +17,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
@@ -263,15 +264,14 @@ func (fixture *predecessorWaitFixture) releaseOld() {
 		_, owned := fixture.bundle.runners[fixture.old]
 		return !owned && !fixture.bundle.dependencies.ReadHolds.controller.Inspect(fixture.old).Loaded
 	}
-	for deadline := time.Now().Add(10 * time.Second); !released() && time.Now().Before(deadline); {
+	// The handover runs on its own goroutine once a leader round drops the
+	// group from this Worker's assignment.
+	testwait.Until(fixture.t, "the drained old group is released", func() bool {
 		if err := fixture.bundle.refreshAndReconcile(context.Background(), true); err != nil {
 			fixture.t.Fatal(err)
 		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if !released() {
-		fixture.t.Fatal("the drained old group was not released")
-	}
+		return released()
+	})
 }
 
 // retireCloses is the retired groups' read hold closes by site, and the
@@ -459,21 +459,9 @@ func TestASuccessorReadsAgainAPredecessorReleasedWhileItWaits(t *testing.T) {
 	}
 
 	fixture.runOld()
-	holds := fixture.bundle.dependencies.ReadHolds
-	released := func() uint64 {
-		holds.retireClosedMu.Lock()
-		defer holds.retireClosedMu.Unlock()
-		return holds.retireClosed[readhold.RetireCloseRelease]
-	}
-	for deadline := time.Now().Add(10 * time.Second); released() == 0 && time.Now().Before(deadline); {
-		if err := fixture.bundle.refreshAndReconcile(context.Background(), true); err != nil {
-			t.Fatal(err)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if released() != 1 || holds.controller.Inspect(fixture.old).Loaded {
-		t.Fatalf("retire closes by release %d, old group's state loaded %t: want it closed by its release and forgotten",
-			released(), holds.controller.Inspect(fixture.old).Loaded)
+	fixture.releaseOld()
+	if closes, failed := fixture.retireCloses(); closes[readhold.RetireCloseRelease] != 1 || failed != 0 {
+		t.Fatalf("retire closes %v, failed %v; want the old group closed by its release and forgotten", closes, failed)
 	}
 	fixture.runNewUntil(first)
 	ended, hold := fixture.completion(first)
