@@ -152,3 +152,41 @@ func TestAHandoverRefusedAsChangedGivesItsPlaceInTheBatchBack(t *testing.T) {
 			settlement.Records["qg-000"].DesiredWorkerID, settlement.Replaced, settlement.Deferred)
 	}
 }
+
+// A handover refused twice did not happen either: its place in the batch
+// goes to the next live, ineligible holder's Query Group in the round.
+func TestAHandoverRefusedTwiceGivesItsPlaceToTheNext(t *testing.T) {
+	workers := []ownership.WorkerRegistration{rolloutWorker("old-a", "cap-old"), rolloutWorker("old-b", "cap-old"), rolloutWorker("new-1", "cap-new")}
+	queryGroups, records := rolloutFleet(4)
+	store := &casAssignmentStore{countingAssignmentStore: countingAssignmentStore{workers: workers, records: records},
+		refuse: map[execution.QueryGroupIdentity]bool{"qg-000": true}}
+	reconciler := newRolloutReconciler(t, store)
+	settlement, err := reconciler.ReconcileRoundSettling(context.Background(), ownership.PublicationAuthority{}, queryGroups, workers, rolloutNow, ContentScopes{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settlement.Records["qg-001"].DesiredWorkerID != "new-1" || settlement.Replaced != 1 || settlement.ConflictsAgain != 1 {
+		t.Fatalf("qg-001 on %s, replaced %d, refused twice %d; want qg-000 refused twice and qg-001 handed over in its place",
+			settlement.Records["qg-001"].DesiredWorkerID, settlement.Replaced, settlement.ConflictsAgain)
+	}
+}
+
+// A record refused as changed and gone when read again - a sweep took it
+// between - is a Query Group with no record: placed, not a failed round.
+func TestARecordGoneWhenReadAgainIsPlaced(t *testing.T) {
+	workers := []ownership.WorkerRegistration{rolloutWorker("old-a", "cap"), rolloutWorker("old-b", "cap")}
+	queryGroups, records := rolloutFleet(4)
+	stale := records["qg-000"]
+	delete(records, "qg-000")
+	store := &casAssignmentStore{countingAssignmentStore: countingAssignmentStore{workers: workers, records: records},
+		stale: map[execution.QueryGroupIdentity]ownership.AssignmentRecord{"qg-000": stale}}
+	reconciler := newDeclineReconciler(t, store)
+	settlement, err := reconciler.ReconcileRoundSettling(context.Background(), ownership.PublicationAuthority{}, queryGroups, workers,
+		rolloutNow, declaredEverywhere(queryGroups, "content-new"))
+	if err != nil {
+		t.Fatalf("a round whose refused record was gone when read again failed: %v", err)
+	}
+	if placed, exists := store.records["qg-000"]; !exists || settlement.Records["qg-000"] != placed || settlement.Conflicts != 1 {
+		t.Fatalf("qg-000 stored %t as %+v, settled %+v, conflicts %d; want it placed after one refusal", exists, placed, settlement.Records["qg-000"], settlement.Conflicts)
+	}
+}
