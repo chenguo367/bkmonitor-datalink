@@ -2896,9 +2896,18 @@ func (tracker *Tracker) Forget(owned map[string]struct{}) {
 // SeriesMatchedIn is the series the latest rounds of the Query Groups in held
 // bound, summed over their Plans' series_matched: how many series those
 // Query Groups evaluate, read off the rounds this tracker already keeps.
-func (tracker *Tracker) SeriesMatchedIn(held map[string]struct{}) uint64 {
+//
+// A Plan's count stays with the Query Group it was last seen on until that
+// Query Group leaves this replica: the tracker is not told the Query Group's
+// current Plans. A Plan edited onto another Query Group, or deleted, would be
+// counted on for as long as the Query Group stays -- twice, when the one it
+// moved to is held here too -- so only a Plan seen within the last within is
+// counted. within is the longest interval a Plan is evaluated at: a Plan
+// still on the Query Group has had a round in it.
+func (tracker *Tracker) SeriesMatchedIn(held map[string]struct{}, within time.Duration) uint64 {
 	tracker.mu.Lock()
 	defer tracker.mu.Unlock()
+	since := tracker.now().Add(-within)
 	total := uint64(0)
 	for queryGroup := range held {
 		state := tracker.groups[queryGroup]
@@ -2906,7 +2915,7 @@ func (tracker *Tracker) SeriesMatchedIn(held map[string]struct{}) uint64 {
 			continue
 		}
 		for _, plan := range state.planSeries {
-			if plan.Matched > 0 {
+			if plan.Matched > 0 && !plan.LastSeenAt.Before(since) {
 				total += uint64(plan.Matched)
 			}
 		}

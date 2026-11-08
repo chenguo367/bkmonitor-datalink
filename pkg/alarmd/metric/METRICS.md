@@ -2089,7 +2089,7 @@ Slots whose retained bytes reached at least 95 percent of the one-object share o
 
 ## alarmd_state_series_held
 
-Series the Query Groups this replica holds now bound in their latest evaluated rounds: each Plan's series_matched, summed over the Query Groups this replica runs. A lower bound of the runtime State keys it owns: no-data series it synthesizes and series absent from the latest round are not in it. Per replica; read the largest replica against the State cache's budget.
+Series the Query Groups this replica holds now bound in their latest evaluated rounds: each Plan's series_matched, over the Plans evaluated within the last day (the longest interval alarmd evaluates at), summed over the Query Groups this replica runs. Not exact either way: no-data series it synthesizes and series absent from the latest round are not in it, and a Plan that left a Query Group still held here -- edited onto another, or deleted -- stays counted for up to a day after its last round, twice when the Query Group it moved to is held here too. Per replica; read the largest replica against the State cache's budget.
 
 ## alarmd_state_superseded_total
 

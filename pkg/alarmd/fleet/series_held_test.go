@@ -12,6 +12,7 @@ package fleet
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
@@ -46,8 +47,42 @@ func TestTheSeriesHeldAreThePlansCountsOverTheQueryGroupsHeld(t *testing.T) {
 		for _, queryGroup := range tc.held {
 			held[queryGroup] = struct{}{}
 		}
-		if got := tracker.SeriesMatchedIn(held); got != tc.want {
+		if got := tracker.SeriesMatchedIn(held, 24*time.Hour); got != tc.want {
 			t.Fatalf("series held over %v = %d, want %d", tc.held, got, tc.want)
 		}
+	}
+}
+
+// A Plan counts on a Query Group only while it is still evaluated there: one
+// edited away or deleted has no round after it left, and once the longest
+// interval has passed since its last one it is no longer counted. A Plan seen
+// at the edge of that interval still is.
+func TestAPlanNotSeenWithinTheLongestIntervalIsNotCounted(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	evaluated := func(strategy string, matched int) {
+		ctx := observability.ContextWithTraceFields(context.Background(), observability.TraceFields{QueryGroupKey: "qg-a"})
+		tracker.Observe(ctx, observability.Observation{
+			Component: observability.ComponentEvaluation, Stage: observability.StageEvaluationCompleted,
+			Result:            observability.ResultSuccess,
+			Trace:             observability.TraceFields{StrategyID: strategy, BusinessID: "2", EvaluationTime: 600},
+			PlanSeriesMatched: &matched,
+		})
+	}
+	held := map[string]struct{}{"qg-a": {}}
+	const within = 24 * time.Hour
+	evaluated("s-left", 11)
+	at.at = at.at.Add(2 * time.Hour)
+	evaluated("s-stays", 5)
+	if got := tracker.SeriesMatchedIn(held, within); got != 16 {
+		t.Fatalf("both Plans seen within a day: %d, want 16", got)
+	}
+	at.at = now.Add(within)
+	if got := tracker.SeriesMatchedIn(held, within); got != 16 {
+		t.Fatalf("the Plan last seen exactly a day ago: %d, want 16, still counted", got)
+	}
+	at.at = now.Add(within + time.Second)
+	if got := tracker.SeriesMatchedIn(held, within); got != 5 {
+		t.Fatalf("a day and a second after the Plan that left: %d, want 5, only the Plan still evaluated", got)
 	}
 }

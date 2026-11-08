@@ -1275,7 +1275,7 @@ func openProductionPhaseTwoBundleAssembly(
 		for _, queryGroup := range owned {
 			held[string(queryGroup)] = struct{}{}
 		}
-		return fleetTracker.SeriesMatchedIn(held)
+		return fleetTracker.SeriesMatchedIn(held, phaseTwoMaxSupportedEvaluationInterval)
 	})
 	lookbackOwner.bind(bundle)
 	// A Slot a supplement or maintenance turned away from its flight runs as
