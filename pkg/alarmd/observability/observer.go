@@ -1439,8 +1439,8 @@ var (
 	StateCarryScopes  = []string{"plan", "series", "no_data_plan", "no_data_load"}
 	StateCarryResults = map[string][]string{
 		"plan": {"carried", "carried_detect_changed", "none_group_changed", "none_no_common_level", "none_previous_unreadable", "none_discontinuous"},
-		"series": {"carried", "carried_across_detect", "nothing_kept", "skipped_active_guard", "skipped_guard_warming",
-			"skipped_guard_gapped", "old_missing"},
+		"series": {"carried", "carried_across_detect", "nothing_kept", "skipped_guard_warming", "skipped_guard_gapped",
+			"old_missing"},
 		"no_data_plan": {"carried", "carried_ends_only", "not_carried_semantics_changed",
 			"not_carried_previous_unreadable"},
 		"no_data_load": {"memory_carried", "memory_previous_empty", "memory_previous_unreadable",

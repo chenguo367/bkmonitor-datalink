@@ -362,11 +362,9 @@ func (reconciler *ScheduleActivationReconciler) ensure(
 		// A generation that moved under a Plan that stayed active: what of
 		// its state is still the same facts. See stateCarry.
 		if continuouslyActive && previousRecord.Fact.Selected.StateGeneration != records[index].Fact.Selected.StateGeneration {
-			current, compiledHere := changedPlans[records[index].Fact.Key()]
-			if !compiledHere {
-				uncarried = append(uncarried, StateCarryPreviousUnreadable)
-				continue
-			}
+			// Compiled here: a record carried from previous keeps the
+			// generation it had, and only a changed group's are compiled.
+			current := changedPlans[records[index].Fact.Key()]
 			// The no-data state is decided on its own: a detection edit that
 			// warms the Plan up whole changes nothing about it.
 			if noData, outcome := reconciler.noDataCarry(ctx, previousRecord, previousContent, current); outcome != "" {
