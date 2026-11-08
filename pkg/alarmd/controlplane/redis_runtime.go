@@ -1428,6 +1428,9 @@ func (repository *RedisCatalogRepository) persistInitialActivation(
 			args = append(args, timeline.RecordRevision)
 		}
 	}
+	// Taken before the script goes out, as a renewal's is: the TTL the
+	// script sets runs from no earlier than this.
+	writtenAt := repository.renewals.now()
 	changed, err := repository.client.Eval(ctx, compareAndSetInitialSchedulesScript, keys, args...).Int()
 	if err != nil {
 		return activationDependencyIO(fmt.Errorf("persist initial schedule activation: %w", err))
@@ -1435,15 +1438,15 @@ func (repository *RedisCatalogRepository) persistInitialActivation(
 	if changed != 1 {
 		return ErrActivationConflict
 	}
-	// The timelines it wrote carry the full TTL: they are renewed a half-life
-	// from now, not again on the next round.
+	// The timelines it wrote carry the full TTL: they come due a third of it
+	// from now, not on the next round.
 	written := make([]string, 0, len(timelines))
 	revisions := make(map[execution.QueryGroupIdentity]uint64, len(timelines))
 	for _, timeline := range timelines {
 		written = append(written, repository.scheduleTimelineKey(timeline.QueryGroup))
 		revisions[timeline.QueryGroup] = timeline.RecordRevision
 	}
-	repository.renewals.renewed(written, repository.renewals.now())
+	repository.renewals.renewed(written, writtenAt)
 	repository.recordTimelineRevisions(next.RecordRevision, revisions)
 	repository.rememberWritten(activationPayload, next)
 	return nil
@@ -1542,6 +1545,7 @@ func (repository *RedisCatalogRepository) persistCutoverActivation(
 		}
 	}
 	cutover.persisted(payloadBytes, timelineBytes)
+	writtenAt := repository.renewals.now()
 	changed, err := repository.client.Eval(ctx, compareAndSetCutoverSchedulesScript, keys, args...).Int()
 	if err != nil {
 		return activationDependencyIO(fmt.Errorf("persist schedule cutover: %w", err))
@@ -1555,7 +1559,7 @@ func (repository *RedisCatalogRepository) persistCutoverActivation(
 		written = append(written, repository.scheduleTimelineKey(update.next.QueryGroup))
 		revisions[update.next.QueryGroup] = update.next.RecordRevision
 	}
-	repository.renewals.renewed(written, repository.renewals.now())
+	repository.renewals.renewed(written, writtenAt)
 	repository.recordTimelineRevisions(next.RecordRevision, revisions)
 	repository.rememberWritten(activationPayload, next)
 	return nil
@@ -2109,8 +2113,8 @@ func (repository *RedisCatalogRepository) renewScheduleTimelines(
 	for _, entry := range draining {
 		appendKey(entry.QueryGroup)
 	}
-	// Only the timelines this process has not renewed or written within half
-	// the TTL (catalogRenewals): a day's TTL renewed on every thirty-second
+	// Only the timelines this term has not renewed or written within a third
+	// of the TTL (catalogRenewals): a day's TTL renewed on every thirty-second
 	// refresh round was 2,880 renewals of each key per TTL.
 	keys, first, now := repository.renewals.timelinesDue(keys, repository.ttl)
 	ctx = redisfailure.WithCaller(ctx, redisfailure.CallerCatalogTimelineRenewal)
@@ -2131,7 +2135,7 @@ func (repository *RedisCatalogRepository) renewScheduleTimelines(
 		repository.renewals.renewed(batch, now)
 		firstInBatch := min(max(first-start, 0), len(batch))
 		facts.TimelinesFirst += firstInBatch
-		facts.TimelinesHalfLife += len(batch) - firstInBatch
+		facts.TimelinesAged += len(batch) - firstInBatch
 	}
 	return nil
 }

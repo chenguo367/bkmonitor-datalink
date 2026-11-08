@@ -2829,6 +2829,9 @@ func (runtime *productionPhaseTwoOwnership) ensureControlAuthority(
 	runtime.authority = authority
 	runtime.viewLead(authority.Fence.OwnerEpoch)
 	runtime.records.lead(authority.Fence.OwnerEpoch)
+	if runtime.dependencies.Activations != nil {
+		runtime.dependencies.Activations.BeginLeaderTerm(authority.Fence.OwnerEpoch)
+	}
 	return authority, nil
 }
 

@@ -57,6 +57,11 @@ type fakeLeaderActivations struct {
 	since   []uint64
 	skip    func(uint64) bool
 	hear    func(uint64, map[execution.QueryGroupIdentity]uint64)
+	terms   []uint64
+}
+
+func (activations *fakeLeaderActivations) BeginLeaderTerm(epoch uint64) {
+	activations.terms = append(activations.terms, epoch)
 }
 
 func (activations *fakeLeaderActivations) ActivationChangesSince(_ context.Context, since uint64, skip func(uint64) bool) (controlplane.ActivationChanges, error) {
@@ -587,5 +592,62 @@ func TestOutsideATermEveryReadReadsEveryRecord(t *testing.T) {
 	}
 	if reads, _, _ := cache.takeRoundFacts(); len(reads) != 0 {
 		t.Fatalf("reads outside a term counted %v, want none: there is no copy they were for", reads)
+	}
+}
+
+// The catalog's renewals belong to the term: each term the Leader takes, the
+// catalog is told, so its first refresh round renews every timeline afresh.
+func TestEachTermTheLeaderTakesBeginsTheCatalogsRenewals(t *testing.T) {
+	activations := &fakeLeaderActivations{changes: controlplane.ActivationChanges{Revision: 10}}
+	production, store, _ := recordCacheRound(t, activations)
+	store.leaderEpoch = 2
+	production.mu.Lock()
+	production.authority.Deadline = time.Unix(0, 0)
+	production.mu.Unlock()
+	if _, err := production.ensureControlAuthority(context.Background(), time.Unix(1_700_000_000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if want := []uint64{1, 2}; !reflect.DeepEqual(activations.terms, want) {
+		t.Fatalf("the catalog was told terms %v, want %v", activations.terms, want)
+	}
+}
+
+// A delta that cannot say has every record the copy holds read again, as the
+// reads come to each: a read of a few first - the content scopes' - reads
+// those, and the round after reads the rest. Unfilling the copy instead let
+// that read of a few end the "read of everything", and the rest kept the
+// timeline revisions from before the activation until the backstop.
+func TestADeltaThatCannotSayHasEveryHeldRecordReadAgainWhoeverReadsFirst(t *testing.T) {
+	activations := &fakeLeaderActivations{changes: controlplane.ActivationChanges{Revision: 10}}
+	production, store, observations := recordCacheRound(t, activations)
+	recordRound(t, production, observations, recordCacheGroups)
+	for _, queryGroup := range recordCacheGroups {
+		rewritten := store.assignments[queryGroup]
+		rewritten.TimelineRecordRevision = 9
+		store.assignments[queryGroup] = rewritten
+	}
+	activations.changes = controlplane.ActivationChanges{Revision: 40}
+	if err := production.records.prepareRound(context.Background(), production.authority, recordCacheGroups); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := production.records.ReadAssignments(context.Background(), recordCacheGroups[:1]); err != nil {
+		t.Fatal(err)
+	}
+	if reads, _, _ := production.records.takeRoundFacts(); !reflect.DeepEqual(reads, map[string]int{"foreign_cutover": 1}) {
+		t.Fatalf("the read of one after a delta that cannot say read %v, want it as foreign_cutover", reads)
+	}
+	activations.changes = controlplane.ActivationChanges{Revision: 40, Complete: true}
+	settlement, err := production.reconciler.ReconcileRoundSettling(context.Background(), production.authority, recordCacheGroups,
+		store.workers, time.Unix(1_700_000_000, 0), scheduler.ContentScopes{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reads, _, _ := production.records.takeRoundFacts(); !reflect.DeepEqual(reads, map[string]int{"foreign_cutover": 2}) {
+		t.Fatalf("the round after it read %v, want the other two as foreign_cutover", reads)
+	}
+	for _, queryGroup := range recordCacheGroups {
+		if got := settlement.Records[queryGroup].TimelineRecordRevision; got != 9 {
+			t.Fatalf("%s answers timeline revision %d, want the 9 the activation wrote", queryGroup, got)
+		}
 	}
 }

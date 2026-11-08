@@ -32,15 +32,15 @@ func TestCatalogRenewalsAreCountedByKindAndReason(t *testing.T) {
 		r.Observe(context.Background(), observation)
 	}
 	observe(observability.Observation{Stage: observability.StageActiveQGSet,
-		ActiveQGSet: &observability.ActiveQGSetFacts{Operation: "renew", Result: "success", TimelinesHalfLife: 3, TimelinesFirst: 7}})
+		ActiveQGSet: &observability.ActiveQGSetFacts{Operation: "renew", Result: "success", TimelinesAged: 3, TimelinesFirst: 7}})
 	observe(observability.Observation{Stage: observability.StageActiveQGSet,
-		ActiveQGSet: &observability.ActiveQGSetFacts{Operation: "renew", Result: "failure", TimelinesHalfLife: 2}})
+		ActiveQGSet: &observability.ActiveQGSetFacts{Operation: "renew", Result: "failure", TimelinesAged: 2}})
 	observe(observability.Observation{Stage: observability.StageObjectCatalog,
 		ObjectCatalog: &observability.ObjectCatalogFacts{Operation: "renew", Result: "success", RenewedObjects: 5, RenewedContexts: 11}})
 	observe(observability.Observation{Stage: observability.StageObjectCatalog,
 		ObjectCatalog: &observability.ObjectCatalogFacts{Operation: "write", Result: "success", RenewedObjects: 13, RenewedContexts: 17}})
 	for cell, want := range map[[2]string]float64{
-		{"timeline", "half_life"}: 5, {"timeline", "first"}: 7, {"object", "periodic"}: 5, {"context", "periodic"}: 11,
+		{"timeline", "aged"}: 5, {"timeline", "first"}: 7, {"object", "periodic"}: 5, {"context", "periodic"}: 11,
 	} {
 		if got := testutil.ToFloat64(r.phaseTwo.catalogRenewals.WithLabelValues(cell[0], cell[1])); got != want {
 			t.Fatalf("catalog_renewals_total%v = %v, want %v", cell, got, want)

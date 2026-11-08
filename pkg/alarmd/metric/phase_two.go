@@ -1136,12 +1136,12 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	// renewal callers counts pipelined batches: a renewal that is due for a
 	// handful of timelines and one due for every one of them are a batch each.
 	metrics.catalogRenewals = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "catalog_renewals_total",
-		Help: "Catalog keys the Control Leader renewed, by kind and why: timeline half_life (this process last renewed or wrote it more " +
-			"than half the catalog TTL ago) or first (it had not since it started); object (the Query Group objects and the manifest) " +
-			"and context (the output contexts) periodic, on the first refresh round of the process and every tenth after. A key a " +
+		Help: "Catalog keys the Control Leader renewed, by kind and why: timeline aged (this term last renewed or wrote it a third of " +
+			"the catalog TTL ago or more) or first (this term had not); object (the Query Group objects and the manifest) " +
+			"and context (the output contexts) periodic, on the first refresh round of the term and every tenth after. A key a " +
 			"renewal found missing is counted here and in object_catalog_objects_total{outcome=\"missing\"}."},
 		[]string{"kind", "reason"})
-	for _, cell := range [][2]string{{"timeline", "half_life"}, {"timeline", "first"}, {"object", "periodic"}, {"context", "periodic"}} {
+	for _, cell := range [][2]string{{"timeline", "aged"}, {"timeline", "first"}, {"object", "periodic"}, {"context", "periodic"}} {
 		metrics.catalogRenewals.WithLabelValues(cell[0], cell[1])
 	}
 	metrics.objectCatalogRedis = prometheus.NewHistogramVec(prometheus.HistogramOpts{Subsystem: metricSubsystem, Name: "object_catalog_redis_duration_seconds", Help: "Object catalog write or renewal duration.", Buckets: activeQGSetDurationBuckets}, []string{"operation", "result"})
@@ -1201,10 +1201,11 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.controlReadRoundTrips = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "control_read_round_trips_total", Help: "Redis round trips the Control Leader's reconcile round spent reading the records it places Query Groups from, by read: assignment (one Assignment record per Query Group of the population) or registry (the index plus one registration per ready worker). Counted where the calls are issued, so it is this round's own number and not a share of a client-wide total. Read it against control_read_keys_total on the same read: keys rising while round trips stay flat is the batch doing its job, both rising together is a batch that is not batching."}, []string{"read"})
 	metrics.controlRecordReads = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "control_record_reads_total",
 		Help: "Assignment records the Control Leader read, by why. It keeps a copy of the records for its term and reads one only when the " +
-			"copy cannot say: term_start (a new term, or a delta it needed was gone and it read everything again), entered (the Query " +
+			"copy cannot say: term_start (a new term's first reads), entered (the Query " +
 			"Group entered the population), backstop (the round's share of every record, each read at least once in sixty rounds), " +
 			"conflict (a publication over it was refused as changed), unknown_outcome (a publication over it failed without saying " +
-			"whether it was written), foreign_cutover (another process's activation rewrote its timeline revision)."}, []string{"reason"})
+			"whether it was written), foreign_cutover (another process's activation rewrote its timeline revision, or a delta that " +
+			"could not say which it rewrote had every record the copy holds read again)."}, []string{"reason"})
 	metrics.controlRecordMismatches = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "control_record_cache_mismatch_total",
 		Help: "Fields a backstop read found the Control Leader's copy of a record wrong on, once a record each field; presence is a " +
 			"record there that the copy had absent or the other way round. content_scope, pending_content_scope and effective_at_ms " +
@@ -2274,7 +2275,7 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		if facts.Operation == "renew" {
 			// Counted on failure too: the batches renewed before the one that
 			// failed were renewed.
-			m.catalogRenewals.WithLabelValues("timeline", "half_life").Add(float64(facts.TimelinesHalfLife))
+			m.catalogRenewals.WithLabelValues("timeline", "aged").Add(float64(facts.TimelinesAged))
 			m.catalogRenewals.WithLabelValues("timeline", "first").Add(float64(facts.TimelinesFirst))
 		}
 	}

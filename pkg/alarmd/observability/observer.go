@@ -889,12 +889,12 @@ type ActiveQGSetFacts struct {
 	Result      string
 	QueryGroups int
 	ObjectBytes int
-	// TimelinesHalfLife and TimelinesFirst are the Schedule timelines a
-	// renewal renewed: the ones this process last renewed or wrote more than
-	// half the catalog TTL ago, and the ones it had not since it started.
-	TimelinesHalfLife int
-	TimelinesFirst    int
-	Duration          time.Duration
+	// TimelinesAged and TimelinesFirst are the Schedule timelines a renewal
+	// renewed: the ones this Control Leader term last renewed or wrote a
+	// third of the catalog TTL ago or more, and the ones it had not.
+	TimelinesAged  int
+	TimelinesFirst int
+	Duration       time.Duration
 }
 
 // ScheduleCutoverFacts describe one publication cutover as the Control
@@ -1698,11 +1698,11 @@ type RecordMismatch struct {
 const MaxRecordMismatchSamples = 8
 
 // RecordReadReasons are why the Control Leader read an Assignment record:
-// the term began (or a delta it needed was gone and it read everything
-// again), the Query Group entered the population, the record is the round's
-// share of the backstop, a publication over it was refused as changed or its
-// outcome is not known, or another process's activation rewrote its timeline
-// revision.
+// the term began, the Query Group entered the population, the record is the
+// round's share of the backstop, a publication over it was refused as
+// changed or its outcome is not known, or another process's activation
+// rewrote its timeline revision - or a delta that could not say which it
+// rewrote had every record the copy holds read again.
 var RecordReadReasons = []string{"term_start", "entered", "backstop", "conflict", "unknown_outcome", "foreign_cutover"}
 
 // RecordFields are the fields of an Assignment record the Leader's copy is
@@ -3602,7 +3602,7 @@ func normalizeActiveQGSetFacts(facts *ActiveQGSetFacts) *ActiveQGSetFacts {
 	if normalized.QueryGroups < 0 {
 		normalized.QueryGroups = 0
 	}
-	for _, count := range []*int{&normalized.ObjectBytes, &normalized.TimelinesHalfLife, &normalized.TimelinesFirst} {
+	for _, count := range []*int{&normalized.ObjectBytes, &normalized.TimelinesAged, &normalized.TimelinesFirst} {
 		if *count < 0 {
 			*count = 0
 		}

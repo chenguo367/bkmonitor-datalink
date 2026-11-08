@@ -96,10 +96,11 @@ func (observer *activeSetRenewals) last(t *testing.T) observability.ActiveQGSetF
 
 // A process renews every catalog key the current activation references on
 // its first refresh round, each kind under its own job, and counts the
-// timelines as ones it had not renewed since it started. Its next round
-// renews no timeline, object or context; once half the catalog TTL has
-// passed it renews the timelines, counted as half_life, and not the objects,
-// which wait for the tenth round.
+// timelines as ones its term had not renewed. Its next round renews no
+// timeline, object or context; once a third of the catalog TTL has passed it
+// renews the timelines, counted as aged, and not the objects, which wait for
+// the tenth round. A new term starts over: every timeline as first, and the
+// objects and contexts; the same term told again does not.
 func TestEachCatalogRenewalNamesItsJobAndRenewsOnItsOwnCadence(t *testing.T) {
 	harness := newObjectCatalogHarness(t)
 	catalog := objectCatalogTwoGroups(t, 80)
@@ -152,18 +153,18 @@ func TestEachCatalogRenewalNamesItsJobAndRenewsOnItsOwnCadence(t *testing.T) {
 			t.Fatalf("the first round renewed %s keys under %q, want %d under %q", kind, got, want.keys, want.caller)
 		}
 	}
-	if facts := renewals.last(t); facts.Result != "success" || facts.TimelinesFirst != 2 || facts.TimelinesHalfLife != 0 {
+	if facts := renewals.last(t); facts.Result != "success" || facts.TimelinesFirst != 2 || facts.TimelinesAged != 0 {
 		t.Fatalf("first round facts=%+v, want two timelines counted first", facts)
 	}
 
-	renewedAt = renewedAt.Add(catalogTTL/2 - time.Second)
+	renewedAt = renewedAt.Add(catalogTTL/3 - time.Second)
 	if err := fresh.RenewCurrentActivationObjects(harness.ctx); err != nil {
 		t.Fatal(err)
 	}
 	if named := callers.take(); len(named) != 0 {
-		t.Fatalf("the second round, inside the half-life, renewed %v", named)
+		t.Fatalf("the second round, inside a third of the TTL, renewed %v", named)
 	}
-	if facts := renewals.last(t); facts.Result != "success" || facts.TimelinesFirst != 0 || facts.TimelinesHalfLife != 0 {
+	if facts := renewals.last(t); facts.Result != "success" || facts.TimelinesFirst != 0 || facts.TimelinesAged != 0 {
 		t.Fatalf("second round facts=%+v, want no timeline", facts)
 	}
 
@@ -172,9 +173,27 @@ func TestEachCatalogRenewalNamesItsJobAndRenewsOnItsOwnCadence(t *testing.T) {
 		t.Fatal(err)
 	}
 	if named, want := callers.take(), map[string][]string{"schedule_timeline": {redisfailure.CallerCatalogTimelineRenewal, redisfailure.CallerCatalogTimelineRenewal}}; !reflect.DeepEqual(named, want) {
-		t.Fatalf("the third round, at the half-life, renewed %v, want %v", named, want)
+		t.Fatalf("the third round, at a third of the TTL, renewed %v, want %v", named, want)
 	}
-	if facts := renewals.last(t); facts.TimelinesFirst != 0 || facts.TimelinesHalfLife != 2 {
-		t.Fatalf("third round facts=%+v, want two timelines counted half_life", facts)
+	if facts := renewals.last(t); facts.TimelinesFirst != 0 || facts.TimelinesAged != 2 {
+		t.Fatalf("third round facts=%+v, want two timelines counted aged", facts)
+	}
+
+	fresh.BeginLeaderTerm(7)
+	if err := fresh.RenewCurrentActivationObjects(harness.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if named := callers.take(); len(named["schedule_timeline"]) != 2 || len(named["qgobj"]) != 2 || len(named["outctx"]) != 2 {
+		t.Fatalf("a new term's first round renewed %v, want every timeline, object and context", named)
+	}
+	if facts := renewals.last(t); facts.TimelinesFirst != 2 || facts.TimelinesAged != 0 {
+		t.Fatalf("a new term's first round facts=%+v, want two timelines counted first", facts)
+	}
+	fresh.BeginLeaderTerm(7)
+	if err := fresh.RenewCurrentActivationObjects(harness.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if named := callers.take(); len(named) != 0 {
+		t.Fatalf("the same term told again renewed %v, want nothing", named)
 	}
 }

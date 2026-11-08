@@ -32,12 +32,15 @@ const recordBackstopRounds = 60
 // neither, and a record missing from the answer would be placed.
 var errRecordTermChanged = errors.New("alarmd: the Control Leader term changed during a record read")
 
-// leaderActivations is what the record cache reads of the catalog's
-// activations, what each one after a revision wrote onto the records, and
-// where it hears the activations of its own process.
+// leaderActivations is what a Control Leader term needs of the catalog:
+// what the activations after a revision wrote onto the records, and the
+// activations of its own process told as they are made, for the record
+// cache; and the catalog's renewals begun afresh with each term
+// (controlplane's catalogRenewals).
 type leaderActivations interface {
 	ActivationChangesSince(ctx context.Context, since uint64, skip func(uint64) bool) (controlplane.ActivationChanges, error)
 	OnRecordTimelineRevisions(func(revision uint64, timelines map[execution.QueryGroupIdentity]uint64))
+	BeginLeaderTerm(epoch uint64)
 }
 
 // leaderRecordCache is the Control Leader's copy of the Assignment records
@@ -64,10 +67,9 @@ type leaderRecordCache struct {
 	mu sync.Mutex
 	// epoch is the term the copy belongs to, zero between terms.
 	epoch uint64
-	// filled is the copy holding every record of the population, from one
-	// read of all of them; until then a read reads everything, as fillReason.
-	filled     bool
-	fillReason string
+	// filled is the term's copy begun by its first read, of everything that
+	// read was asked for; until then a read reads everything, as term_start.
+	filled bool
 	// activation is the record revision of the last activation whose writes
 	// the copy holds; pending the one the next read of everything will: the
 	// earliest header read before it, so an activation between two such
@@ -107,7 +109,7 @@ func (cache *leaderRecordCache) leadLocked(epoch uint64) {
 		return
 	}
 	cache.epoch = epoch
-	cache.filled, cache.fillReason = false, "term_start"
+	cache.filled = false
 	cache.activation, cache.pending, cache.cursor = 0, 0, 0
 	cache.own = map[uint64]struct{}{}
 	cache.entries = map[execution.QueryGroupIdentity]cachedRecord{}
@@ -132,8 +134,9 @@ func (cache *leaderRecordCache) stepDown() {
 // prepareRound brings the copy to the activation header before a round:
 // one small read when nothing was activated, and when another process
 // activated, the delta of each activation since, whose Query Groups are
-// read again. A delta that cannot say has everything read again. Then it
-// owes the round's share of the backstop, in turn over population.
+// read again. A delta that cannot say has every record the copy holds read
+// again. Then it owes the round's share of the backstop, in turn over
+// population.
 func (cache *leaderRecordCache) prepareRound(
 	ctx context.Context,
 	authority ownership.PublicationAuthority,
@@ -167,8 +170,20 @@ func (cache *leaderRecordCache) prepareRound(
 		case cache.activation != since:
 			// Another round moved the copy meanwhile; its reading stands.
 		case !changes.Complete:
-			cache.filled, cache.fillReason = false, "foreign_cutover"
-			cache.notePendingLocked(changes.Revision)
+			// A delta that cannot say has every record the copy holds read
+			// again, as the reads come to each: not "the next read is of
+			// everything", which a read of a few - the content scopes' -
+			// would end with the rest unread and no later delta to name
+			// them. A copy begun before any header was read has no revision
+			// to start from: that is the term's start.
+			reason := "foreign_cutover"
+			if since == 0 {
+				reason = "term_start"
+			}
+			for queryGroup := range cache.entries {
+				cache.oweLocked(queryGroup, reason)
+			}
+			cache.advanceLocked(changes.Revision)
 		default:
 			for _, queryGroup := range changes.QueryGroups {
 				cache.oweLocked(queryGroup, "foreign_cutover")
@@ -296,7 +311,7 @@ func (cache *leaderRecordCache) ReadAssignments(
 	for _, queryGroup := range queryGroups {
 		switch reason, owed := cache.owed[queryGroup]; {
 		case fill:
-			reasons[queryGroup] = cache.fillReason
+			reasons[queryGroup] = "term_start"
 		case owed:
 			reasons[queryGroup] = reason
 		default:

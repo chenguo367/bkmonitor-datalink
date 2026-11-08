@@ -418,7 +418,7 @@ func (repository *RedisCatalogRepository) LoadCatalogManifest(ctx context.Contex
 
 // renewObjectCatalog renews the manifest of the current publication and
 // every object and output context it names, on the first refresh round of
-// the process and every objectRenewalRounds-th after. A key the renewal
+// the Control Leader term and every objectRenewalRounds-th after. A key the renewal
 // cannot find is counted and makes the next write ask Redis about every
 // digest again instead of trusting what this process remembers.
 func (repository *RedisCatalogRepository) renewObjectCatalog(ctx context.Context, revision execution.SnapshotRevision) {

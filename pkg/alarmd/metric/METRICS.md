@@ -319,7 +319,7 @@ Query Groups in the Catalog the leader last built, by the data sources their que
 
 Labels: `kind`, `reason`
 
-Catalog keys the Control Leader renewed, by kind and why: timeline half_life (this process last renewed or wrote it more than half the catalog TTL ago) or first (it had not since it started); object (the Query Group objects and the manifest) and context (the output contexts) periodic, on the first refresh round of the process and every tenth after. A key a renewal found missing is counted here and in object_catalog_objects_total{outcome="missing"}.
+Catalog keys the Control Leader renewed, by kind and why: timeline aged (this term last renewed or wrote it a third of the catalog TTL ago or more) or first (this term had not); object (the Query Group objects and the manifest) and context (the output contexts) periodic, on the first refresh round of the term and every tenth after. A key a renewal found missing is counted here and in object_catalog_objects_total{outcome="missing"}.
 
 ## alarmd_catalog_required_history_points
 
@@ -529,7 +529,7 @@ Records whose publication in a reconcile round was refused because they had chan
 
 Labels: `reason`
 
-Assignment records the Control Leader read, by why. It keeps a copy of the records for its term and reads one only when the copy cannot say: term_start (a new term, or a delta it needed was gone and it read everything again), entered (the Query Group entered the population), backstop (the round's share of every record, each read at least once in sixty rounds), conflict (a publication over it was refused as changed), unknown_outcome (a publication over it failed without saying whether it was written), foreign_cutover (another process's activation rewrote its timeline revision).
+Assignment records the Control Leader read, by why. It keeps a copy of the records for its term and reads one only when the copy cannot say: term_start (a new term's first reads), entered (the Query Group entered the population), backstop (the round's share of every record, each read at least once in sixty rounds), conflict (a publication over it was refused as changed), unknown_outcome (a publication over it failed without saying whether it was written), foreign_cutover (another process's activation rewrote its timeline revision, or a delta that could not say which it rewrote had every record the copy holds read again).
 
 ## alarmd_control_source_last_good_identity_changed_total
 

@@ -15,9 +15,28 @@ import (
 	"time"
 )
 
+// A term other than the one the renewals belong to starts them with no
+// memory; the same term told again keeps it.
+func TestCatalogRenewalsBelongToATerm(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	repository := &RedisCatalogRepository{}
+	repository.renewals.clock = func() time.Time { return now }
+	repository.BeginLeaderTerm(3)
+	repository.renewals.renewed([]string{"a"}, now)
+	repository.renewals.objectRenewalDue()
+	repository.BeginLeaderTerm(3)
+	if due, _, _ := repository.renewals.timelinesDue([]string{"a"}, time.Hour); len(due) != 0 || repository.renewals.objectRenewalDue() {
+		t.Fatalf("the same term told again forgot: timelines due %v", due)
+	}
+	repository.BeginLeaderTerm(4)
+	if due, first, _ := repository.renewals.timelinesDue([]string{"a"}, time.Hour); first != 1 || len(due) != 1 || !repository.renewals.objectRenewalDue() {
+		t.Fatalf("a new term remembered: timelines due %v, first %d", due, first)
+	}
+}
+
 // What the renewals remember is bounded by the timelines still referenced: a
 // key that leaves the catalog is forgotten, and one that comes back is due
-// as one this process never renewed.
+// as one this term never renewed.
 func TestCatalogRenewalsForgetATimelineNoLongerReferenced(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	renewals := &catalogRenewals{clock: func() time.Time { return now }}
