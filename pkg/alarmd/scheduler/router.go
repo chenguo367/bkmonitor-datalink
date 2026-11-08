@@ -613,12 +613,17 @@ func (reconciler *Reconciler) ReconcileRoundSettlingWithBytes(
 		existing, hasCurrent := current[queryGroup]
 		record, outcome, holder, settleErr := reconciler.settle(ctx, authority, queryGroup, existing, hasCurrent, index, at, scopes, &budget, projection, &settlement.Unfit)
 		if errors.Is(settleErr, ownership.ErrAssignmentConflict) {
-			// The record changed since it was read: a Worker's acquire
-			// promoted its pending content, or the read was older than a
-			// write. One stale record does not fail the round: it is read
-			// again and settled once more, and one refused again is left as
-			// read for the next round. A handover the refusal did not make
-			// gives its place in the batch back.
+			// The record's revision moved since it was read. Only a write
+			// that bumps record_revision does that: a publication whose
+			// answer this Leader never got, another Leader's publication,
+			// or a sweep that removed the record. A Worker promoting its
+			// pending content and an activation writing the timeline
+			// revision leave record_revision as it is, so neither is ever
+			// a conflict, and a round with one is not the usual case. One
+			// stale record does not fail the round: it is read again and
+			// settled once more, and one refused again is left as read for
+			// the next round. A handover the refusal did not make gives its
+			// place in the batch back.
 			settlement.Conflicts++
 			if outcome == settleReplaced {
 				budget++

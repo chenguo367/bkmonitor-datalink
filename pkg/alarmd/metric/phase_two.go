@@ -1213,7 +1213,10 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"control_reads_spent line names the Query Group and both values."}, []string{"field"})
 	metrics.controlRecordConflicts = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "control_record_conflicts_total",
 		Help: "Records whose publication in a reconcile round was refused because they had changed since read: settled (read again and " +
-			"settled in the same round) or again (refused again, left as read for the next round)."}, []string{"outcome"})
+			"settled in the same round) or again (refused again, left as read for the next round). Only a write that moves the " +
+			"record's revision refuses one: a publication whose answer the Leader did not get, another Leader's publication, or a " +
+			"sweep that removed the record. A Worker promoting its pending content and an activation writing the timeline revision " +
+			"do not, so conflicts are not the usual case of any round."}, []string{"outcome"})
 	for _, reason := range observability.RecordReadReasons {
 		metrics.controlRecordReads.WithLabelValues(reason)
 	}

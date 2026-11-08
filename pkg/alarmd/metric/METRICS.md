@@ -523,7 +523,7 @@ Fields a backstop read found the Control Leader's copy of a record wrong on, onc
 
 Labels: `outcome`
 
-Records whose publication in a reconcile round was refused because they had changed since read: settled (read again and settled in the same round) or again (refused again, left as read for the next round).
+Records whose publication in a reconcile round was refused because they had changed since read: settled (read again and settled in the same round) or again (refused again, left as read for the next round). Only a write that moves the record's revision refuses one: a publication whose answer the Leader did not get, another Leader's publication, or a sweep that removed the record. A Worker promoting its pending content and an activation writing the timeline revision do not, so conflicts are not the usual case of any round.
 
 ## alarmd_control_record_reads_total
 
