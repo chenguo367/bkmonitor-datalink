@@ -381,11 +381,42 @@ func (store *RedisStore) PublishAssignment(
 	authority PublicationAuthority,
 	decision AssignmentDecision,
 ) (AssignmentRecord, error) {
+	record, _, err := store.PublishAssignmentReporting(ctx, authority, decision)
+	return record, err
+}
+
+// HolderKind is what held a Query Group's lease when a decision was
+// published over it: HolderUnderSession for a lease held under a worker
+// session (A2), HolderRenewing for one its holder renews itself -- an
+// older binary's -- and empty for no holder.
+type HolderKind string
+
+const (
+	HolderUnderSession HolderKind = "session"
+	HolderRenewing     HolderKind = "no_session"
+)
+
+// PublishAssignmentReporting is PublishAssignment, saying also what held the
+// lease, for the Leader to count its moves by.
+func (store *RedisStore) PublishAssignmentReporting(
+	ctx context.Context,
+	authority PublicationAuthority,
+	decision AssignmentDecision,
+) (AssignmentRecord, HolderKind, error) {
+	record, holder, err := store.publishAssignment(ctx, authority, decision)
+	return record, holder, err
+}
+
+func (store *RedisStore) publishAssignment(
+	ctx context.Context,
+	authority PublicationAuthority,
+	decision AssignmentDecision,
+) (AssignmentRecord, HolderKind, error) {
 	if authority.Fence.QueryGroup != ControlLeaderIdentity {
-		return AssignmentRecord{}, errors.New("alarmd ownership: invalid Assignment publication")
+		return AssignmentRecord{}, "", errors.New("alarmd ownership: invalid Assignment publication")
 	}
 	if err := decision.Validate(); err != nil {
-		return AssignmentRecord{}, err
+		return AssignmentRecord{}, "", err
 	}
 	holder := decision.HolderWorkerID
 	if holder == "" {
@@ -400,19 +431,24 @@ func (store *RedisStore) PublishAssignment(
 		decision.ContentScope, ContentSwitchMargin.Milliseconds(), boolText(decision.WithdrawContentScope),
 		decision.TimelineRecordRevision, store.leaseTTL.Milliseconds(), holder).Result()
 	if err != nil {
-		return AssignmentRecord{}, err
+		return AssignmentRecord{}, "", err
 	}
 	values, err := scriptValues(result, 11)
 	if err != nil {
-		return AssignmentRecord{}, err
+		return AssignmentRecord{}, "", err
 	}
 	if scriptText(values[0]) == "STALE" {
-		return AssignmentRecord{}, ErrStaleFence
+		return AssignmentRecord{}, "", ErrStaleFence
 	}
 	if scriptText(values[0]) == "CONFLICT" {
-		return AssignmentRecord{}, ErrAssignmentConflict
+		return AssignmentRecord{}, "", ErrAssignmentConflict
 	}
-	return assignmentFromReply(decision.QueryGroup, values[0:6], values[7:11])
+	record, err := assignmentFromReply(decision.QueryGroup, values[0:6], values[7:11])
+	var kind HolderKind
+	if len(values) > 11 {
+		kind = HolderKind(scriptText(values[11]))
+	}
+	return record, kind, err
 }
 
 // assignmentFromReply assembles a record from the field order the scripts
@@ -1385,7 +1421,15 @@ local function reply()
   local f = redis.call('HMGET', KEYS[2], 'desired_worker_id', 'assignment_generation', 'record_revision',
     'control_epoch', 'placement_reason', 'assigned_at_ms', 'content_scope', 'pending_content_scope', 'effective_at_ms',
     'timeline_record_revision')
-  return {f[1], f[2], f[3], f[4], f[5], f[6], query_group, f[7] or '', f[8] or '', tonumber(f[9] or '0'), tonumber(f[10] or '0')}
+  -- What the lease's holder is, for the Leader to count its moves by: one
+  -- holding under a worker session, one renewing its own lease, or none.
+  local held = redis.call('HMGET', KEYS[3], 'owner_id', 'owner_session_epoch')
+  local holder_kind = ''
+  if held[1] and held[1] ~= '' then
+    holder_kind = 'no_session'
+    if held[2] and held[2] ~= '' then holder_kind = 'session' end
+  end
+  return {f[1], f[2], f[3], f[4], f[5], f[6], query_group, f[7] or '', f[8] or '', tonumber(f[9] or '0'), tonumber(f[10] or '0'), holder_kind}
 end
 -- The timeline revision is the Query Group's, not the decision's: written
 -- when a decision names one newer than the record holds and left alone

@@ -93,6 +93,11 @@ type decisionRecordingStore struct {
 	decisions []ownership.AssignmentDecision
 }
 
+func (store *decisionRecordingStore) PublishAssignmentReporting(ctx context.Context, authority ownership.PublicationAuthority, decision ownership.AssignmentDecision) (ownership.AssignmentRecord, ownership.HolderKind, error) {
+	store.decisions = append(store.decisions, decision)
+	return store.RedisStore.PublishAssignmentReporting(ctx, authority, decision)
+}
+
 func (store *decisionRecordingStore) PublishAssignment(ctx context.Context, authority ownership.PublicationAuthority, decision ownership.AssignmentDecision) (ownership.AssignmentRecord, error) {
 	store.decisions = append(store.decisions, decision)
 	return store.RedisStore.PublishAssignment(ctx, authority, decision)
@@ -116,6 +121,17 @@ func TestARebalanceMoveNamesTheWorkerItTakesFrom(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The Query Group is held under worker-from's session, so the move is
+	// counted as one off a session holder.
+	session, err := redisStore.AcquireWorkerSession(ctx, "worker-from", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holder := &workerSessionHolder{}
+	holder.set(session, true)
+	if _, err := ownership.OpenSessionUnder(ctx, redisStore, "qg-1", holder.current, now, time.Minute); err != nil {
+		t.Fatal(err)
+	}
 	runtime := &productionPhaseTwoOwnership{dependencies: productionPhaseTwoOwnershipDependencies{Store: store, Now: time.Now}}
 	outcome, err := runtime.publishMoves(ctx, authority, []scheduler.RebalanceMove{{QueryGroup: "qg-1", From: "worker-from", To: "worker-to"}},
 		map[execution.QueryGroupIdentity]ownership.AssignmentRecord{"qg-1": record}, true, 0, now)
@@ -124,6 +140,9 @@ func TestARebalanceMoveNamesTheWorkerItTakesFrom(t *testing.T) {
 	}
 	if len(store.decisions) != 1 || store.decisions[0].HolderWorkerID != "worker-from" {
 		t.Fatalf("published decisions %+v, want one naming worker-from as the holder", store.decisions)
+	}
+	if outcome.fromSessionHolders != 1 {
+		t.Fatalf("moves off session holders = %d, want the one", outcome.fromSessionHolders)
 	}
 }
 

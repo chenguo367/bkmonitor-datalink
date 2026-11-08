@@ -1856,10 +1856,14 @@ func (runtime *productionPhaseTwoOwnership) sweepRetiredAssignments(
 
 // rebalanceOutcome is what one round did with the plan it computed.
 type rebalanceOutcome struct {
-	applied   []scheduler.RebalanceMove
-	conflicts int
-	paused    bool
-	pausedFor time.Duration
+	applied []scheduler.RebalanceMove
+	// fromSessionHolders is how many of the applied moves took a Query Group
+	// from a holder holding it under a worker session (A2), the rest from
+	// one renewing its own lease or from none.
+	fromSessionHolders int
+	conflicts          int
+	paused             bool
+	pausedFor          time.Duration
 }
 
 // publishMoves publishes one round's moves - the byte-constraint moves and
@@ -1903,10 +1907,17 @@ func (runtime *productionPhaseTwoOwnership) publishMoves(
 			outcome.conflicts++
 			continue
 		}
-		_, err := runtime.dependencies.Store.PublishAssignment(ctx, authority, ownership.AssignmentDecision{
+		decision := ownership.AssignmentDecision{
 			QueryGroup: move.QueryGroup, DesiredWorkerID: move.To, HolderWorkerID: move.From, ExpectedRecordRevision: record.RecordRevision,
 			PlacementReason: ownership.PlacementRebalance, DecidedAt: at,
-		})
+		}
+		var holder ownership.HolderKind
+		var err error
+		if reporting, ok := runtime.dependencies.Store.(holderReportingPublisher); ok {
+			_, holder, err = reporting.PublishAssignmentReporting(ctx, authority, decision)
+		} else {
+			_, err = runtime.dependencies.Store.PublishAssignment(ctx, authority, decision)
+		}
 		switch {
 		case errors.Is(err, ownership.ErrAssignmentConflict):
 			outcome.conflicts++
@@ -1918,8 +1929,17 @@ func (runtime *productionPhaseTwoOwnership) publishMoves(
 			return outcome, err
 		}
 		outcome.applied = append(outcome.applied, move)
+		if holder == ownership.HolderUnderSession {
+			outcome.fromSessionHolders++
+		}
 	}
 	return outcome, nil
+}
+
+// holderReportingPublisher is a store that says what held a lease when it
+// published a decision over it (ownership.RedisStore).
+type holderReportingPublisher interface {
+	PublishAssignmentReporting(context.Context, ownership.PublicationAuthority, ownership.AssignmentDecision) (ownership.AssignmentRecord, ownership.HolderKind, error)
 }
 
 // observeReadySet remembers the ready set this round reconciled against and
@@ -2005,7 +2025,7 @@ func (runtime *productionPhaseTwoOwnership) observeRebalance(
 	facts := &observability.RebalanceFacts{
 		ReadyWorkers: plan.ReadyWorkers, Assigned: plan.Assigned, Target: plan.Target,
 		MostOwned: plan.MostOwned, LeastOwned: plan.LeastOwned, Batch: plan.Batch, PlannedMoves: len(plan.Moves),
-		PublishedMoves: len(outcome.applied), Conflicts: outcome.conflicts,
+		PublishedMoves: len(outcome.applied), PublishedFromSessionHolders: outcome.fromSessionHolders, Conflicts: outcome.conflicts,
 		Paused: outcome.paused, PausedForSeconds: outcome.pausedFor.Seconds(),
 		Replaced: settlement.Replaced, Deferred: settlement.Deferred, Unplaceable: settlement.Unplaceable,
 		DeclinedEverywhere: settlement.DeclinedEverywhere, DeclinedEverywhereSample: declinedEverywhereSamples(settlement),

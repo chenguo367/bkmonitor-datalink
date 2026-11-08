@@ -710,7 +710,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("output_unapplied_total"):              len(ownership.RefusalReasons),
 		fqName("executions_hung_total"):               len(observability.ExecutionHungOutcomes),
 		fqName("control_tier_paused_total"):           len(ControlTierFunctions),
-		fqName("assignment_moves_total"):              1,
+		fqName("assignment_moves_total"):              2,
 		fqName("rebalance_paused_total"):              1,
 		fqName("control_read_round_trips_total"):      len(ControlReadKinds),
 		fqName("control_read_keys_total"):             len(ControlReadKinds),

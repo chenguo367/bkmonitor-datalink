@@ -217,9 +217,9 @@ Assignment index rounds the Control Leader attempted, by result.
 
 ## alarmd_assignment_moves_total
 
-Labels: `reason`
+Labels: `reason`, `holder`
 
-Assignments the Control Leader moved to another ready worker, by reason. reason=rebalance is a move to even the owned counts out; each costs the Query Group at most one Slot on the old holder.
+Assignments the Control Leader moved to another ready worker, by reason. reason=rebalance is a move to even the owned counts out; each costs the Query Group at most one Slot on the old holder. holder is what held the Query Group's lease: session for a holder holding it under a worker session, no_session for one renewing its own lease (an older binary) or none.
 
 ## alarmd_assignment_record_read_total
 

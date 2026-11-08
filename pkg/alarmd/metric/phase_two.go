@@ -1151,9 +1151,10 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"the rolled-back replica back on it. Which replicas they are is on /api/health rebalance.shard_aware.unaware. " +
 			"Meaningful on the Control Leader only; aggregate replicas with max, not sum."})
 	metrics.rebalanceGap = newLoadedGauge(prometheus.GaugeOpts{Subsystem: metricSubsystem, Name: "rebalance_gap", Help: "Owned Query Groups on the most loaded ready worker minus those on the least loaded, as the latest rebalance round on this Control Leader saw them. Zero is even; a gap that stays above five percent of the even share across rounds is a writer that is not moving. Meaningful on the Control Leader only; aggregate replicas with max, not sum."})
-	metrics.assignmentMoves = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "assignment_moves_total", Help: "Assignments the Control Leader moved to another ready worker, by reason. reason=rebalance is a move to even the owned counts out; each costs the Query Group at most one Slot on the old holder."}, []string{"reason"})
+	metrics.assignmentMoves = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "assignment_moves_total", Help: "Assignments the Control Leader moved to another ready worker, by reason. reason=rebalance is a move to even the owned counts out; each costs the Query Group at most one Slot on the old holder. holder is what held the Query Group's lease: session for a holder holding it under a worker session, no_session for one renewing its own lease (an older binary) or none."}, []string{"reason", "holder"})
 	metrics.rebalancePaused = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "rebalance_paused_total", Help: "Rebalance rounds that planned moves and published none, by reason. reason=set_unstable is the ready set having changed within the stabilisation window, which is what a rolling update or a replica joining looks like; rising without end is a set that never settles."}, []string{"reason"})
-	metrics.assignmentMoves.WithLabelValues("rebalance")
+	metrics.assignmentMoves.WithLabelValues("rebalance", "session")
+	metrics.assignmentMoves.WithLabelValues("rebalance", "no_session")
 	metrics.rebalancePaused.WithLabelValues("set_unstable")
 	metrics.controlReadRoundTrips = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "control_read_round_trips_total", Help: "Redis round trips the Control Leader's reconcile round spent reading the records it places Query Groups from, by read: assignment (one Assignment record per Query Group of the population) or registry (the index plus one registration per ready worker). Counted where the calls are issued, so it is this round's own number and not a share of a client-wide total. Read it against control_read_keys_total on the same read: keys rising while round trips stay flat is the batch doing its job, both rising together is a batch that is not batching."}, []string{"read"})
 	metrics.controlReadKeys = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "control_read_keys_total", Help: "Records the Control Leader's reconcile round asked for, by read. The denominator for control_read_round_trips_total; before the reads were batched the two were equal by construction."}, []string{"read"})
@@ -2132,8 +2133,11 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		if facts.ShardAware != nil {
 			m.shardUnawareReadyReplicas.Set(float64(len(facts.ShardAware.Unaware)))
 		}
-		if facts.PublishedMoves > 0 {
-			m.assignmentMoves.WithLabelValues("rebalance").Add(float64(facts.PublishedMoves))
+		if facts.PublishedFromSessionHolders > 0 {
+			m.assignmentMoves.WithLabelValues("rebalance", "session").Add(float64(facts.PublishedFromSessionHolders))
+		}
+		if rest := facts.PublishedMoves - facts.PublishedFromSessionHolders; rest > 0 {
+			m.assignmentMoves.WithLabelValues("rebalance", "no_session").Add(float64(rest))
 		}
 		if facts.Paused {
 			m.rebalancePaused.WithLabelValues("set_unstable").Inc()

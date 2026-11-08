@@ -1538,10 +1538,13 @@ type RebalanceFacts struct {
 	// had moved under the round. Paused says the round wrote none because
 	// the ready set changed within the stabilisation window, PausedForSeconds
 	// how much of the window was left.
-	PublishedMoves   int     `json:"published_moves"`
-	Conflicts        int     `json:"conflicts"`
-	Paused           bool    `json:"paused"`
-	PausedForSeconds float64 `json:"paused_for_seconds"`
+	PublishedMoves int `json:"published_moves"`
+	// PublishedFromSessionHolders is how many of those took a Query Group
+	// from a holder holding it under a worker session (A2).
+	PublishedFromSessionHolders int     `json:"published_from_session_holders"`
+	Conflicts                   int     `json:"conflicts"`
+	Paused                      bool    `json:"paused"`
+	PausedForSeconds            float64 `json:"paused_for_seconds"`
 	// Replaced is how many Query Groups the round moved off holders that are
 	// alive and READY but no longer eligible (a rollout that changed the
 	// capability digest), Deferred how many more it left where they were for
@@ -1666,7 +1669,8 @@ func normalizeRebalanceFacts(facts *RebalanceFacts) *RebalanceFacts {
 	normalized := *facts
 	for _, count := range []*int{
 		&normalized.ReadyWorkers, &normalized.Assigned, &normalized.Target, &normalized.MostOwned,
-		&normalized.LeastOwned, &normalized.Batch, &normalized.PlannedMoves, &normalized.PublishedMoves, &normalized.Conflicts,
+		&normalized.LeastOwned, &normalized.Batch, &normalized.PlannedMoves, &normalized.PublishedMoves,
+		&normalized.PublishedFromSessionHolders, &normalized.Conflicts,
 	} {
 		if *count < 0 {
 			*count = 0

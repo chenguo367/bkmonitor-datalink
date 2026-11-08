@@ -764,3 +764,20 @@ func TestSourceRefreshBuildsAreCountedFromZero(t *testing.T) {
 		t.Fatalf("after one reused round = %v", got)
 	}
 }
+
+// The rebalance moves a round published are counted by what held each Query
+// Group's lease: a holder under a worker session, or one renewing its own
+// lease (or none), so a rollout can read the moves off new holders apart.
+func TestRebalanceMovesAreCountedByWhatHeldTheLease(t *testing.T) {
+	recorder := NewRecorder(BuildInfo{})
+	recorder.Observe(context.Background(), observability.Observation{
+		Component: observability.ComponentOwnership, Stage: observability.StageRebalancePlanned, Result: observability.ResultSuccess,
+		Operation: observability.OperationLoad,
+		Rebalance: &observability.RebalanceFacts{PlannedMoves: 3, PublishedMoves: 3, PublishedFromSessionHolders: 2},
+	})
+	for holder, want := range map[string]float64{"session": 2, "no_session": 1} {
+		if got := redisCounterSum(t, recorder, "alarmd_assignment_moves_total", map[string]string{"reason": "rebalance", "holder": holder}); got != want {
+			t.Fatalf("moves from %s holders = %v, want %v", holder, got, want)
+		}
+	}
+}

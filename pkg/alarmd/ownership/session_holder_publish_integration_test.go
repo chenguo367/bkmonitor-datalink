@@ -226,3 +226,37 @@ func TestTheOwnerReadOfASessionHolderFollowsItsSession(t *testing.T) {
 		t.Fatalf("owner once the session is gone = (%t, %v), want none", ok, err)
 	}
 }
+
+// A publication says what held the lease it was published over: a holder
+// under a worker session, one renewing its own lease, or none.
+func TestAPublicationSaysWhatHeldTheLease(t *testing.T) {
+	store := newIntegrationStore(t)
+	ctx := context.Background()
+	now := time.Now()
+	authority, first, _ := handoverStart(t, store, now)
+	_, kind, err := store.PublishAssignmentReporting(ctx, authority, AssignmentDecision{QueryGroup: handoverQueryGroup,
+		DesiredWorkerID: "worker-old", ExpectedRecordRevision: first.RecordRevision, PlacementReason: PlacementRendezvous, DecidedAt: now})
+	if err != nil || kind != HolderRenewing {
+		t.Fatalf("over a renewing holder = (%q, %v), want %q", kind, err, HolderRenewing)
+	}
+	session, err := store.AcquireWorkerSession(ctx, "worker-old", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holdUnderSession(t, store, session, 20*time.Second)
+	current, err := store.ReadAssignment(ctx, handoverQueryGroup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, kind, err = store.PublishAssignmentReporting(ctx, authority, AssignmentDecision{QueryGroup: handoverQueryGroup,
+		DesiredWorkerID: "worker-old", ExpectedRecordRevision: current.RecordRevision, PlacementReason: PlacementRendezvous, DecidedAt: now}); err != nil || kind != HolderUnderSession {
+		t.Fatalf("over a session holder = (%q, %v), want %q", kind, err, HolderUnderSession)
+	}
+	if err := store.client.HDel(ctx, store.ownershipKey(handoverQueryGroup), "owner_id").Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, kind, err = store.PublishAssignmentReporting(ctx, authority, AssignmentDecision{QueryGroup: handoverQueryGroup,
+		DesiredWorkerID: "worker-old", ExpectedRecordRevision: current.RecordRevision, PlacementReason: PlacementRendezvous, DecidedAt: now}); err != nil || kind != "" {
+		t.Fatalf("over no holder = (%q, %v), want none", kind, err)
+	}
+}
