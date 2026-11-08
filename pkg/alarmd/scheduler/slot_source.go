@@ -227,6 +227,9 @@ type ProductionSlotSource struct {
 	// readHolds answers the Query Group's current read hold, which a Slot
 	// frozen for the first time carries; nil holds none.
 	readHolds ReadHolds
+	// retirement reads what closing a retired Query Group's read hold at its
+	// release needs (WithRetirementReader); nil reads it from the catalog.
+	retirement RetirementReader
 	// queryLatency is the Query Group's own reading of how long its query
 	// takes (WithQueryLatency), and inheritedLatency the previous owner's as
 	// the group's read-hold record keeps it (WithInheritedQueryLatency),
@@ -303,6 +306,26 @@ type SlotReadHolds interface {
 var ErrReadHoldDegraded = errors.New("alarmd scheduler: read hold degraded")
 
 type ProductionSlotSourceOption func(*ProductionSlotSource) error
+
+// RetirementReader is what closing a retired, drained Query Group's read hold
+// at its release reads: where it retired, and the Segment that ended there.
+type RetirementReader interface {
+	ReadScheduleRetirement(context.Context, execution.QueryGroupIdentity) (execution.EvaluationTime, bool, error)
+	ReadFrozenSchedule(context.Context, execution.QueryGroupIdentity, execution.EvaluationTime) (execution.FrozenQueryGroupSchedule, error)
+}
+
+// WithRetirementReader has CloseRetiredReadHold read the retirement from
+// reader rather than from the source's catalog. A catalog gated on the view a
+// Slot executes from refuses every read for a Query Group the view no longer
+// carries, which a drained, retired one does not by the time it is released:
+// the close runs no Slot and executes nothing from the view, and reads the
+// timeline its lease fences the write against.
+func WithRetirementReader(reader RetirementReader) ProductionSlotSourceOption {
+	return func(source *ProductionSlotSource) error {
+		source.retirement = reader
+		return nil
+	}
+}
 
 // WithReadHolds lets the source freeze each new Slot with its Query Group's
 // current read hold. A Slot begun before is resumed with the hold it was
@@ -1657,6 +1680,10 @@ func (source *ProductionSlotSource) replayDistance(
 // its successor waiting on it. A group that cannot close retires all the
 // same, counted, and a successor reads its unclosed record as the hold bound.
 func (source *ProductionSlotSource) prepareRetiredReadHold(ctx context.Context, fence execution.OwnerFence, site string) {
+	source.prepareRetiredReadHoldFrom(ctx, source.catalog, fence, site)
+}
+
+func (source *ProductionSlotSource) prepareRetiredReadHoldFrom(ctx context.Context, reader RetirementReader, fence execution.OwnerFence, site string) {
 	holds, ok := source.readHolds.(interface {
 		PrepareSchedule(context.Context, execution.FrozenQueryGroupSchedule, execution.OwnerFence) error
 	})
@@ -1664,11 +1691,11 @@ func (source *ProductionSlotSource) prepareRetiredReadHold(ctx context.Context, 
 		return
 	}
 	err := func() error {
-		boundary, retired, err := source.catalog.ReadScheduleRetirement(ctx, source.queryGroup)
+		boundary, retired, err := reader.ReadScheduleRetirement(ctx, source.queryGroup)
 		if err != nil || !retired {
 			return err
 		}
-		schedule, err := source.catalog.ReadFrozenSchedule(ctx, source.queryGroup, boundary-1)
+		schedule, err := reader.ReadFrozenSchedule(ctx, source.queryGroup, boundary-1)
 		if err != nil {
 			return err
 		}
@@ -1692,11 +1719,30 @@ func (source *ProductionSlotSource) prepareRetiredReadHold(ctx context.Context, 
 // drained is not closed here: whoever takes it over closes it at the
 // retirement. It answers whether it closed; a failure is counted as Next's
 // is, and the release goes on.
+//
+// The lease is all it asks for, not this Worker's assignment: a drained
+// Query Group is released because the leader has already taken it off this
+// Worker, and asking for the assignment refused every one of these closes.
+// The lease fences the write as it fences every other: until it is
+// released, no other owner holds it. Every way the close fails is counted
+// with the closes that fail: a successor reading the record unclosed is the
+// cost of each.
 func (source *ProductionSlotSource) CloseRetiredReadHold(ctx context.Context) (bool, error) {
 	if source == nil {
 		return false, nil
 	}
-	_, fence, err := source.currentOwnership(ctx, source.now())
+	closed, err := source.closeRetiredReadHold(ctx)
+	if failed, counts := source.readHolds.(interface{ RetireCloseFailed(error) }); err != nil && counts {
+		failed.RetireCloseFailed(err)
+	}
+	return closed, err
+}
+
+func (source *ProductionSlotSource) closeRetiredReadHold(ctx context.Context) (bool, error) {
+	fence, err := source.session.ValidateCurrent(ctx, source.now())
+	if err == nil {
+		err = source.acceptFence(fence)
+	}
 	if err != nil {
 		return false, err
 	}
@@ -1712,11 +1758,15 @@ func (source *ProductionSlotSource) CloseRetiredReadHold(ctx context.Context) (b
 		load.Progress.UnfinishedSlot != nil || load.Progress.UnfinishedRange != nil {
 		return false, nil
 	}
-	retired, err := source.isRetiredBoundary(ctx, load.Progress.NextSlot)
+	reader := RetirementReader(source.catalog)
+	if source.retirement != nil {
+		reader = source.retirement
+	}
+	retired, err := source.isRetiredBoundaryFrom(ctx, reader, load.Progress.NextSlot)
 	if err != nil || !retired {
 		return false, err
 	}
-	source.prepareRetiredReadHold(ctx, fence, readhold.RetireCloseRelease)
+	source.prepareRetiredReadHoldFrom(ctx, reader, fence, readhold.RetireCloseRelease)
 	return true, nil
 }
 
@@ -1724,7 +1774,15 @@ func (source *ProductionSlotSource) isRetiredBoundary(
 	ctx context.Context,
 	boundary execution.EvaluationTime,
 ) (bool, error) {
-	retiredAt, retired, err := source.catalog.ReadScheduleRetirement(ctx, source.queryGroup)
+	return source.isRetiredBoundaryFrom(ctx, source.catalog, boundary)
+}
+
+func (source *ProductionSlotSource) isRetiredBoundaryFrom(
+	ctx context.Context,
+	reader RetirementReader,
+	boundary execution.EvaluationTime,
+) (bool, error) {
+	retiredAt, retired, err := reader.ReadScheduleRetirement(ctx, source.queryGroup)
 	if err != nil || !retired {
 		return false, err
 	}

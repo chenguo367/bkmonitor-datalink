@@ -2683,6 +2683,10 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 		return nil, err
 	}
 	var catalog productionPhaseTwoSlotCatalog = runtime.dependencies.Catalog
+	// Read past the view gate: closing a retired Query Group's read hold at
+	// its release reads the retirement of a Query Group the view no longer
+	// carries (scheduler.WithRetirementReader).
+	retirement := runtime.dependencies.Catalog
 	var executor scheduler.Executor = runtime.dependencies.Executor
 	release := func() {}
 	if holds := runtime.dependencies.ReadHolds; holds != nil {
@@ -2718,6 +2722,7 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 		scheduler.WithObserver(runtime.dependencies.Observer),
 		scheduler.WithTakeoverClock(runtime.takeovers),
 		scheduler.WithReadHolds(readHolds),
+		scheduler.WithRetirementReader(retirement),
 		scheduler.WithQueryLatency(runtime.dependencies.QueryLatency),
 		scheduler.WithInheritedQueryLatency(runtime.dependencies.InheritedQueryLatency),
 		scheduler.WithLiveReserve(slotSourceLiveReserve(runtime.dependencies.Flights)),
@@ -3341,7 +3346,8 @@ func (runtime *productionPhaseTwoQueryGroup) Release(ctx context.Context) error 
 	// While the lease is still held, and before release forgets the Query
 	// Group's read hold: a retired Query Group that drained is let go without
 	// a round coming back to it, and only a round closed its read hold. Its
-	// failure is the slot source's to count; the release goes on.
+	// failure is the slot source's to count, whatever it is; the release
+	// goes on.
 	if runtime.source != nil {
 		_, _ = runtime.source.CloseRetiredReadHold(ctx)
 	}

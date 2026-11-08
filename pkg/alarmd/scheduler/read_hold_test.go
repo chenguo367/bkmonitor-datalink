@@ -10,6 +10,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
 )
 
@@ -84,27 +85,46 @@ func TestARetiredGroupClosesItsHoldWhenReleasedOnlyOnceDrained(t *testing.T) {
 	schedule := schedulerSchedule(t, 60, 60, &end, "snapshot-1", 1)
 	// A Slot in flight sits at the cursor (Progress refuses a projection
 	// anywhere else), so one short of the retirement is the case that has one.
+	// Released because the leader took it off this Worker: the assignment
+	// names another, and the lease is still this Worker's.
+	movedOn := []ownership.AssignmentRecord{testAssignment("worker-2", 4)}
 	for name, test := range map[string]struct {
 		progress execution.ProgressLoadResult
+		records  []ownership.AssignmentRecord
 		closes   bool
 	}{
-		"drained past the retirement": {progress: foundProgress(660, 600), closes: true},
-		"drained at the retirement":   {progress: foundProgress(630, 600), closes: true},
-		"short of the retirement":     {progress: foundProgress(600, 540)},
+		"drained past the retirement":                  {progress: foundProgress(660, 600), closes: true},
+		"drained at the retirement":                    {progress: foundProgress(630, 600), closes: true},
+		"drained, its assignment moved to another":     {progress: foundProgress(660, 600), records: movedOn, closes: true},
+		"short of the retirement":                      {progress: foundProgress(600, 540)},
+		"short of it, its assignment moved to another": {progress: foundProgress(600, 540), records: movedOn},
 	} {
 		t.Run(name, func(t *testing.T) {
 			catalog := &fakeSlotCatalog{t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}, retiredAt: &end}
 			holds := &closingReadHolds{testReadHolds: testReadHolds{hold: 150 * time.Second}}
-			source := newProductionSlotSourceForTest(t, catalog, test.progress, time.Unix(700, 0))
+			reader := &fakeProgressReader{result: test.progress, catalog: catalog}
+			source := mustProductionSlotSource(t, &sequenceOwnerSession{fences: []execution.OwnerFence{testFence(7)}, records: test.records},
+				catalog, reader, time.Unix(700, 0))
 			source.readHolds = holds
 			closed, err := source.CloseRetiredReadHold(context.Background())
-			if err != nil || closed != test.closes || (len(holds.closed) == 1) != test.closes {
-				t.Fatalf("CloseRetiredReadHold() = (%t, %v), closed %+v; want closing %t", closed, err, holds.closed, test.closes)
+			if err != nil || closed != test.closes || (len(holds.closed) == 1) != test.closes || len(holds.failed) != 0 {
+				t.Fatalf("CloseRetiredReadHold() = (%t, %v), closed %+v, failed %v; want closing %t", closed, err, holds.closed, holds.failed, test.closes)
 			}
 			if test.closes && (len(holds.sites) != 1 || holds.sites[0] != readhold.RetireCloseRelease) {
 				t.Fatalf("closed at %v, want once by the release (%s)", holds.sites, readhold.RetireCloseRelease)
 			}
 		})
+	}
+	// A close that cannot even ask - the lease is gone - is a close that
+	// failed, counted as one.
+	catalog := &fakeSlotCatalog{t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}, retiredAt: &end}
+	holds := &closingReadHolds{testReadHolds: testReadHolds{hold: 150 * time.Second}}
+	reader := &fakeProgressReader{result: foundProgress(660, 600), catalog: catalog}
+	source := mustProductionSlotSource(t, &fakeSession{err: ownership.ErrStaleFence}, catalog, reader, time.Unix(700, 0))
+	source.readHolds = holds
+	if closed, err := source.CloseRetiredReadHold(context.Background()); closed || !errors.Is(err, ownership.ErrStaleFence) ||
+		len(holds.failed) != 1 || len(holds.closed) != 0 {
+		t.Fatalf("CloseRetiredReadHold() without a lease = (%t, %v), failed %v; want one counted failure", closed, err, holds.failed)
 	}
 }
 
