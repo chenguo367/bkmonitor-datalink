@@ -237,8 +237,8 @@ var roundStages = map[Stage]bool{
 
 // roundChanged says a Control Leader round line has something new on it: the
 // round moved, rewrote or found missing something, read the source changed,
-// or holds Query Groups draining. Three of the stages carry no facts at all
-// on their line and never have anything new.
+// holds Query Groups draining, or found a record changed under it. Two of the
+// stages carry no facts at all on their line and never have anything new.
 func roundChanged(observation Observation) bool {
 	switch observation.Stage {
 	case StageRebalancePlanned:
@@ -271,6 +271,19 @@ func roundChanged(observation Observation) bool {
 		return observation.SourceRefresh == nil || observation.SourceRefresh.Status != SourceRefreshUnchanged
 	case StageDrainingQGReconciled:
 		return observation.DrainingQG != nil && observation.DrainingQG.Total > 0
+	case StageControlReadsSpent:
+		// A conflict, or a field the Leader's copy of the records missed a
+		// write on: the sample names the Query Group and both values.
+		facts := observation.ControlReads
+		if facts == nil {
+			return false
+		}
+		for field, count := range facts.RecordMismatches {
+			if count > 0 && !RecordFieldWorkerWritten(field) {
+				return true
+			}
+		}
+		return facts.RecordConflicts > 0
 	default:
 		return false
 	}

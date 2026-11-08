@@ -34,7 +34,7 @@ func TestAWorkerHoldsOneSessionAndReplacesOneItLost(t *testing.T) {
 	store := newViewGateTestStore(t)
 	var mu sync.Mutex
 	var lines []observability.Observation
-	runtime := &productionPhaseTwoOwnership{dependencies: productionPhaseTwoOwnershipDependencies{
+	runtime := &productionPhaseTwoOwnership{records: newLeaderRecordCache(store, nil), dependencies: productionPhaseTwoOwnershipDependencies{
 		Store: store, Now: time.Now,
 		Observer: observability.ObserverFunc(func(_ context.Context, o observability.Observation) {
 			if o.Stage == observability.StageLeaseRenewed {
@@ -133,7 +133,7 @@ func TestARebalanceMoveNamesTheWorkerItTakesFrom(t *testing.T) {
 	if _, err := ownership.OpenSessionUnder(ctx, redisStore, "qg-1", holder.current, now, time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	runtime := &productionPhaseTwoOwnership{dependencies: productionPhaseTwoOwnershipDependencies{Store: store, Now: time.Now}}
+	runtime := &productionPhaseTwoOwnership{records: newLeaderRecordCache(store, nil), dependencies: productionPhaseTwoOwnershipDependencies{Store: store, Now: time.Now}}
 	outcome, err := runtime.publishMoves(ctx, authority, []scheduler.RebalanceMove{{QueryGroup: "qg-1", From: "worker-from", To: "worker-to"}},
 		map[execution.QueryGroupIdentity]ownership.AssignmentRecord{"qg-1": record}, true, 0, now)
 	if err != nil || len(outcome.applied) != 1 {
@@ -260,7 +260,7 @@ func TestAWorkerSessionTheStoreCannotRenewIsLetGoAtItsDeadline(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	runtime := &productionPhaseTwoOwnership{dependencies: productionPhaseTwoOwnershipDependencies{
+	runtime := &productionPhaseTwoOwnership{records: newLeaderRecordCache(store, nil), dependencies: productionPhaseTwoOwnershipDependencies{
 		Store: store, Now: time.Now, Observer: observability.ObserverFunc(func(context.Context, observability.Observation) {}),
 	}}
 	loopCtx, cancel := context.WithCancel(ctx)
@@ -350,7 +350,7 @@ func TestAWorkerTakesItsSessionBeforeItOpensAQueryGroupAtStartup(t *testing.T) {
 		}
 	}
 	open := func(worker string) (*productionPhaseTwoOwnership, *ownership.Session, error) {
-		runtime := &productionPhaseTwoOwnership{dependencies: productionPhaseTwoOwnershipDependencies{
+		runtime := &productionPhaseTwoOwnership{records: newLeaderRecordCache(store, nil), dependencies: productionPhaseTwoOwnershipDependencies{
 			Store: store, Now: time.Now, Observer: observability.ObserverFunc(func(context.Context, observability.Observation) {}),
 		}}
 		runtime.OpenWorkerSessionAtStartup(ctx, worker, 50*time.Millisecond, time.Minute)
@@ -380,7 +380,7 @@ func TestAWorkerTakesItsSessionBeforeItOpensAQueryGroupAtStartup(t *testing.T) {
 
 	// A cadence the session's loop refuses is never maintained, so its
 	// leases are not taken under a session that will not come.
-	invalid := &productionPhaseTwoOwnership{dependencies: productionPhaseTwoOwnershipDependencies{
+	invalid := &productionPhaseTwoOwnership{records: newLeaderRecordCache(store, nil), dependencies: productionPhaseTwoOwnershipDependencies{
 		Store: store, Now: time.Now, Observer: observability.ObserverFunc(func(context.Context, observability.Observation) {}),
 	}}
 	invalid.OpenWorkerSessionAtStartup(ctx, "worker-3", time.Minute, time.Minute)

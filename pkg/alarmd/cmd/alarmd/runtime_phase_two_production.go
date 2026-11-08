@@ -1284,14 +1284,19 @@ type productionPhaseTwoOwnershipDependencies struct {
 	Traces *tracing.Exporter
 	// DecisionLag hears each decided Slot's lag (the flow's evaluate
 	// stage); nil hears nothing.
-	DecisionLag      func(time.Duration)
-	Store            productionPhaseTwoOwnershipStore
-	WorkerID         string
-	Catalog          productionPhaseTwoSlotCatalog
-	Progress         productionPhaseTwoProgressReader
-	Executor         scheduler.Executor
-	Now              func() time.Time
-	Reconcile        *scheduler.Reconciler
+	DecisionLag func(time.Duration)
+	Store       productionPhaseTwoOwnershipStore
+	WorkerID    string
+	Catalog     productionPhaseTwoSlotCatalog
+	Progress    productionPhaseTwoProgressReader
+	Executor    scheduler.Executor
+	Now         func() time.Time
+	Reconcile   *scheduler.Reconciler
+	// Activations is the catalog the Control Leader's copy of the records
+	// reads other processes' activations from and hears its own on. Nil
+	// looks for none: an activation made elsewhere reaches the copy by the
+	// backstop alone.
+	Activations      leaderActivations
 	ControlLeaderTTL time.Duration
 	Observer         observability.Observer
 	// SteppedDownAsLeader is told when this process stops being the Control
@@ -1363,7 +1368,11 @@ type productionPhaseTwoOwnership struct {
 	// workerSession is this process's worker session (MaintainWorkerSession).
 	workerSession workerSessionHolder
 	reconciler    *scheduler.Reconciler
-	flights       *scheduler.FlightCoordinator
+	// records is the Control Leader's copy of the Assignment records for its
+	// term, which the reconciler and every other record read and write of
+	// the Leader go through (leaderRecordCache).
+	records *leaderRecordCache
+	flights *scheduler.FlightCoordinator
 	// lookbackPlanner is the Leader's lookback planning after each view
 	// publication (WithLookbackPlanner); nil plans nothing.
 	lookbackPlanner *lookbackPlanner
@@ -1471,9 +1480,13 @@ func newProductionPhaseTwoOwnership(
 			return nil, errors.New("phase-two content scope reader is required")
 		}
 	}
+	records := newLeaderRecordCache(dependencies.Store, dependencies.Activations)
+	if dependencies.Activations != nil {
+		dependencies.Activations.OnRecordTimelineRevisions(records.noteActivation)
+	}
 	return &productionPhaseTwoOwnership{
-		dependencies: dependencies, reconciler: dependencies.Reconcile, flights: dependencies.Flights,
-		takeovers: scheduler.NewTakeoverClock(),
+		dependencies: dependencies, reconciler: dependencies.Reconcile.WithStore(records), records: records,
+		flights: dependencies.Flights, takeovers: scheduler.NewTakeoverClock(),
 	}, nil
 }
 
@@ -1621,12 +1634,18 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 	// decision could be taken.
 	// Placements are judged under the byte constraint's projection, from the
 	// readings for the owners the records name before the round (L100).
+	// The term's copy of the records is brought to the activations made
+	// since the last round and owes the round's share of the backstop; the
+	// round then reads only the records the copy cannot say.
+	if err := runtime.records.prepareRound(ctx, authority, ordered); err != nil {
+		return err
+	}
 	settlement, err := runtime.reconciler.ReconcileRoundSettlingWithBytes(ctx, authority, ordered, workers, at, scopes,
 		func(owners map[execution.QueryGroupIdentity]string) scheduler.ByteReadings {
 			return runtime.dependencies.Costs.Readings(owners, workers)
 		})
 	records := settlement.Records
-	runtime.observeControlReads(ctx, settlement.Stats, registryReads, len(ordered))
+	runtime.observeControlReads(ctx, settlement, registryReads, len(ordered))
 	if err != nil {
 		if errors.Is(err, ownership.ErrStaleFence) {
 			runtime.clearControlAuthority(authority)
@@ -1825,6 +1844,9 @@ func (runtime *productionPhaseTwoOwnership) sweepRetiredAssignments(
 		return
 	}
 	sweep, err := runtime.dependencies.Store.SweepAssignments(ctx, authority, keep)
+	// Whatever the sweep removed is out of the population; one that comes
+	// back is read as it enters.
+	runtime.records.retain(keep)
 	facts := &observability.AssignmentSweepFacts{Scanned: sweep.Scanned, Retired: sweep.Retired,
 		Reclaimed: sweep.Reclaimed, HeldByLease: sweep.HeldByLease, Changed: sweep.Changed}
 	// The same numbers for the fleet snapshot, success or failure: a sweep
@@ -1929,13 +1951,7 @@ func (runtime *productionPhaseTwoOwnership) publishMoves(
 			QueryGroup: move.QueryGroup, DesiredWorkerID: move.To, HolderWorkerID: move.From, ExpectedRecordRevision: record.RecordRevision,
 			PlacementReason: ownership.PlacementRebalance, DecidedAt: at,
 		}
-		var holder ownership.HolderKind
-		var err error
-		if reporting, ok := runtime.dependencies.Store.(holderReportingPublisher); ok {
-			_, holder, err = reporting.PublishAssignmentReporting(ctx, authority, decision)
-		} else {
-			_, err = runtime.dependencies.Store.PublishAssignment(ctx, authority, decision)
-		}
+		_, holder, err := runtime.records.PublishAssignmentReporting(ctx, authority, decision)
 		switch {
 		case errors.Is(err, ownership.ErrAssignmentConflict):
 			outcome.conflicts++
@@ -1952,12 +1968,6 @@ func (runtime *productionPhaseTwoOwnership) publishMoves(
 		}
 	}
 	return outcome, nil
-}
-
-// holderReportingPublisher is a store that says what held a lease when it
-// published a decision over it (ownership.RedisStore).
-type holderReportingPublisher interface {
-	PublishAssignmentReporting(context.Context, ownership.PublicationAuthority, ownership.AssignmentDecision) (ownership.AssignmentRecord, ownership.HolderKind, error)
 }
 
 // observeReadySet remembers the ready set this round reconciled against and
@@ -2011,10 +2021,12 @@ func (runtime *productionPhaseTwoOwnership) observeReadySet(
 // distribution somebody is looking at them in.
 func (runtime *productionPhaseTwoOwnership) observeControlReads(
 	ctx context.Context,
-	assignments ownership.ControlReadStats,
+	settlement scheduler.RoundSettlement,
 	registry ownership.ControlReadStats,
 	queryGroups int,
 ) {
+	assignments := settlement.Stats
+	reads, mismatches, sample := runtime.records.takeRoundFacts()
 	facts := &observability.ControlReadFacts{
 		QueryGroups:            queryGroups,
 		AssignmentKeys:         assignments.Keys,
@@ -2023,6 +2035,8 @@ func (runtime *productionPhaseTwoOwnership) observeControlReads(
 		RegistryKeys:           registry.Keys,
 		RegistryRoundTrips:     registry.RoundTrips,
 		RegistryMilliseconds:   float64(registry.Duration.Nanoseconds()) / float64(time.Millisecond),
+		RecordReads:            reads, RecordMismatches: mismatches, RecordMismatchSample: sample,
+		RecordConflicts: settlement.Conflicts, RecordConflictsAgain: settlement.ConflictsAgain,
 	}
 	observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{
 		Component: observability.ComponentOwnership, Stage: observability.StageControlReadsSpent,
@@ -2626,6 +2640,7 @@ func (runtime *productionPhaseTwoOwnership) clearControlAuthority(authority owne
 	if runtime.authority.Fence == authority.Fence {
 		runtime.authority = ownership.PublicationAuthority{}
 		runtime.viewStepDown()
+		runtime.records.stepDown()
 		// The leader-round readings go with the role. They are aggregated
 		// across replicas with max, so a replica that stopped leading and
 		// kept its last reading outranks the Leader that has one.
@@ -2813,6 +2828,7 @@ func (runtime *productionPhaseTwoOwnership) ensureControlAuthority(
 	}
 	runtime.authority = authority
 	runtime.viewLead(authority.Fence.OwnerEpoch)
+	runtime.records.lead(authority.Fence.OwnerEpoch)
 	return authority, nil
 }
 

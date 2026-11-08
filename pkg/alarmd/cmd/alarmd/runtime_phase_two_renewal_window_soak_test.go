@@ -224,7 +224,7 @@ func TestALeaseSurvivesAFailureEndingBeforeItsLastAttempt(t *testing.T) {
 		"control leader": func(
 			_ *testing.T, ctx context.Context, store *ownership.RedisStore, authority ownership.PublicationAuthority, observer observability.Observer,
 		) <-chan error {
-			runtime := &productionPhaseTwoOwnership{
+			runtime := &productionPhaseTwoOwnership{records: newLeaderRecordCache(store, nil),
 				dependencies: productionPhaseTwoOwnershipDependencies{Store: store, Observer: observer, Now: time.Now},
 				authority:    authority,
 			}

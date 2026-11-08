@@ -387,6 +387,19 @@ func NewReconciler(router *Router, store AssignmentStore) (*Reconciler, error) {
 	return &Reconciler{router: router, store: store}, nil
 }
 
+// WithStore is the reconciler reading and writing its records through store
+// instead, with the same router and timeline source: the Control Leader
+// rounds through its term's copy of the records (a caching store over the
+// one it was given).
+func (reconciler *Reconciler) WithStore(store AssignmentStore) *Reconciler {
+	if reconciler == nil || store == nil {
+		return reconciler
+	}
+	rebound := *reconciler
+	rebound.store = store
+	return &rebound
+}
+
 // ListReadyWorkers reads the ready set once for a reconcile round. A round
 // reconciles every Query Group against this one set: listing per Query
 // Group costs a registry read per Query Group and, worse, lets one round
@@ -505,6 +518,11 @@ type RoundSettlement struct {
 	// Unfit counts the placements that fit no Worker under the round's byte
 	// projection and went to the rendezvous choice regardless.
 	Unfit int
+	// Conflicts counts the Query Groups whose record had changed since it
+	// was read, so the publication was refused; each was read again and
+	// settled once more in the round. ConflictsAgain is the part of them
+	// refused again, left as read for the next round.
+	Conflicts, ConflictsAgain int
 	// Unplaceable counts the Query Groups no ready worker can take this
 	// round. Each keeps the record it had, or stays without one; the round
 	// goes on with the rest.
@@ -594,6 +612,33 @@ func (reconciler *Reconciler) ReconcileRoundSettlingWithBytes(
 	for _, queryGroup := range queryGroups {
 		existing, hasCurrent := current[queryGroup]
 		record, outcome, holder, settleErr := reconciler.settle(ctx, authority, queryGroup, existing, hasCurrent, index, at, scopes, &budget, projection, &settlement.Unfit)
+		if errors.Is(settleErr, ownership.ErrAssignmentConflict) {
+			// The record changed since it was read: a Worker's acquire
+			// promoted its pending content, or the read was older than a
+			// write. One stale record does not fail the round: it is read
+			// again and settled once more, and one refused again is left as
+			// read for the next round. A handover the refusal did not make
+			// gives its place in the batch back.
+			settlement.Conflicts++
+			if outcome == settleReplaced {
+				budget++
+			}
+			existing, hasCurrent, settleErr = reconciler.readAgain(ctx, queryGroup)
+			if settleErr != nil {
+				return settlement, settleErr
+			}
+			record, outcome, holder, settleErr = reconciler.settle(ctx, authority, queryGroup, existing, hasCurrent, index, at, scopes, &budget, projection, &settlement.Unfit)
+			if errors.Is(settleErr, ownership.ErrAssignmentConflict) {
+				settlement.ConflictsAgain++
+				if outcome == settleReplaced {
+					budget++
+				}
+				if hasCurrent {
+					settled[queryGroup] = existing
+				}
+				continue
+			}
+		}
 		if settleErr != nil {
 			return settlement, settleErr
 		}
@@ -630,6 +675,19 @@ func (reconciler *Reconciler) ReconcileRoundSettlingWithBytes(
 	}
 	settlement.Records = settled
 	return settlement, nil
+}
+
+// readAgain reads one Query Group's record after its publication was
+// refused; absent is no record, not a failure.
+func (reconciler *Reconciler) readAgain(ctx context.Context, queryGroup execution.QueryGroupIdentity) (ownership.AssignmentRecord, bool, error) {
+	record, err := reconciler.store.ReadAssignment(ctx, queryGroup)
+	if errors.Is(err, ownership.ErrAssignmentAbsent) {
+		return ownership.AssignmentRecord{}, false, nil
+	}
+	if err != nil {
+		return ownership.AssignmentRecord{}, false, err
+	}
+	return record, true, nil
 }
 
 // settleOutcome is what settle did with one Query Group.

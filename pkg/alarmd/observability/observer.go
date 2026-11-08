@@ -1663,6 +1663,71 @@ type ControlReadFacts struct {
 	RegistryKeys           int     `json:"registry_keys"`
 	RegistryRoundTrips     int     `json:"registry_round_trips"`
 	RegistryMilliseconds   float64 `json:"registry_milliseconds"`
+	// RecordReads is the Assignment records the Leader read since its last
+	// round line, by why (RecordReadReasons): it keeps a copy of them for its
+	// term and reads one only when the copy cannot be trusted to say.
+	RecordReads map[string]int `json:"record_reads,omitempty"`
+	// RecordMismatches is the fields a backstop read found its copy wrong
+	// on (RecordFields), counted once a record each field; RecordMismatchSample
+	// the first few of them outside the three a Worker writes, each a write
+	// the copy missed.
+	RecordMismatches     map[string]int   `json:"record_mismatches,omitempty"`
+	RecordMismatchSample []RecordMismatch `json:"record_mismatch_sample,omitempty"`
+	// RecordConflicts is the round's records whose publication was refused
+	// because they had changed since read; each was read again and settled
+	// once more. RecordConflictsAgain is the part refused again, left for the
+	// next round.
+	RecordConflicts      int `json:"record_conflicts,omitempty"`
+	RecordConflictsAgain int `json:"record_conflicts_again,omitempty"`
+}
+
+// RecordMismatch is one field of one record a backstop read found the
+// Leader's copy wrong on, with both values.
+type RecordMismatch struct {
+	QueryGroup string `json:"query_group"`
+	Field      string `json:"field"`
+	Cached     string `json:"cached"`
+	Stored     string `json:"stored"`
+}
+
+// MaxRecordMismatchSamples bounds the mismatches a round line names.
+const MaxRecordMismatchSamples = 8
+
+// RecordReadReasons are why the Control Leader read an Assignment record:
+// the term began (or a delta it needed was gone and it read everything
+// again), the Query Group entered the population, the record is the round's
+// share of the backstop, a publication over it was refused as changed or its
+// outcome is not known, or another process's activation rewrote its timeline
+// revision.
+var RecordReadReasons = []string{"term_start", "entered", "backstop", "conflict", "unknown_outcome", "foreign_cutover"}
+
+// RecordFields are the fields of an Assignment record the Leader's copy is
+// compared on, and presence: whether there is a record at all. content_scope,
+// pending_content_scope and effective_at_ms are the ones a Worker writes
+// (promoting its pending content), and the copy is expected to fall behind
+// on them until a backstop read; any other is a write the copy missed.
+var RecordFields = []string{"presence", "record_revision", "desired_worker_id", "placement_reason", "timeline_record_revision",
+	"content_scope", "pending_content_scope", "effective_at_ms"}
+
+// RecordFieldWorkerWritten says a Worker writes the field.
+func RecordFieldWorkerWritten(field string) bool {
+	return field == "content_scope" || field == "pending_content_scope" || field == "effective_at_ms"
+}
+
+// closedCounts is counts keeping only the positive ones of a name in names,
+// nil when none is left.
+func closedCounts(counts map[string]int, names []string) map[string]int {
+	var kept map[string]int
+	for name, count := range counts {
+		if count <= 0 || !slices.Contains(names, name) {
+			continue
+		}
+		if kept == nil {
+			kept = make(map[string]int, len(counts))
+		}
+		kept[name] = count
+	}
+	return kept
 }
 
 func normalizeControlReadFacts(facts *ControlReadFacts) *ControlReadFacts {
@@ -1670,14 +1735,21 @@ func normalizeControlReadFacts(facts *ControlReadFacts) *ControlReadFacts {
 		return nil
 	}
 	normalized := *facts
+	normalized.RecordReads = closedCounts(facts.RecordReads, RecordReadReasons)
+	normalized.RecordMismatches = closedCounts(facts.RecordMismatches, RecordFields)
+	if len(normalized.RecordMismatchSample) > MaxRecordMismatchSamples {
+		normalized.RecordMismatchSample = normalized.RecordMismatchSample[:MaxRecordMismatchSamples]
+	}
 	for _, count := range []*int{
 		&normalized.QueryGroups, &normalized.AssignmentKeys, &normalized.AssignmentRoundTrips,
-		&normalized.RegistryKeys, &normalized.RegistryRoundTrips,
+		&normalized.RegistryKeys, &normalized.RegistryRoundTrips, &normalized.RecordConflicts, &normalized.RecordConflictsAgain,
 	} {
 		if *count < 0 {
 			*count = 0
 		}
 	}
+	// The ones refused again are a part of the ones refused.
+	normalized.RecordConflictsAgain = min(normalized.RecordConflictsAgain, normalized.RecordConflicts)
 	for _, elapsed := range []*float64{&normalized.AssignmentMilliseconds, &normalized.RegistryMilliseconds} {
 		if *elapsed < 0 || math.IsNaN(*elapsed) || math.IsInf(*elapsed, 0) {
 			*elapsed = 0

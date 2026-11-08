@@ -1438,10 +1438,13 @@ func (repository *RedisCatalogRepository) persistInitialActivation(
 	// The timelines it wrote carry the full TTL: they are renewed a half-life
 	// from now, not again on the next round.
 	written := make([]string, 0, len(timelines))
+	revisions := make(map[execution.QueryGroupIdentity]uint64, len(timelines))
 	for _, timeline := range timelines {
 		written = append(written, repository.scheduleTimelineKey(timeline.QueryGroup))
+		revisions[timeline.QueryGroup] = timeline.RecordRevision
 	}
 	repository.renewals.renewed(written, repository.renewals.now())
+	repository.recordTimelineRevisions(next.RecordRevision, revisions)
 	repository.rememberWritten(activationPayload, next)
 	return nil
 }
@@ -1547,10 +1550,13 @@ func (repository *RedisCatalogRepository) persistCutoverActivation(
 		return ErrActivationConflict
 	}
 	written := make([]string, 0, len(updates))
+	revisions := make(map[execution.QueryGroupIdentity]uint64, len(updates))
 	for _, update := range updates {
 		written = append(written, repository.scheduleTimelineKey(update.next.QueryGroup))
+		revisions[update.next.QueryGroup] = update.next.RecordRevision
 	}
 	repository.renewals.renewed(written, repository.renewals.now())
+	repository.recordTimelineRevisions(next.RecordRevision, revisions)
 	repository.rememberWritten(activationPayload, next)
 	return nil
 }

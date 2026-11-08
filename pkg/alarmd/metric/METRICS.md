@@ -513,6 +513,24 @@ Labels: `read`
 
 Redis round trips the Control Leader's reconcile round spent reading the records it places Query Groups from, by read: assignment (one Assignment record per Query Group of the population) or registry (the index plus one registration per ready worker). Counted where the calls are issued, so it is this round's own number and not a share of a client-wide total. Read it against control_read_keys_total on the same read: keys rising while round trips stay flat is the batch doing its job, both rising together is a batch that is not batching.
 
+## alarmd_control_record_cache_mismatch_total
+
+Labels: `field`
+
+Fields a backstop read found the Control Leader's copy of a record wrong on, once a record each field; presence is a record there that the copy had absent or the other way round. content_scope, pending_content_scope and effective_at_ms are written by a Worker promoting its pending content and are expected; any other is a write the copy missed, and the control_reads_spent line names the Query Group and both values.
+
+## alarmd_control_record_conflicts_total
+
+Labels: `outcome`
+
+Records whose publication in a reconcile round was refused because they had changed since read: settled (read again and settled in the same round) or again (refused again, left as read for the next round).
+
+## alarmd_control_record_reads_total
+
+Labels: `reason`
+
+Assignment records the Control Leader read, by why. It keeps a copy of the records for its term and reads one only when the copy cannot say: term_start (a new term, or a delta it needed was gone and it read everything again), entered (the Query Group entered the population), backstop (the round's share of every record, each read at least once in sixty rounds), conflict (a publication over it was refused as changed), unknown_outcome (a publication over it failed without saying whether it was written), foreign_cutover (another process's activation rewrote its timeline revision).
+
 ## alarmd_control_source_last_good_identity_changed_total
 
 Last-good Plans a Catalog build refused to retain because the source now states another tenant, business, space or global switch for the strategy than the Plan was built for (disposition LAST_GOOD_IDENTITY_CHANGED): the number is the same and the strategy is not, as when a writer's numbering started over. Counted where a document that did not compile, or compiled and was refused whole or in part, would otherwise keep its last good definition. Zero while every writer keeps its numbering; each such strategy stays out of the Catalog under its own disposition until its document compiles.

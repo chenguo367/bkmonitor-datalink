@@ -892,7 +892,7 @@ func openProductionPhaseTwoBundleAssembly(
 		DecisionLag:         recorder.RecordDecisionLag,
 		Store:               ownershipStore, WorkerID: cfg.PhaseTwo.Worker.ID, Catalog: catalog, Progress: progressStore,
 		Executor: executor, Now: external.Now, ControlLeaderTTL: cfg.PhaseTwo.Ownership.ControlLeaderTTL.Duration(),
-		Observer: observer, Reconcile: assignmentReconciler, Flights: flights, RecoveryLimits: recoveryLimits,
+		Observer: observer, Reconcile: assignmentReconciler, Activations: repository, Flights: flights, RecoveryLimits: recoveryLimits,
 		QueryLatency:              lookbackQueryLatency(lookbackEngine),
 		LookbackBusy:              lookbackBusy(lookbackEngine),
 		InheritedQueryLatency:     readHoldInheritedQueryLatency(readHolds),

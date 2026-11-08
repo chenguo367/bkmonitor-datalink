@@ -190,10 +190,15 @@ func TestProductionPhaseTwoOwnershipWritesTheAssignmentIndexOnlyWhenSetsChange(t
 			t.Fatalf("second round rewrote %q although nothing changed: %+v", write.WorkerID, store.indexRounds[1])
 		}
 	}
-	// One Query Group moves: both affected sets are rewritten, nothing else.
+	// One Query Group moves - a publication of the Leader's, as every move
+	// is: both affected sets are rewritten, nothing else.
 	record := store.assignments["query-group-3"]
-	record.DesiredWorkerID = "worker-2"
-	store.assignments["query-group-3"] = record
+	if _, err := production.records.PublishAssignment(context.Background(), production.authority, ownership.AssignmentDecision{
+		QueryGroup: "query-group-3", DesiredWorkerID: "worker-2", ExpectedRecordRevision: record.RecordRevision,
+		PlacementReason: ownership.PlacementRebalance, DecidedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	round()
 	third := store.indexRounds[2]
 	sortWrites(third)

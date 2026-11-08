@@ -190,7 +190,10 @@ type RedisCatalogRepository struct {
 	// timeline (decision-016 batch 4). Nil writes none: a deployment without
 	// the ownership store beside the catalog carries no such word.
 	assignmentRecordKey func(execution.QueryGroupIdentity) string
-	observer            observability.Observer
+	// recordTimelinesWritten hears the timeline revisions an activation
+	// wrote onto the records (OnRecordTimelineRevisions).
+	recordTimelinesWritten func(uint64, map[execution.QueryGroupIdentity]uint64)
+	observer               observability.Observer
 }
 
 // ConfigureDrainingTermination bounds how long a retired Query Group may stay

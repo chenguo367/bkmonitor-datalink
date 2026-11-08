@@ -242,7 +242,7 @@ func openProductionControlRoleBundle(
 	controlOwnership, err := newProductionPhaseTwoOwnership(productionPhaseTwoOwnershipDependencies{
 		Roles: cfg.EffectiveRoles(), Store: core.Ownership, WorkerID: cfg.PhaseTwo.Worker.ID,
 		Catalog: core.Catalog, Progress: core.Progress, Now: external.Now, Observer: observer,
-		ControlLeaderTTL: cfg.PhaseTwo.Ownership.ControlLeaderTTL.Duration(), Reconcile: assignments,
+		ControlLeaderTTL: cfg.PhaseTwo.Ownership.ControlLeaderTTL.Duration(), Reconcile: assignments, Activations: core.Repository,
 		LeaseTTL: cfg.PhaseTwo.Ownership.LeaseTTL.Duration(), ReconcileInterval: cfg.PhaseTwo.Control.ReconcileInterval.Duration(),
 		ContentScopes: currentContentScopes(core.Repository), SteppedDownAsLeader: controlLeaderSteppedDown(core.Reconciler, recorder),
 		ViewStream: viewServer, ViewSource: core.Repository, Costs: costs, TimelineRepairs: core.TimelineRepairs,

@@ -223,6 +223,32 @@ func TestARoundThatMovedByAnyPathWritesItsLine(t *testing.T) {
 	}
 }
 
+// A round's control reads line is written when a record changed under the
+// round, or a backstop read found the Leader's copy wrong on a field no
+// Worker writes - a write the copy missed, named on the line. A Worker's
+// promotion found the same way is expected and only counted.
+func TestAControlReadsLineIsWrittenOnAConflictOrAMissedWrite(t *testing.T) {
+	for _, test := range []struct {
+		facts *ControlReadFacts
+		lines int
+	}{
+		{&ControlReadFacts{RecordConflicts: 1}, 1},
+		{&ControlReadFacts{RecordMismatches: map[string]int{"desired_worker_id": 1}}, 1},
+		{&ControlReadFacts{RecordMismatches: map[string]int{"presence": 1}}, 1},
+		{&ControlReadFacts{RecordMismatches: map[string]int{"content_scope": 1, "pending_content_scope": 1, "effective_at_ms": 1}}, 0},
+		{&ControlReadFacts{RecordReads: map[string]int{"backstop": 1}}, 0},
+	} {
+		var output bytes.Buffer
+		now := time.Unix(1_000, 0)
+		observer := levelObserver(t, &output, &now)
+		observer.Observe(context.Background(), Observation{Component: ComponentOwnership, Stage: StageControlReadsSpent,
+			Result: ResultSuccess, ControlReads: test.facts})
+		if lines := decodeLines(t, &output); len(lines) != test.lines {
+			t.Fatalf("a round with %+v wrote %v, want %d lines", test.facts, lines, test.lines)
+		}
+	}
+}
+
 // A worker's index read is written when the index did not advance for two
 // rounds or more, or could not be read; one stale round is the race between a
 // worker reading and the Leader writing, counted and not written.

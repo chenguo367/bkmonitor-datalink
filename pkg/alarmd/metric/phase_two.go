@@ -144,6 +144,9 @@ type phaseTwoMetrics struct {
 	rebalancePaused                 *prometheus.CounterVec
 	controlReadRoundTrips           *prometheus.CounterVec
 	controlReadKeys                 *prometheus.CounterVec
+	controlRecordReads              *prometheus.CounterVec
+	controlRecordMismatches         *prometheus.CounterVec
+	controlRecordConflicts          *prometheus.CounterVec
 	controlReadDuration             *prometheus.HistogramVec
 	assignmentIndexStaleRounds      *loadedGauge
 	assignmentIndexWrites           *prometheus.CounterVec
@@ -1182,6 +1185,29 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.byteUnreadGroups = newLoadedGauge(prometheus.GaugeOpts{Subsystem: metricSubsystem, Name: "rebalance_byte_unread_groups", Help: "Query Groups with no reported retained-byte peak in the latest round on this Control Leader: they count nothing toward their worker's sum, so the byte readings beside it are lower bounds. Meaningful on the Control Leader only; aggregate replicas with max, not sum."})
 	metrics.rebalancePaused.WithLabelValues("set_unstable")
 	metrics.controlReadRoundTrips = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "control_read_round_trips_total", Help: "Redis round trips the Control Leader's reconcile round spent reading the records it places Query Groups from, by read: assignment (one Assignment record per Query Group of the population) or registry (the index plus one registration per ready worker). Counted where the calls are issued, so it is this round's own number and not a share of a client-wide total. Read it against control_read_keys_total on the same read: keys rising while round trips stay flat is the batch doing its job, both rising together is a batch that is not batching."}, []string{"read"})
+	metrics.controlRecordReads = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "control_record_reads_total",
+		Help: "Assignment records the Control Leader read, by why. It keeps a copy of the records for its term and reads one only when the " +
+			"copy cannot say: term_start (a new term, or a delta it needed was gone and it read everything again), entered (the Query " +
+			"Group entered the population), backstop (the round's share of every record, each read at least once in sixty rounds), " +
+			"conflict (a publication over it was refused as changed), unknown_outcome (a publication over it failed without saying " +
+			"whether it was written), foreign_cutover (another process's activation rewrote its timeline revision)."}, []string{"reason"})
+	metrics.controlRecordMismatches = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "control_record_cache_mismatch_total",
+		Help: "Fields a backstop read found the Control Leader's copy of a record wrong on, once a record each field; presence is a " +
+			"record there that the copy had absent or the other way round. content_scope, pending_content_scope and effective_at_ms " +
+			"are written by a Worker promoting its pending content and are expected; any other is a write the copy missed, and the " +
+			"control_reads_spent line names the Query Group and both values."}, []string{"field"})
+	metrics.controlRecordConflicts = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "control_record_conflicts_total",
+		Help: "Records whose publication in a reconcile round was refused because they had changed since read: settled (read again and " +
+			"settled in the same round) or again (refused again, left as read for the next round)."}, []string{"outcome"})
+	for _, reason := range observability.RecordReadReasons {
+		metrics.controlRecordReads.WithLabelValues(reason)
+	}
+	for _, field := range observability.RecordFields {
+		metrics.controlRecordMismatches.WithLabelValues(field)
+	}
+	for _, outcome := range []string{"settled", "again"} {
+		metrics.controlRecordConflicts.WithLabelValues(outcome)
+	}
 	metrics.controlReadKeys = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "control_read_keys_total", Help: "Records the Control Leader's reconcile round asked for, by read. The denominator for control_read_round_trips_total; before the reads were batched the two were equal by construction."}, []string{"read"})
 	metrics.controlReadDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{Subsystem: metricSubsystem, Name: "control_read_duration_seconds", Help: "Wall time one reconcile round spent inside each control-plane read, by read. Reported for failed rounds too: a round that took far longer than the others is the one most likely to have failed, and leaving those out would drop them from the distribution somebody is looking at them in.", Buckets: controlReadDurationBuckets}, []string{"read"})
 	for _, read := range ControlReadKinds {
@@ -2078,7 +2104,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.scheduleCutoverFirstTimelines, m.replayExpiries, m.replayTakeovers, m.slotDiversions, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
 		m.queryFailures,
 		m.objectCatalogObjects, m.catalogRenewals, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectCatalogWrittenBytes, m.objectReads, m.stateGenerationSkew, m.stateCarry,
-		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.byteOverloadedWorkers, m.byteMostLoadedShare, m.byteUnreadGroups, m.placementUnfit, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
+		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.byteOverloadedWorkers, m.byteMostLoadedShare, m.byteUnreadGroups, m.placementUnfit, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlRecordReads, m.controlRecordMismatches, m.controlRecordConflicts, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.recoveryWithheld, m.noDataEnd, m.openAlertGate,
 	}...), append(append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), append(m.handover.collectors(), m.sreActions.actions, m.sreActions.rollouts, m.sreActions.watched, m.sreActions.receipts, m.cliAuth.total, m.cliAuth.rosterApplied)...), append(m.controlFacts.collectors(), m.traceExport.collectors()...)...),
 		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.activeCopy, m.fleetTracker, m.effectiveTimeRefresh, m.activationRebuild, m.timelineRepair, m.activationSkippedTimelines, m.timelineUnreadableReports, m.activationHeader, m.activationBlocked, m.liveReserve, m.roundMemory, m.stateSeriesHeld, m.targetGroup, m.effectiveClose, m.logLines, m.observerPanics, m.absentClose, m.editClose, m.noDataCloseAPI, m.linkdFilterClose, m.linkdFilterCloseRequests, m.openEpisodeRecord, m.newOpens, m.frontRefused, m.processMemory, m.strategyScopeClose, m.targetScopeClose, m.controlSourceRounds, m.apmCarried, m.apmCarriedBytes, m.sourceLivenessChecks, m.sourceLivenessSeconds, m.sourceLivenessDeferred, m.sourceLivenessEvicted, m.sourceLivenessHeldEvicted, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.controlFactsWrites, m.planCarriesReads, m.queryCooldownLoads, m.eventBusinessAttribution, m.detectionSnapshots, m.detectionSnapshotStates, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
@@ -2152,6 +2178,14 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 			m.controlReadRoundTrips.WithLabelValues(read).Add(float64(spent.roundTrips))
 			m.controlReadDuration.WithLabelValues(read).Observe(spent.elapsed / 1000)
 		}
+		for reason, count := range facts.RecordReads {
+			m.controlRecordReads.WithLabelValues(reason).Add(float64(count))
+		}
+		for field, count := range facts.RecordMismatches {
+			m.controlRecordMismatches.WithLabelValues(field).Add(float64(count))
+		}
+		m.controlRecordConflicts.WithLabelValues("settled").Add(float64(facts.RecordConflicts - facts.RecordConflictsAgain))
+		m.controlRecordConflicts.WithLabelValues("again").Add(float64(facts.RecordConflictsAgain))
 	}
 	if facts := observation.Rebalance; facts != nil && observation.Result == observability.ResultSuccess {
 		m.rebalancePlannedMoves.Set(float64(facts.PlannedMoves))
