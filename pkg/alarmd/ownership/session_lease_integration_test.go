@@ -7,11 +7,13 @@ package ownership
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
 )
 
 const sessionLeaseQueryGroup = execution.QueryGroupIdentity("query-group-session")
@@ -316,5 +318,56 @@ func TestALeaseUnderASessionEndsOnlyWhenTheSessionDoes(t *testing.T) {
 	holder.set(replaced, true)
 	if !session.SessionEnded() {
 		t.Fatal("a replaced session did not end the lease")
+	}
+}
+
+// callerRecordingStore is the store with the job each fence check names.
+type callerRecordingStore struct {
+	*RedisStore
+	callers []string
+}
+
+func (store *callerRecordingStore) CheckFenceWithAssignment(ctx context.Context, fence execution.OwnerFence) (AssignmentRecord, error) {
+	store.callers = append(store.callers, redisfailure.Caller(ctx))
+	return store.RedisStore.CheckFenceWithAssignment(ctx, fence)
+}
+
+// A confirmation names its fence check lease_confirmation, whichever way it is
+// asked for: the view gate's early renewal and a long Slot's output. A round's
+// own check confirms the lease too, and names no job of its own, so the store's
+// client counts it as the ownership store's, and the confirmations can be read
+// apart from it.
+func TestAConfirmationNamesItsFenceCheckAndARoundsCheckDoesNot(t *testing.T) {
+	redisStore := newIntegrationStore(t)
+	if err := redisStore.ConfigureLeaseTTL(time.Second); err != nil {
+		t.Fatal(err)
+	}
+	store := &callerRecordingStore{RedisStore: redisStore}
+	ctx := context.Background()
+	publishTo(t, redisStore, "worker-1")
+	worker, err := redisStore.AcquireWorkerSession(ctx, "worker-1", time.Now(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holder := &heldWorkerSession{}
+	holder.set(worker, true)
+	opened := time.Now()
+	session, err := OpenSessionUnder(ctx, store, sessionLeaseQueryGroup, holder.current, opened, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.callers = nil
+	if err := session.Renew(ctx, opened.Add(100*time.Millisecond), time.Minute); err != nil {
+		t.Fatalf("the gate's renewal = %v", err)
+	}
+	if err := session.Confirm(ctx, opened.Add(200*time.Millisecond)); err != nil {
+		t.Fatalf("the output's confirmation = %v", err)
+	}
+	if _, _, err := session.ValidateCurrentWithAssignment(ctx, opened.Add(300*time.Millisecond)); err != nil {
+		t.Fatalf("the round's check = %v", err)
+	}
+	want := []string{redisfailure.CallerLeaseConfirmation, redisfailure.CallerLeaseConfirmation, ""}
+	if !reflect.DeepEqual(store.callers, want) {
+		t.Fatalf("fence checks named %q, want %q", store.callers, want)
 	}
 }

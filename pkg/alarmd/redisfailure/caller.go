@@ -70,13 +70,18 @@ const (
 	// run: its fence checks and whatever else it asks Redis, beside the
 	// owner's detection rounds rather than counted with them.
 	CallerEffectiveMaintenance = "effective_maintenance"
+	// CallerLeaseConfirmation is a fence check made only to move a lease held
+	// under a worker session on by its TTL: the view gate's early renewal and
+	// a long Slot's output asking before it defers. The fence check a round
+	// makes confirms the lease too, and stays the ownership store's.
+	CallerLeaseConfirmation = "lease_confirmation"
 )
 
 // Callers is every caller name, for callers that must enumerate them.
 var Callers = []string{CallerDirectoryRead, CallerDiagnosticWrite, CallerDiagnosticRead, CallerCostProjection,
 	CallerStrategySource, CallerLegacyEffectiveTime, CallerControlPlane, CallerOwnership, CallerRuntimeState, CallerQueryCooldown,
 	CallerFleet, CallerCMDBCache, CallerTargetGroup, CallerDynamicConfig, CallerLinkd, CallerStoreCensus,
-	CallerLegacyOutput, CallerLegacyPodCache, CallerEffectiveMaintenance}
+	CallerLegacyOutput, CallerLegacyPodCache, CallerEffectiveMaintenance, CallerLeaseConfirmation}
 
 type callerKey struct{}
 

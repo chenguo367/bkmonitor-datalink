@@ -240,8 +240,8 @@ func TestCustomMetricFamilySeriesDevelopmentLimits(t *testing.T) {
 		"alarmd_redis_script_total":            65 * 3 * 2 * 3,
 		"alarmd_redis_script_duration_seconds": 65 * 2 * (12 + 1 + 2),
 		"alarmd_redis_script_bytes_total":      65 * 2,
-		"alarmd_redis_caller_duration_seconds": (len(redisClientNames) + 1) * 21 * 2 * (12 + 1 + 2),
-		"alarmd_redis_bytes_total":             (len(redisClientNames) + 1) * 21 * (len(redisCommandNames) + 1) * 2,
+		"alarmd_redis_caller_duration_seconds": (len(redisClientNames) + 1) * 22 * 2 * (12 + 1 + 2),
+		"alarmd_redis_bytes_total":             (len(redisClientNames) + 1) * 22 * (len(redisCommandNames) + 1) * 2,
 		"alarmd_lease_renewal_total":           4 * 14,
 	} {
 		if got := bounds[family]; got != want {

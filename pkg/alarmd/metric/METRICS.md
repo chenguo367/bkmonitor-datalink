@@ -1667,7 +1667,7 @@ Redis operations of a named job that failed, by why, counted as redis_failure_re
 
 Labels: `client`, `caller`
 
-Redis operations issued by a named job on a client, one per call or pipeline batch, for the jobs that share one client: on the diagnostics client directory_read, diagnostic_write, diagnostic_read, cost_projection; on the source and runtime clients (one client when the deployment points both at one Redis) strategy_source, legacy_effective_time, control_plane, ownership, runtime_state, query_cooldown, fleet, linkd; cmdb_cache, target_group and dynamic_config on whichever client they share; store_census and effective_maintenance on the source and runtime clients; legacy_output and legacy_pod_cache on the clients of those names.
+Redis operations issued by a named job on a client, one per call or pipeline batch, for the jobs that share one client: on the diagnostics client directory_read, diagnostic_write, diagnostic_read, cost_projection; on the source and runtime clients (one client when the deployment points both at one Redis) strategy_source, legacy_effective_time, control_plane, ownership, runtime_state, query_cooldown, fleet, linkd; cmdb_cache, target_group and dynamic_config on whichever client they share; store_census and effective_maintenance on the source and runtime clients; lease_confirmation on the runtime client; legacy_output and legacy_pod_cache on the clients of those names.
 
 ## alarmd_redis_command_duration_seconds
 

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
 )
 
 // LeaseStore is what a Session needs of the ownership store. The instants
@@ -305,7 +306,7 @@ func (session *Session) Renew(ctx context.Context, at time.Time, ttl time.Durati
 	// A lease held under a session is not renewed: a renewal of it is a
 	// confirmation, which moves its horizon on by its TTL.
 	if under != nil {
-		_, _, err := session.ValidateCurrentWithAssignment(ctx, at)
+		_, _, err := session.ValidateCurrentWithAssignment(confirmation(ctx), at)
 		return err
 	}
 	renewed, err := session.store.RenewDeclaring(ctx, lease.Fence, declared, at, ttl)
@@ -378,8 +379,14 @@ func (session *Session) Confirm(ctx context.Context, at time.Time) error {
 	if !session.HeldUnderSession() {
 		return nil
 	}
-	_, _, err := session.ValidateCurrentWithAssignment(ctx, at)
+	_, _, err := session.ValidateCurrentWithAssignment(confirmation(ctx), at)
 	return err
+}
+
+// confirmation names the one fence check a confirmation makes, on a context of
+// its own: the caller's goes on to reads that are not the confirmation's.
+func confirmation(ctx context.Context) context.Context {
+	return redisfailure.WithCaller(ctx, redisfailure.CallerLeaseConfirmation)
 }
 
 // HeldUnderSession reports whether the lease is held under a worker session

@@ -257,7 +257,8 @@ func newRedisCallMetrics() redisCallMetrics {
 			"diagnostic_read, cost_projection; on the source and runtime clients (one client when the deployment " +
 			"points both at one Redis) strategy_source, legacy_effective_time, control_plane, ownership, runtime_state, " +
 			"query_cooldown, fleet, linkd; cmdb_cache, target_group and dynamic_config on whichever client they share; " +
-			"store_census and effective_maintenance on the source and runtime clients; legacy_output and " +
+			"store_census and effective_maintenance on the source and runtime clients; lease_confirmation on the " +
+			"runtime client; legacy_output and " +
 			"legacy_pod_cache on the clients of those names.",
 	}, []string{"client", "caller"})
 	callerReasons := prometheus.NewCounterVec(prometheus.CounterOpts{
