@@ -328,3 +328,63 @@ func TestARoundOfTheSameAssignmentDoesNotOpenAnOpenQueryGroupAgain(t *testing.T)
 		t.Fatalf("OpenQueryGroup called %d times over three rounds of one Assignment, want once", owner.opens)
 	}
 }
+
+// At startup the worker takes its session before the startup Assignment opens
+// a Query Group, so those leases are held under it. A session it cannot have
+// yet -- this worker id's last process still holds one, as after a container
+// restart -- leaves the Query Groups to wait for the loop to take one: an open
+// meanwhile is refused as busy, not granted as a lease its holder renews itself.
+func TestAWorkerTakesItsSessionBeforeItOpensAQueryGroupAtStartup(t *testing.T) {
+	ctx := context.Background()
+	store := newViewGateTestStore(t)
+	now := time.Now()
+	authority, err := store.AcquireControlLeader(ctx, "control-1", now, 10*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, worker := range []string{"worker-1", "worker-2"} {
+		if _, err := store.PublishAssignment(ctx, authority, ownership.AssignmentDecision{
+			QueryGroup: execution.QueryGroupIdentity("qg-" + worker), DesiredWorkerID: worker, PlacementReason: ownership.PlacementRendezvous, DecidedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	open := func(worker string) (*productionPhaseTwoOwnership, *ownership.Session, error) {
+		runtime := &productionPhaseTwoOwnership{dependencies: productionPhaseTwoOwnershipDependencies{
+			Store: store, Now: time.Now, Observer: observability.ObserverFunc(func(context.Context, observability.Observation) {}),
+		}}
+		runtime.OpenWorkerSessionAtStartup(ctx, worker, 50*time.Millisecond, time.Minute)
+		if !runtime.workerSession.running() {
+			t.Fatalf("%s: the session is not what its leases are taken under after startup", worker)
+		}
+		session, err := ownership.OpenSessionUnder(ctx, store, execution.QueryGroupIdentity("qg-"+worker), runtime.workerSession.current, time.Now(), time.Minute)
+		return runtime, session, err
+	}
+
+	_, session, err := open("worker-1")
+	if err != nil || !session.HeldUnderSession() {
+		t.Fatalf("worker-1 at startup: (%v, %v), want its Query Group held under the session it took", session, err)
+	}
+
+	// worker-2's last process still holds its session.
+	if _, err := store.AcquireWorkerSession(ctx, "worker-2", time.Now(), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	runtime, _, err := open("worker-2")
+	if _, held := runtime.workerSession.current(); held {
+		t.Fatal("worker-2 holds a session while its last process's is alive")
+	}
+	if !errors.Is(err, ownership.ErrLeaseBusy) {
+		t.Fatalf("worker-2's Query Group at startup = %v, want it refused as busy until the session is taken", err)
+	}
+
+	// A cadence the session's loop refuses is never maintained, so its
+	// leases are not taken under a session that will not come.
+	invalid := &productionPhaseTwoOwnership{dependencies: productionPhaseTwoOwnershipDependencies{
+		Store: store, Now: time.Now, Observer: observability.ObserverFunc(func(context.Context, observability.Observation) {}),
+	}}
+	invalid.OpenWorkerSessionAtStartup(ctx, "worker-3", time.Minute, time.Minute)
+	if invalid.workerSession.running() {
+		t.Fatal("a session the loop will not maintain is what leases are taken under")
+	}
+}

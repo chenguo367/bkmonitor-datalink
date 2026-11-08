@@ -126,6 +126,14 @@ func TestALostRunnersLateReleaseLeavesItsSuccessorRunning(t *testing.T) {
 		t.Fatalf("Query Groups = %v, want one", bundle.queryGroups)
 	}
 	queryGroup := bundle.queryGroups[0]
+	// Opened by the startup Assignment, before the session's loop ran, and
+	// held under the worker session all the same.
+	bundle.mu.RLock()
+	started, _ := bundle.runners[queryGroup].runner.(*productionPhaseTwoQueryGroup)
+	bundle.mu.RUnlock()
+	if started == nil || !started.session.HeldUnderSession() {
+		t.Fatal("the lease the startup Assignment opened is not held under the worker session")
+	}
 	clock.Store((base+30)*1000 + 60*1000)
 	if _, _, err := settledRunner(bundle, queryGroup).RunOne(ctx); err != nil || queried.Load() == 0 {
 		t.Fatalf("first round: %v, %d queries", err, queried.Load())

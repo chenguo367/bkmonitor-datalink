@@ -2627,9 +2627,9 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 	if !runtime.hasRole(roles.Worker) {
 		return nil, errors.New("phase-two Query Group execution requires worker role")
 	}
-	// Under the worker session once this process holds one (A2); a runtime
-	// that never started its session -- a store without sessions -- takes
-	// a lease it renews itself.
+	// Under the worker session once this process maintains one (A2), from
+	// startup on; a runtime that never started its session -- a store
+	// without sessions -- takes a lease it renews itself.
 	var session *ownership.Session
 	var err error
 	if runtime.workerSession.running() {

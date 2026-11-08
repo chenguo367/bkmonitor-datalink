@@ -37,9 +37,18 @@ type phaseTwoWorkerSessionMaintainer interface {
 	ReleaseWorkerSession(context.Context) error
 }
 
+// phaseTwoWorkerSessionOpener takes the worker session at startup, before
+// the startup Assignment opens a Query Group.
+type phaseTwoWorkerSessionOpener interface {
+	OpenWorkerSessionAtStartup(ctx context.Context, workerID string, interval, ttl time.Duration)
+}
+
 // The production runtime holds the session; a wiring that lost the method
 // would leave the worker with none and no failing build.
-var _ phaseTwoWorkerSessionMaintainer = (*productionPhaseTwoOwnership)(nil)
+var (
+	_ phaseTwoWorkerSessionMaintainer = (*productionPhaseTwoOwnership)(nil)
+	_ phaseTwoWorkerSessionOpener     = (*productionPhaseTwoOwnership)(nil)
+)
 
 // workerSessionHolder is the session this process holds, nil-safe and shared
 // by the loop that renews it and the shutdown that releases it.
@@ -138,6 +147,38 @@ func (runtime *productionPhaseTwoOwnership) MaintainWorkerSession(ctx context.Co
 			return ctx.Err()
 		case <-ticker.C:
 		}
+	}
+}
+
+// OpenWorkerSessionAtStartup makes every Query Group lease this process takes
+// one held under its worker session, the first ones too: the startup
+// Assignment opens its Query Groups before the session's loop has run, and a
+// lease opened then was taken as one its holder renews itself, and stayed one.
+// It asks for the session once. One it cannot have now -- the last process of
+// this worker id still alive in the store's eyes, as after a container
+// restart, or the store not answering -- is the loop's to take, and the Query
+// Groups wait for it rather than open without it. The cadence is checked as
+// the loop checks it, so a session that will never be maintained is never
+// waited for.
+func (runtime *productionPhaseTwoOwnership) OpenWorkerSessionAtStartup(ctx context.Context, workerID string, interval, ttl time.Duration) {
+	if runtime == nil || workerID == "" || interval <= 0 || ttl <= interval {
+		return
+	}
+	store, ok := runtime.dependencies.Store.(workerSessionStore)
+	if !ok {
+		return
+	}
+	runtime.workerSession.start()
+	if _, held := runtime.workerSession.current(); held {
+		return
+	}
+	leaseCtx := observability.ContextWithTraceFields(ctx, observability.TraceFields{
+		QueryGroupKey: string(ownership.WorkerSessionIdentity(workerID)), OwnerID: workerID,
+	})
+	acquired, err := store.AcquireWorkerSession(ctx, workerID, runtime.dependencies.Now(), ttl)
+	observeProductionOwnership(leaseCtx, runtime.dependencies.Observer, observability.StageLeaseRenewed, err)
+	if err == nil {
+		runtime.workerSession.set(acquired, true)
 	}
 }
 

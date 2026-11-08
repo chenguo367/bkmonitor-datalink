@@ -1221,6 +1221,11 @@ func (bundle *phaseTwoWorkerBundle) Start(ctx context.Context) error {
 	if err := bundle.registerAtStartup(ctx, ownership.WorkerReady); err != nil {
 		return err
 	}
+	if opener, ok := bundle.dependencies.Ownership.(phaseTwoWorkerSessionOpener); ok && bundle.dependencies.Config.HasRole(roles.Worker) {
+		ownershipCfg := bundle.dependencies.Config.PhaseTwo.Ownership
+		opener.OpenWorkerSessionAtStartup(ctx, bundle.dependencies.Config.PhaseTwo.Worker.ID,
+			ownershipCfg.LeaseRenewInterval.Duration(), ownershipCfg.LeaseTTL.Duration())
+	}
 	if !controlFactsAvailable {
 		// Nothing to publish and nothing to be assigned: this replica does not
 		// know which Query Groups exist. The assignment steps are skipped
