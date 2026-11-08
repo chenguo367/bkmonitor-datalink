@@ -149,6 +149,17 @@ func openCutoverFixture(
 	opened func(*phaseTwoWorkerBundle), external func(*phaseTwoProductionExternalDependencies),
 ) *cutoverStallFixture {
 	t.Helper()
+	return openCutoverFixtureSharing(t, configure, logger, before, opened, external, 1)
+}
+
+// openCutoverFixtureSharing is openCutoverFixture for a before hook that
+// installs strategies sharing strategy 1001's query: its Query Group then
+// holds plans Plans, every other one a single Plan.
+func openCutoverFixtureSharing(
+	t *testing.T, configure func(*config.Config), logger *observability.Logger, before func(ctx context.Context, client *redis.Client, cfg config.Config),
+	opened func(*phaseTwoWorkerBundle), external func(*phaseTwoProductionExternalDependencies), plans int,
+) *cutoverStallFixture {
+	t.Helper()
 	address, redisClient := startPhaseTwoRedis(t)
 	ctx := context.Background()
 	installCutoverStallStrategies(t, ctx, redisClient, "system.mem", 1725000000)
@@ -284,10 +295,18 @@ func openCutoverFixture(
 	fixture.repository = bundle.dependencies.Control.(*productionPhaseTwoControl).dependencies.Repository.(*controlplane.RedisCatalogRepository)
 	for _, candidate := range bundle.queryGroups {
 		schedule, scheduleErr := fixture.production.dependencies.Catalog.ReadInitialFrozenSchedule(ctx, candidate)
-		if scheduleErr != nil || len(schedule.Plans) != 1 {
-			t.Fatalf("Query Group %s schedule=%+v error=%v", candidate, schedule, scheduleErr)
+		holds1001 := false
+		for _, plan := range schedule.Plans {
+			holds1001 = holds1001 || plan.Identity.StrategyID == "1001"
 		}
-		if schedule.Plans[0].Identity.StrategyID == "1001" {
+		want := 1
+		if holds1001 {
+			want = plans
+		}
+		if scheduleErr != nil || len(schedule.Plans) != want {
+			t.Fatalf("Query Group %s schedule=%+v error=%v, want %d Plans", candidate, schedule, scheduleErr, want)
+		}
+		if holds1001 {
 			fixture.queryGroup, fixture.initialSchedule = candidate, schedule
 		}
 	}
