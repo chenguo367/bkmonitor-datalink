@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -215,5 +216,115 @@ func TestALeaseUnderTheSessionIsLostOnlyWhenTheSessionIs(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the loss of the session was not reported")
+	}
+}
+
+// unreachableSessionStore is the ownership store with its worker session
+// calls failing, once cut, as a store that cannot be reached does: with no
+// answer, which is no decision about the session.
+type unreachableSessionStore struct {
+	*ownership.RedisStore
+	cut atomic.Bool
+}
+
+var errSessionStoreUnreachable = errors.New("dial tcp 192.0.2.1:6379: connect: connection refused")
+
+func (store *unreachableSessionStore) AcquireWorkerSession(ctx context.Context, workerID string, at time.Time, ttl time.Duration) (ownership.WorkerSession, error) {
+	if store.cut.Load() {
+		return ownership.WorkerSession{}, errSessionStoreUnreachable
+	}
+	return store.RedisStore.AcquireWorkerSession(ctx, workerID, at, ttl)
+}
+
+func (store *unreachableSessionStore) RenewWorkerSession(ctx context.Context, session ownership.WorkerSession, at time.Time, ttl time.Duration) (ownership.WorkerSession, error) {
+	if store.cut.Load() {
+		return ownership.WorkerSession{}, errSessionStoreUnreachable
+	}
+	return store.RedisStore.RenewWorkerSession(ctx, session, at, ttl)
+}
+
+// A store that cannot be reached never says the worker session is gone, so
+// the session's loop lets it go itself once its deadline has passed on this
+// process's clock, and the Query Groups held under it are reported lost then:
+// not before the deadline, and not only when the store answers again.
+func TestAWorkerSessionTheStoreCannotRenewIsLetGoAtItsDeadline(t *testing.T) {
+	ctx := context.Background()
+	store := &unreachableSessionStore{RedisStore: newViewGateTestStore(t)}
+	now := time.Now()
+	authority, err := store.AcquireControlLeader(ctx, "control-1", now, 10*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PublishAssignment(ctx, authority, ownership.AssignmentDecision{
+		QueryGroup: "qg-1", DesiredWorkerID: "worker-1", PlacementReason: ownership.PlacementRendezvous, DecidedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &productionPhaseTwoOwnership{dependencies: productionPhaseTwoOwnershipDependencies{
+		Store: store, Now: time.Now, Observer: observability.ObserverFunc(func(context.Context, observability.Observation) {}),
+	}}
+	loopCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	sessionDone := make(chan error, 1)
+	go func() {
+		sessionDone <- runtime.MaintainWorkerSession(loopCtx, "worker-1", 50*time.Millisecond, 400*time.Millisecond)
+	}()
+	testwait.Until(t, "the session acquired", func() bool {
+		_, held := runtime.workerSession.current()
+		return held
+	})
+	session, err := ownership.OpenSessionUnder(ctx, store, "qg-1", runtime.workerSession.current, time.Now(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queryGroup := &productionPhaseTwoQueryGroup{session: session, queryGroup: "qg-1", now: time.Now}
+	lost := make(chan error, 1)
+	go func() { lost <- queryGroup.MaintainLease(loopCtx, 20*time.Millisecond, time.Second) }()
+
+	store.cut.Store(true)
+	last, _ := runtime.workerSession.current()
+	select {
+	case err := <-lost:
+		lostAt := time.Now()
+		if !errors.Is(err, ownership.ErrStaleFence) {
+			t.Fatalf("MaintainLease() = %v once the session was let go, want ErrStaleFence", err)
+		}
+		if lostAt.Before(last.Deadline) {
+			t.Fatalf("the Query Group was lost %s before the session's deadline", last.Deadline.Sub(lostAt))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the session the store could not renew was not let go, and its Query Group not reported lost")
+	}
+	if _, held := runtime.workerSession.current(); held {
+		t.Fatal("the session is still held with the store unreachable past its deadline")
+	}
+	cancel()
+	<-sessionDone
+}
+
+// A Query Group already open is not opened again by the next round of the
+// same Assignment. Under a worker session the same process may take its own
+// lease back, so a second open would be granted with a new token and the
+// running Runner's next write refused; it is not the harmless BUSY it was.
+func TestARoundOfTheSameAssignmentDoesNotOpenAnOpenQueryGroupAgain(t *testing.T) {
+	cfg := validGoAccessRuntimeConfig()
+	queryGroups := []execution.QueryGroupIdentity{"query-group-1"}
+	runner := newFakePhaseTwoQueryGroup()
+	owner := &fakePhaseTwoOwnership{assigned: queryGroups, runner: runner}
+	bundle := mustPhaseTwoWorkerBundle(t, cfg, newPhaseTwoApplicationHealth(), &fakePhaseTwoControl{queryGroups: queryGroups}, owner)
+	if err := bundle.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() { _ = bundle.Shutdown(context.Background()) })
+	waitSignal(t, runner.leaseStarted, "query-group lease maintenance")
+	for round := 0; round < 2; round++ {
+		if err := bundle.applyAssignment(context.Background(), queryGroups); err != nil {
+			t.Fatalf("round %d of the same Assignment: %v", round, err)
+		}
+	}
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	if owner.opens != 1 {
+		t.Fatalf("OpenQueryGroup called %d times over three rounds of one Assignment, want once", owner.opens)
 	}
 }
