@@ -801,9 +801,11 @@ func changedSelectedActivations(
 // forces warming on a Plan re-entering the activation and on a Plan whose
 // state generation was edited, and a Slot frozen after the edit carries the
 // new generation on both sides of the comparison. What tells them apart is
-// the Guard: a generation the store already holds a marker for has run
-// before and is coming back; a generation with no marker is new, which is
-// an edit. A due Plan the activation does not name, or names as unselected,
+// what the store holds of the generation: a marker for it, or state or
+// no-data memory of it this Slot read from before it (ranBefore), says it has
+// run before and is coming back; a generation with neither is new, which is
+// an edit. The state is the evidence a Plan from a deployment's first
+// activation has - never forced to warm up, it never wrote a marker. A due Plan the activation does not name, or names as unselected,
 // is gone. Anything else - a revision or a generation that moved - is an
 // edit. An edit outranks the other two when a Slot carries several due
 // Plans, because it is the one a reader has to go and look at; gone outranks
@@ -827,6 +829,7 @@ func classifyActivationChange(
 	duePlans []execution.DuePlan,
 	activations execution.PlanActivationResult,
 	loadedGaps execution.GapLoadResult,
+	unseen map[execution.PlanKey]struct{},
 ) activationChange {
 	change := activationChangeUnchanged
 	for _, due := range duePlans {
@@ -852,9 +855,9 @@ func classifyActivationChange(
 			this = activationChangeUnchanged
 		case samePlan && fact.Selected.StateApplyEpoch != due.StateApplyEpoch:
 			this = activationChangeReactivated
-		case samePlan && generationSeenBefore(loadedGaps, due):
-			// Warming restarted on a generation the store already holds a
-			// marker for: the Plan ran under it before and is back.
+		case samePlan && ranBefore(loadedGaps, unseen, due):
+			// Warming restarted on a generation that has run: the Plan ran
+			// under it before and is back.
 			this = activationChangeReactivated
 		default:
 			this = activationChangeDrift
@@ -902,6 +905,7 @@ func guardReasonFor(
 	duePlans []execution.DuePlan,
 	activations execution.PlanActivationResult,
 	loadedGaps execution.GapLoadResult,
+	unseen map[execution.PlanKey]struct{},
 ) execution.ReasonCode {
 	guarded := make([]execution.DuePlan, 0, len(duePlans))
 	for _, due := range duePlans {
@@ -909,7 +913,7 @@ func guardReasonFor(
 			guarded = append(guarded, due)
 		}
 	}
-	return classifyActivationChange(guarded, activations, loadedGaps).reason()
+	return classifyActivationChange(guarded, activations, loadedGaps, unseen).reason()
 }
 
 // generationSeenBefore reports whether the loaded Guards hold a marker for
@@ -917,6 +921,22 @@ func guardReasonFor(
 func generationSeenBefore(loadedGaps execution.GapLoadResult, due execution.DuePlan) bool {
 	marker, found := loadedGaps.Find(due.GapIdentity())
 	return found && (marker.Status == execution.GapFound || marker.Status == execution.GapClearedTombstone)
+}
+
+// ranBefore reports whether the due Plan has run under its state generation
+// before this Slot: the store holds a marker for the generation, or this Slot
+// read state or no-data memory of it written before the Slot - the Plans not
+// in unseen (unseenPlans). unseen is nil where the Slot read neither, as one
+// completed without its query, and the marker alone then says.
+func ranBefore(loadedGaps execution.GapLoadResult, unseen map[execution.PlanKey]struct{}, due execution.DuePlan) bool {
+	if generationSeenBefore(loadedGaps, due) {
+		return true
+	}
+	if unseen == nil {
+		return false
+	}
+	_, nothingBefore := unseen[due.Key()]
+	return !nothingBefore
 }
 
 // reason is the completion reason the change is reported under, CONFIG_DRIFT
@@ -1814,7 +1834,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 	if len(changedPlans) > 0 {
 		var drift execution.CompletionAttribution
 		completion, drift = activationChangeCompletion(request.Contract, &primary,
-			classifyActivationChange(header.DuePlans, guardActivations, loadedGaps), bindings, targets)
+			classifyActivationChange(header.DuePlans, guardActivations, loadedGaps, unseenPlansFrom(ctx)), bindings, targets)
 		attribution.Cause, attribution.Reason, attribution.Scope = drift.Cause, drift.Reason, drift.Scope
 	} else {
 		var derived execution.CompletionAttribution
@@ -1849,7 +1869,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 			activations:       changedActivations,
 			completion:        completion,
 			completionCause:   attribution,
-			guardReason:       guardReasonFor(header.DuePlans, changedActivations, loadedGaps),
+			guardReason:       guardReasonFor(header.DuePlans, changedActivations, loadedGaps, unseenPlansFrom(ctx)),
 		}
 	}
 	progressActivations, err := coordinator.loadActivations(ctx, activationRequest)
@@ -1858,7 +1878,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 	}
 	if !guardActivations.SameSelections(progressActivations) {
 		driftCompletion, driftAttribution := activationChangeCompletion(request.Contract, &primary,
-			classifyActivationChange(header.DuePlans, progressActivations, loadedGaps), bindings, targets)
+			classifyActivationChange(header.DuePlans, progressActivations, loadedGaps, unseenPlansFrom(ctx)), bindings, targets)
 		changedSelected := changedSelectedActivations(guardActivations, progressActivations)
 		return execution.SlotExecutionResult{}, &activationProtectionRequiredError{
 			activationRequest: activationRequest,
@@ -1866,7 +1886,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 			activations:       changedSelected,
 			completion:        driftCompletion,
 			completionCause:   driftAttribution,
-			guardReason:       guardReasonFor(header.DuePlans, changedSelected, loadedGaps),
+			guardReason:       guardReasonFor(header.DuePlans, changedSelected, loadedGaps, unseenPlansFrom(ctx)),
 		}
 	}
 	// The activation facts are read again before Progress; the owner fence is

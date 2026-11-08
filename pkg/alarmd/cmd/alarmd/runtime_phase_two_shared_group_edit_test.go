@@ -435,8 +435,9 @@ func TestABacklogAcrossAnEditPastItsSnapshotEndsUnavailable(t *testing.T) {
 // the warmed-up strategy is still skipped - judged satisfied, it would write
 // its own key again at the same version and conflict on every attempt - the
 // Slot keeps the first attempt's word, and the others' events are not sent
-// again. Both words: a strategy back to a marker it had (PLAN_REACTIVATED),
-// and one back without one (CONFIG_DRIFT).
+// again. Both words: a strategy back (PLAN_REACTIVATED) - to a marker it had,
+// or, from the deployment's first activation and so without a marker, to the
+// state it left - and an edit that carries nothing (CONFIG_DRIFT).
 func TestAWarmUpSlotRetriedKeepsItsWordAndSendsNothingTwice(t *testing.T) {
 	for _, test := range []struct {
 		name    string
@@ -452,12 +453,21 @@ func TestAWarmUpSlotRetriedKeepsItsWordAndSendsNothingTwice(t *testing.T) {
 				fixture.leaveAndComeBack(ctx, ran+1)
 				return ran + 60
 			}},
-		{name: "back without a marker", word: contract.ReasonConfigDrift, away: "1001", staying: []string{"1003"},
+		{name: "back to its state, without a marker", word: contract.ReasonPlanReactivated, away: "1001", staying: []string{"1003"},
 			setUp: func(fixture *cutoverStallFixture, ctx context.Context) execution.EvaluationTime {
 				installSharedGroup(fixture.t, ctx, fixture.redisClient, sharedGroupOf(fixture.t, 1003))
 				fixture.cutOverAt(ctx, execution.EvaluationTime(fixture.base+30))
 				installSharedGroup(fixture.t, ctx, fixture.redisClient, sharedGroupOf(fixture.t, 1001, 1003))
 				fixture.cutOverAt(ctx, execution.EvaluationTime(fixture.base+31))
+				return execution.EvaluationTime(fixture.base + 60)
+			}},
+		{name: "an edit that carries nothing", word: contract.ReasonConfigDrift, away: "1001", staying: []string{"1003"},
+			setUp: func(fixture *cutoverStallFixture, ctx context.Context) execution.EvaluationTime {
+				installSharedGroup(fixture.t, ctx, fixture.redisClient, map[int64][]byte{
+					1001: sharedGroupStrategy(fixture.t, 1001, 1725000600, renumberLevels),
+					1003: sharedGroupStrategy(fixture.t, 1003, 1725000000, nil),
+				})
+				fixture.cutOverAt(ctx, execution.EvaluationTime(fixture.base+30))
 				return execution.EvaluationTime(fixture.base + 60)
 			}},
 	} {

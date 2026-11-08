@@ -165,7 +165,7 @@ func TestAMarkerAtTheSlotsOwnVersionKeepsTheWordItWasWrittenUnder(t *testing.T) 
 		{name: "no marker", want: activationChangeDrift},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			if change := classifyActivationChange([]execution.DuePlan{due}, rewarmed, testCase.gaps); change != testCase.want {
+			if change := classifyActivationChange([]execution.DuePlan{due}, rewarmed, testCase.gaps, nil); change != testCase.want {
 				t.Fatalf("change %v, want %v", change, testCase.want)
 			}
 		})
