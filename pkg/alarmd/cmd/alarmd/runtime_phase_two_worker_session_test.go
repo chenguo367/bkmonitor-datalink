@@ -214,7 +214,7 @@ func TestALeaseUnderTheSessionIsLostOnlyWhenTheSessionIs(t *testing.T) {
 		if !errors.Is(err, ownership.ErrStaleFence) {
 			t.Fatalf("MaintainLease() = %v once the session was let go, want ErrStaleFence", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("the loss of the session was not reported")
 	}
 }
@@ -292,7 +292,7 @@ func TestAWorkerSessionTheStoreCannotRenewIsLetGoAtItsDeadline(t *testing.T) {
 		if lostAt.Before(last.Deadline) {
 			t.Fatalf("the Query Group was lost %s before the session's deadline", last.Deadline.Sub(lostAt))
 		}
-	case <-time.After(5 * time.Second):
+	case <-testwait.Expired(t):
 		t.Fatal("the session the store could not renew was not let go, and its Query Group not reported lost")
 	}
 	if _, held := runtime.workerSession.current(); held {
