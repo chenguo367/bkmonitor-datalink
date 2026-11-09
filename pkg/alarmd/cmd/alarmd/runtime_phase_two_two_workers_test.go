@@ -203,8 +203,10 @@ func (fixture *twoWorkerFixture) openWorker(workerID string) *workerOfTwo {
 func (worker *workerOfTwo) holds() map[execution.QueryGroupIdentity]bool {
 	worker.bundle.mu.RLock()
 	defer worker.bundle.mu.RUnlock()
-	held := make(map[execution.QueryGroupIdentity]bool, len(worker.bundle.queryGroups))
-	for _, queryGroup := range worker.bundle.queryGroups {
+	// The Query Groups the worker runs, as ownedQueryGroups reads them; the
+	// bundle's queryGroups is every Query Group it knows of, held or not.
+	held := make(map[execution.QueryGroupIdentity]bool, len(worker.bundle.runners))
+	for queryGroup := range worker.bundle.runners {
 		held[queryGroup] = true
 	}
 	return held

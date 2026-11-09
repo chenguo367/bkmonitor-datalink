@@ -441,8 +441,9 @@ func TestSharedSchemaDeterministicLimitsConserveDelivery(t *testing.T) {
 // where it is read (sharedFrameBytes), so an answer of many frames is
 // delivered whole over HTTP, read once.
 func TestASharedSchemaAnswerOverHTTPHasNoWholeBound(t *testing.T) {
-	many := make([]responseSeries, 0, 2000)
-	for index := 0; index < 2000; index++ {
+	many := make([]responseSeries, 0, 1000)
+	// One schema per series: under the 1,024 a dictionary may declare.
+	for index := 0; index < 1000; index++ {
 		series := sharedTestSeries()
 		series.GroupValues = []json.RawMessage{json.RawMessage(fmt.Sprintf(`"192.0.2.%d-%d"`, index%250, index))}
 		many = append(many, series)
