@@ -168,7 +168,10 @@ func TestEachRuleThatDoesNotHoldReadsTheStoreBack(t *testing.T) {
 // A frozen series is read every Slot and never written, so its entry ages
 // while it is touched: served up to its usable life (the write's TTL less
 // the replay age) and not past it, where the key it answers for may have
-// expired in the store (rule 3). It leaves under expired, not untouched.
+// expired in the store (rule 3). It leaves under expired, not untouched. The
+// series beside it is no longer in the answer when their life ends, and
+// leaves all the same: the sweep at the start of the group's read takes out
+// what is past its life, asked for or not.
 func TestAFrozenSeriesIsServedUntilItsEntrysUsableLifeAndNotPast(t *testing.T) {
 	rig := newCacheRig(t, 1<<20)
 	rig.round(first, 2, 0)
@@ -181,8 +184,12 @@ func TestAFrozenSeriesIsServedUntilItsEntrysUsableLifeAndNotPast(t *testing.T) {
 	for {
 		rig.now = rig.now.Add(time.Minute)
 		at += 60
+		asked := 2
+		if !rig.now.Before(usableUntil) {
+			asked = 1
+		}
 		hits := rig.lookups(StateCacheHit)
-		reads := rig.load(slot{at: at, epoch: 1, segmentStart: 60, fence: fenceOf(3)}, 2)
+		reads := rig.load(slot{at: at, epoch: 1, segmentStart: 60, fence: fenceOf(3)}, asked)
 		served := rig.lookups(StateCacheHit) - hits
 		if rig.now.Before(usableUntil) {
 			if served != 2 || reads != 0 {
@@ -192,7 +199,7 @@ func TestAFrozenSeriesIsServedUntilItsEntrysUsableLifeAndNotPast(t *testing.T) {
 		}
 		departures := rig.store.StateCacheStats().Departures
 		if served != 0 || reads == 0 || departures[StateCacheDepartExpired] != 2 || departures[StateCacheDepartUntouched] != 0 {
-			t.Fatalf("%s past the usable life, %d served, %d reads, departures %v; want the store read back and both out under expired",
+			t.Fatalf("%s past the usable life, %d served, %d reads, departures %v; want the store read back and both out under expired, the one not asked for too",
 				rig.now.Sub(usableUntil), served, reads, departures)
 		}
 		return

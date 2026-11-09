@@ -598,9 +598,10 @@ func (reader *boundedReader) Read(buffer []byte) (int, error) {
 // at a time, so one value's bound is what an answer of any length holds.
 // The window is measured from where the decoder has consumed to
 // (json.Decoder.InputOffset), not from what this reader handed it - the
-// decoder reads ahead, and a window from the handed count would give the
-// next value less than its bound. An overrun answers with the window's own
-// named error rather than io.EOF, which would read as an answer cut short.
+// decoder reads ahead, and a window from the handed count would let it pull
+// what it read ahead on top of the next value's bound. An overrun answers
+// with the window's own named error rather than io.EOF, which would read as
+// an answer cut short.
 type valueWindow struct {
 	reader   io.Reader
 	read     int64

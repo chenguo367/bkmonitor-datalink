@@ -11,8 +11,11 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
 
@@ -34,5 +37,32 @@ func TestNoInjectedPlacementIsTheCompatibilityAlone(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("eligibility with no placement = %#v, want the compatibility alone %#v", got, want)
+	}
+}
+
+// An injected placement narrows the compatibility and does not replace it:
+// a Query Group pinned to worker-b is not placed on worker-a, nor on a
+// worker-b of another profile. The two-worker cases cannot show this on
+// their own - the Leader's rendezvous may pick the pinned worker anyway.
+func TestAnInjectedPlacementNarrowsTheCompatibility(t *testing.T) {
+	expected, err := phaseTwoExpectedWorkerCompatibility(config.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	placement := &pinnedWorkers{pins: map[execution.QueryGroupIdentity]string{"qg": "worker-b"}}
+	eligibility, err := phaseTwoWorkerEligibility(expected, placement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := func(id string, compatibility ownership.WorkerCompatibility) ownership.WorkerRegistration {
+		return ownership.WorkerRegistration{WorkerID: id, DeploymentProfile: compatibility.DeploymentProfile,
+			CapabilitiesDigest: compatibility.CapabilitiesDigest, ExecutionContractDigest: compatibility.ExecutionContractDigest}
+	}
+	other := expected
+	other.DeploymentProfile += "-other"
+	now := time.Unix(1_700_000_000, 0)
+	if eligibility.Eligible("qg", worker("worker-a", expected), now) || !eligibility.Eligible("qg", worker("worker-b", expected), now) ||
+		eligibility.Eligible("qg", worker("worker-b", other), now) {
+		t.Fatal("the eligibility under an injected placement is not where both the placement and the compatibility are")
 	}
 }
