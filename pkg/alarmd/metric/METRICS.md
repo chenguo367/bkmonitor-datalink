@@ -407,6 +407,12 @@ CPU budget the process is running against, labelled with where it was resolved f
 
 Cumulative CFS throttling. It separates 'busy' from 'not allowed to run', which no busy-time metric can: a process sitting at its quota looks identical to an idle one being held back. Absent when it cannot be read.
 
+## alarmd_container_memory_cgroup_info
+
+Labels: `version`, `memory_cgroup`, `usage_file`
+
+Which memory cgroup this process's memory gauges read, value 1: version (v2, v1 or unknown), the memory line of /proc/self/cgroup (memory_cgroup), and the usage file container_memory_used_bytes comes from (usage_file). Another reader of the container's memory - cAdvisor, kubectl top - may read another memcg or another counter: compare its path and container_memory_v1_bytes against this.
+
 ## alarmd_container_memory_limit_bytes
 
 Labels: `source`
@@ -422,6 +428,12 @@ The container cgroup's charge by kind (memory.stat): anon is process memory (ano
 ## alarmd_container_memory_used_bytes
 
 Memory charged to the container's cgroup. This is not the Go heap: the two differ by everything the heap does not account for, and it is this number that gets the process killed. Absent when it cannot be read, which is not the same as zero.
+
+## alarmd_container_memory_v1_bytes
+
+Labels: `counter`
+
+On cgroup v1, each counter of the memory cgroup by name: rss and total_rss (memory.stat; total_ includes child cgroups), usage_in_bytes and max_usage_in_bytes, and memsw_usage_in_bytes where swap accounting is on. Absent on v2 and where a file cannot be read.
 
 ## alarmd_control_cache_audit_total
 

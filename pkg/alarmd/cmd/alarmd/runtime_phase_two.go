@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"runtime"
 	"sort"
 	"sync"
@@ -225,11 +226,16 @@ func runPhaseTwoApplicationWithDependencies(
 	// The collector budget rides on the same line. Nothing outside the process
 	// can set it, so this and the facts table are the only two places anyone
 	// reading a running Pod can find out what the collector was told.
+	cgroupIdentity := metric.ReadCgroupMemoryIdentity(os.ReadFile)
 	logger.InfoEvent(observability.StageStartup, observability.ResultStarted, 0,
 		slog.String("diagnostics_listen", cfg.HTTP.DiagnosticsFact()),
 		slog.Int64("go_memory_limit_bytes", profile.Capacity.GoMemoryLimitBytes),
 		slog.Int("go_gc_percent", profile.Capacity.GoGCPercent),
-		slog.String("memory_source", profile.MemorySource))
+		slog.String("memory_source", profile.MemorySource),
+		// Which memcg and which usage file the memory gauges read, so a
+		// reader comparing another tool's number knows what this one is.
+		slog.String("memory_cgroup_version", cgroupIdentity.Version), slog.String("memory_cgroup", cgroupIdentity.Line),
+		slog.String("memory_usage_file", cgroupIdentity.UsageFile))
 	// A series delivery digest assembled from its shared parts that differed
 	// from the generic one: counted on canonical_encoding_records_shadow_total
 	// and said here at most once a minute. The generic digest was returned.
