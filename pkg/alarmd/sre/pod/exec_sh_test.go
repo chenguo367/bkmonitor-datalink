@@ -645,9 +645,12 @@ func TestStoppedTimersLeaveNoSleep(t *testing.T) {
 			lengths[strconv.Itoa(first+index*parallel*runs+run)] = setup.name
 		}
 	}
-	ctx := testwait.Context(t)
-	var wg sync.WaitGroup
+	// One setup at a time, each within a bound of its own: under the race
+	// detector a supervisor under setsid starts this test binary as the
+	// setsid stand-in, and all of them at once did not finish in one bound.
 	for index, setup := range setups {
+		ctx := testwait.Context(t)
+		var wg sync.WaitGroup
 		for worker := 0; worker < parallel; worker++ {
 			wg.Add(1)
 			go func() {
@@ -667,8 +670,8 @@ func TestStoppedTimersLeaveNoSleep(t *testing.T) {
 				}
 			}()
 		}
+		wg.Wait()
 	}
-	wg.Wait()
 	var left []string
 	t.Cleanup(func() {
 		for _, line := range left {
