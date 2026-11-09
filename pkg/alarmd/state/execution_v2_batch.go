@@ -501,7 +501,7 @@ func (store *ExecutionStore) applyRuntime(
 			Value: encoded, TTL: ttl}
 		if guard != nil {
 			staged[index] = stateCacheEntry{key: keys[index], group: request.Contract.Slot.QueryGroup, raw: encoded,
-				digest: ExpectedValueDigest(encoded), revision: witness.framedRevision + 1, applyVersion: mutation.ApplyVersion,
+				digest: ExpectedValueDigest(encoded), applyVersion: mutation.ApplyVersion,
 				fence: execution.OwnerFence{QueryGroup: request.Contract.Slot.QueryGroup, OwnerID: guard.OwnerID,
 					OwnerEpoch: guard.OwnerEpoch, LeaseToken: guard.LeaseToken},
 				epoch: mutation.ApplyVersion.StateApplyEpoch, segmentStart: request.Contract.ScheduleSegmentStart,

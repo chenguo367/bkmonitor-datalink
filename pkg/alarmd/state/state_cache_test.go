@@ -100,6 +100,21 @@ func (rig *cacheRig) round(s slot, series int, revision uint64) (int, execution.
 	return reads, result
 }
 
+// load reads the series as a Slot of a frozen Plan does, writing nothing,
+// and returns how many reads reached the store.
+func (rig *cacheRig) load(s slot, series int) int {
+	rig.t.Helper()
+	items := make([]execution.StatePreflightItem, series)
+	for index := range items {
+		items[index] = execution.StatePreflightItem{Identity: seriesIdentity(index), ApplyVersion: s.version(), Sharded: s.sharded}
+	}
+	before := rig.backend.mgetCalls
+	if _, err := rig.store.LoadRuntime(context.Background(), execution.StatePreflightRequest{Contract: s.contract(), Items: items, OwnerFence: s.fence}); err != nil {
+		rig.t.Fatalf("LoadRuntime() error = %v", err)
+	}
+	return rig.backend.mgetCalls - before
+}
+
 func (rig *cacheRig) lookups(result string) uint64 {
 	return rig.store.StateCacheStats().Lookups[result]
 }
@@ -147,6 +162,80 @@ func TestEachRuleThatDoesNotHoldReadsTheStoreBack(t *testing.T) {
 					reads, test.word, rig.lookups(test.word), rig.lookups(StateCacheHit), test.word)
 			}
 		})
+	}
+}
+
+// A frozen series is read every Slot and never written, so its entry ages
+// while it is touched: served up to its usable life (the write's TTL less
+// the replay age) and not past it, where the key it answers for may have
+// expired in the store (rule 3). It leaves under expired, not untouched.
+func TestAFrozenSeriesIsServedUntilItsEntrysUsableLifeAndNotPast(t *testing.T) {
+	rig := newCacheRig(t, 1<<20)
+	rig.round(first, 2, 0)
+	ttl, err := rig.store.runtimeTTL(testRetention(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usableUntil := rig.now.Add(ttl - time.Minute)
+	at := first.at
+	for {
+		rig.now = rig.now.Add(time.Minute)
+		at += 60
+		hits := rig.lookups(StateCacheHit)
+		reads := rig.load(slot{at: at, epoch: 1, segmentStart: 60, fence: fenceOf(3)}, 2)
+		served := rig.lookups(StateCacheHit) - hits
+		if rig.now.Before(usableUntil) {
+			if served != 2 || reads != 0 {
+				t.Fatalf("at %s before the usable life ends, %d served and %d reads; want both served", usableUntil.Sub(rig.now), served, reads)
+			}
+			continue
+		}
+		departures := rig.store.StateCacheStats().Departures
+		if served != 0 || reads == 0 || departures[StateCacheDepartExpired] != 2 || departures[StateCacheDepartUntouched] != 0 {
+			t.Fatalf("%s past the usable life, %d served, %d reads, departures %v; want the store read back and both out under expired",
+				rig.now.Sub(usableUntil), served, reads, departures)
+		}
+		return
+	}
+}
+
+// A frozen series' renewal that finds its key gone takes the key out of the
+// cache (rule 4): the next Slot reads it absent from the store instead of
+// being served the bytes it would answer for. The key beside it, still
+// there, is served.
+func TestARenewalThatFindsTheKeyGoneTakesItOut(t *testing.T) {
+	rig := newCacheRig(t, 1<<20)
+	rig.round(first, 2, 0)
+	gone, err := RuntimeStateKeyV3("alarmd", seriesIdentity(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	delete(rig.backend.values, gone)
+	ttl, err := rig.store.runtimeTTL(testRetention(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	renewal, err := rig.store.RenewFrozenRuntime(context.Background(), execution.FrozenStateRenewalRequest{
+		Contract: frozenRef(), Retention: testRetention(),
+		Now: time.Unix(int64(first.at), 0).Add(ttl - time.Second),
+		Items: []execution.FrozenSeriesState{{Identity: seriesIdentity(0), LastApplied: first.at,
+			Representation: execution.StateRepresentationFramed}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renewal.Items[0].Outcome != execution.FrozenRenewalMissing {
+		t.Fatalf("fixture: the renewal ended %q, want %q", renewal.Items[0].Outcome, execution.FrozenRenewalMissing)
+	}
+	if got := rig.store.StateCacheStats().Departures[StateCacheDepartRenewalMissing]; got != 1 {
+		t.Fatalf("departures{renewal_missing} = %d, want the gone key out", got)
+	}
+	rig.now = rig.now.Add(time.Minute)
+	absent := rig.lookups(StateCacheMissAbsent)
+	if reads, _ := rig.round(second, 2, 1); reads == 0 || rig.lookups(StateCacheMissAbsent) != absent+1 ||
+		rig.lookups(StateCacheHit) != 1 {
+		t.Fatalf("reads %d, miss_absent +%d, hits %d; want the gone key read from the store and the other served",
+			reads, rig.lookups(StateCacheMissAbsent)-absent, rig.lookups(StateCacheHit))
 	}
 }
 

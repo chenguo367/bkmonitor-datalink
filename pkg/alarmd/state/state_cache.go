@@ -83,7 +83,6 @@ type stateCacheEntry struct {
 	// digest is the stored bytes' SHA-1 as the write's witness names it:
 	// what this process last wrote under the key.
 	digest       string
-	revision     uint64
 	applyVersion execution.ApplyVersion
 	// fence is the owner fence the write ran under (rule 1); epoch and
 	// segmentStart the Plan's activation it ran under (rule 6).
