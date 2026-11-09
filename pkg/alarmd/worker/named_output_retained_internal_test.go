@@ -72,9 +72,9 @@ func TestANamedOutputTableIsChargedToTheSlotAndReleasedWithIt(t *testing.T) {
 func TestANamedOutputTablePastTheShareIsRefused(t *testing.T) {
 	completion := namedOutputCompletion(10)
 	retained := namedOutputRecordsRetainedBytes(completion)
-	// The share is three quarters of the pool: room for the Slot's own 100
+	// The share is seven eighths of the pool: room for the Slot's own 100
 	// bytes and not for the table beside them.
-	co, stream := namedOutputStream((100+retained)/3*4-4, 100)
+	co, stream := namedOutputStream((100+retained)/7*8-8, 100)
 	err := stream.retainNamedOutputs(context.Background(), completion)
 	refusal, deterministic := execution.ShareRefusalOf(fmt.Errorf("alarmd worker: complete Slot: %w", err))
 	if err == nil || !deterministic || refusal.RequestedBytes != retained || refusal.OwnUsedBytes != 100 {

@@ -38,8 +38,8 @@ func TestThePoolIsTheSameWithTheStateCacheOnOrOff(t *testing.T) {
 		document string
 		want     uint64
 	}{
-		{"phase_two:\n  state_cache:\n    disabled: true\n", inputs.MemoryLimitBytes / retainedMemoryDivisor},
-		{"phase_two:\n  state_cache:\n    disabled: false\n", inputs.MemoryLimitBytes / retainedMemoryDivisor},
+		{"phase_two:\n  state_cache:\n    disabled: true\n", inputs.MemoryLimitBytes / 4},
+		{"phase_two:\n  state_cache:\n    disabled: false\n", inputs.MemoryLimitBytes / 4},
 	} {
 		cfg := Default().WithContainerCapacity()
 		if err := decodeDocument([]byte(test.document), &cfg); err != nil {

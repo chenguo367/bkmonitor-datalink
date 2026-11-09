@@ -28,11 +28,11 @@ func TestOneQueryGroupCannotTakeTheWholePool(t *testing.T) {
 	}}
 	// An empty pool, so nothing but the share can refuse this.
 	stream := &streamedExecution{coordinator: co, began: true, retainedByPhase: retainedSeed(60)}
-	err := co.acquireEffects(effectCounts{states: 1}, 20, stream, stream.reservationPhase("normal_output"))
+	err := co.acquireEffects(effectCounts{states: 1}, 30, stream, stream.reservationPhase("normal_output"))
 
 	var exceeded *provisionalBudgetExceededError
 	if !errors.As(err, &exceeded) {
-		t.Fatalf("an object asking for 80 of a 100 pool with nobody else running was admitted: %v", err)
+		t.Fatalf("an object asking for 90 of a 100 pool with nobody else running was admitted: %v", err)
 	}
 	if !exceeded.share {
 		t.Fatal("refused, but not as a share: reported as a full pool it reads as somebody else's doing, " +
@@ -45,8 +45,8 @@ func TestOneQueryGroupCannotTakeTheWholePool(t *testing.T) {
 		t.Fatalf("shared_used = %d, want none: no other Query Group is part of why this was refused",
 			exceeded.facts.SharedUsed)
 	}
-	if exceeded.facts.OwnUsed == nil || *exceeded.facts.OwnUsed != 60 || exceeded.facts.Limit != 75 {
-		t.Fatalf("facts = %+v, want this object's own total against three quarters of the pool", exceeded.facts)
+	if exceeded.facts.OwnUsed == nil || *exceeded.facts.OwnUsed != 60 || exceeded.facts.Limit != 88 {
+		t.Fatalf("facts = %+v, want this object's own total against seven eighths of the pool", exceeded.facts)
 	}
 	// Nothing was taken: a refused reservation must not leave the pool charged.
 	if co.reservations.retainedBytes != 0 {
@@ -71,10 +71,10 @@ func TestTheShareIsMeasuredInBytesNotMutations(t *testing.T) {
 	}}
 	// Far inside every count budget, far over the byte share.
 	stream := &streamedExecution{coordinator: co, began: true, retainedByPhase: retainedSeed(600)}
-	err := co.acquireEffects(effectCounts{states: 1}, 200, stream, stream.reservationPhase("normal_output"))
+	err := co.acquireEffects(effectCounts{states: 1}, 300, stream, stream.reservationPhase("normal_output"))
 	var exceeded *provisionalBudgetExceededError
 	if !errors.As(err, &exceeded) || !exceeded.share {
-		t.Fatalf("a Slot at 1 mutation and 800 bytes of a 1000-byte pool was not refused by share: %v", err)
+		t.Fatalf("a Slot at 1 mutation and 900 bytes of a 1000-byte pool was not refused by share: %v", err)
 	}
 	if exceeded.budget != observability.CapacityBudgetRetainedBytes {
 		t.Fatalf("budget = %q, want the byte budget", exceeded.budget)
