@@ -22,7 +22,7 @@ func framedSeries(series, bad int) []responseSeries {
 	for index := 0; index < series; index++ {
 		item := responseSeries{Columns: []string{"_time", "_value"}, Types: []string{"float", "float"},
 			GroupKeys: []string{"bk_target_cloud_id", "bk_target_ip", "device_name"},
-			GroupValues: []json.RawMessage{json.RawMessage(`"0"`), json.RawMessage(fmt.Sprintf(`"10.0.%d.%d"`, index/43/256, index/43%256)),
+			GroupValues: []json.RawMessage{json.RawMessage(`"0"`), json.RawMessage(fmt.Sprintf(`"host-%06d"`, index/43)),
 				json.RawMessage(fmt.Sprintf(`"cpu%d"`, index%43))},
 			Values: [][]json.RawMessage{{json.RawMessage(`1700123940000`), json.RawMessage(fmt.Sprintf(`%d.%d`, index%100, index%7))}}}
 		if index == bad {

@@ -69,7 +69,7 @@ func largeAnswerBody(tb testing.TB, series int) []byte {
 	for index := 0; index < series; index++ {
 		host, core := index/43, index%43
 		frame = append(frame, map[string]any{"s": 0,
-			"g": []json.RawMessage{json.RawMessage(`"0"`), json.RawMessage(fmt.Sprintf(`"10.%d.%d.%d"`, host/65536, host/256%256, host%256)),
+			"g": []json.RawMessage{json.RawMessage(`"0"`), json.RawMessage(fmt.Sprintf(`"host-%08d"`, host)),
 				json.RawMessage(fmt.Sprintf(`"cpu%d"`, core))},
 			"r": [][]json.RawMessage{{json.RawMessage(`1700123940000`), json.RawMessage(fmt.Sprintf(`%d.%d`, index%100, index%7))}}})
 		if len(frame) == sharedFrameSeries || index == series-1 {
