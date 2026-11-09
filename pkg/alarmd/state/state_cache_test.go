@@ -395,6 +395,48 @@ func TestAFullCacheKeepsItsResidentsAndTakesInNoNewQueryGroup(t *testing.T) {
 	}
 }
 
+// The cache borrows only what no Slot has reserved of the retained pool:
+// with no room it takes nothing in, however far under its budget, and with
+// room it does - the same cache, the same budget.
+func TestTheCacheTakesInOnlyWhatThePoolHasRoomFor(t *testing.T) {
+	rig := newCacheRig(t, 1<<20)
+	room := uint64(0)
+	rig.store.LendStateCacheRoom(func() uint64 { return room })
+	rig.round(first, 2, 0)
+	if stats := rig.store.StateCacheStats(); stats.Bytes != 0 || rig.store.StateCacheBorrower().BorrowedRetainedBytes() != 0 {
+		t.Fatalf("charge %d with no room in the pool; want nothing borrowed", stats.Bytes)
+	}
+	room = 1 << 20
+	rig.now = rig.now.Add(time.Minute)
+	rig.round(second, 2, 1)
+	if stats := rig.store.StateCacheStats(); stats.Bytes == 0 || uint64(stats.Bytes) != rig.store.StateCacheBorrower().BorrowedRetainedBytes() {
+		t.Fatalf("charge %d, borrowed %d with room again; want the group taken in and borrowed as charged",
+			stats.Bytes, rig.store.StateCacheBorrower().BorrowedRetainedBytes())
+	}
+}
+
+// Asked for room by a Slot, the cache gives its Query Group back whole, under
+// yielded, and keeps it out - read back from the store - until the pool has
+// room for it again.
+func TestACacheAskedForRoomGivesItsQueryGroupBackWhole(t *testing.T) {
+	rig := newCacheRig(t, 1<<20)
+	rig.round(first, 3, 0)
+	borrower := rig.store.StateCacheBorrower()
+	if borrower.BorrowedRetainedBytes() == 0 {
+		t.Fatal("fixture: nothing was borrowed")
+	}
+	borrower.YieldRetainedBytes(1)
+	if stats := rig.store.StateCacheStats(); borrower.BorrowedRetainedBytes() != 0 || stats.QueryGroups != 0 ||
+		stats.Departures[StateCacheDepartYielded] != 3 {
+		t.Fatalf("after one byte asked for: borrowed %d, groups %d, departures %v; want the group given back whole under yielded",
+			borrower.BorrowedRetainedBytes(), stats.QueryGroups, stats.Departures)
+	}
+	rig.now = rig.now.Add(time.Minute)
+	if reads, _ := rig.round(second, 3, 1); reads == 0 || rig.lookups(StateCacheMissOverBudget) != 3 {
+		t.Fatalf("reads %d, miss_over_budget %d; want the group given back read from the store", reads, rig.lookups(StateCacheMissOverBudget))
+	}
+}
+
 // Every departure gives its charge back: a Query Group released leaves the
 // cache at zero.
 func TestADepartureGivesItsChargeBack(t *testing.T) {

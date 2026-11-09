@@ -195,7 +195,7 @@ func (coordinator *SlotExecutionCoordinator) acquireEffects(delta effectCounts, 
 	if share := coordinator.qgShareBytes(); share > 0 && stream.retainedTotal()+retained > share {
 		return shareRejection(phase, stream.retainedTotal(), retained, share, stream.ownBudgetUsage(coordinator.budget))
 	}
-	if retained > coordinator.budget.MaxRetainedBytes-reservation.retainedBytes {
+	if !coordinator.fitsLocked(retained) {
 		return budgetRejection(observability.CapacityBudgetRetainedBytes, phase, reservation.retainedBytes, retained, coordinator.budget.MaxRetainedBytes, stream.ownBudget(observability.CapacityBudgetRetainedBytes), stream.ownBudgetUsage(coordinator.budget))
 	}
 	reservation.states += delta.states

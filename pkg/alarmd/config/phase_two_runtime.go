@@ -23,10 +23,11 @@ import (
 const PhaseTwoWorkerIDEnvironment = "ALARMD_PHASE_TWO_WORKER_ID"
 
 // PhaseTwoStateCacheConfig switches the write-through State cache (fourth-
-// batch design §4). On, as the user chose (11-09), it takes the container's
-// thirty-second out of the retained-bytes pool; disabled, the pool is the
-// whole quarter again and every series is read back from Redis each round,
-// as before the cache: the rollback that needs no rebuild.
+// batch design §4). On, as the user chose (11-09), it borrows up to the
+// container's thirty-second of the retained-bytes pool while no Slot has
+// reserved it; disabled, every series is read back from Redis each round, as
+// before the cache: the rollback that needs no rebuild. The pool is the same
+// either way.
 type PhaseTwoStateCacheConfig struct {
 	Disabled bool `yaml:"disabled"`
 }

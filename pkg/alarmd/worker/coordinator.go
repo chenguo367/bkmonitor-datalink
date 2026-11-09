@@ -103,6 +103,10 @@ type Ports struct {
 	// those conditions' records (dynamic_group_unavailable), by name. Plans
 	// whose targets name no dynamic group never touch it.
 	ScopeGroups ScopeGroupResolver
+	// RetainedBorrower is the State cache, which holds what no Slot has
+	// reserved of the retained pool and gives it back the moment a Slot
+	// needs it. Optional: without it the pool has no borrower.
+	RetainedBorrower execution.RetainedBytesBorrower
 }
 
 // ScopeGroupResolver reads one dynamic group a target scope names for one
@@ -214,7 +218,7 @@ func (coordinator *SlotExecutionCoordinator) acquireProvisional(series, retained
 	// The bytes are the budget and are judged first; the series count is a
 	// guardrail at the smallest a series can encode, which binds only when
 	// the byte accounting has gone wrong.
-	if retainedBytes > coordinator.budget.MaxRetainedBytes-coordinator.reservations.retainedBytes {
+	if !coordinator.fitsLocked(retainedBytes) {
 		return budgetRejection(observability.CapacityBudgetRetainedBytes, phase, coordinator.reservations.retainedBytes, retainedBytes, coordinator.budget.MaxRetainedBytes, stream.ownBudget(observability.CapacityBudgetRetainedBytes), stream.ownBudgetUsage(coordinator.budget))
 	}
 	if series > coordinator.budget.MaxSeries-coordinator.reservations.series {
@@ -238,11 +242,39 @@ func (coordinator *SlotExecutionCoordinator) releaseProvisional(series, retained
 func (coordinator *SlotExecutionCoordinator) tryAcquireRetained(retainedBytes uint64) bool {
 	coordinator.reservations.mu.Lock()
 	defer coordinator.reservations.mu.Unlock()
-	if retainedBytes > coordinator.budget.MaxRetainedBytes-coordinator.reservations.retainedBytes {
+	if !coordinator.fitsLocked(retainedBytes) {
 		return false
 	}
 	coordinator.reservations.retainedBytes += retainedBytes
 	return true
+}
+
+// fitsLocked reports whether retainedBytes more fit the retained pool, under
+// reservations.mu: what no Slot has reserved, with what the State cache
+// borrowed of it given back first, as far as the bytes need it. The cache
+// never stands in a Slot's way - a reservation is refused only where the pool
+// has no room for it with the cache empty - and gives back nothing for one
+// that would be refused anyway.
+func (coordinator *SlotExecutionCoordinator) fitsLocked(retainedBytes uint64) bool {
+	free := coordinator.budget.MaxRetainedBytes - coordinator.reservations.retainedBytes
+	if retainedBytes > free {
+		return false
+	}
+	if borrower := coordinator.ports.RetainedBorrower; borrower != nil {
+		if lent := min(borrower.BorrowedRetainedBytes(), free); retainedBytes > free-lent {
+			borrower.YieldRetainedBytes(retainedBytes - (free - lent))
+		}
+	}
+	return true
+}
+
+// RetainedRoom is what no Slot running on coordinator has reserved of the
+// retained pool: what the State cache may borrow. A function, as
+// RetainedReserved is.
+func RetainedRoom(coordinator *SlotExecutionCoordinator) uint64 {
+	coordinator.reservations.mu.Lock()
+	defer coordinator.reservations.mu.Unlock()
+	return coordinator.budget.MaxRetainedBytes - coordinator.reservations.retainedBytes
 }
 
 // RetainedReserved is what the Slots running on coordinator hold reserved

@@ -62,14 +62,17 @@ const (
 
 	compileCacheMemoryDivisor = 32
 
-	// stateCacheMemoryDivisor is the write-through State cache's share of the
-	// container, taken out of the retained-bytes pool (fourth-batch design
-	// §4.5, option 1, user 11-09): on 4 GiB the pool goes 1,024 -> 896 MiB
-	// and the cache holds 128 MiB, about 82,000 series. The pool, not the
-	// container, gives it: the cache is resident heap, and with the pool full
-	// the heap stays further under the soft limit than before (2,233 against
-	// 2,367 MiB). Query permits keep their own line (DeriveExecution), which
-	// does not move.
+	// stateCacheMemoryDivisor bounds the write-through State cache: at most
+	// the container's thirty-second, 128 MiB on 4 GiB (about 82,000 series),
+	// borrowed from the retained-bytes pool (fourth-batch design §4.5). The
+	// pool, not the container, gives it: the cache is resident heap, so the
+	// cache and the Slots' reservations together stay within the pool. It is
+	// borrowed, not taken out: the cache holds only what no Slot has
+	// reserved and gives it back when a Slot needs it, so the share one
+	// Query Group may hold stays three quarters of the whole pool. Taking it
+	// out cut that share on 4 GiB from 768 to 672 MiB and refused a Query
+	// Group of about 700 MiB that had run beside no cache. Query permits keep
+	// their own line (DeriveExecution), which does not move.
 	stateCacheMemoryDivisor = 32
 	// Every compile cache entry is charged a 64-byte header before anything
 	// it holds (strategy.estimateCompileResultBytes), so none is smaller.
@@ -480,18 +483,12 @@ func DeriveCompileCache(inputs CapacityInputs, maxCompiledPlanBytes int) Derived
 // The bytes govern. What is left of the count is a runaway guardrail at the
 // smallest size a series can have, so it binds only where the byte accounting
 // itself has gone wrong.
+//
+// The State cache takes nothing out of the pool: it borrows what no Slot has
+// reserved of it and gives that back when a Slot needs it, so the share one
+// Query Group may hold is the same with the cache on or off.
 func DeriveCoordinator(inputs CapacityInputs, storeItemsPerBatch, chunkedApplyBudget uint64) PhaseTwoCoordinatorConfig {
-	return DeriveCoordinatorWith(inputs, storeItemsPerBatch, chunkedApplyBudget, true)
-}
-
-// DeriveCoordinatorWith is DeriveCoordinator with the State cache on or
-// off: off, its share stays in the pool.
-func DeriveCoordinatorWith(inputs CapacityInputs, storeItemsPerBatch, chunkedApplyBudget uint64, stateCache bool) PhaseTwoCoordinatorConfig {
-	cache := uint64(0)
-	if stateCache {
-		cache = DeriveStateCacheBytes(inputs)
-	}
-	retained := max(inputs.MemoryLimitBytes/retainedMemoryDivisor-cache, uint64(bytesPerMutation))
+	retained := max(inputs.MemoryLimitBytes/retainedMemoryDivisor, uint64(bytesPerMutation))
 	guardrail := max(chunkedApplyBudget, storeItemsPerBatch, 1)
 	return PhaseTwoCoordinatorConfig{
 		MaxRetainedBytes:  retained,
@@ -506,8 +503,9 @@ func DeriveCoordinatorWith(inputs CapacityInputs, storeItemsPerBatch, chunkedApp
 	}
 }
 
-// DeriveStateCacheBytes is the write-through State cache's budget: the
-// container's thirty-second, taken out of the retained-bytes pool.
+// DeriveStateCacheBytes is the most the write-through State cache may hold:
+// the container's thirty-second, borrowed from the retained-bytes pool while
+// no Slot has reserved it, never taken out of it.
 func DeriveStateCacheBytes(inputs CapacityInputs) uint64 {
 	return inputs.MemoryLimitBytes / stateCacheMemoryDivisor
 }

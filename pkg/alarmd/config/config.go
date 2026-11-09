@@ -767,12 +767,6 @@ func decodeDocument(raw []byte, cfg *Config) error {
 		}
 		cfg.UnknownKeys = unknown
 	}
-	if cfg.PhaseTwo.StateCache.Disabled {
-		// The pool was derived with the cache's share out of it, before the
-		// file said the cache is off: give it back.
-		cfg.PhaseTwo.Coordinator = DeriveCoordinatorWith(DetectCapacityInputs(),
-			uint64(cfg.Limits.Store.MaxKeysPerBatch), cfg.chunkedStateApplyBudget(), false)
-	}
 	// yaml.v3 decodes an explicit null as nil, just like omission. Preserve
 	// the declaration so roles: null cannot silently enable every role.
 	if cfg.Roles == nil && yamlRolesDeclared(&document) {

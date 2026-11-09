@@ -2097,7 +2097,7 @@ Runtime State mutations found already on disk, by where that was decided and how
 
 ## alarmd_state_cache_budget_bytes
 
-The State cache's budget: the container's thirty-second, taken out of the retained-bytes pool. A Query Group that would go past it is kept out and read back; the resident ones stay.
+The most the State cache may hold: the container's thirty-second, borrowed from the retained-bytes pool while no Slot has reserved it and given back when one needs it. A Query Group that would go past it or past the pool's room is kept out and read back; the resident ones stay.
 
 ## alarmd_state_cache_bytes
 
@@ -2107,13 +2107,13 @@ The State cache's charge: each entry's value and key rounded to their size class
 
 Labels: `reason`
 
-Entries that left the State cache, by reason: released (the Query Group stopped, was lost, declined or handed over), unknown (a write of its request ended in doubt), conflict (its write did not apply), expired, renewal_missing, untouched (neither read nor written for two of its own intervals), over_budget (its Query Group grew past the room and left whole). Every cell exists from the start.
+Entries that left the State cache, by reason: released (the Query Group stopped, was lost, declined or handed over), unknown (a write of its request ended in doubt), conflict (its write did not apply), expired, renewal_missing, untouched (neither read nor written for two of its own intervals), over_budget (its Query Group grew past the room and left whole), yielded (its Query Group was given back whole to the retained pool for a Slot that needed the room). Every cell exists from the start.
 
 ## alarmd_state_cache_lookups_total
 
 Labels: `result`
 
-Runtime State keys a load asked the write-through State cache for, by result: hit (served from what this process last wrote), or why it was read back - miss_absent (nothing kept), miss_fence (another owner fence), miss_unknown (the last write's outcome unknown), miss_expired (past its key's life less the replay age), miss_replay (a replay, retry or older Slot), miss_activation (the Plan's activation changed: moved, put back, reactivated, edited), miss_sharded (a split strategy's Plan, never served), miss_over_budget (its Query Group kept out by the budget). Every cell exists from the start, so a zero is a reading.
+Runtime State keys a load asked the write-through State cache for, by result: hit (served from what this process last wrote), or why it was read back - miss_absent (nothing kept), miss_fence (another owner fence), miss_unknown (the last write's outcome unknown), miss_expired (past its key's life less the replay age), miss_replay (a replay, retry or older Slot), miss_activation (the Plan's activation changed: moved, put back, reactivated, edited), miss_sharded (a split strategy's Plan, never served), miss_over_budget (its Query Group kept out by the budget or given back to the retained pool). Every cell exists from the start, so a zero is a reading.
 
 ## alarmd_state_cache_query_groups
 

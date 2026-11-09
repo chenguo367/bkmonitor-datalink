@@ -10,6 +10,8 @@
 package state
 
 import (
+	"math"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -51,11 +53,14 @@ const (
 	StateCacheDepartRenewalMissing = "renewal_missing"
 	StateCacheDepartUntouched      = "untouched"
 	StateCacheDepartOverBudget     = "over_budget"
+	// StateCacheDepartYielded is a Query Group given back to the retained
+	// pool for a Slot that needed the room.
+	StateCacheDepartYielded = "yielded"
 )
 
 // StateCacheDepartureReasons lists them.
 var StateCacheDepartureReasons = []string{StateCacheDepartReleased, StateCacheDepartUnknown, StateCacheDepartConflict,
-	StateCacheDepartExpired, StateCacheDepartRenewalMissing, StateCacheDepartUntouched, StateCacheDepartOverBudget}
+	StateCacheDepartExpired, StateCacheDepartRenewalMissing, StateCacheDepartUntouched, StateCacheDepartOverBudget, StateCacheDepartYielded}
 
 // Restore causes and refusals (§4.4).
 const (
@@ -119,9 +124,21 @@ type StateCacheStats struct {
 
 // stateCache is per ExecutionStore. Nil is a disabled cache: every method is
 // safe on it and every lookup misses without counting.
+//
+// It holds bytes of the retained pool only while no Slot has reserved them:
+// it takes in an entry only within its budget and within the pool's room
+// (room), and gives Query Groups back whole when a Slot's reservation needs
+// the bytes (YieldRetainedBytes), so it never takes a share from detection.
 type stateCache struct {
-	mu        sync.Mutex
-	budget    int64
+	mu     sync.Mutex
+	budget int64
+	// room is what no Slot has reserved of the retained pool, read before
+	// mu is taken: the pool's owner calls into the cache under its own lock.
+	// Unset, the cache is held to its budget alone.
+	room atomic.Pointer[func() uint64]
+	// held mirrors bytes for the pool's owner, which reads it on every
+	// reservation without taking mu.
+	held      atomic.Int64
 	replayAge time.Duration
 	now       func() time.Time
 	byKey     map[string]*stateCacheEntry
@@ -245,8 +262,10 @@ func (cache *stateCache) applied(entry stateCacheEntry) {
 	if cache == nil {
 		return
 	}
+	room := cache.roomNow()
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
+	capacity := min(cache.budget, room)
 	now := cache.now()
 	entry.cost = entryCost(entry.key, entry.raw)
 	entry.touched, entry.written = now, now
@@ -257,13 +276,13 @@ func (cache *stateCache) applied(entry stateCacheEntry) {
 		cache.removeLocked(previous)
 	}
 	if _, refused := cache.refused[entry.group]; refused {
-		// Kept out until the budget has room for it again.
-		if cache.bytes+entry.cost > cache.budget {
+		// Kept out until the budget and the pool have room for it again.
+		if cache.bytes+entry.cost > capacity {
 			return
 		}
 		delete(cache.refused, entry.group)
 	}
-	if cache.bytes+entry.cost > cache.budget {
+	if cache.bytes+entry.cost > capacity {
 		// A resident Query Group that grew past the room leaves whole; one
 		// not resident does not come in. Either way it is read back.
 		if group := cache.groups[entry.group]; group != nil {
@@ -287,6 +306,59 @@ func (cache *stateCache) applied(entry stateCacheEntry) {
 	group.bytes += stored.cost
 	cache.byKey[entry.key] = &stored
 	cache.bytes += stored.cost
+	cache.held.Store(cache.bytes)
+}
+
+// roomNow is what the cache may hold of the retained pool now, read before
+// mu is taken.
+func (cache *stateCache) roomNow() int64 {
+	room := cache.room.Load()
+	if room == nil {
+		return math.MaxInt64
+	}
+	return int64(min((*room)(), uint64(math.MaxInt64)))
+}
+
+// BorrowedRetainedBytes is what the cache holds of the retained pool.
+func (cache *stateCache) BorrowedRetainedBytes() uint64 {
+	if cache == nil {
+		return 0
+	}
+	return uint64(max(cache.held.Load(), 0))
+}
+
+// YieldRetainedBytes gives at least need bytes back to the retained pool,
+// or all it holds, a Query Group at a time and the largest first, so as few
+// as can be are read back. A group given back stays out, as one over the
+// budget does, until the pool has room for it again.
+func (cache *stateCache) YieldRetainedBytes(need uint64) {
+	if cache == nil || need == 0 {
+		return
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	groups := make([]execution.QueryGroupIdentity, 0, len(cache.groups))
+	for group := range cache.groups {
+		groups = append(groups, group)
+	}
+	sort.Slice(groups, func(left, right int) bool {
+		if cache.groups[groups[left]].bytes != cache.groups[groups[right]].bytes {
+			return cache.groups[groups[left]].bytes > cache.groups[groups[right]].bytes
+		}
+		return groups[left] < groups[right]
+	})
+	freed := uint64(0)
+	for _, group := range groups {
+		if freed >= need {
+			return
+		}
+		held := cache.groups[group]
+		freed += uint64(held.bytes)
+		for _, entry := range held.entries {
+			cache.departLocked(entry, StateCacheDepartYielded)
+		}
+		cache.refused[group] = struct{}{}
+	}
 }
 
 // drop removes key for reason, if it is held.
@@ -352,6 +424,7 @@ func (cache *stateCache) removeLocked(entry *stateCacheEntry) {
 	}
 	delete(cache.byKey, entry.key)
 	cache.bytes -= entry.cost
+	cache.held.Store(cache.bytes)
 	if group := cache.groups[entry.group]; group != nil {
 		delete(group.entries, entry.key)
 		group.bytes -= entry.cost
@@ -394,6 +467,23 @@ func (cache *stateCache) stats() StateCacheStats {
 // StateCacheStats reports the cache's sizes and counts; the zero value when
 // the cache is off.
 func (store *ExecutionStore) StateCacheStats() StateCacheStats { return store.cache.stats() }
+
+// StateCacheBorrower is the cache as the retained pool's borrower; nil when
+// the cache is off.
+func (store *ExecutionStore) StateCacheBorrower() execution.RetainedBytesBorrower {
+	if store == nil || store.cache == nil {
+		return nil
+	}
+	return store.cache
+}
+
+// LendStateCacheRoom has the cache borrow no more than room says no Slot has
+// reserved of the retained pool. Set once, before Slots run.
+func (store *ExecutionStore) LendStateCacheRoom(room func() uint64) {
+	if store != nil && store.cache != nil && room != nil {
+		store.cache.room.Store(&room)
+	}
+}
 
 // DropStateCacheQueryGroup removes a Query Group's entries when this process
 // stops holding it.
