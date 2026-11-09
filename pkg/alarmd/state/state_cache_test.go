@@ -432,8 +432,8 @@ func TestACacheAskedForRoomGivesItsQueryGroupBackWhole(t *testing.T) {
 			borrower.BorrowedRetainedBytes(), stats.QueryGroups, stats.Departures)
 	}
 	rig.now = rig.now.Add(time.Minute)
-	if reads, _ := rig.round(second, 3, 1); reads == 0 || rig.lookups(StateCacheMissOverBudget) != 3 {
-		t.Fatalf("reads %d, miss_over_budget %d; want the group given back read from the store", reads, rig.lookups(StateCacheMissOverBudget))
+	if reads, _ := rig.round(second, 3, 1); reads == 0 || rig.lookups(StateCacheMissYielded) != 3 {
+		t.Fatalf("reads %d, miss_yielded %d; want the group given back read from the store", reads, rig.lookups(StateCacheMissYielded))
 	}
 }
 

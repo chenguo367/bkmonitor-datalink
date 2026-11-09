@@ -38,11 +38,13 @@ const (
 	StateCacheMissActivation = "miss_activation"
 	StateCacheMissSharded    = "miss_sharded"
 	StateCacheMissOverBudget = "miss_over_budget"
+	StateCacheMissYielded    = "miss_yielded"
 )
 
 // StateCacheLookupResults lists them, for the metric's cells.
 var StateCacheLookupResults = []string{StateCacheHit, StateCacheMissAbsent, StateCacheMissFence, StateCacheMissUnknown,
-	StateCacheMissExpired, StateCacheMissReplay, StateCacheMissActivation, StateCacheMissSharded, StateCacheMissOverBudget}
+	StateCacheMissExpired, StateCacheMissReplay, StateCacheMissActivation, StateCacheMissSharded, StateCacheMissOverBudget,
+	StateCacheMissYielded}
 
 // Departure reasons, the closed vocabulary of state_cache_departures_total.
 const (
@@ -52,9 +54,12 @@ const (
 	StateCacheDepartExpired        = "expired"
 	StateCacheDepartRenewalMissing = "renewal_missing"
 	StateCacheDepartUntouched      = "untouched"
-	StateCacheDepartOverBudget     = "over_budget"
-	// StateCacheDepartYielded is a Query Group given back to the retained
-	// pool for a Slot that needed the room.
+	// StateCacheDepartOverBudget is a Query Group that did not fit the
+	// cache's budget.
+	StateCacheDepartOverBudget = "over_budget"
+	// StateCacheDepartYielded is a Query Group that fit the budget but not
+	// what the Slots left of the retained pool: given back for a Slot that
+	// needed the room, or not taken in past it.
 	StateCacheDepartYielded = "yielded"
 )
 
@@ -112,6 +117,26 @@ type stateCacheGroup struct {
 	bytes   int64
 }
 
+// stateCacheRefusal is a Query Group kept out of the cache. bound is the
+// departure word for what it did not fit, as of its latest Slot: the budget
+// (over_budget) or the pool's room (yielded). size is what the group wrote
+// for slot, its latest Slot: once a write for a later Slot arrives, size is
+// what one whole round of it costs, and the group comes back only when that
+// fits.
+type stateCacheRefusal struct {
+	bound string
+	slot  execution.EvaluationTime
+	size  int64
+}
+
+// missOf is the lookup word for a key of the group while it is kept out.
+func (refusal *stateCacheRefusal) missOf() string {
+	if refusal.bound == StateCacheDepartYielded {
+		return StateCacheMissYielded
+	}
+	return StateCacheMissOverBudget
+}
+
 // StateCacheStats is what the cache's metrics read.
 type StateCacheStats struct {
 	Bytes, BudgetBytes int64
@@ -143,11 +168,15 @@ type stateCache struct {
 	now       func() time.Time
 	byKey     map[string]*stateCacheEntry
 	groups    map[execution.QueryGroupIdentity]*stateCacheGroup
-	// refused names the Query Groups whose admission would have gone past
-	// the budget: they stay out, and the resident ones stay in, so a working
-	// set larger than the budget is served at budget ÷ working set rather
-	// than thrashing as an LRU would on a fixed rotation.
-	refused                                 map[execution.QueryGroupIdentity]struct{}
+	// refused names the Query Groups kept out: one whose write did not fit
+	// the budget or the pool's room, or one given back for a Slot. It stays
+	// out until one whole round of it fits beside the resident ones, judged
+	// at the first write of each later Slot, and the resident ones stay in,
+	// so a working set larger than the budget is served at budget ÷ working
+	// set rather than thrashing as an LRU would on a fixed rotation, and a
+	// group larger than the room is not taken in write by write and given
+	// back whole each round.
+	refused                                 map[execution.QueryGroupIdentity]*stateCacheRefusal
 	bytes                                   int64
 	lookups, departures, restored, declined map[string]*atomic.Uint64
 }
@@ -165,7 +194,7 @@ func newStateCache(budget int64, replayAge time.Duration, now func() time.Time) 
 	}
 	return &stateCache{budget: budget, replayAge: replayAge, now: now,
 		byKey: map[string]*stateCacheEntry{}, groups: map[execution.QueryGroupIdentity]*stateCacheGroup{},
-		refused: map[execution.QueryGroupIdentity]struct{}{}, lookups: counters(StateCacheLookupResults),
+		refused: map[execution.QueryGroupIdentity]*stateCacheRefusal{}, lookups: counters(StateCacheLookupResults),
 		departures: counters(StateCacheDepartureReasons), restored: counters(StateCacheRestoreCauses),
 		declined: counters(StateCacheDeclineReasons)}
 }
@@ -217,8 +246,8 @@ func (cache *stateCache) judgeLocked(key string, request execution.StatePrefligh
 		// selections met would write it under one epoch (§4.3, rule 6).
 		return StateCacheMissSharded
 	}
-	if _, refused := cache.refused[group]; refused {
-		return StateCacheMissOverBudget
+	if refusal := cache.refused[group]; refusal != nil {
+		return refusal.missOf()
 	}
 	entry := cache.byKey[key]
 	if entry == nil {
@@ -275,24 +304,42 @@ func (cache *stateCache) applied(entry stateCacheEntry) {
 		}
 		cache.removeLocked(previous)
 	}
-	if _, refused := cache.refused[entry.group]; refused {
-		// Kept out until the budget and the pool have room for it again.
-		if cache.bytes+entry.cost > capacity {
+	if refusal := cache.refused[entry.group]; refusal != nil {
+		// Kept out while a round of it is measured: a write for its latest
+		// Slot adds to the round, and the first write for a later Slot
+		// closes it, taking the group back only when the whole round fits.
+		switch {
+		case entry.slot == refusal.slot:
+			refusal.size += entry.cost
+			return
+		case entry.slot < refusal.slot:
+			return
+		}
+		round := refusal.size
+		refusal.slot, refusal.size = entry.slot, entry.cost
+		if cache.bytes+round > capacity {
+			refusal.bound = cache.boundOf(cache.bytes + round)
 			return
 		}
 		delete(cache.refused, entry.group)
 	}
 	if cache.bytes+entry.cost > capacity {
 		// A resident Query Group that grew past the room leaves whole; one
-		// not resident does not come in. Either way it is read back.
+		// not resident does not come in. Either way it is read back, and
+		// what it wrote for this Slot starts the round it is measured by.
+		bound := cache.boundOf(cache.bytes + entry.cost)
+		size := entry.cost
 		if group := cache.groups[entry.group]; group != nil {
 			for _, resident := range group.entries {
-				cache.departLocked(resident, StateCacheDepartOverBudget)
+				if resident.slot == entry.slot {
+					size += resident.cost
+				}
+				cache.departLocked(resident, bound)
 			}
 		} else {
-			cache.departures[StateCacheDepartOverBudget].Add(1)
+			cache.departures[bound].Add(1)
 		}
-		cache.refused[entry.group] = struct{}{}
+		cache.refused[entry.group] = &stateCacheRefusal{bound: bound, slot: entry.slot, size: size}
 		return
 	}
 	stored := entry
@@ -307,6 +354,15 @@ func (cache *stateCache) applied(entry stateCacheEntry) {
 	cache.byKey[entry.key] = &stored
 	cache.bytes += stored.cost
 	cache.held.Store(cache.bytes)
+}
+
+// boundOf is the departure word for what bytes did not fit: past the budget
+// it is over_budget, within it only the pool's room was short, yielded.
+func (cache *stateCache) boundOf(bytes int64) string {
+	if bytes > cache.budget {
+		return StateCacheDepartOverBudget
+	}
+	return StateCacheDepartYielded
 }
 
 // roomNow is what the cache may hold of the retained pool now, read before
@@ -338,7 +394,8 @@ func (cache *stateCache) BorrowedRetainedBytes() uint64 {
 // YieldRetainedBytes gives at least need bytes back to the retained pool,
 // or all it holds, a Query Group at a time and the largest first, so as few
 // as can be are read back. A group given back stays out, as one over the
-// budget does, until the pool has room for it again.
+// budget does, until a whole round of it fits again, measured from what it
+// held for its latest Slot.
 func (cache *stateCache) YieldRetainedBytes(need uint64) {
 	if cache == nil || need == 0 {
 		return
@@ -362,10 +419,17 @@ func (cache *stateCache) YieldRetainedBytes(need uint64) {
 		}
 		held := cache.groups[group]
 		freed += uint64(held.bytes)
+		refusal := &stateCacheRefusal{bound: StateCacheDepartYielded}
 		for _, entry := range held.entries {
+			switch {
+			case entry.slot > refusal.slot:
+				refusal.slot, refusal.size = entry.slot, entry.cost
+			case entry.slot == refusal.slot:
+				refusal.size += entry.cost
+			}
 			cache.departLocked(entry, StateCacheDepartYielded)
 		}
-		cache.refused[group] = struct{}{}
+		cache.refused[group] = refusal
 	}
 }
 

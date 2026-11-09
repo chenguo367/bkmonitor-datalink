@@ -39,13 +39,17 @@ func newStateCacheCollector() *stateCacheCollector {
 				"miss_expired (past its key's life less the replay age), miss_replay (a replay, retry or "+
 				"older Slot), miss_activation (the Plan's activation changed: moved, put back, reactivated, "+
 				"edited), miss_sharded (a split strategy's Plan, never served), miss_over_budget (its Query "+
-				"Group kept out by the budget or given back to the retained pool). Every cell exists from the start, so a zero is a reading.", "result"),
+				"Group kept out: a round of it does not fit the budget), miss_yielded (its Query Group kept out: a "+
+				"round of it fits the budget but not what the Slots leave of the retained pool, or it was given back "+
+				"for a Slot). Every cell exists from the start, so a zero is a reading.", "result"),
 		departures: descriptor("state_cache_departures_total",
 			"Entries that left the State cache, by reason: released (the Query Group stopped, was lost, "+
 				"declined or handed over), unknown (a write of its request ended in doubt), conflict (its "+
 				"write did not apply), expired, renewal_missing, untouched (neither read nor written for two "+
-				"of its own intervals), over_budget (its Query Group grew past the room and left whole), yielded "+
-				"(its Query Group was given back whole to the retained pool for a Slot that needed the room). "+
+				"of its own intervals), over_budget (its Query Group did not fit the budget: it left whole, or a write "+
+				"of it was not taken in), yielded (the same for what the Slots leave of the retained pool, or its "+
+				"Query Group given back whole for a Slot that needed the room). A group kept out is judged again "+
+				"once a round, by a whole round of it, so one that never fits leaves once rather than every round. "+
 				"Every cell exists from the start.", "reason"),
 		restored: descriptor("state_cache_restored_total",
 			"Values written back over an external change to a key the State cache served, by cause: missing "+
