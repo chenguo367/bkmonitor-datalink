@@ -255,10 +255,10 @@ func TestASyntheticSeriesIsBoundToTheNoDataLevelsOwnEffectiveTime(t *testing.T) 
 // The dimensions a Slot saw come back as text, because that is what a group is.
 func TestSeenSeriesDimensionsComeBackAsText(t *testing.T) {
 	text := dimensionText(map[string]json.RawMessage{
-		"bk_target_ip": json.RawMessage(`"10.0.0.1"`),
+		"bk_target_ip": json.RawMessage(`"192.0.2.1"`),
 		"port":         json.RawMessage(`8080`),
 	})
-	if text["bk_target_ip"] != "10.0.0.1" {
+	if text["bk_target_ip"] != "192.0.2.1" {
 		t.Fatalf("a string dimension came back as %q, want the text inside it", text["bk_target_ip"])
 	}
 	// A dimension that is not a string keeps its JSON form: rendering it any

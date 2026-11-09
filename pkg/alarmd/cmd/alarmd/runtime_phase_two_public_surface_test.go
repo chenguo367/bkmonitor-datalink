@@ -34,7 +34,7 @@ import (
 	httpservice "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/service/http"
 )
 
-const plantedAddress = "redis.internal.example:6379"
+const plantedAddress = "redis.planted.invalid:6379"
 
 // The routes the public surface stops serving when restricted. Each is
 // answered by the stand-in API with its own path and the planted address, so
