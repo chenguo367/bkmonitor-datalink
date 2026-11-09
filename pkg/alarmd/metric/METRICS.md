@@ -261,7 +261,7 @@ What the shared pool has handed out at the moment of the scrape, labelled the wa
 
 Labels: `budget`, `result`
 
-Process-wide phase-two capacity admission outcomes by fixed budget kind.
+Capacity outcomes by budget, counted process-wide. rejected is one refusal - the pool, the share or a per-Slot cap - as its resource line reports it, whatever Slot it refused. admitted is one Slot that completed holding something of the budget: a Slot is counted once per budget it reserved, at its completion, so rejected over admitted plus rejected is the share of Slots refused at that budget. What the pool holds now is capacity_reserved; which Slot held what is the slot_budget_usage of its slot_completed line.
 
 ## alarmd_catalog_global_strategies
 

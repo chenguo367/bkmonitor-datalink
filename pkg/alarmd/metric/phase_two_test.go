@@ -354,7 +354,7 @@ func TestCapacityTransitionPublishesEveryCellAtZero(t *testing.T) {
 		}
 	}
 	budgets := append(observability.CapacityBudgets(), observability.CapacityBudgetOther)
-	results := []string{"admitted", "rejected", "other"}
+	results := []string{"admitted", "rejected"}
 	if len(seen) != len(budgets)*len(results) {
 		t.Fatalf("series = %v, want %d", seen, len(budgets)*len(results))
 	}
@@ -363,6 +363,40 @@ func TestCapacityTransitionPublishesEveryCellAtZero(t *testing.T) {
 			if value, ok := seen[string(budget)+"/"+result]; !ok || value != 0 {
 				t.Fatalf("%s/%s = %v present %v, want 0 present", budget, result, value, ok)
 			}
+		}
+	}
+}
+
+// A completed Slot is admitted once for each budget it held, and a refusal
+// is rejected once at its budget: the two moving together is what makes a
+// refusal rate readable, where a family that only ever moved on refusals
+// read zero for a pool holding hundreds of MiB.
+func TestCapacityTransitionCountsSlotsHeldAndRefusals(t *testing.T) {
+	recorder := NewRecorder(BuildInfo{})
+	cell := func(budget observability.CapacityBudget, result string) float64 {
+		return testutil.ToFloat64(recorder.phaseTwo.capacity.WithLabelValues(string(budget), result))
+	}
+	recorder.Observe(context.Background(), observability.Observation{
+		Component: observability.ComponentScheduler, Stage: observability.StageSlotCompleted, Result: observability.ResultSuccess,
+		SlotBudgetUsage: &observability.SlotBudgetUsageFacts{Series: 3, RetainedBytes: 4096, StateMutations: 3}})
+	recorder.Observe(context.Background(), observability.Observation{
+		Component: observability.ComponentResource, Stage: observability.StageResourceHard, Result: observability.ResultPaused,
+		CapacityBudget: observability.CapacityBudgetRetainedBytes, Err: errors.New("the pool is full")})
+	for _, test := range []struct {
+		budget observability.CapacityBudget
+		result string
+		want   float64
+	}{
+		{observability.CapacityBudgetSeries, "admitted", 1},
+		{observability.CapacityBudgetRetainedBytes, "admitted", 1},
+		{observability.CapacityBudgetStateMutations, "admitted", 1},
+		{observability.CapacityBudgetEvents, "admitted", 0},
+		{observability.CapacityBudgetGapMutations, "admitted", 0},
+		{observability.CapacityBudgetRetainedBytes, "rejected", 1},
+		{observability.CapacityBudgetSeries, "rejected", 0},
+	} {
+		if got := cell(test.budget, test.result); got != test.want {
+			t.Fatalf("%s/%s = %v, want %v", test.budget, test.result, got, test.want)
 		}
 	}
 }

@@ -330,7 +330,10 @@ var phaseTwoBudgets = func() []string {
 	}
 	return append(names, string(observability.CapacityBudgetOther))
 }()
-var phaseTwoCapacityResults = []string{"admitted", "rejected", "other"}
+
+// phaseTwoCapacityResults is the closed vocabulary of capacity_transition_total:
+// admitted is a Slot that completed holding the budget, rejected a refusal.
+var phaseTwoCapacityResults = []string{"admitted", "rejected"}
 var phaseTwoSourceResults = []string{"degraded", "recovered"}
 
 // sourceCompileResults is the closed vocabulary of how a refresh round
@@ -380,7 +383,12 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		}, []string{"kind"}),
 		capacity: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: metricSubsystem, Name: "capacity_transition_total",
-			Help: "Process-wide phase-two capacity admission outcomes by fixed budget kind.",
+			Help: "Capacity outcomes by budget, counted process-wide. rejected is one refusal - the pool, the " +
+				"share or a per-Slot cap - as its resource line reports it, whatever Slot it refused. admitted is " +
+				"one Slot that completed holding something of the budget: a Slot is counted once per budget it " +
+				"reserved, at its completion, so rejected over admitted plus rejected is the share of Slots " +
+				"refused at that budget. What the pool holds now is capacity_reserved; which Slot held what is " +
+				"the slot_budget_usage of its slot_completed line.",
 		}, []string{"budget", "result"}),
 		stateWriteReuse: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: metricSubsystem, Name: "state_write_reuse_total",
@@ -2593,14 +2601,22 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		m.stateSuperseded.WithLabelValues(string(observability.NormalizeStateSupersededSite(facts.Site)),
 			string(observability.NormalizeStateSupersededOperation(observation.Operation))).Add(float64(facts.Count))
 	}
-	if observation.Component == observability.ComponentResource && observation.CapacityBudget != "" {
-		result := "other"
-		if observation.Result == observability.ResultPaused || observation.Result == observability.ResultFailed {
-			result = "rejected"
-		} else if observation.Result == observability.ResultSuccess || observation.Result == observability.ResultResumed {
-			result = "admitted"
+	if observation.Component == observability.ComponentResource && observation.Stage == observability.StageResourceHard &&
+		observation.CapacityBudget != "" {
+		// The resource line is a refusal and nothing else.
+		m.capacity.WithLabelValues(normalizePhaseTwoBudget(observation.CapacityBudget), "rejected").Inc()
+	}
+	if usage := observation.SlotBudgetUsage; observation.Stage == observability.StageSlotCompleted && observation.Err == nil &&
+		usage != nil {
+		for budget, held := range map[observability.CapacityBudget]uint64{
+			observability.CapacityBudgetSeries: usage.Series, observability.CapacityBudgetRetainedBytes: usage.RetainedBytes,
+			observability.CapacityBudgetStateMutations: usage.StateMutations, observability.CapacityBudgetEvents: usage.Events,
+			observability.CapacityBudgetGapMutations: usage.GapMutations,
+		} {
+			if held > 0 {
+				m.capacity.WithLabelValues(string(budget), "admitted").Inc()
+			}
 		}
-		m.capacity.WithLabelValues(normalizePhaseTwoBudget(observation.CapacityBudget), result).Inc()
 	}
 	stage := phaseTwoBusyStage(observation.Stage)
 	if stage == "" {
