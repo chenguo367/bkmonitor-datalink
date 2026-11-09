@@ -12,14 +12,55 @@ package execution
 import (
 	"encoding/json"
 	"errors"
+	"sort"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
 
 // Dataset is immutable after construction. Multiple Plans may share one
 // Dataset safely without exposing writable records, maps or RawMessage bytes.
+//
+// It keeps its records in runs. A run of consecutive records of one series -
+// one business, one dimension identity and dimensions, one received time, no
+// collection time and one value field - keeps those once and its points as
+// columns: record ids, source times and values, a value that is a JSON number
+// kept as the float64 it reads back to byte for byte, any other value (a
+// string, null, a number written another way) kept as its bytes in a side
+// table. A record of no such run is kept as it was given. RecordView builds
+// the record's maps from the run when asked, so readers see what NewDataset
+// was given either way.
 type Dataset struct {
+	runs []datasetRun
+	// starts is each run's first record, for Record's search.
+	starts []int
+	len    int
+}
+
+// datasetRun is a columnar run, or records kept whole when records is set.
+type datasetRun struct {
 	records []contract.CanonicalRecordV2
+
+	business   string
+	identity   contract.DimensionIdentityV2
+	dimensions map[string]json.RawMessage
+	received   int64
+	valueField string
+	// ids holds the run's record ids end to end, idWidth bytes each.
+	ids     string
+	idWidth int
+	times   []int64
+	values  []float64
+	// sideMarks marks the points whose value is in side, one bit each; nil
+	// when every value is a number.
+	sideMarks []uint64
+	side      []datasetSideValue
+}
+
+// datasetSideValue is a point's value kept as its bytes, by its offset in the
+// run.
+type datasetSideValue struct {
+	offset int
+	raw    string
 }
 
 // DatasetView is an immutable selector over one immutable Dataset.
@@ -63,18 +104,117 @@ func (view *DatasetView) Uses(dataset *Dataset) bool {
 }
 
 func NewDataset(records []contract.CanonicalRecordV2) *Dataset {
-	cloned := make([]contract.CanonicalRecordV2, len(records))
-	for index := range records {
-		cloned[index] = cloneCanonicalRecord(records[index])
+	dataset := &Dataset{len: len(records)}
+	for start := 0; start < len(records); {
+		end := start + 1
+		if columnar(&records[start]) {
+			for end < len(records) && sameSeriesRun(&records[start], &records[end]) {
+				end++
+			}
+			dataset.add(start, newColumnarRun(records[start:end]))
+		} else {
+			for end < len(records) && !columnar(&records[end]) {
+				end++
+			}
+			whole := make([]contract.CanonicalRecordV2, end-start)
+			for index := range whole {
+				whole[index] = cloneCanonicalRecord(records[start+index])
+			}
+			dataset.add(start, datasetRun{records: whole})
+		}
+		start = end
 	}
-	return &Dataset{records: cloned}
+	return dataset
+}
+
+func (dataset *Dataset) add(start int, run datasetRun) {
+	dataset.runs = append(dataset.runs, run)
+	dataset.starts = append(dataset.starts, start)
+}
+
+// columnar is whether a record can be kept in a columnar run: one value
+// field and no collection time.
+func columnar(record *contract.CanonicalRecordV2) bool {
+	return record.CollectionTime == nil && len(record.Values) == 1
+}
+
+// sameSeriesRun is whether next continues first's run: everything a run keeps
+// once is the same, and so is the length of the record id.
+func sameSeriesRun(first, next *contract.CanonicalRecordV2) bool {
+	if !columnar(next) || next.BusinessID != first.BusinessID || next.ReceivedTime != first.ReceivedTime ||
+		len(next.RecordID) != len(first.RecordID) || !sameIdentity(first.DimensionIdentity, next.DimensionIdentity) ||
+		!sameRawMap(first.Dimensions, next.Dimensions) {
+		return false
+	}
+	for field := range first.Values {
+		_, ok := next.Values[field]
+		return ok
+	}
+	return false
+}
+
+func sameIdentity(left, right contract.DimensionIdentityV2) bool {
+	if left.Digest != right.Digest || len(left.Fields) != len(right.Fields) || (left.Fields == nil) != (right.Fields == nil) {
+		return false
+	}
+	for index := range left.Fields {
+		if left.Fields[index].Name != right.Fields[index].Name || string(left.Fields[index].Value) != string(right.Fields[index].Value) {
+			return false
+		}
+	}
+	return true
+}
+
+// sameRawMap is whether two maps hold the same entries, nil apart from empty.
+func sameRawMap(left, right map[string]json.RawMessage) bool {
+	if len(left) != len(right) || (left == nil) != (right == nil) {
+		return false
+	}
+	for key, value := range left {
+		other, ok := right[key]
+		if !ok || string(other) != string(value) {
+			return false
+		}
+	}
+	return true
+}
+
+func newColumnarRun(records []contract.CanonicalRecordV2) datasetRun {
+	first := &records[0]
+	run := datasetRun{business: first.BusinessID, identity: RecordView{record: first}.DimensionIdentity(),
+		dimensions: cloneRawMap(first.Dimensions), received: first.ReceivedTime, idWidth: len(first.RecordID),
+		times: make([]int64, len(records)), values: make([]float64, len(records))}
+	for field := range first.Values {
+		run.valueField = field
+	}
+	ids := make([]byte, 0, len(records)*run.idWidth)
+	for index := range records {
+		record := &records[index]
+		ids = append(ids, record.RecordID...)
+		run.times[index] = record.SourceTime
+		raw := record.Values[run.valueField]
+		if value, ok := numberOf(raw); ok {
+			run.values[index] = value
+			continue
+		}
+		if run.sideMarks == nil {
+			run.sideMarks = make([]uint64, (len(records)+63)/64)
+		}
+		run.sideMarks[index/64] |= 1 << (index % 64)
+		run.side = append(run.side, datasetSideValue{offset: index, raw: string(raw)})
+	}
+	run.ids = string(ids)
+	if run.side != nil {
+		run.side = append([]datasetSideValue(nil), run.side...)
+	}
+	return run
 }
 
 func (dataset *Dataset) Len() int {
 	if dataset == nil {
 		return 0
 	}
-	return len(dataset.records)
+	return dataset.len
 }
 
 // Records returns independent copies of every record in Dataset order. The
@@ -84,51 +224,90 @@ func (dataset *Dataset) Records() []contract.CanonicalRecordV2 {
 	if dataset == nil {
 		return nil
 	}
-	records := make([]contract.CanonicalRecordV2, len(dataset.records))
-	for index := range dataset.records {
-		records[index] = cloneCanonicalRecord(dataset.records[index])
+	records := make([]contract.CanonicalRecordV2, 0, dataset.len)
+	for index := range dataset.runs {
+		run := &dataset.runs[index]
+		if run.records != nil {
+			for _, record := range run.records {
+				records = append(records, cloneCanonicalRecord(record))
+			}
+			continue
+		}
+		for offset := range run.times {
+			records = append(records, RecordView{run: run, offset: offset}.canonical())
+		}
 	}
 	return records
 }
 
 func (dataset *Dataset) Record(index int) (RecordView, bool) {
-	if dataset == nil || index < 0 || index >= len(dataset.records) {
+	if dataset == nil || index < 0 || index >= dataset.len {
 		return RecordView{}, false
 	}
-	return RecordView{record: &dataset.records[index]}, true
+	position := sort.SearchInts(dataset.starts, index+1) - 1
+	run := &dataset.runs[position]
+	offset := index - dataset.starts[position]
+	if run.records != nil {
+		return RecordView{record: &run.records[offset]}, true
+	}
+	return RecordView{run: run, offset: offset}, true
 }
 
 // RecordView exposes one immutable record. Map and byte getters return copies.
 type RecordView struct {
+	// record is a record kept whole; run and offset a point of a columnar run.
 	record *contract.CanonicalRecordV2
+	run    *datasetRun
+	offset int
+}
+
+// canonical is a columnar point as an independent record.
+func (view RecordView) canonical() contract.CanonicalRecordV2 {
+	return contract.CanonicalRecordV2{RecordID: view.RecordID(), SourceTime: view.SourceTime(), BusinessID: view.BusinessID(),
+		DimensionIdentity: view.DimensionIdentity(), Values: view.Values(), Dimensions: view.Dimensions(),
+		ReceivedTime: view.ReceivedTime()}
 }
 
 func (view RecordView) RecordID() string {
-	if view.record == nil {
-		return ""
+	switch {
+	case view.record != nil:
+		return view.record.RecordID
+	case view.run != nil:
+		return view.run.ids[view.offset*view.run.idWidth : (view.offset+1)*view.run.idWidth]
 	}
-	return view.record.RecordID
+	return ""
 }
 
 func (view RecordView) SourceTime() int64 {
-	if view.record == nil {
-		return 0
+	switch {
+	case view.record != nil:
+		return view.record.SourceTime
+	case view.run != nil:
+		return view.run.times[view.offset]
 	}
-	return view.record.SourceTime
+	return 0
 }
 
 func (view RecordView) BusinessID() string {
-	if view.record == nil {
-		return ""
+	switch {
+	case view.record != nil:
+		return view.record.BusinessID
+	case view.run != nil:
+		return view.run.business
 	}
-	return view.record.BusinessID
+	return ""
 }
 
 func (view RecordView) DimensionIdentity() contract.DimensionIdentityV2 {
-	if view.record == nil {
+	var identity contract.DimensionIdentityV2
+	switch {
+	case view.record != nil:
+		identity = view.record.DimensionIdentity
+	case view.run != nil:
+		identity = view.run.identity
+	default:
 		return contract.DimensionIdentityV2{}
 	}
-	identity := view.record.DimensionIdentity
 	identity.Fields = append([]contract.DimensionFieldV2(nil), identity.Fields...)
 	for index := range identity.Fields {
 		identity.Fields[index].Value = cloneRawMessage(identity.Fields[index].Value)
@@ -141,43 +320,58 @@ func (view RecordView) DimensionIdentity() contract.DimensionIdentityV2 {
 // and every raw value in it to stay immutable, and a Slot compares series once
 // per record per consuming Plan.
 func (view RecordView) DimensionIdentityDigest() string {
-	if view.record == nil {
-		return ""
+	switch {
+	case view.record != nil:
+		return view.record.DimensionIdentity.Digest
+	case view.run != nil:
+		return view.run.identity.Digest
 	}
-	return view.record.DimensionIdentity.Digest
+	return ""
 }
 
 func (view RecordView) Values() map[string]json.RawMessage {
-	if view.record == nil {
-		return nil
+	switch {
+	case view.record != nil:
+		return cloneRawMap(view.record.Values)
+	case view.run != nil:
+		return map[string]json.RawMessage{view.run.valueField: view.run.appendValue(nil, view.offset)}
 	}
-	return cloneRawMap(view.record.Values)
+	return nil
 }
 
 func (view RecordView) Value(name string) (json.RawMessage, bool) {
-	if view.record == nil {
-		return nil, false
+	switch {
+	case view.record != nil:
+		value, ok := view.record.Values[name]
+		return cloneRawMessage(value), ok
+	case view.run != nil && name == view.run.valueField:
+		return view.run.appendValue(nil, view.offset), true
 	}
-	value, ok := view.record.Values[name]
-	return cloneRawMessage(value), ok
+	return nil, false
 }
 
 // AppendValue appends one value's bytes to dst. It is a copy, like Value,
 // into a buffer the caller reuses: a reader keeping many values pays per
 // buffer, not per value.
 func (view RecordView) AppendValue(dst []byte, name string) ([]byte, bool) {
-	if view.record == nil {
-		return dst, false
+	switch {
+	case view.record != nil:
+		value, ok := view.record.Values[name]
+		return append(dst, value...), ok
+	case view.run != nil && name == view.run.valueField:
+		return view.run.appendValue(dst, view.offset), true
 	}
-	value, ok := view.record.Values[name]
-	return append(dst, value...), ok
+	return dst, false
 }
 
 func (view RecordView) Dimensions() map[string]json.RawMessage {
-	if view.record == nil {
-		return nil
+	switch {
+	case view.record != nil:
+		return cloneRawMap(view.record.Dimensions)
+	case view.run != nil:
+		return cloneRawMap(view.run.dimensions)
 	}
-	return cloneRawMap(view.record.Dimensions)
+	return nil
 }
 
 func (view RecordView) CollectionTime() *int64 {
@@ -189,10 +383,28 @@ func (view RecordView) CollectionTime() *int64 {
 }
 
 func (view RecordView) ReceivedTime() int64 {
-	if view.record == nil {
-		return 0
+	switch {
+	case view.record != nil:
+		return view.record.ReceivedTime
+	case view.run != nil:
+		return view.run.received
 	}
-	return view.record.ReceivedTime
+	return 0
+}
+
+// appendValue appends the bytes the point's value was given as.
+func (run *datasetRun) appendValue(dst []byte, offset int) []byte {
+	if run.sideMarks != nil && run.sideMarks[offset/64]&(1<<(offset%64)) != 0 {
+		position := sort.Search(len(run.side), func(index int) bool { return run.side[index].offset >= offset })
+		raw := run.side[position].raw
+		if raw == "" {
+			// A value given as no bytes reads back as none, as a whole
+			// record's does.
+			return dst
+		}
+		return append(dst, raw...)
+	}
+	return appendNumber(dst, run.values[offset])
 }
 
 func cloneCanonicalRecord(source contract.CanonicalRecordV2) contract.CanonicalRecordV2 {

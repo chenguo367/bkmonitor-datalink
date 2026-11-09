@@ -18,6 +18,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -247,7 +248,7 @@ func TestSlotExecutionCoordinatorRejectsCumulativeUQPayloadBeforeSideEffectsAndR
 		MaxSeries: 100, MaxRetainedBytes: 2 << 20, MaxStateMutations: 100, MaxEvents: 100, MaxGapMutations: 10,
 	})
 	fixture.ports.reverseStateReceipts = true
-	fixture.ports.queryDeliveryBytes = []uint64{900 << 10, 900 << 10}
+	fixture.ports.querySeriesBytes = []uint64{900 << 10, 900 << 10}
 
 	result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
 	if err == nil || result.Completed {
@@ -285,7 +286,7 @@ func TestSlotExecutionCoordinatorRejectsCumulativeUQPayloadBeforeSideEffectsAndR
 	// A complete single-series execution fitting the same budget proves the
 	// failed attempt released its accepted first-batch reservation.
 	fixture.ports.reverseStateReceipts = false
-	fixture.ports.queryDeliveryBytes = []uint64{600 << 10}
+	fixture.ports.querySeriesBytes = []uint64{600 << 10}
 	result, err = fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
 	if err != nil || !result.Completed {
 		t.Fatalf("Execute() after rejection result=%+v error=%v", result, err)
@@ -1525,7 +1526,7 @@ type recordingPorts struct {
 	// zero; the in-memory answer is otherwise often done within one.
 	queryTakes            time.Duration
 	queryAfterSeriesError error
-	queryDeliveryBytes    []uint64
+	querySeriesBytes      []uint64
 
 	// stateAdmissionRule and stateAdmissionText go on the refused admission
 	// item, as the store names its rule and says its sentence.
@@ -1689,12 +1690,14 @@ func (ports *recordingPorts) Execute(ctx context.Context, request execution.Quer
 		view, _ := execution.NewDatasetView(seriesDataset, []uint32{0})
 		binding := input.Inputs[0]
 		binding.Dataset, binding.View = seriesDataset, view
+		if index < len(ports.querySeriesBytes) {
+			// The series holds that many bytes more as spare capacity of its
+			// quality facts: the retained size counts it, and nothing reads it.
+			binding.QualityFacts = make([]execution.InputQualityFact, 0, ports.querySeriesBytes[index]/uint64(unsafe.Sizeof(execution.InputQualityFact{})))
+		}
 		batchDelivery := execution.SeriesDelivery{
 			PhysicalQuery: "physical-query-1", QueryRevision: queryRevision,
 			Series: 1, Records: 1, Digest: fmt.Sprintf("delivery-%d", index+1),
-		}
-		if index < len(ports.queryDeliveryBytes) {
-			batchDelivery.Bytes = ports.queryDeliveryBytes[index]
 		}
 		accumulated, accumulateErr := execution.AccumulateSeriesDelivery(delivery, batchDelivery)
 		if accumulateErr != nil {

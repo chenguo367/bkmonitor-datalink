@@ -455,10 +455,11 @@ func (sink *keptSink) ConsumeProviderSeries(_ context.Context, batch execution.P
 	if _, had := sink.first[hashString(identity)]; had {
 		return nil
 	}
-	// What a kept series holds is the delivery's own byte count; the line is
+	// What a kept series holds is its Dataset's RetainedBytes; the line is
 	// asked for room as it doubles, as a series table's is.
-	if sink.keptBytes+batch.Delivery.Bytes > sink.grantBytes {
-		step := max(sink.grantBytes, sink.keptBytes+batch.Delivery.Bytes)
+	kept := batch.Dataset.RetainedBytes()
+	if sink.keptBytes+kept > sink.grantBytes {
+		step := max(sink.grantBytes, sink.keptBytes+kept)
 		if sink.admit != nil && !sink.admit(step) {
 			sink.refused, sink.batches, sink.series = true, nil, nil
 			return nil
@@ -470,7 +471,7 @@ func (sink *keptSink) ConsumeProviderSeries(_ context.Context, batch execution.P
 		sink.invalid = err
 		return nil
 	}
-	sink.delivery, sink.keptBytes = delivery, sink.keptBytes+batch.Delivery.Bytes
+	sink.delivery, sink.keptBytes = delivery, sink.keptBytes+kept
 	sink.batches = append(sink.batches, batch)
 	sink.stats.Series++
 	sink.stats.Records += batch.Delivery.Records

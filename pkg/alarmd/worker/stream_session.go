@@ -397,10 +397,7 @@ func (stream *streamedExecution) ConsumeSeries(ctx context.Context, batch execut
 	if err != nil {
 		return fmt.Errorf("alarmd worker: invalid series batch: %w", err)
 	}
-	retained, err := streamedRetainedSize(batch.Inputs, batch.Delivery)
-	if err != nil {
-		return fmt.Errorf("alarmd worker: measure provisional retention: %w", err)
-	}
+	retained := streamedRetainedSize(batch)
 	// An overlay is kept until the series is evaluated, and charged as it is
 	// kept; a series without one is charged nothing more.
 	retained += hostOverlaysRetainedBytes(batch.HostOverlays)
@@ -580,13 +577,6 @@ func hostOverlaysRetainedBytes(overlays map[execution.PlanIdentity]map[string]js
 		}
 	}
 	return total
-}
-
-func streamedRetainedSize(bindings []execution.NamedInputBinding, delivery execution.SeriesDelivery) (uint64, error) {
-	// The length the bindings without their datasets and the delivery encode
-	// to, counted field by field (retained_size.go): encoding them only to
-	// measure them was a twentieth of reading a large answer.
-	return uint64(retainedDocumentLength(bindings, delivery)) + delivery.Bytes, nil
 }
 
 func prepareNamedInputIndex(header execution.InternalExecutionHeader) (preparedNamedInputIndex, error) {

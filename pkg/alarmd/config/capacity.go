@@ -40,7 +40,6 @@ const memorySourceFallback = "fallback_default"
 // that calibration changes the formulas below and no interface.
 const (
 	retainedMemoryDivisor = 4
-	bytesPerSeries        = 4 << 10
 	bytesPerMutation      = 32 << 10
 
 	// The Go runtime's own budgets are derived from the same container limit.
