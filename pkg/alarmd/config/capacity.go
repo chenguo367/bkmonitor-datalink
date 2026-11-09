@@ -481,7 +481,17 @@ func DeriveCompileCache(inputs CapacityInputs, maxCompiledPlanBytes int) Derived
 // smallest size a series can have, so it binds only where the byte accounting
 // itself has gone wrong.
 func DeriveCoordinator(inputs CapacityInputs, storeItemsPerBatch, chunkedApplyBudget uint64) PhaseTwoCoordinatorConfig {
-	retained := max(inputs.MemoryLimitBytes/retainedMemoryDivisor-DeriveStateCacheBytes(inputs), uint64(bytesPerMutation))
+	return DeriveCoordinatorWith(inputs, storeItemsPerBatch, chunkedApplyBudget, true)
+}
+
+// DeriveCoordinatorWith is DeriveCoordinator with the State cache on or
+// off: off, its share stays in the pool.
+func DeriveCoordinatorWith(inputs CapacityInputs, storeItemsPerBatch, chunkedApplyBudget uint64, stateCache bool) PhaseTwoCoordinatorConfig {
+	cache := uint64(0)
+	if stateCache {
+		cache = DeriveStateCacheBytes(inputs)
+	}
+	retained := max(inputs.MemoryLimitBytes/retainedMemoryDivisor-cache, uint64(bytesPerMutation))
 	guardrail := max(chunkedApplyBudget, storeItemsPerBatch, 1)
 	return PhaseTwoCoordinatorConfig{
 		MaxRetainedBytes:  retained,

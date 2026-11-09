@@ -323,7 +323,9 @@ func openPhaseTwoCoreResources(ctx context.Context, cfg config.Config, recorder 
 		// taken out of the retained-bytes pool. A value is written back over a
 		// rolled-back key only while the Query Group's Progress still has the
 		// Slot begun; the Progress store is opened below, before any Slot runs.
-		options.StateCacheBudgetBytes = int64(config.DeriveStateCacheBytes(config.DetectCapacityInputs()))
+		if !cfg.PhaseTwo.StateCache.Disabled {
+			options.StateCacheBudgetBytes = int64(config.DeriveStateCacheBytes(config.DetectCapacityInputs()))
+		}
 		options.StateCacheReplayAge = recoveryLimits.MaxReplayAge
 		options.RestoreProgressCheck = func(ctx context.Context, group execution.QueryGroupIdentity, slot execution.EvaluationTime) (bool, error) {
 			if progressReader == nil {

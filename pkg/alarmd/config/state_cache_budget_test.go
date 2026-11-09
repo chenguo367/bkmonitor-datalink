@@ -27,3 +27,24 @@ func TestTheStateCacheIsTakenOutOfThePoolAndNothingElse(t *testing.T) {
 		t.Fatalf("execution ceiling = %d, want the 1 GiB line's, untouched", got)
 	}
 }
+
+// Disabled in the file, the State cache takes nothing: the pool is the
+// container's whole quarter again, which is the rollback without a rebuild.
+func TestTurningTheStateCacheOffGivesThePoolItsShareBack(t *testing.T) {
+	inputs := DetectCapacityInputs()
+	for _, test := range []struct {
+		document string
+		want     uint64
+	}{
+		{"phase_two:\n  state_cache:\n    disabled: true\n", inputs.MemoryLimitBytes / retainedMemoryDivisor},
+		{"phase_two:\n  state_cache:\n    disabled: false\n", inputs.MemoryLimitBytes/retainedMemoryDivisor - DeriveStateCacheBytes(inputs)},
+	} {
+		cfg := Default().WithContainerCapacity()
+		if err := decodeDocument([]byte(test.document), &cfg); err != nil {
+			t.Fatal(err)
+		}
+		if got := cfg.PhaseTwo.Coordinator.MaxRetainedBytes; got != test.want {
+			t.Fatalf("%q: pool = %d, want %d", test.document, got, test.want)
+		}
+	}
+}
