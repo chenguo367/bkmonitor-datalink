@@ -11,6 +11,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
@@ -126,5 +127,63 @@ func TestTheStateCacheGivesNothingBackForAReservationThatCannotFit(t *testing.T)
 	}
 	if cache.held != 24<<20 {
 		t.Fatalf("the cache holds %d after the refusal, want the 24 MiB the Slots left it", cache.held)
+	}
+}
+
+// oneGapFact is a gap store that loads one fact.
+type oneGapFact struct{}
+
+func (oneGapFact) LoadGaps(context.Context, execution.GapLoadRequest) (execution.GapLoadResult, error) {
+	return execution.GapLoadResult{}, nil
+}
+
+func (oneGapFact) LoadGapsInto(_ context.Context, _ execution.GapLoadRequest, accept func(execution.GapGuardSnapshot) error) error {
+	return accept(execution.GapGuardSnapshot{})
+}
+
+func (oneGapFact) ApplyGap(context.Context, execution.GapGuardApplyRequest) (execution.GapGuardApplyResult, error) {
+	return execution.GapGuardApplyResult{}, nil
+}
+
+// Every way into the retained pool has the State cache give way: an optional
+// hold, a side effect's bytes and a gap fact, each with the pool's only room
+// what the cache holds, are reserved, the cache giving back what they need.
+func TestEveryWayIntoThePoolHasTheStateCacheGiveWay(t *testing.T) {
+	for name, reserve := range map[string]func(*SlotExecutionCoordinator, *streamedExecution) error{
+		"an optional hold": func(co *SlotExecutionCoordinator, _ *streamedExecution) error {
+			if !co.tryAcquireRetained(4096) {
+				return errors.New("declined")
+			}
+			return nil
+		},
+		"a side effect": func(co *SlotExecutionCoordinator, stream *streamedExecution) error {
+			return co.acquireEffects(effectCounts{states: 1}, 4096, stream, "normal_apply")
+		},
+		"a gap fact": func(co *SlotExecutionCoordinator, stream *streamedExecution) error {
+			co.ports.GapGuard = oneGapFact{}
+			_, err := stream.loadGapFacts(context.Background(), execution.GapLoadRequest{})
+			var exceeded *provisionalBudgetExceededError
+			if errors.As(err, &exceeded) {
+				return err
+			}
+			if stream.gapFacts != 1 {
+				return errors.New("the fact was not reserved")
+			}
+			return nil
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			co := coordinatorOfReplica(fourGiB)
+			cache := &fullCache{held: 128 << 20}
+			co.ports.RetainedBorrower = cache
+			co.reservations.retainedBytes = co.budget.MaxRetainedBytes - cache.held
+			if err := reserve(co, &streamedExecution{coordinator: co, began: true}); err != nil {
+				t.Fatalf("refused with the cache holding the pool's room: %v", err)
+			}
+			if cache.yields == 0 || RetainedReserved(co)+cache.held > co.budget.MaxRetainedBytes {
+				t.Fatalf("%d yields, reserved %d beside the cache's %d; want the cache to give way within the pool %d",
+					cache.yields, RetainedReserved(co), cache.held, co.budget.MaxRetainedBytes)
+			}
+		})
 	}
 }
