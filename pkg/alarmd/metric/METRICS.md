@@ -1959,7 +1959,7 @@ Duration of the committed executor call, excluding SlotSource preparation and ea
 
 Labels: `reason`
 
-Slots that ended, by the reason word their slot_completed line carries: one per Slot, counted once, when it ends - a round that retries it is not an end - whatever the log samples. none is a Slot that ended whole. The answer to how many Slots ended PLAN_NOT_ACTIVE is the PLAN_NOT_ACTIVE cell, whatever cause progress_completion_causes_total files them under. Every cell exists from the start, so a zero is a reading.
+Slots that ended, by the reason word their slot_completed line carries: one per Slot, counted once, when it ends - a round that retries it is not an end - whatever the log samples. none is a Slot that ended whole. The answer to how many Slots ended PLAN_NOT_ACTIVE is the PLAN_NOT_ACTIVE cell, whatever cause progress_completion_causes_total files them under. The none, PLAN_NOT_ACTIVE, CONFIG_DRIFT, PLAN_REACTIVATED, reason_not_reported and _other cells exist from the start, so a zero there is a reading; another word of the contract catalogue appears once a Slot ends with it.
 
 ## alarmd_slot_decision_lag_seconds
 

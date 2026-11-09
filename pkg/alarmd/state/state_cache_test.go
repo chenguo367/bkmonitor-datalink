@@ -187,7 +187,8 @@ func TestAWriteInDoubtIsReadBackNextRound(t *testing.T) {
 	rig.backend.failPipeline = nil
 	rig.now = rig.now.Add(time.Minute)
 	third := slot{at: 180, epoch: 1, segmentStart: 60, fence: fenceOf(3)}
-	if reads, _ := rig.round(third, 2, 1); reads == 0 || rig.lookups(StateCacheMissAbsent) != 2 {
+	// Two absent the first round, nothing cached yet, and two after the doubt.
+	if reads, _ := rig.round(third, 2, 1); reads == 0 || rig.lookups(StateCacheMissAbsent) != 4 {
 		t.Fatalf("reads %d, miss_absent %d; want the store read back after the write in doubt", reads, rig.lookups(StateCacheMissAbsent))
 	}
 }

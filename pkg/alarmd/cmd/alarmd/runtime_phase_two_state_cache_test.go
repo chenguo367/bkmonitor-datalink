@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/state"
 )
 
 // The production wiring of the write-through State cache: the worker hands
@@ -62,10 +63,17 @@ func TestAStrategyBackInItsHeldGroupIsNotServedWhatWasCachedBeforeItLeft(t *test
 	if got := cache("alarmd_state_cache_restored_total", "cause", "missing"); got != 0 {
 		t.Fatalf("state_cache_restored_total{missing} = %v, want nothing written back: the Slot read the key absent", got)
 	}
-	// And the Slot after, under the same fence and activation, is served from
-	// what the one before wrote.
-	fixture.runUntilEnded(ctx, first+60)
+	// And the Slots after, under the same fence and activation, are served
+	// from what the one before wrote: a round retried under load reads the
+	// store (miss_replay), so a few Slots, not one.
+	for slot := first + 60; slot <= first+180; slot += 60 {
+		fixture.runUntilEnded(ctx, slot)
+	}
 	if got := cache("alarmd_state_cache_lookups_total", "result", "hit"); got < 1 {
-		t.Fatalf("state_cache_lookups_total{hit} = %v, want the next Slot served from the cache", got)
+		lookups := map[string]float64{}
+		for _, result := range state.StateCacheLookupResults {
+			lookups[result] = cache("alarmd_state_cache_lookups_total", "result", result)
+		}
+		t.Fatalf("state_cache_lookups_total{hit} = %v, want the next Slot served from the cache; lookups %v", got, lookups)
 	}
 }

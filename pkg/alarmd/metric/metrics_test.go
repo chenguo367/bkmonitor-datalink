@@ -42,6 +42,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisscript"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scopeclose"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sourceliveness"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/state"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategycache"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/targetplan"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/tracing"
@@ -766,7 +767,9 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("schedule_cursor_advance_total"): (len(observability.CursorAdvanceStatuses) - 1 + len(observability.CursorRefusals) + 1) * len(execution.ForwardSkipReasons),
 		// Every word of the contract catalogue, none, reason_not_reported and
 		// _other, created at construction.
-		fqName("slot_completed_reasons_total"):    len(slotReasonWords),
+		// The standing cells, and every word of the contract catalogue a Slot
+		// may end with.
+		fqName("slot_completed_reasons_total"):    len(slotReasonWords) + len(contract.ReasonCatalogV2()),
 		fqName("activation_held_query_groups"):    1,
 		fqName("activation_held_age_seconds_max"): 1,
 	}
@@ -792,6 +795,15 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("observer_panics_total")] = len(observability.ObserverNames)
 	bounds[fqName("absent_strategy_close_total")] = len(absentalerts.Outcomes)
 	bounds[fqName("strategy_edit_close_total")] = len(editclose.Outcomes)
+	bounds[fqName("state_cache_lookups_total")] = len(state.StateCacheLookupResults)
+	bounds[fqName("state_cache_departures_total")] = len(state.StateCacheDepartureReasons)
+	bounds[fqName("state_cache_restored_total")] = len(state.StateCacheRestoreCauses)
+	bounds[fqName("state_cache_restore_declined_total")] = len(state.StateCacheDeclineReasons)
+	bounds[fqName("state_cache_bytes")] = 1
+	bounds[fqName("state_cache_budget_bytes")] = 1
+	bounds[fqName("state_cache_query_groups")] = 1
+	bounds[fqName("container_memory_cgroup_info")] = 1
+	bounds[fqName("container_memory_v1_bytes")] = 5
 	// cmd/alarmd noDataCloseOutcomes: eight words.
 	bounds[fqName("no_data_close_requests_total")] = 8
 	bounds[fqName("linkd_filter_close_total")] = len(filterclose.Outcomes)
