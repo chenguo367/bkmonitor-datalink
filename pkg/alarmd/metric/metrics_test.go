@@ -760,8 +760,13 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("assignment_index_confirm_total"):          4,
 		fqName("assignment_record_read_total"):            2,
 		// Four outcomes without a refusal, plus a conflict for each refusal
-		// OTHER included, all created at construction.
-		fqName("schedule_cursor_advance_total"):   len(observability.CursorAdvanceStatuses) - 1 + len(observability.CursorRefusals),
+		// OTHER included, each under every skip reason, and an applied skip
+		// that threw away a Slot in flight under every reason: all created at
+		// construction.
+		fqName("schedule_cursor_advance_total"): (len(observability.CursorAdvanceStatuses) - 1 + len(observability.CursorRefusals) + 1) * len(execution.ForwardSkipReasons),
+		// Every word of the contract catalogue, none, reason_not_reported and
+		// _other, created at construction.
+		fqName("slot_completed_reasons_total"):    len(slotReasonWords),
 		fqName("activation_held_query_groups"):    1,
 		fqName("activation_held_age_seconds_max"): 1,
 	}

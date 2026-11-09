@@ -71,7 +71,9 @@ type cutoverStallFixture struct {
 	oldProjection   execution.UnfinishedSlotProjection
 	clock           *atomic.Int64
 	now             func() time.Time
-	uqCalls         *atomic.Int64
+	// recorder is the bundle's: its registry is what /metrics serves.
+	recorder *metric.Recorder
+	uqCalls  *atomic.Int64
 	// unalignedCalls counts the requests read from where they start: the
 	// queries of a Plan detected more often than it aggregates.
 	unalignedCalls   *atomic.Int64
@@ -171,7 +173,8 @@ func openCutoverFixtureSharing(
 	// It fails on some runs and not others, which is worse than always.
 	base := time.Now().Unix()
 	base += 60 - base%60
-	fixture := &cutoverStallFixture{t: t, redisClient: redisClient, base: base, clock: &atomic.Int64{}, uqCalls: &atomic.Int64{}, unalignedCalls: &atomic.Int64{}}
+	fixture := &cutoverStallFixture{t: t, redisClient: redisClient, base: base, clock: &atomic.Int64{}, uqCalls: &atomic.Int64{}, unalignedCalls: &atomic.Int64{},
+		recorder: metric.NewRecorder(metric.BuildInfo{})}
 	fixture.clock.Store(base * 1000)
 	fixture.now = func() time.Time { return time.UnixMilli(fixture.clock.Load()) }
 
@@ -266,7 +269,7 @@ func openCutoverFixtureSharing(
 		external(&dependencies)
 	}
 	bundle, err := openProductionPhaseTwoBundleWithDependencies(
-		ctx, cfg, metric.NewRecorder(metric.BuildInfo{}), logger,
+		ctx, cfg, fixture.recorder, logger,
 		newPhaseTwoApplicationHealth(),
 		func(client redis.Cmdable, prefix string) (controlplane.StrategySource, error) {
 			return controlplane.NewLegacyRedisStrategySource(client, prefix)

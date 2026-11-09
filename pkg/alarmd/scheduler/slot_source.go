@@ -2073,7 +2073,7 @@ func (source *ProductionSlotSource) observeCursorAdvance(
 			OwnerID: request.OwnerFence.OwnerID, OwnerEpoch: request.OwnerFence.OwnerEpoch,
 		}, observability.OperationWrite, observability.SlotSkippedFacts{
 			Path: observability.SlotSkippedCursorSkip, FirstSlot: int64(gap.FirstSlot), LastSlot: int64(gap.LastSlot),
-			Reason: string(gap.ReasonCode), GapGuard: observability.SkipGapProgressOnly,
+			Reason: string(gap.ReasonCode), GapGuard: observability.SkipGapProgressOnly, InFlightSlot: facts.InFlightSlot,
 		})
 	}
 	return facts.Status

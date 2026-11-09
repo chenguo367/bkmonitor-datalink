@@ -1517,7 +1517,7 @@ Acknowledged Progress commit observations by existing completion kind.
 
 Labels: `completion_kind`, `cause`, `reason`, `origin`
 
-Acknowledged Slots that completed short of whole - COMPLETED_WITH_UNAVAILABLE, COMPLETED_WITH_PARTIAL_GAP - by the cause the completion carried (the most actionable of what the round hit) and that cause's reason: which Plan, Level or query it was and when are on the progress_committed line (completion_strategy, completion_level, completion_query). NONE is a completion that carried no cause. origin says whose the reason is: physical for what the round met itself - a primary input's reason always is - and carried for a stored guard's reason a Level outcome repeated on a later round (LEVEL_OUTCOME_UNKNOWN, GAP_GUARD_WARMING); the guard's origin Slot is on the progress_committed line (evaluation_reason_origin_slot). reason=QUERY_TIMEOUT,origin=physical is a timeout this round.
+Acknowledged Slots that completed short of whole - COMPLETED_WITH_UNAVAILABLE, COMPLETED_WITH_PARTIAL_GAP - by the cause the completion carried (the most actionable of what the round hit) and that cause's reason: which Plan, Level or query it was and when are on the progress_committed line (completion_strategy, completion_level, completion_query). NONE is a completion that carried no cause. origin says whose the reason is: physical for what the round met itself - a primary input's reason always is - and carried for a stored guard's reason a Level outcome repeated on a later round (LEVEL_OUTCOME_UNKNOWN, GAP_GUARD_WARMING); the guard's origin Slot is on the progress_committed line (evaluation_reason_origin_slot). reason=QUERY_TIMEOUT,origin=physical is a timeout this round. A Slot is filed here by its cause, so one that ended PLAN_NOT_ACTIVE while its primary input was unavailable is under PRIMARY_INPUT_UNAVAILABLE: how many Slots ended PLAN_NOT_ACTIVE is slot_completed_reasons_total{reason="PLAN_NOT_ACTIVE"}, and the two families are not summed.
 
 ## alarmd_query_cooldown_events_total
 
@@ -1825,9 +1825,9 @@ RunOne exits including panic, classified once by actual control flow.
 
 ## alarmd_schedule_cursor_advance_total
 
-Labels: `result`, `refusal`
+Labels: `result`, `refusal`, `reason`, `in_flight`
 
-Attempts to move a Progress cursor that points into a pruned part of its timeline to the earliest Slot the timeline still holds, by outcome; a conflict also carries the one fact that refused it (refusal), which is empty for every other outcome.
+Attempts to move a Progress cursor past Slots nobody evaluated to the earliest Slot its timeline still holds, by outcome and by the word the skip is recorded under (reason: SCHEDULE_PRUNED, PLAN_NOT_ACTIVE, SCHEDULE_REPAIRED, SCHEDULE_REOPENED). An applied attempt is one skipped span, of however many Slots, not one Slot; in_flight says whether it also threw away a Slot in flight - a Slot that ended, named by in_flight_slot on its slot_skipped line - and is false for every other outcome. A conflict also carries the one fact that refused it (refusal), which is empty for every other outcome. Every cell exists from the start, so a zero is a reading.
 
 ## alarmd_schedule_cutover_duration_seconds
 
@@ -1942,6 +1942,12 @@ Acknowledged short-period Slot Progress completions by actual completion kind.
 Labels: `cohort`, `completion_kind`
 
 Duration of the committed executor call, excluding SlotSource preparation and earlier attempts, by the completion kind it committed.
+
+## alarmd_slot_completed_reasons_total
+
+Labels: `reason`
+
+Slots that ended, by the reason word their slot_completed line carries: one per Slot, counted once, when it ends - a round that retries it is not an end - whatever the log samples. none is a Slot that ended whole. The answer to how many Slots ended PLAN_NOT_ACTIVE is the PLAN_NOT_ACTIVE cell, whatever cause progress_completion_causes_total files them under. Every cell exists from the start, so a zero is a reading.
 
 ## alarmd_slot_decision_lag_seconds
 

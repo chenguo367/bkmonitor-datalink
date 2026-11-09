@@ -112,6 +112,11 @@ type SlotSkippedFacts struct {
 	Cause     string
 	GapGuard  string
 	GapPlans  int
+	// InFlightSlot is the evaluation time of the Slot in flight that a
+	// cursor skip threw away with the span it skipped: a Slot that ended,
+	// named here because it has no slot_completed line of its own. Zero when
+	// there was none.
+	InFlightSlot int64
 	// GapStrategies is the first few due Plans' strategy ids.
 	GapStrategies []string
 	Replay        *SlotSkipReplayFacts
@@ -208,6 +213,9 @@ func appendSlotSkippedAttributes(attributes []slog.Attr, facts *SlotSkippedFacts
 		slog.Int("skip_gap_plans", facts.GapPlans),
 		slog.Any("skip_gap_strategies", facts.GapStrategies),
 	)
+	if facts.InFlightSlot != 0 {
+		attributes = append(attributes, slog.Int64("in_flight_slot", facts.InFlightSlot))
+	}
 	if busy := facts.Lookback; busy != nil {
 		attributes = append(attributes,
 			slog.Bool("held_by_lookback", busy.Held()),

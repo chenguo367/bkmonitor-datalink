@@ -10,10 +10,32 @@ type workflowMetrics struct {
 	ranges, expiredSlots   *prometheus.CounterVec
 	run, execute, progress *prometheus.CounterVec
 	progressCauses         *prometheus.CounterVec
+	slotReasons            *prometheus.CounterVec
 	active, ready, delayed prometheus.Gauge
 	abandonedSlots         prometheus.Counter
 	shareRefusalGaps       prometheus.Counter
 	permitWait             *prometheus.HistogramVec
+}
+
+// slotReasonWords is every word a Slot's end is counted under: the contract
+// catalogue's, none for a Slot that ended whole, reason_not_reported for an
+// end that named no reason where one was due, and _other for any word past
+// them - the words its slot_completed line writes.
+var slotReasonWords = func() []string {
+	words := []string{string(observability.ReasonNone), string(observability.ReasonNotReported), string(observability.ReasonOther)}
+	for _, definition := range contract.ReasonCatalogV2() {
+		words = append(words, definition.Code)
+	}
+	return words
+}()
+
+// slotReasonWord is the word a Slot's end is counted under.
+func slotReasonWord(reason observability.ReasonCode, result observability.Result) string {
+	reason = observability.NormalizeReason(reason, result)
+	if reason == observability.ReasonNone || reason == observability.ReasonNotReported || contract.IsKnownReasonV2(string(reason)) {
+		return string(reason)
+	}
+	return string(observability.ReasonOther)
 }
 
 func newWorkflowMetrics() workflowMetrics {
@@ -23,7 +45,7 @@ func newWorkflowMetrics() workflowMetrics {
 	gauge := func(name, help string) prometheus.Gauge {
 		return prometheus.NewGauge(prometheus.GaugeOpts{Subsystem: metricSubsystem, Name: name, Help: help})
 	}
-	return workflowMetrics{
+	metrics := workflowMetrics{
 		ranges:       counter("expired_range_total", "Expired range operation returns, not logical Slot completions.", "result"),
 		expiredSlots: counter("expired_slots_finalized_total", "Logical age-expired Slots finalized by a new successful range commit.", "reason"),
 		run:          counter("run_one_return_total", "RunOne exits including panic, classified once by actual control flow.", "outcome"),
@@ -38,8 +60,19 @@ func newWorkflowMetrics() workflowMetrics {
 				"reason is: physical for what the round met itself - a primary input's reason always is - and carried " +
 				"for a stored guard's reason a Level outcome repeated on a later round (LEVEL_OUTCOME_UNKNOWN, " +
 				"GAP_GUARD_WARMING); the guard's origin Slot is on the progress_committed line " +
-				"(evaluation_reason_origin_slot). reason=QUERY_TIMEOUT,origin=physical is a timeout this round."},
+				"(evaluation_reason_origin_slot). reason=QUERY_TIMEOUT,origin=physical is a timeout this round. " +
+				"A Slot is filed here by its cause, so one that ended PLAN_NOT_ACTIVE while its primary input was " +
+				"unavailable is under PRIMARY_INPUT_UNAVAILABLE: how many Slots ended PLAN_NOT_ACTIVE is " +
+				"slot_completed_reasons_total{reason=\"PLAN_NOT_ACTIVE\"}, and the two families are not summed."},
 			[]string{"completion_kind", "cause", "reason", "origin"}),
+		slotReasons: prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem,
+			Name: "slot_completed_reasons_total",
+			Help: "Slots that ended, by the reason word their slot_completed line carries: one per Slot, counted once, " +
+				"when it ends - a round that retries it is not an end - whatever the log samples. none is a Slot that " +
+				"ended whole. The answer to how many Slots ended PLAN_NOT_ACTIVE is the PLAN_NOT_ACTIVE cell, whatever " +
+				"cause progress_completion_causes_total files them under. Every cell exists from the start, so a zero " +
+				"is a reading."},
+			[]string{"reason"}),
 		abandonedSlots: prometheus.NewCounter(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "unfinished_slots_abandoned_total",
 			Help: "Unfinished Slots the Progress store dropped because a later Segment moved the cursor past them, counted when the write recording the skip applied. Each is one slot_skipped line with finalizing_path=progress_store; its Slot was never queried and only the Progress record's recent gap holds it."}),
 		shareRefusalGaps: prometheus.NewCounter(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "share_refusal_gaps_total",
@@ -49,9 +82,14 @@ func newWorkflowMetrics() workflowMetrics {
 		delayed:    gauge("scheduler_delayed_runners", "Runners in the outer delayed queue."),
 		permitWait: prometheus.NewHistogramVec(prometheus.HistogramOpts{Subsystem: metricSubsystem, Name: "query_permit_wait_seconds", Help: "Actual query admission call wall duration including immediate grants and failures; parallel waits are not additive Slot time.", Buckets: []float64{0.001, 0.01, 0.1, 1, 5, 15, 30, 60}}, []string{"queue_kind"}),
 	}
+	// Every cell from the start, so a word that never happens reads zero.
+	for _, word := range slotReasonWords {
+		metrics.slotReasons.WithLabelValues(word)
+	}
+	return metrics
 }
 func (m workflowMetrics) collectors() []prometheus.Collector {
-	return []prometheus.Collector{m.run, m.execute, m.progress, m.progressCauses, m.active, m.ready, m.delayed, m.permitWait, m.ranges, m.expiredSlots, m.abandonedSlots, m.shareRefusalGaps}
+	return []prometheus.Collector{m.run, m.execute, m.progress, m.progressCauses, m.slotReasons, m.active, m.ready, m.delayed, m.permitWait, m.ranges, m.expiredSlots, m.abandonedSlots, m.shareRefusalGaps}
 }
 func (m workflowMetrics) observe(o observability.Observation) {
 	switch {
@@ -88,6 +126,9 @@ func (m workflowMetrics) observe(o observability.Observation) {
 		// the lookback (lookback_supplement_windows_total).
 		if observability.ValidExecuteOutcome(o.ExecuteOutcome) && o.Operation != observability.OperationSupplement {
 			m.execute.WithLabelValues(o.ExecuteOutcome).Inc()
+			if o.ExecuteOutcome == "completed" {
+				m.slotReasons.WithLabelValues(slotReasonWord(o.ReasonCode, o.Result)).Inc()
+			}
 		}
 	case o.Component == observability.ComponentProgress && o.Stage == observability.StageProgressCommitted:
 		if phaseTwoWorkCompleted(o) && observability.ValidProgressCompletionKind(o.ProgressCompletionKind) {

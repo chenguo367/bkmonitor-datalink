@@ -8,6 +8,7 @@ package metric
 import (
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -1237,17 +1238,23 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.assignmentIndexReads = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "assignment_index_read_total", Help: "Assignment index reads by this worker, by result: fresh (round advanced), stale (same round), missing (no index or no set), invalid (unreadable)."}, []string{"result"})
 	metrics.assignmentIndexConfirm = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "assignment_index_confirm_total", Help: "Changes a worker took from the Assignment index and confirmed against the Assignment records, by outcome: opened (a candidate the record confirmed), rejected (a candidate the record refused), released (a held Query Group the record confirmed gone), retained (a held Query Group the index dropped but the record still assigns here). The record always wins; rejected and retained measure how often the index was behind it."}, []string{"result"})
 	metrics.assignmentRecordReads = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "assignment_record_read_total", Help: "Assignment records this worker read to learn what it owns, by path: index (only the changes the index named) or full (every record of the population, when no usable index was there). The index exists to keep the index path near zero in a quiet round."}, []string{"path"})
-	metrics.scheduleCursorAdvances = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "schedule_cursor_advance_total", Help: "Attempts to move a Progress cursor that points into a pruned part of its timeline to the earliest Slot the timeline still holds, by outcome; a conflict also carries the one fact that refused it (refusal), which is empty for every other outcome."}, []string{"result", "refusal"})
-	// Every outcome and every refusal of a conflict publishes a zero from the
-	// start, so a refusal that never happens reads as zero and not as absent.
+	metrics.scheduleCursorAdvances = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "schedule_cursor_advance_total", Help: "Attempts to move a Progress cursor past Slots nobody evaluated to the earliest Slot its timeline still holds, by outcome and by the word the skip is recorded under (reason: SCHEDULE_PRUNED, PLAN_NOT_ACTIVE, SCHEDULE_REPAIRED, SCHEDULE_REOPENED). An applied attempt is one skipped span, of however many Slots, not one Slot; in_flight says whether it also threw away a Slot in flight - a Slot that ended, named by in_flight_slot on its slot_skipped line - and is false for every other outcome. A conflict also carries the one fact that refused it (refusal), which is empty for every other outcome. Every cell exists from the start, so a zero is a reading."}, []string{"result", "refusal", "reason", "in_flight"})
+	// Every outcome, every refusal of a conflict, every reason and, for an
+	// applied skip, both in_flight values publish a zero from the start, so a
+	// skip that never happens reads as zero and not as absent.
 	for _, status := range observability.CursorAdvanceStatuses {
+		refusals := []string{""}
 		if status == observability.CursorAdvanceConflict {
-			for _, refusal := range observability.CursorRefusals {
-				metrics.scheduleCursorAdvances.WithLabelValues(status, refusal)
-			}
-			continue
+			refusals = observability.CursorRefusals
 		}
-		metrics.scheduleCursorAdvances.WithLabelValues(status, "")
+		for _, refusal := range refusals {
+			for _, reason := range execution.ForwardSkipReasons {
+				metrics.scheduleCursorAdvances.WithLabelValues(status, refusal, string(reason), "false")
+				if status == observability.CursorAdvanceApplied {
+					metrics.scheduleCursorAdvances.WithLabelValues(status, refusal, string(reason), "true")
+				}
+			}
+		}
 	}
 	metrics.undrainedDrainingQueryGroups = newLoadedGauge(prometheus.GaugeOpts{Subsystem: metricSubsystem, Name: "undrained_draining_query_groups", Help: "Replicated per-Pod view of retired Query Groups still requiring ownership until their retirement boundary is drained; aggregate replicas with max, not sum."})
 	metrics.activationHeldQueryGroups = newLoadedGauge(prometheus.GaugeOpts{Subsystem: metricSubsystem, Name: "activation_held_query_groups", Help: "Query Groups the publication brings back from retirement that have not drained and were held out of the activation, which went ahead for everyone else. Reported by the Control Leader on every activation attempt and on every reconcile of a publication that still holds some, so it follows the held set down to zero; a value that does not fall is a retirement that is not draining."})
@@ -2261,7 +2268,14 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		}
 	}
 	if facts := observation.CursorAdvance; facts != nil {
-		m.scheduleCursorAdvances.WithLabelValues(facts.Status, facts.Refusal).Inc()
+		reason := string(observability.ReasonOther)
+		for _, known := range execution.ForwardSkipReasons {
+			if facts.Reason == string(known) {
+				reason = facts.Reason
+			}
+		}
+		inFlight := facts.Status == observability.CursorAdvanceApplied && facts.InFlightSlot != 0
+		m.scheduleCursorAdvances.WithLabelValues(facts.Status, facts.Refusal, reason, strconv.FormatBool(inFlight)).Inc()
 	}
 	if facts := observation.ActivationHold; facts != nil && observation.Stage == observability.StageActivationHold {
 		m.activationHeldQueryGroups.Set(float64(facts.Held))
