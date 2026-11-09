@@ -161,3 +161,13 @@ func TestAColumnarRunCountsItsSeriesOnceAndItsPointsAsColumns(t *testing.T) {
 		t.Fatalf("one more point added %d bytes, want %d: its time, its value and its id", step, want)
 	}
 }
+
+// A value kept in the side table counts its bytes and its entry: the same
+// series with string values for numbers costs at least the strings more.
+func TestASideTableValueCountsItsBytes(t *testing.T) {
+	numbers := NewDataset(columnarSeries(digestA, 1757462400, `1`, `2`, `3`)).RetainedBytes()
+	strings := NewDataset(columnarSeries(digestA, 1757462400, `"aaaaaaaaaaaaaaaaaaaa"`, `"bbbbbbbbbbbbbbbbbbbb"`, `3`)).RetainedBytes()
+	if floor := uint64(2 * len(`"aaaaaaaaaaaaaaaaaaaa"`)); strings < numbers+floor {
+		t.Fatalf("two string values cost %d more than numbers, want at least their %d bytes", strings-numbers, floor)
+	}
+}

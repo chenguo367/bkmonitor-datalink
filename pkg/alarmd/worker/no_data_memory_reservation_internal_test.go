@@ -17,6 +17,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
@@ -207,5 +208,44 @@ func TestALoadedNoDataMemoryIsHeldOrRefusedForItsPlanAlone(t *testing.T) {
 	var exceeded *provisionalBudgetExceededError
 	if err := crowded.reserveNoDataMemory(context.Background()); !errors.As(err, &exceeded) || exceeded.share {
 		t.Fatalf("a memory the pool has no room for ended %v; want the pool's refusal", err)
+	}
+}
+
+// A Plan whose loaded memory was refused for the Slot skips its no-data
+// round by name, SKIPPED_SLOT_BUDGET, reports the BYTES refusal, and neither
+// judges nor queues a memory; the same Plan not refused judges and stores,
+// which is the control that makes the skip mean something.
+func TestAPlanWhoseMemoryWasRefusedSkipsItsNoDataRound(t *testing.T) {
+	due := noDataWiredPlan(t)
+	control := noDataWiredStream(t, due, &emptyNoDataStore{})
+	if err := control.loadNoDataMemory(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if whole, err := control.noDataRoundFor(due, nil, execution.CompletenessFull); err != nil || whole.mutation == nil {
+		t.Fatalf("not refused the round ended %v with mutation %v; the control has to judge", err, whole.mutation != nil)
+	}
+
+	var refusals []observability.Observation
+	stream := noDataWiredStream(t, due, &emptyNoDataStore{})
+	stream.coordinator.ports.Observer = observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+		if observation.Stage == observability.StageNoDataMemoryRefused {
+			refusals = append(refusals, observation)
+		}
+	})
+	if err := stream.loadNoDataMemory(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	stream.noDataRefused = map[execution.PlanNoDataIdentity]execution.NoDataApplyItemResult{
+		due.NoDataIdentity(): noDataBytesRefusal(due.NoDataIdentity(), 5000, 1<<30, 768<<20)}
+	// Nothing reaches the batch, so the fixture's missing state port is the
+	// assertion: a series sent on would panic here.
+	if err := stream.evaluateNoData(context.Background(), nil, 16); err != nil {
+		t.Fatal(err)
+	}
+	if len(stream.noDataOutcomes) != 1 || stream.noDataOutcomes[0] != nodata.OutcomeSkippedSlotBudget ||
+		stream.noDataStateMutations != 0 || len(stream.noDataMutations) != 0 || len(refusals) != 1 ||
+		refusals[0].NoDataMemoryRefusal == nil || refusals[0].NoDataMemoryRefusal.Record != string(execution.NoDataRecordBytes) {
+		t.Fatalf("outcomes %v, %d state writes, %d memories queued, refusals %+v; want SKIPPED_SLOT_BUDGET, nothing judged "+
+			"or queued, and one BYTES refusal", stream.noDataOutcomes, stream.noDataStateMutations, len(stream.noDataMutations), refusals)
 	}
 }
