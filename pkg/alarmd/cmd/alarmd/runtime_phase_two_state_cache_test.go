@@ -56,7 +56,13 @@ func TestAStrategyBackInItsHeldGroupIsNotServedWhatWasCachedBeforeItLeft(t *test
 		return got
 	}
 	first := ran + 60
+	hitsBefore := cache("alarmd_state_cache_lookups_total", "result", "hit")
 	fixture.runUntilEnded(ctx, first)
+	// The first Slot back is served nothing from the cache: every lookup of
+	// it misses, by its activation or, retried, as a replay.
+	if got := cache("alarmd_state_cache_lookups_total", "result", "hit"); got != hitsBefore {
+		t.Fatalf("the first Slot back was served %v lookups from the cache, want none", got-hitsBefore)
+	}
 	if got := cache("alarmd_state_cache_lookups_total", "result", "miss_activation"); got < 1 {
 		t.Fatalf("state_cache_lookups_total{miss_activation} = %v, want the strategy back read from the store", got)
 	}
