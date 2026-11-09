@@ -417,11 +417,18 @@ func TestMeasureALargeQueryGroupsTakeoverAgainstTheHeap(t *testing.T) {
 	}()
 	// The rounds a takeover runs: the Slots behind, then the current one and
 	// the next, a minute apart.
+	// After each round returns, collected and read again: what is live
+	// then with nothing reserved is what a finished Slot left reachable.
 	for round := int64(0); round < 4; round++ {
 		clock.Store(base + 3*60 + 30 + round*60)
 		if err := second.runScheduledOnce(ctx); err != nil {
 			t.Logf("round %d: %v", round, err)
 		}
+		runtime.GC()
+		live := largeGroupLiveHeap()
+		reserved, _ := retainedReservedOf(recorder)
+		t.Logf("round %d done at %d ms: live %d reserved %d live_less_reserved_over_before %d", round,
+			time.Since(started).Milliseconds(), live, reserved, int64(live)-int64(reserved)-int64(before))
 	}
 	close(done)
 	<-sampled
