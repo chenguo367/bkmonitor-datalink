@@ -94,6 +94,14 @@ type phaseTwoProductionExternalDependencies struct {
 	// are retried while the replica reports itself not ready.
 	PrepareEvents      func(enginekafka.DecisionSinkConfig) (outputSinkOpener, error)
 	AdditionalObserver observability.Observer
+	// Placement narrows which workers the Control Leader may place a Query
+	// Group on, on top of the compatibility every worker is judged by: the
+	// placement, the incumbent it keeps, and both rebalances' destinations
+	// all ask it (scheduler.Router's eligibility), so a placement it pins is
+	// not undone. nil is production's - rendezvous over every compatible
+	// worker. It is set only by a test that has to put two Query Groups on
+	// two named workers; nothing in configuration reaches it.
+	Placement scheduler.WorkerEligibility
 	// StartupWaitInitial overrides the first retry delay of a startup
 	// dependency that does not answer; zero is the production delay.
 	StartupWaitInitial time.Duration
@@ -870,7 +878,7 @@ func openProductionPhaseTwoBundleAssembly(
 	if err != nil {
 		return nil, err
 	}
-	eligibility, err := scheduler.NewStaticWorkerEligibility(expectedCompatibility)
+	eligibility, err := phaseTwoWorkerEligibility(expectedCompatibility, external.Placement)
 	if err != nil {
 		return nil, err
 	}
@@ -1732,27 +1740,29 @@ func productionPhaseTwoPrefix(prefix, component string) string {
 	return prefix + ":phase-two:" + component
 }
 
+// phaseTwoWorkerEligibility is which workers the Leader may place on: every
+// worker of the expected compatibility, narrowed by placement when a test
+// injects one. With none it is the compatibility alone, as it always was.
+func phaseTwoWorkerEligibility(expected ownership.WorkerCompatibility, placement scheduler.WorkerEligibility) (scheduler.WorkerEligibility, error) {
+	compatible, err := scheduler.NewStaticWorkerEligibility(expected)
+	if err != nil {
+		return nil, err
+	}
+	return scheduler.AllEligible(compatible, placement), nil
+}
+
 func phaseTwoUQLimits(cfg config.Config) accessuq.Limits {
-	// One UQ response body is capped independently of the Coordinator retained
-	// budget: raising that budget to gigabytes must not allow a multi-gigabyte
-	// single response. Series, record and per-series byte limits are unchanged.
-	const maximumBodyCap = int64(512 << 20)
-	maximumBody := int64(cfg.PhaseTwo.Coordinator.MaxRetainedBytes)
-	if maximumBody > maximumBodyCap {
-		maximumBody = maximumBodyCap
-	}
-	maximumSeries := maximumBody
-	if defaults := accessuq.DefaultLimits(); defaults.MaxSeriesBytes < maximumSeries {
-		maximumSeries = defaults.MaxSeriesBytes
-	}
-	// The counts in one answer are what its bytes can hold at the smallest a
-	// series and a record encode: the body cap governs, and these stop only an
-	// answer whose counting has gone wrong. The record cap was once the
-	// coordinator's series count times the detector's records per series,
-	// two numbers that bound other things.
+	// An answer is decoded series by series, so it is bounded by its series:
+	// each at most the pool, and at most the per-series default. There is no
+	// bound on the whole body - it holds no memory, and a byte cap on it
+	// would refuse a Query Group the pool can hold. The counts are what the
+	// pool can hold at the smallest a series and a record encode; they stop
+	// only an answer whose counting has gone wrong.
+	pool := cfg.PhaseTwo.Coordinator.MaxRetainedBytes
+	maximumSeries := int64(min(pool, uint64(accessuq.DefaultLimits().MaxSeriesBytes)))
 	return accessuq.Limits{
-		MaxBodyBytes: maximumBody, MaxSeriesBytes: maximumSeries,
-		MaxSeries: max(uint64(maximumBody)/config.MinimumSeriesBytes, 1), MaxRecords: max(uint64(maximumBody)/config.MinimumRecordBytes, 1),
+		MaxSeriesBytes: max(maximumSeries, 1),
+		MaxSeries:      max(pool/config.MinimumSeriesBytes, 1), MaxRecords: max(pool/config.MinimumRecordBytes, 1),
 	}
 }
 

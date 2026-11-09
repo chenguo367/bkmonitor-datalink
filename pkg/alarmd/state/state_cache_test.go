@@ -193,6 +193,35 @@ func TestAWriteInDoubtIsReadBackNextRound(t *testing.T) {
 	}
 }
 
+// One key of a request ends in doubt and the other is written: the written
+// one is not kept either, since the request as a whole may have landed in
+// part, and both leave under unknown, not conflict.
+func TestAWriteInDoubtTakesOutTheKeysWrittenBesideIt(t *testing.T) {
+	rig := newCacheRig(t, 1<<20)
+	rig.round(first, 2, 0)
+	doubted, err := RuntimeStateKeyV3("alarmd", seriesIdentity(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rig.now = rig.now.Add(time.Minute)
+	rig.backend.failKey = doubted
+	if _, result := rig.round(second, 2, 1); result.Items[0].Status != execution.StateApplied ||
+		result.Items[1].Status != execution.StateApplyRetryable {
+		t.Fatalf("fixture: the round ended %s / %s, want one written and one in doubt", result.Items[0].Status, result.Items[1].Status)
+	}
+	rig.backend.failKey = ""
+	departures := rig.store.StateCacheStats().Departures
+	if departures[StateCacheDepartUnknown] != 2 || departures[StateCacheDepartConflict] != 0 {
+		t.Fatalf("departures %v, want both keys out under unknown", departures)
+	}
+	rig.now = rig.now.Add(time.Minute)
+	third := slot{at: 180, epoch: 1, segmentStart: 60, fence: fenceOf(3)}
+	hits := rig.lookups(StateCacheHit)
+	if reads, _ := rig.round(third, 2, 2); reads == 0 || rig.lookups(StateCacheHit) != hits {
+		t.Fatalf("reads %d, %d served from the cache; want the written key read back too", reads, rig.lookups(StateCacheHit)-hits)
+	}
+}
+
 // A key the cache served that was deleted underneath it is written back in
 // the same Slot, expecting it gone.
 func TestADeletedKeyIsWrittenBackInTheSameSlot(t *testing.T) {

@@ -99,7 +99,6 @@ func BenchmarkDecodeALargeAnswer(b *testing.B) {
 	attempt := largeAnswerAttempt(b)
 	body := largeAnswerBody(b, largeAnswerSeries)
 	limits := DefaultLimits()
-	limits.MaxBodyBytes = 1 << 30
 	client, err := NewClientWithLimits("http://127.0.0.1:1", "alarmd-shadow", &http.Client{}, limits)
 	if err != nil {
 		b.Fatal(err)

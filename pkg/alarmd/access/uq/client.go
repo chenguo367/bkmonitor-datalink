@@ -81,20 +81,26 @@ var (
 	ErrTotalRecordsExceeded  error = &responseLimitError{code: "TOTAL_RECORDS_EXCEEDED", class: execution.ResponseFailureLimitTotalRecords}
 )
 
+// Limits bound one answer's decode. There is no bound on the whole body: an
+// answer is decoded series by series and handed on as it is read, so its
+// size holds no memory - each series is bounded on its own (MaxSeriesBytes)
+// and is charged to the retained pool by whoever keeps it. A byte bound on
+// the whole body would refuse a large Query Group the pool can hold, by a
+// number that guards nothing. The counts stop only an answer whose counting
+// has gone wrong.
 type Limits struct {
-	MaxBodyBytes   int64
 	MaxSeriesBytes int64
 	MaxSeries      uint64
 	MaxRecords     uint64
 }
 
 func DefaultLimits() Limits {
-	return Limits{MaxBodyBytes: 64 << 20, MaxSeriesBytes: 8 << 20, MaxSeries: 100_000, MaxRecords: 1_000_000}
+	return Limits{MaxSeriesBytes: 8 << 20, MaxSeries: 100_000, MaxRecords: 1_000_000}
 }
 
 func (limits Limits) validate() error {
-	if limits.MaxBodyBytes <= 0 || limits.MaxSeriesBytes <= 0 || limits.MaxSeries == 0 || limits.MaxRecords == 0 || limits.MaxSeriesBytes > limits.MaxBodyBytes {
-		return errors.New("alarmd access uq: positive ordered response limits are required")
+	if limits.MaxSeriesBytes <= 0 || limits.MaxSeries == 0 || limits.MaxRecords == 0 {
+		return errors.New("alarmd access uq: positive response limits are required")
 	}
 	return nil
 }
@@ -377,13 +383,12 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 	if err != nil {
 		return execution.ProviderCompletion{}, &requestFailureError{err: err, request: answeredRequest(err)}
 	}
-	bounded := &boundedReader{reader: counted, maximum: client.limits.MaxBodyBytes}
 	delivered := &countingSink{sink: sink}
 	var completion execution.ProviderCompletion
 	if shared {
-		completion, err = client.decodeShared(ctx, bounded, attempt, delivered)
+		completion, err = client.decodeShared(ctx, counted, attempt, delivered)
 	} else {
-		completion, err = client.decodeQuery(ctx, bounded, attempt, delivered, scanned)
+		completion, err = client.decodeQuery(ctx, counted, attempt, delivered, scanned)
 	}
 	if scanned != nil {
 		scanned.Bytes = counted.bytes
@@ -588,6 +593,54 @@ func (reader *boundedReader) Read(buffer []byte) (int, error) {
 	return count, err
 }
 
+// valueWindow bounds what the decoder may buffer for the value it reads
+// next, in place of a bound on the whole body: the decoder holds one value
+// at a time, so one value's bound is what an answer of any length holds.
+// The window is measured from where the decoder has consumed to
+// (json.Decoder.InputOffset), not from what this reader handed it - the
+// decoder reads ahead, and a window from the handed count would give the
+// next value less than its bound. An overrun answers with the window's own
+// named error rather than io.EOF, which would read as an answer cut short.
+type valueWindow struct {
+	reader   io.Reader
+	read     int64
+	end      int64
+	over     error
+	exceeded error
+}
+
+// valueWindowSlack is what the decoder may need past a value's own bytes to
+// know it ended: separators and whitespace.
+const valueWindowSlack = 4 << 10
+
+// otherValueBytes bounds a key, a delimiter, and every top-level value that
+// is not a series: status, result_table_id, an answer's own fields, and
+// anything the decoder skips.
+const otherValueBytes = 1 << 20
+
+// next lets the decoder read a value of up to limit bytes from where it has
+// consumed to; past it, the read answers over.
+func (window *valueWindow) next(decoder *json.Decoder, limit int64, over error) {
+	window.end, window.over = decoder.InputOffset()+limit+valueWindowSlack, over
+}
+
+func (window *valueWindow) Read(buffer []byte) (int, error) {
+	if window.exceeded != nil {
+		return 0, window.exceeded
+	}
+	remaining := window.end - window.read
+	if remaining <= 0 {
+		window.exceeded = window.over
+		return 0, window.exceeded
+	}
+	if int64(len(buffer)) > remaining {
+		buffer = buffer[:remaining]
+	}
+	count, err := window.reader.Read(buffer)
+	window.read += int64(count)
+	return count, err
+}
+
 func (reader *countingReader) Read(buffer []byte) (int, error) {
 	began := reader.now()
 	count, err := reader.reader.Read(buffer)
@@ -777,9 +830,20 @@ func (client *Client) decodeQuery(ctx context.Context, reader io.Reader, attempt
 	// reserved only the table the completion carries.
 	defer func() { session.named.settle(completion, err) }()
 	defer session.limitCompletion(&completion, &err)
+	window := &valueWindow{reader: reader}
 	defer session.settle(ctx, &err)
-	decoder := json.NewDecoder(reader)
+	// A path that replaced the read's error with its own words is told the
+	// overrun it met, so it completes as the limit it is - before settle,
+	// whose own failure handing a series on stays the reason it gives.
+	defer func() {
+		if err != nil && window.exceeded != nil {
+			err = window.exceeded
+		}
+	}()
+	decoder := json.NewDecoder(window)
 	decoder.UseNumber()
+	session.window = window
+	window.next(decoder, otherValueBytes, ErrResponseBytesExceeded)
 	opening, err := decoder.Token()
 	if err != nil {
 		return completion, err
@@ -795,6 +859,7 @@ func (client *Client) decodeQuery(ctx context.Context, reader io.Reader, attempt
 		if err := ctx.Err(); err != nil {
 			return completion, err
 		}
+		window.next(decoder, otherValueBytes, ErrResponseBytesExceeded)
 		keyToken, err := decoder.Token()
 		if err != nil {
 			return completion, fmt.Errorf("alarmd access uq: decode field: %w", err)
@@ -803,6 +868,7 @@ func (client *Client) decodeQuery(ctx context.Context, reader io.Reader, attempt
 		if !ok {
 			return completion, errors.New("alarmd access uq: response field name is invalid")
 		}
+		window.next(decoder, otherValueBytes, ErrResponseBytesExceeded)
 		switch key {
 		case "series":
 			start, err := decoder.Token()
@@ -810,6 +876,7 @@ func (client *Client) decodeQuery(ctx context.Context, reader io.Reader, attempt
 				return completion, errors.New("alarmd access uq: series must be an array")
 			}
 			for decoder.More() {
+				window.next(decoder, client.limits.MaxSeriesBytes, ErrSeriesBytesExceeded)
 				var raw json.RawMessage
 				if err := decoder.Decode(&raw); err != nil {
 					return completion, fmt.Errorf("alarmd access uq: decode series payload: %w", err)
@@ -824,6 +891,7 @@ func (client *Client) decodeQuery(ctx context.Context, reader io.Reader, attempt
 				if err := session.accept(ctx, series, uint64(len(raw))); err != nil {
 					return completion, err
 				}
+				window.next(decoder, otherValueBytes, ErrResponseBytesExceeded)
 			}
 			if _, err := decoder.Token(); err != nil {
 				return completion, err
@@ -870,6 +938,7 @@ func (client *Client) decodeQuery(ctx context.Context, reader io.Reader, attempt
 			}
 		}
 	}
+	window.next(decoder, otherValueBytes, ErrResponseBytesExceeded)
 	if _, err := decoder.Token(); err != nil {
 		return completion, err
 	}

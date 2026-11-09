@@ -32,6 +32,37 @@ type WorkerEligibility interface {
 	Eligible(execution.QueryGroupIdentity, ownership.WorkerRegistration, time.Time) bool
 }
 
+// AllEligible is eligible where every one of eligibilities is; a nil one
+// is left out, so AllEligible(e) is e and AllEligible(e, nil) is e. With
+// none left it is nil - no eligibility, as NewRouter reads nil - not one
+// that says every worker is eligible.
+func AllEligible(eligibilities ...WorkerEligibility) WorkerEligibility {
+	var kept allEligible
+	for _, eligibility := range eligibilities {
+		if eligibility != nil {
+			kept = append(kept, eligibility)
+		}
+	}
+	switch len(kept) {
+	case 0:
+		return nil
+	case 1:
+		return kept[0]
+	}
+	return kept
+}
+
+type allEligible []WorkerEligibility
+
+func (eligibilities allEligible) Eligible(queryGroup execution.QueryGroupIdentity, worker ownership.WorkerRegistration, at time.Time) bool {
+	for _, eligibility := range eligibilities {
+		if !eligibility.Eligible(queryGroup, worker, at) {
+			return false
+		}
+	}
+	return true
+}
+
 type staticWorkerEligibility struct {
 	required ownership.WorkerCompatibility
 }

@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -281,6 +282,17 @@ const renewalTestInterval = 20 * time.Millisecond
 // renewing it until a few renewals have gone through.
 func openRenewingQueryGroup(t *testing.T, production *productionPhaseTwoOwnership, store *ownership.RedisStore, reading scriptReading, queryGroup execution.QueryGroupIdentity) (phaseTwoQueryGroupRuntime, <-chan error) {
 	t.Helper()
+	runner := openLeasedQueryGroup(t, production, store, queryGroup)
+	done := maintainLease(t, runner)
+	waitPhaseTwoCondition(t, "renewals to go through", func() bool {
+		return reading.renewals("query_group", "renewed", "none") >= 3
+	})
+	return runner, done
+}
+
+// openLeasedQueryGroup takes the Query Group's lease and leaves it unrenewed.
+func openLeasedQueryGroup(t *testing.T, production *productionPhaseTwoOwnership, store *ownership.RedisStore, queryGroup execution.QueryGroupIdentity) phaseTwoQueryGroupRuntime {
+	t.Helper()
 	ctx := context.Background()
 	now := time.Now()
 	authority, err := store.AcquireControlLeader(ctx, "control-1", now, 10*time.Minute)
@@ -296,14 +308,18 @@ func openRenewingQueryGroup(t *testing.T, production *productionPhaseTwoOwnershi
 	if err != nil {
 		t.Fatalf("OpenQueryGroup() error = %v", err)
 	}
-	leaseCtx, cancel := context.WithCancel(ctx)
+	return runner
+}
+
+// maintainLease runs the lease's renewal loop until the test ends, and says
+// how it ended.
+func maintainLease(t *testing.T, runner phaseTwoQueryGroupRuntime) <-chan error {
+	t.Helper()
+	leaseCtx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	done := make(chan error, 1)
 	go func() { done <- runner.MaintainLease(leaseCtx, renewalTestInterval, time.Minute) }()
-	waitPhaseTwoCondition(t, "renewals to go through", func() bool {
-		return reading.renewals("query_group", "renewed", "none") >= 3
-	})
-	return runner, done
+	return done
 }
 
 func waitRenewalEnd(t *testing.T, done <-chan error, want error) {
@@ -371,7 +387,8 @@ func TestAQueryGroupRenewalRefusedByTheStoreReadsAsRefused(t *testing.T) {
 }
 
 // A session that has stopped refuses locally, with the same word, and sends
-// nothing: this count has it and the script's does not.
+// nothing: this count has it and the script's does not. Released before its
+// loop renews once, so no renewal can be in flight when it stops.
 func TestARenewalRefusedLocallySendsNoScriptAndIsCounted(t *testing.T) {
 	server := redistest.Start(t)
 	if server == nil {
@@ -380,17 +397,78 @@ func TestARenewalRefusedLocallySendsNoScriptAndIsCounted(t *testing.T) {
 	recorder := metric.NewRecorder(metric.BuildInfo{})
 	reading := scriptReading{t, recorder}
 	production, store := renewalOwnership(t, scriptMetricsClient(t, server, recorder), recorder)
-	runner, done := openRenewingQueryGroup(t, production, store, reading, "query-group-1")
+	runner := openLeasedQueryGroup(t, production, store, "query-group-1")
 	if err := runner.Release(context.Background()); err != nil {
 		t.Fatalf("Release() error = %v", err)
 	}
+	waitRenewalEnd(t, maintainLease(t, runner), ownership.ErrStaleFence)
+	if got := reading.renewals("query_group", "refused", "OWNERSHIP_STALE_FENCE"); got != 1 {
+		t.Errorf("refused = %v", got)
+	}
+	if scripted := reading.renewScriptAttempts(); scripted != 0 {
+		t.Errorf("the script ran %v times, want none: a stopped session sends nothing", scripted)
+	}
+}
+
+// releaseInFlight holds the first script it sees once armed until release
+// has returned: a renewal that read its session as accepting is sent after
+// the session stopped.
+type releaseInFlight struct {
+	armed   atomic.Bool
+	release func()
+}
+
+func (hook *releaseInFlight) hold(cmds ...redis.Cmder) {
+	for _, cmd := range cmds {
+		if name := cmd.Name(); (name == "evalsha" || name == "eval") && hook.armed.CompareAndSwap(true, false) {
+			hook.release()
+			return
+		}
+	}
+}
+
+func (hook *releaseInFlight) BeforeProcess(ctx context.Context, cmd redis.Cmder) (context.Context, error) {
+	hook.hold(cmd)
+	return ctx, nil
+}
+
+func (*releaseInFlight) AfterProcess(context.Context, redis.Cmder) error { return nil }
+
+func (hook *releaseInFlight) BeforeProcessPipeline(ctx context.Context, cmds []redis.Cmder) (context.Context, error) {
+	hook.hold(cmds...)
+	return ctx, nil
+}
+
+func (*releaseInFlight) AfterProcessPipeline(context.Context, []redis.Cmder) error { return nil }
+
+// A renewal in flight when its session stops is refused by the store: it
+// sent its script, so the script's count has it, and it is counted refused
+// once, with the word a local refusal has.
+func TestARenewalInFlightAtReleaseIsRefusedByTheStoreAndItsScriptCounted(t *testing.T) {
+	server := redistest.Start(t)
+	if server == nil {
+		return
+	}
+	recorder := metric.NewRecorder(metric.BuildInfo{})
+	reading := scriptReading{t, recorder}
+	client := scriptMetricsClient(t, server, recorder)
+	inFlight := &releaseInFlight{}
+	client.AddHook(inFlight)
+	production, store := renewalOwnership(t, client, recorder)
+	runner, done := openRenewingQueryGroup(t, production, store, reading, "query-group-1")
+	inFlight.release = func() {
+		if err := runner.Release(context.Background()); err != nil {
+			t.Errorf("Release() error = %v", err)
+		}
+	}
+	inFlight.armed.Store(true)
 	waitRenewalEnd(t, done, ownership.ErrStaleFence)
 	if got := reading.renewals("query_group", "refused", "OWNERSHIP_STALE_FENCE"); got != 1 {
 		t.Errorf("refused = %v", got)
 	}
 	remote := reading.renewals("query_group", "renewed", "none")
-	if scripted := reading.renewScriptAttempts(); scripted != remote {
-		t.Errorf("the script ran %v times, the attempts that sent one count %v", scripted, remote)
+	if scripted := reading.renewScriptAttempts(); scripted != remote+1 {
+		t.Errorf("the script ran %v times, want the %v renewals and the one refused in flight", scripted, remote)
 	}
 }
 

@@ -437,43 +437,41 @@ func TestSharedSchemaDeterministicLimitsConserveDelivery(t *testing.T) {
 	}
 }
 
-func TestSharedSchemaHTTPBodyUsesConfiguredProductionLimit(t *testing.T) {
-	body := sharedTestBody(t, []responseSeries{sharedTestSeries()}, map[string]any{"is_partial": false})
-	for _, maximum := range []int64{int64(len(body)), int64(len(body) - 1)} {
-		t.Run(fmt.Sprint(maximum), func(t *testing.T) {
-			var posts atomic.Uint32
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				posts.Add(1)
-				w.Header().Set("Content-Type", SharedSchemaMediaType)
-				_, _ = io.WriteString(w, body)
-			}))
-			defer server.Close()
-			limits := DefaultLimits()
-			limits.MaxBodyBytes, limits.MaxSeriesBytes = maximum, maximum
-			client, err := NewClientWithLimits(server.URL, "alarmd", server.Client(), limits)
-			if err != nil {
-				t.Fatal(err)
-			}
-			sink := &collectingSink{}
-			done, err := client.Execute(context.Background(), validAttempt(t), sink)
-			var delivered execution.SeriesDelivery
-			for _, batch := range sink.batches {
-				delivered, err = execution.AccumulateSeriesDelivery(delivered, batch.Delivery)
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
-			if err != nil || posts.Load() != 1 || done.Delivery != delivered {
-				t.Fatalf("body limit lost delivery or re-queried: done=%+v err=%v posts=%d", done, err, posts.Load())
-			}
-			if maximum == int64(len(body)) {
-				if done.Completeness != execution.CompletenessFull || len(sink.batches) != 1 {
-					t.Fatal("exact body bound rejected")
-				}
-			} else if done.Completeness != execution.CompletenessUnavailable || done.RouteFacts.Attempts[0].Detail != "response=limit_response_bytes" {
-				t.Fatal("body bound bypassed or not named", done)
-			}
-		})
+// A shared-schema answer has no bound on its whole: each frame is bounded
+// where it is read (sharedFrameBytes), so an answer of many frames is
+// delivered whole over HTTP, read once.
+func TestASharedSchemaAnswerOverHTTPHasNoWholeBound(t *testing.T) {
+	many := make([]responseSeries, 0, 2000)
+	for index := 0; index < 2000; index++ {
+		series := sharedTestSeries()
+		series.GroupValues = []json.RawMessage{json.RawMessage(fmt.Sprintf(`"192.0.2.%d-%d"`, index%250, index))}
+		many = append(many, series)
+	}
+	body := sharedTestBody(t, many, map[string]any{"is_partial": false})
+	var posts atomic.Uint32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts.Add(1)
+		w.Header().Set("Content-Type", SharedSchemaMediaType)
+		_, _ = io.WriteString(w, body)
+	}))
+	defer server.Close()
+	limits := DefaultLimits()
+	limits.MaxSeriesBytes = 4 << 10
+	client, err := NewClientWithLimits(server.URL, "alarmd", server.Client(), limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &collectingSink{}
+	done, err := client.Execute(context.Background(), validAttempt(t), sink)
+	var delivered execution.SeriesDelivery
+	for _, batch := range sink.batches {
+		delivered, err = execution.AccumulateSeriesDelivery(delivered, batch.Delivery)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err != nil || posts.Load() != 1 || done.Completeness != execution.CompletenessFull || done.Delivery != delivered || delivered.Series != uint64(len(many)) {
+		t.Fatalf("done=%+v err=%v posts=%d delivered=%+v, want every series of a %d-byte answer, read once", done, err, posts.Load(), delivered, len(body))
 	}
 }
 

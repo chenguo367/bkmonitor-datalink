@@ -29,8 +29,11 @@ type pipelineMemoryBackend struct {
 	casCalls     int
 	staleOwner   bool
 	failPipeline error
-	failMGet     error
-	guards       []*FenceGuard
+	// failKey ends that one key's write with an error of its own, the
+	// rest of the pipeline exchanged.
+	failKey  string
+	failMGet error
+	guards   []*FenceGuard
 	// recordKeyCounts keeps how many keys each MGET carried, for the tests
 	// that assert on the batch bound rather than on the number of calls.
 	recordKeyCounts bool
@@ -102,6 +105,10 @@ func (backend *pipelineMemoryBackend) CompareAndSetManyByDigest(_ context.Contex
 	}
 	outcomes := make([]FencedWriteOutcome, len(writes))
 	for index, write := range writes {
+		if write.Key == backend.failKey {
+			outcomes[index] = FencedWriteOutcome{Err: errors.New("connection reset")}
+			continue
+		}
 		if guard != nil && backend.staleOwner {
 			outcomes[index] = FencedWriteOutcome{Status: FencedWriteStaleOwner}
 			continue

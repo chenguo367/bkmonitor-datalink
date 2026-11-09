@@ -36,6 +36,10 @@ type seriesDecoder struct {
 	// named reads the answer of a query that asked for named outputs; nil
 	// for every other query.
 	named *namedOutputDecoding
+	// window bounds what the decoder reading a one-document answer may
+	// buffer for its next value; nil for an answer read a frame at a time,
+	// whose frames are bounded where they are read.
+	window *valueWindow
 }
 
 func (client *Client) newSeriesDecoder(attempt queryIdentity, sink execution.ProviderSeriesSink, scanned *DiagnosticScan) *seriesDecoder {
