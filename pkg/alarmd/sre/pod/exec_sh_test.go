@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -617,29 +618,77 @@ func TestAShortProgramIsMatchedOnlyAsTheRuntimeQuotesIt(t *testing.T) {
 	}
 }
 
-// A timer stopped before its deadline leaves no sleep behind: the timer's
-// own TERM ends it, whether or not the shell has job control.
-func TestAStoppedTimerLeavesNoSleep(t *testing.T) {
+// A timer stopped before its deadline leaves no sleep behind - under this
+// host's /bin/sh as it is and under setsid, and under dash, which has no job
+// control without a tty, alone and with setsid as a Debian-based image runs
+// it - even stopped as it starts, by a command that ends at once. A TERM
+// that came while the timer was forking its sleep, or before its trap, ended
+// the timer and left the sleep to run to the deadline: sent to the timer's
+// group, it missed a sleep not yet among the members, and sent to the timer
+// alone, where there was no group, it never reached the sleep. That is a
+// matter of scheduling, so many timers are stopped at once.
+func TestStoppedTimersLeaveNoSleep(t *testing.T) {
 	runtimeProvider(t)
-	// The timer's deadline lies past the wait below, so its sleep goes
-	// within the wait only by the TERM the stopped timer sends it: a leaked
-	// one would still be sleeping when the wait gives up.
-	seconds := strconv.Itoa(int(time.Until(testwait.Deadline(t)).Seconds()) + 47)
-	command := exec.Command("/bin/sh", "-c", remoteSupervisor, supervisorName, "N0NCE", seconds, "/bin/sh", "-c", "exit 0")
-	if out, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("%v %s", err, out)
+	type setup struct{ name, shell, path string }
+	setups := []setup{{"this host's /bin/sh", "/bin/sh", ""}, {"/bin/sh under setsid", "/bin/sh", withSetsid(t)}}
+	if _, err := os.Stat("/bin/dash"); err == nil {
+		setups = append(setups, setup{"dash", "/bin/dash", ""}, setup{"dash under setsid", "/bin/dash", withSetsid(t)})
 	}
-	testwait.Until(t, "the stopped timer's sleep ending on its TERM", func() bool {
-		listing, err := exec.Command("ps", "-Ao", "args").Output()
+	const parallel, runs = 12, 20
+	// Each sleep's length is this run's own and lies past the wait below, so
+	// a sleep goes within the wait only by its timer's stop, and another
+	// test binary's cannot be taken for one of these.
+	first := int(time.Until(testwait.Deadline(t)).Seconds()) + 47 + os.Getpid()%16*4096
+	lengths := map[string]string{}
+	for index, setup := range setups {
+		for run := 0; run < parallel*runs; run++ {
+			lengths[strconv.Itoa(first+index*parallel*runs+run)] = setup.name
+		}
+	}
+	ctx := testwait.Context(t)
+	var wg sync.WaitGroup
+	for index, setup := range setups {
+		for worker := 0; worker < parallel; worker++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for run := worker * runs; run < (worker+1)*runs; run++ {
+					seconds := strconv.Itoa(first + index*parallel*runs + run)
+					command := exec.CommandContext(ctx, setup.shell, "-c", remoteSupervisor, supervisorName, "N0NCE", seconds, "/bin/sh", "-c", "exit 0")
+					if setup.path != "" {
+						command.Env = append(os.Environ(), "PATH="+setup.path)
+					}
+					// A timer that does not end holds the supervisor's stderr.
+					command.WaitDelay = time.Second
+					if out, err := command.CombinedOutput(); err != nil {
+						t.Errorf("%s: supervisor of a %s s timer: %v %s", setup.name, seconds, err, out)
+						return
+					}
+				}
+			}()
+		}
+	}
+	wg.Wait()
+	var left []string
+	t.Cleanup(func() {
+		for _, line := range left {
+			t.Logf("left behind (pid ppid pgid elapsed args; setup %s): %s", lengths[strings.Fields(line)[5]], line)
+			pid, _ := strconv.Atoi(strings.Fields(line)[0])
+			syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
+	testwait.Until(t, "every stopped timer's sleep ending", func() bool {
+		listing, err := exec.Command("ps", "-Ao", "pid=,ppid=,pgid=,etime=,args=").Output()
 		if err != nil {
 			t.Fatalf("ps: %v", err)
 		}
+		left = left[:0]
 		for _, line := range strings.Split(string(listing), "\n") {
-			if strings.TrimSpace(line) == "sleep "+seconds {
-				return false
+			if fields := strings.Fields(line); len(fields) == 6 && fields[4] == "sleep" && lengths[fields[5]] != "" {
+				left = append(left, strings.Join(fields, " "))
 			}
 		}
-		return true
+		return len(left) == 0
 	})
 }
 
