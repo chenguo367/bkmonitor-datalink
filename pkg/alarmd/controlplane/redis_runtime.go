@@ -535,7 +535,7 @@ func (repository *RedisCatalogRepository) compareAndSetPublicationScheduleActiva
 		if !remains {
 			// Leaving the publication: there is nothing to keep running, and
 			// the draining projection already expects it gone.
-			cutover.decided(cutoverRetiredUnwritten)
+			cutover.decided(cutoverRetiredUnwritten, group)
 			return nil
 		}
 		for _, key := range keys {
@@ -546,7 +546,7 @@ func (repository *RedisCatalogRepository) compareAndSetPublicationScheduleActiva
 		blockedGroups[group] = struct{}{}
 		blockedNow = append(blockedNow, blockedAt(previousBlocked, group, reason, detail, boundary,
 			keys, activatedDigest, activatedRefs, openDigest, openRefs))
-		cutover.decided(cutoverBlocked)
+		cutover.decided(cutoverBlocked, group)
 		return nil
 	}
 	// keptWithoutRead is the Query Groups the manifest shows unchanged, whose
@@ -607,7 +607,7 @@ func (repository *RedisCatalogRepository) compareAndSetPublicationScheduleActiva
 				continue
 			}
 			plans = append(plans, kept...)
-			cutover.decided(cutoverKept)
+			cutover.decided(cutoverKept, queryGroup)
 			continue
 		}
 		timeline, raw, err := timelines.timeline(ctx, queryGroup)
@@ -625,7 +625,7 @@ func (repository *RedisCatalogRepository) compareAndSetPublicationScheduleActiva
 				coveredPrevious[key] = struct{}{}
 			}
 			if !remains {
-				cutover.decided(cutoverRetiredUnwritten)
+				cutover.decided(cutoverRetiredUnwritten, queryGroup)
 				continue
 			}
 			// The candidate records say which publication the Segment names: the
@@ -644,7 +644,7 @@ func (repository *RedisCatalogRepository) compareAndSetPublicationScheduleActiva
 			updates = append(updates, opened.update)
 			plans = append(plans, opened.records...)
 			reopened++
-			cutover.decided(cutoverReopened)
+			cutover.decided(cutoverReopened, queryGroup)
 			continue
 		}
 		var unreadable *DeterministicScheduleError
@@ -673,7 +673,7 @@ func (repository *RedisCatalogRepository) compareAndSetPublicationScheduleActiva
 					plans = append(plans, opened.records...)
 					repaired++
 					repairedGroups[queryGroup] = struct{}{}
-					cutover.decided(cutoverRepaired)
+					cutover.decided(cutoverRepaired, queryGroup)
 					continue
 				}
 				repository.timelineRepairs.add(TimelineRepairFailed, 1)
@@ -772,7 +772,7 @@ func (repository *RedisCatalogRepository) compareAndSetPublicationScheduleActiva
 				inForce = segment.OutputContextRevisions[count-1].Refs
 			}
 			if execution.SameOutputContextRefs(inForce, newContent[queryGroup].refs) {
-				cutover.decided(cutoverKept)
+				cutover.decided(cutoverKept, queryGroup)
 				continue
 			}
 			revised := open.Schedule
@@ -791,7 +791,7 @@ func (repository *RedisCatalogRepository) compareAndSetPublicationScheduleActiva
 				candidates = append(candidates, pruneCandidate{update: len(updates), dead: dead})
 			}
 			updates = append(updates, scheduleTimelineUpdate{expected: raw, next: timeline})
-			cutover.decided(cutoverRevised)
+			cutover.decided(cutoverRevised, queryGroup)
 			continue
 		}
 		closed := open.Schedule
@@ -845,11 +845,11 @@ func (repository *RedisCatalogRepository) compareAndSetPublicationScheduleActiva
 			}
 			timeline.Segments = append(timeline.Segments, persistedScheduleSegment{Schedule: opened, Plans: records})
 			plans = append(plans, records...)
-			cutover.decided(cutoverCut)
+			cutover.decided(cutoverCut, queryGroup)
 		} else {
 			retiredAt := boundary
 			timeline.RetiredAt = &retiredAt
-			cutover.decided(cutoverRetired)
+			cutover.decided(cutoverRetired, queryGroup)
 		}
 		if err := validateScheduleTimeline(timeline); err != nil {
 			return err
@@ -1130,7 +1130,7 @@ func (repository *RedisCatalogRepository) openQueryGroupTimeline(
 		return openedQueryGroupTimeline{}, err
 	}
 	result.update = scheduleTimelineUpdate{expected: raw, next: timeline}
-	cutover.decided(cutoverAdded)
+	cutover.decided(cutoverAdded, group.Identity)
 	return result, nil
 }
 

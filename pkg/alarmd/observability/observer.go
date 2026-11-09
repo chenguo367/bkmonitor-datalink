@@ -934,11 +934,31 @@ type ScheduleCutoverFacts struct {
 	// ReadHoldLinks counts the moved Plans' links to the groups they left,
 	// by ScheduleCutoverReadHoldLinks.
 	ReadHoldLinks map[string]int
+	// Samples names, for each of ScheduleCutoverSampledDecisions the cutover
+	// made, the first ScheduleCutoverSampleCap Query Groups it made it for,
+	// and SamplesTruncated how many more it made it for and did not name.
+	// Without them nothing said which Query Groups an edit reached, and a
+	// reading of their Slots after the cutover had nothing to join on.
+	Samples          map[string][]string
+	SamplesTruncated map[string]int
 }
 
 // ScheduleCutoverDecisions is the closed vocabulary of what a publication
 // cutover does with one Query Group.
 var ScheduleCutoverDecisions = []string{"kept", "revised", "cut", "retired", "added", "blocked", "reopened", "retired_unwritten", "repaired"}
+
+// ScheduleCutoverSampledDecisions are the decisions a cutover's line names
+// Query Groups for: an edit that moved only output contexts, one that
+// changed what runs, and a Query Group arriving or leaving.
+var ScheduleCutoverSampledDecisions = []string{"revised", "cut", "added", "retired"}
+
+// ScheduleCutoverSampleCap is how many Query Groups a cutover's line names
+// for one decision. An edit reaches a handful: a live deployment's cutovers
+// keep some 2,900 Query Groups an hour and revise about one, so 16 names
+// every Query Group of an ordinary edit. A bulk change past it is named by
+// its count, its first 16 and how many more, and the line stays bounded at
+// four lists of 16 identities whatever the change.
+const ScheduleCutoverSampleCap = 16
 
 // ScheduleCutoverReadHoldLinks is the closed vocabulary of what a cutover
 // does with a Plan's link to the Query Group it left: linked (the state
@@ -3506,6 +3526,22 @@ func normalizeScheduleCutoverFacts(facts *ScheduleCutoverFacts) *ScheduleCutover
 	if normalized.Duration < 0 {
 		normalized.Duration = 0
 	}
+	samples, truncated := map[string][]string{}, map[string]int{}
+	for _, decision := range ScheduleCutoverSampledDecisions {
+		named := normalized.Samples[decision]
+		more := max(normalized.SamplesTruncated[decision], 0)
+		if len(named) > ScheduleCutoverSampleCap {
+			more += len(named) - ScheduleCutoverSampleCap
+			named = named[:ScheduleCutoverSampleCap]
+		}
+		if len(named) > 0 {
+			samples[decision] = append([]string(nil), named...)
+		}
+		if more > 0 {
+			truncated[decision] = more
+		}
+	}
+	normalized.Samples, normalized.SamplesTruncated = samples, truncated
 	return &normalized
 }
 

@@ -239,6 +239,25 @@ var roundStages = map[Stage]bool{
 	StageControlReadsSpent: true, StageActiveQGSet: true, StageObjectCatalog: true,
 }
 
+// cutoverChanged says a publication cutover did something to a Query Group
+// other than keep it. Each of those is written, as a round that changed
+// something is: its line names the Query Groups an edit reached, and under
+// the hourly sample a second edit within the hour named none of its own. A
+// cutover that kept every Query Group stays under the sample. It is asked of
+// successes only (Admit); a failure keeps the failures' limit.
+func cutoverChanged(observation Observation) bool {
+	facts := observation.ScheduleCutover
+	if observation.Stage != StageScheduleCutover || facts == nil {
+		return false
+	}
+	for decision, count := range facts.QueryGroups {
+		if decision != "kept" && count > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // roundChanged says a Control Leader round line has something new on it: the
 // round moved, rewrote or found missing something, read the source changed,
 // holds Query Groups draining, or found a record changed under it. Two of the

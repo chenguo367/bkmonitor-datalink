@@ -94,7 +94,7 @@ func (p *BoundedLogPolicy) Admit(observation Observation) LogAdmission {
 	if routineResult(observation.Result) && !evaluationHeldQuery(observation) && !readAtLimitRound(observation) &&
 		!supersededRound(observation) {
 		switch {
-		case roundStages[observation.Stage] && roundChanged(observation):
+		case roundStages[observation.Stage] && roundChanged(observation), cutoverChanged(observation):
 			return LogAdmission{Allowed: true, Candidate: true}
 		case roundStages[observation.Stage], routineStages[observation.Stage]:
 			return LogAdmission{Candidate: true, Unwritten: true}
@@ -652,6 +652,19 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.String("cutover_reason", facts.Reason),
 			slog.String("cutover_query_group", facts.QueryGroup),
 		)
+	}
+	if facts := observation.ScheduleCutover; facts != nil && facts.Result == "success" {
+		// What the cutover did, and to which Query Groups: a reading of the
+		// Slots an edit reached joins its Query Groups against these.
+		for _, decision := range []string{"kept", "revised", "cut", "added", "retired", "blocked"} {
+			attributes = append(attributes, slog.Int("cutover_"+decision, facts.QueryGroups[decision]))
+		}
+		for _, decision := range ScheduleCutoverSampledDecisions {
+			if facts.QueryGroups[decision] > 0 {
+				attributes = append(attributes, slog.Any("cutover_"+decision+"_sample", facts.Samples[decision]),
+					slog.Int("cutover_"+decision+"_truncated", facts.SamplesTruncated[decision]))
+			}
+		}
 	}
 	if facts := observation.SlotWait; facts != nil {
 		// Reached only for a wait past the threshold, which is the attempt
