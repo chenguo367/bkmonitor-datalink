@@ -137,8 +137,9 @@ type BytePlan struct {
 	PoolUnknown []string
 	// Unread is how many Query Groups on judged Workers have no reported
 	// peak. They count nothing toward their Worker's sum, and Unsettled
-	// names the judged Workers holding one: their sums are lower bounds,
-	// and they are not destinations this round.
+	// names the judged Workers holding one: their sums are lower bounds. As
+	// a destination such a Worker is judged with each unread Query Group at
+	// UnreadEstimate, and is not one only when that is zero.
 	Unread    int
 	Unsettled []string
 	// UnreadEstimate is what each unread Query Group on a destination was
@@ -294,8 +295,10 @@ func (router *Router) PlanByteMoves(
 
 // byteDestination is the judged Worker with the most headroom that the
 // Query Group fits and is eligible for, or "" when there is none. A Worker
-// with an unread Query Group is not one: its sum is a lower bound, and the
-// room it appears to have may be exactly what it does not.
+// with an unread Query Group is judged by its projection, each unread one at
+// the estimate (projectedSum); with no estimate it is not one, its sum only
+// a lower bound and the room it appears to have perhaps exactly what it does
+// not.
 func (router *Router) byteDestination(
 	queryGroup execution.QueryGroupIdentity,
 	from string,
