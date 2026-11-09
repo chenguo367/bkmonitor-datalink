@@ -105,7 +105,8 @@ type Ports struct {
 	ScopeGroups ScopeGroupResolver
 	// RetainedBorrower is the State cache, which holds what no Slot has
 	// reserved of the retained pool and gives it back the moment a Slot
-	// needs it. Optional: without it the pool has no borrower.
+	// needs it; the coordinator lends it that room when it is built.
+	// Optional: without it the pool has no borrower.
 	RetainedBorrower execution.RetainedBytesBorrower
 }
 
@@ -209,7 +210,11 @@ func NewSlotExecutionCoordinator(ports Ports, budget ProvisionalBudget) (*SlotEx
 		budget.MaxEvents == 0 || budget.MaxGapMutations == 0 {
 		return nil, errors.New("alarmd worker: positive process provisional budgets are required")
 	}
-	return &SlotExecutionCoordinator{ports: ports, budget: budget}, nil
+	coordinator := &SlotExecutionCoordinator{ports: ports, budget: budget}
+	if borrower := ports.RetainedBorrower; borrower != nil {
+		borrower.BorrowRetainedWithin(func() uint64 { return RetainedRoom(coordinator) })
+	}
+	return coordinator, nil
 }
 
 func (coordinator *SlotExecutionCoordinator) acquireProvisional(series, retainedBytes uint64, stream *streamedExecution, phase string) error {

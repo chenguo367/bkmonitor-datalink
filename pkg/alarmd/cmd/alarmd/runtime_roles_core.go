@@ -320,8 +320,8 @@ func openPhaseTwoCoreResources(ctx context.Context, cfg config.Config, recorder 
 		// resolver the store would fall back to unfenced batched writes.
 		options.FenceKeys = ownershipStore
 		// The write-through State cache (fourth-batch design §4), its budget
-		// borrowed from the retained-bytes pool (the bundle lends it the
-		// coordinator's room). A value is written back over a
+		// borrowed from the retained-bytes pool (the coordinator lends it its
+		// room). A value is written back over a
 		// rolled-back key only while the Query Group's Progress still has the
 		// Slot begun; the Progress store is opened below, before any Slot runs.
 		if !cfg.PhaseTwo.StateCache.Disabled {

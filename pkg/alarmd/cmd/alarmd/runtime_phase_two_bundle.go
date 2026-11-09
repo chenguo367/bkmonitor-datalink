@@ -812,7 +812,7 @@ func openProductionPhaseTwoBundleAssembly(
 		Targets:      targetResolver,
 		ScopeGroups:  scopeGroups,
 		// The State cache borrows what no Slot has reserved of the retained
-		// pool and gives it back when a Slot needs it (lent its room below).
+		// pool and gives it back when a Slot needs it.
 		RetainedBorrower: executionStore.StateCacheBorrower(),
 	}
 	coordinator, err := worker.NewSlotExecutionCoordinator(workerPorts, worker.ProvisionalBudget{
@@ -823,7 +823,6 @@ func openProductionPhaseTwoBundleAssembly(
 	if err != nil {
 		return nil, err
 	}
-	executionStore.LendStateCacheRoom(func() uint64 { return worker.RetainedRoom(coordinator) })
 	// The retained-byte pool's usage, read from the coordinator that owns it
 	// at scrape time, beside the ceiling capacity_budget carries.
 	// What the stores hold by key family, weighed by the stores: one census

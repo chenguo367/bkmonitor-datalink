@@ -401,7 +401,7 @@ func TestAFullCacheKeepsItsResidentsAndTakesInNoNewQueryGroup(t *testing.T) {
 func TestTheCacheTakesInOnlyWhatThePoolHasRoomFor(t *testing.T) {
 	rig := newCacheRig(t, 1<<20)
 	room := uint64(0)
-	rig.store.LendStateCacheRoom(func() uint64 { return room })
+	rig.store.StateCacheBorrower().BorrowRetainedWithin(func() uint64 { return room })
 	rig.round(first, 2, 0)
 	if stats := rig.store.StateCacheStats(); stats.Bytes != 0 || rig.store.StateCacheBorrower().BorrowedRetainedBytes() != 0 {
 		t.Fatalf("charge %d with no room in the pool; want nothing borrowed", stats.Bytes)

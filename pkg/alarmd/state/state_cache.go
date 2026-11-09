@@ -319,6 +319,14 @@ func (cache *stateCache) roomNow() int64 {
 	return int64(min((*room)(), uint64(math.MaxInt64)))
 }
 
+// BorrowRetainedWithin has the cache take in no more than room says no Slot
+// has reserved of the retained pool.
+func (cache *stateCache) BorrowRetainedWithin(room func() uint64) {
+	if cache != nil && room != nil {
+		cache.room.Store(&room)
+	}
+}
+
 // BorrowedRetainedBytes is what the cache holds of the retained pool.
 func (cache *stateCache) BorrowedRetainedBytes() uint64 {
 	if cache == nil {
@@ -475,14 +483,6 @@ func (store *ExecutionStore) StateCacheBorrower() execution.RetainedBytesBorrowe
 		return nil
 	}
 	return store.cache
-}
-
-// LendStateCacheRoom has the cache borrow no more than room says no Slot has
-// reserved of the retained pool. Set once, before Slots run.
-func (store *ExecutionStore) LendStateCacheRoom(room func() uint64) {
-	if store != nil && store.cache != nil && room != nil {
-		store.cache.room.Store(&room)
-	}
 }
 
 // DropStateCacheQueryGroup removes a Query Group's entries when this process

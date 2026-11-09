@@ -77,6 +77,8 @@ type fullCache struct {
 	yields int
 }
 
+func (*fullCache) BorrowRetainedWithin(func() uint64) {}
+
 func (cache *fullCache) BorrowedRetainedBytes() uint64 { return cache.held }
 
 func (cache *fullCache) YieldRetainedBytes(need uint64) {
