@@ -202,10 +202,13 @@ type FlowCounters struct {
 	EventsRejected uint64            `json:"events_rejected"`
 	// LiveHeapBytes is the heap collector's last sample, never a fresh one:
 	// reading it forces no collection. Zero with LiveHeapKnown false before
-	// the first sample.
-	LiveHeapBytes uint64 `json:"live_heap_bytes"`
-	LiveHeapKnown bool   `json:"live_heap_known"`
-	Hosts         uint64 `json:"hosts"`
+	// the first sample. LiveHeapReserved is the retained-byte pool's
+	// reservation at that sample's collection (heap_inuse_reserved_bytes),
+	// the only reservation the live heap may be read against.
+	LiveHeapBytes    uint64      `json:"live_heap_bytes"`
+	LiveHeapKnown    bool        `json:"live_heap_known"`
+	LiveHeapReserved HeapReading `json:"live_heap_reserved"`
+	Hosts            uint64      `json:"hosts"`
 }
 
 // notDecisions are the completion kinds that book a Slot without deciding
@@ -263,7 +266,9 @@ func (r *Recorder) FlowCounters() FlowCounters {
 	eachSample(m.outputEventsByKind, func(sample *dto.Metric) { flow.EventsEmitted += uint64(sample.GetCounter().GetValue()) })
 	flow.EventsRejected = counterOf(m.flow.outputRejectedAll)
 	if r.heap != nil {
-		flow.LiveHeapBytes, flow.LiveHeapKnown = r.heap.cachedLive()
+		var reading HeapReading
+		reading, flow.LiveHeapKnown = r.heap.cachedLive()
+		flow.LiveHeapBytes, flow.LiveHeapReserved = reading.Live, reading
 	}
 	flow.Hosts = uint64(gaugeOf(m.cmdbIndexHosts))
 	return flow
