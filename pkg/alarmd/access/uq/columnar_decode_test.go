@@ -83,7 +83,8 @@ func measureAttempt(t *testing.T, points int) execution.QueryAttempt {
 
 // measuredAnswer writes an answer of series series of points points each, one
 // series at a time, the dimensions of a disk series and wide more of 320
-// bytes each.
+// bytes each; wide below zero is the largest Query Group's shape instead,
+// three dimensions of 3, 14 and 32 bytes.
 func measuredAnswer(writer http.ResponseWriter, series, points, wide int) {
 	writer.Header().Set("Content-Type", "application/json")
 	_, _ = writer.Write([]byte(`{"series":[`))
@@ -95,6 +96,10 @@ func measuredAnswer(writer http.ResponseWriter, series, points, wide int) {
 		}
 		keys, values := `"bk_target_ip","bk_target_cloud_id","device_name","mountpoint"`,
 			fmt.Sprintf(`"192.0.2.%d","0","/dev/vd%c%d","/data%d"`, index%256, 'a'+index%26, index%7, index)
+		if wide < 0 {
+			keys = `"bk_target_cloud_id","bk_target_ip","device_name"`
+			values = fmt.Sprintf(`"%03d","198.51.100.%03d","device-%025d"`, index%1000, index%256, index)
+		}
 		for tag := 0; tag < wide; tag++ {
 			keys += fmt.Sprintf(`,"tag%02d"`, tag)
 			values += fmt.Sprintf(`,"%0320d"`, index*wide+tag)
@@ -133,8 +138,9 @@ func (sink *heldSink) ConsumeProviderSeries(_ context.Context, batch execution.P
 // decoder and kept, as a Slot keeps them, counted at their RetainedBytes and
 // measured as the HeapAlloc they add once the decoder's garbage is
 // collected. Their ratio must fall within [0.8, 1.25] at every shape, the
-// last one a series of about 7 KB on the wire, mostly dimensions, as the
-// largest Query Group seen in a 4 GiB replica had. It is a
+// last three a series of about 7 KB on the wire, mostly dimensions, and the
+// largest Query Group seen on a 4 GiB replica at one point and at five. It
+// is a
 // measurement of hundreds of MiB, run on demand with
 // ALARMD_MEASURE_RETAINED_HEAP=1; it prints the wire bytes beside it, the
 // count the share read before.
@@ -148,7 +154,8 @@ func TestMeasureTheRetainedBytesAgainstTheHeap(t *testing.T) {
 			shapes = append(shapes, struct{ series, points, wide int }{series, points, 0})
 		}
 	}
-	shapes = append(shapes, struct{ series, points, wide int }{50_000, 5, 21})
+	shapes = append(shapes, struct{ series, points, wide int }{50_000, 5, 21},
+		struct{ series, points, wide int }{95_760, 1, -1}, struct{ series, points, wide int }{95_760, 5, -1})
 	for _, shape := range shapes {
 		series, points, wide := shape.series, shape.points, shape.wide
 		{
