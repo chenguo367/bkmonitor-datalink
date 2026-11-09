@@ -87,11 +87,11 @@ func largeGroupLiveHeap() uint64 {
 	return sample[0].Value.Uint64()
 }
 
-// TestMeasureALargeQueryGroupsSlotAgainstTheHeap runs one Slot of the largest
+// TestMeasureALargeQueryGroupsSlotAgainstTheHeap runs Slots of the largest
 // Query Group seen on a 4 GiB replica - 95,760 series of one point and three
-// dimensions - through the production bundle on a real Redis, and holds what
-// the Slot reserved, input, output and State apart, to the live heap it
-// took: the peak of the live heap over the Slot, the collector set to run at
+// dimensions - through the production bundle on a real Redis, three a
+// minute apart, and holds what the third reserved, input, output and State
+// apart, to the live heap it took: the peak of the live heap over the Slot, the collector set to run at
 // every few percent of growth, less what was live before it. It prints both
 // and asserts nothing; run on demand with ALARMD_MEASURE_LARGE_GROUP=1. It
 // builds against the code before batch 7 as well, which is how the two are
@@ -116,10 +116,17 @@ func TestMeasureALargeQueryGroupsSlotAgainstTheHeap(t *testing.T) {
 	var clock atomic.Int64
 	clock.Store(base)
 	now := func() time.Time { return time.Unix(clock.Load(), 0) }
-	response := largeGroupAnswer(series, (base-1)*1000)
+	// Three Slots a minute apart, the third measured: by then the State holds
+	// the history a running group's does, as far as its trigger window needs.
+	const slots = 3
+	var responses [slots][]byte
+	for slot := range responses {
+		responses[slot] = largeGroupAnswer(series, (base+int64(slot)*60-1)*1000)
+	}
+	var answering atomic.Int64
 	uqServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write(response)
+		_, _ = writer.Write(responses[answering.Load()])
 	}))
 	defer uqServer.Close()
 
@@ -178,7 +185,18 @@ func TestMeasureALargeQueryGroupsSlotAgainstTheHeap(t *testing.T) {
 	defer func() { _ = bundle.Shutdown(ctx) }()
 	settleExecutableView(ctx, bundle, 10*time.Second)
 
-	clock.Store(base + 1)
+	for slot := int64(0); slot < slots-1; slot++ {
+		answering.Store(slot)
+		clock.Store(base + slot*60 + 1)
+		if err := bundle.runScheduledOnce(ctx); err != nil {
+			t.Fatalf("Slot %d: %v", slot, err)
+		}
+	}
+	mu.Lock()
+	usage = nil
+	mu.Unlock()
+	answering.Store(slots - 1)
+	clock.Store(base + (slots-1)*60 + 1)
 	previous := debug.SetGCPercent(5)
 	runtime.GC()
 	before := largeGroupLiveHeap()
