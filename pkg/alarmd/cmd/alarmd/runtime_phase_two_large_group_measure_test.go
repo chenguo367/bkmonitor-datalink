@@ -137,10 +137,11 @@ func TestMeasureALargeQueryGroupsSlotAgainstTheHeap(t *testing.T) {
 	cfg.PhaseTwo.Ownership.ControlLeaderRenewInterval = config.Duration(time.Minute)
 	cfg.PhaseTwo.Ownership.LeaseTTL = config.Duration(10 * time.Minute)
 	cfg.PhaseTwo.Ownership.LeaseRenewInterval = config.Duration(time.Minute)
-	// The Slot is measured, not refused: every budget holds it.
-	cfg.PhaseTwo.Coordinator.MaxEvents = 1 << 20
-	cfg.PhaseTwo.Coordinator.MaxStateMutations = 1 << 20
-	cfg.PhaseTwo.Coordinator.MaxGapMutations = 1 << 20
+	// The Slot is measured, not refused: every budget holds it, the counts
+	// at the most the chunked State apply takes (max_keys_per_batch x 64).
+	cfg.PhaseTwo.Coordinator.MaxEvents = 1 << 19
+	cfg.PhaseTwo.Coordinator.MaxStateMutations = 1 << 19
+	cfg.PhaseTwo.Coordinator.MaxGapMutations = 1 << 19
 	cfg.PhaseTwo.Coordinator.MaxRetainedBytes = 8 << 30
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("configuration rejected: %v", err)
