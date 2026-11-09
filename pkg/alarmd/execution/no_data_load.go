@@ -139,8 +139,8 @@ type NoDataRecordKind string
 
 const (
 	// NoDataRecordGroups is how many groups the memory this round would store
-	// holds, against the bound on that number. It is the only measurement an
-	// apply refusal carries.
+	// holds, against the bound on that number. It is the store's one
+	// measurement: the worker's is NoDataRecordBytes.
 	//
 	// It replaced a byte bound rather than joining one. A byte bound belonged
 	// to a memory held in a single value, and it was reached by an ordinary
@@ -150,6 +150,14 @@ const (
 	// and the shape that used to report it is gone rather than kept as a label
 	// nothing can produce.
 	NoDataRecordGroups NoDataRecordKind = "GROUPS"
+	// NoDataRecordBytes is what a Plan's memory holds in the worker - the
+	// whole memory a first write builds, or the roster a Slot reads - against
+	// the share one Query Group's Slot may hold of the retained pool. Past
+	// the share it never fits, whatever else is running, so only this Plan's
+	// memory is refused and its threshold detection goes on; a memory within
+	// the share that the pool has no room for at the moment is the Slot's
+	// RESOURCE_HARD_STOP instead, and is retried.
+	NoDataRecordBytes NoDataRecordKind = "BYTES"
 )
 
 // NoDataRecordSize is the measurement behind a bound refusal: what was
@@ -159,14 +167,18 @@ type NoDataRecordSize struct {
 	Groups int
 	Limit  int
 	// LimitSource is whose Limit is: NoDataLimitPlatform for the deployment's,
-	// NoDataLimitStrategy for the item's own max_groups.
+	// NoDataLimitStrategy for the item's own max_groups, NoDataLimitShare for
+	// the share a BYTES refusal measured against, Limit then in bytes.
 	LimitSource string
+	// Bytes is what a BYTES refusal measured.
+	Bytes uint64
 }
 
 // The two sources a no-data group bound comes from.
 const (
 	NoDataLimitPlatform = "platform"
 	NoDataLimitStrategy = "strategy"
+	NoDataLimitShare    = "share"
 )
 
 // NoDataRefusal is one shape a deterministic refusal takes, for the partition
@@ -187,6 +199,7 @@ type NoDataRefusal struct {
 // bound while not being one.
 var NoDataRefusals = []NoDataRefusal{
 	{Reason: ReasonCode(contract.ReasonStateBudgetExceeded), Record: NoDataRecordGroups},
+	{Reason: ReasonCode(contract.ReasonStateBudgetExceeded), Record: NoDataRecordBytes},
 	{Reason: ReasonCode(contract.ReasonStateCorrupt)},
 	{Reason: ReasonCode(contract.ReasonBackendCapabilityMissing)},
 	{Reason: ReasonCode(contract.ReasonStateSchemaUnsupported)},

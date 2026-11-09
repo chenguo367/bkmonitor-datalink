@@ -879,6 +879,9 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 				slog.Int("no_data_memory_limit", facts.Limit),
 				slog.String("no_data_memory_limit_source", facts.LimitSource),
 			)
+			if facts.Bytes > 0 {
+				attributes = append(attributes, slog.Uint64("no_data_memory_bytes", facts.Bytes))
+			}
 		}
 	}
 	if facts := observation.StateGenerationSkew; facts != nil {

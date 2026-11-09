@@ -728,8 +728,8 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	}, []string{"outcome"})
 	metrics.noDataMemoryRefusals = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: metricSubsystem, Name: "worker_no_data_memory_refusals_total",
-		Help: "Absence-memory writes the store refused deterministically, by reason and by which record " +
-			"was measured when the reason was size. A refusal does not fail the Slot, so nothing else " +
+		Help: "Absence-memory writes the store refused deterministically, and memories the worker refused for " +
+			"what they hold, by reason and by which record was measured when the reason was size. A refusal does not fail the Slot, so nothing else " +
 			"in this family moves when it happens: the Plan evaluated, reported and was counted as " +
 			"evaluated, and only the record it would have written was lost. That is why this exists - " +
 			"without it a Plan whose memory has stopped being writable is indistinguishable from one " +
@@ -738,7 +738,11 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"empty for a refusal that was not about size. The group bound (record GROUPS) defaults to " +
 			"100,000 and may be raised to 1,000,000 for the deployment or one strategy; a raised bound " +
 			"costs Redis once per state generation, on the Plan's first whole-record write: measured " +
-			"about 120-180 ms at 100,000 groups, 610 ms at 200,000 and 2.9 s at 1,000,000.",
+			"about 120-180 ms at 100,000 groups, 610 ms at 200,000 and 2.9 s at 1,000,000. record BYTES is " +
+			"a memory past the share one Query Group's Slot may hold of the retained pool - a whole-record " +
+			"write as the worker builds it, or a loaded memory beside what the Slot already holds - refused " +
+			"for that Plan alone, its threshold detection unchanged; one within the share that the pool has " +
+			"no room for is a RESOURCE_HARD_STOP instead.",
 	}, []string{"reason", "record"})
 	metrics.noDataMemoryWrites = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: metricSubsystem, Name: "worker_no_data_memory_writes_total",

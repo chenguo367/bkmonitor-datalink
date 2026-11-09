@@ -307,6 +307,13 @@ func (stream *streamedExecution) evaluateNoData(
 		// cannot disagree about which Plans this Slot had. A Plan seen here and
 		// missing from the outcomes was dropped between the two.
 		stream.noDataPlansSeen++
+		if refusal, refused := stream.noDataRefused[due.NoDataIdentity()]; refused {
+			// Its memory did not fit the share beside what the Slot holds:
+			// not judged, not written, its threshold detection unchanged.
+			stream.coordinator.observeNoDataMemoryRefusal(ctx, stream.request, refusal)
+			stream.recordNoDataOutcome(ctx, due, nodata.OutcomeSkippedSlotBudget)
+			continue
+		}
 		started := time.Now()
 		round, err := stream.noDataRoundFor(due, seriesDimensionsFor(prepared, due.Identity),
 			stream.noDataCompleteness(due))
@@ -447,6 +454,14 @@ func (coordinator *SlotExecutionCoordinator) applyNoDataMemory(
 	if len(mutations) == 0 {
 		return nil
 	}
+	mutations, held, err := coordinator.holdNoDataFirstWrites(ctx, request, mutations)
+	if err != nil {
+		return err
+	}
+	defer coordinator.releaseProvisional(0, held)
+	if len(mutations) == 0 {
+		return nil
+	}
 	// What each memory lives for: its own Plan's retention, the one the load
 	// renews it to.
 	written := make([]execution.DuePlan, 0, len(mutations))
@@ -560,6 +575,7 @@ func (coordinator *SlotExecutionCoordinator) observeNoDataMemoryRefusal(
 	facts := observability.NoDataMemoryRefusalFacts{Reason: string(item.ReasonCode)}
 	if size := item.Size; size != nil {
 		facts.Record, facts.Groups, facts.Limit, facts.LimitSource = string(size.Record), size.Groups, size.Limit, size.LimitSource
+		facts.Bytes = size.Bytes
 	}
 	coordinator.emitObservation(ctx, observability.Observation{
 		Component: observability.ComponentState, Stage: observability.StageNoDataMemoryRefused,

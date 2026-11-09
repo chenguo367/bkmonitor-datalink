@@ -50,6 +50,10 @@ type streamedExecution struct {
 	state          execution.StatePreflightResult
 	gaps           execution.GapLoadResult
 	noData         execution.NoDataLoadResult
+	// noDataRefused is the loaded memories that did not fit the share beside
+	// what this Slot holds (reserveNoDataMemory): their Plans skip no-data
+	// this Slot.
+	noDataRefused  map[execution.PlanNoDataIdentity]execution.NoDataApplyItemResult
 	noDataHosts    map[execution.PlanNoDataIdentity]nodata.HostResolution
 	noDataOutcomes []nodata.SlotOutcome
 	// noDataOutcomeIndex is where each Plan's outcome sits in noDataOutcomes,
@@ -493,6 +497,7 @@ func (stream *streamedExecution) releaseProvisional() {
 	stream.planSeriesCounts = nil
 	stream.bindings, stream.stateItems, stream.gapItems, stream.delivered = nil, nil, nil, nil
 	stream.state, stream.gaps = execution.StatePreflightResult{}, execution.GapLoadResult{}
+	stream.noDataRefused = nil
 	stream.evaluated = execution.EvaluationResult{}
 	stream.seriesCensus = seriesCensus{}
 	stream.coordinator.reservations.mu.Lock()
@@ -1268,6 +1273,9 @@ func (stream *streamedExecution) loadNoDataMemory(ctx context.Context) error {
 	stream.coordinator.observeWithCounts(ctx, observability.ComponentState, observability.StageGapLoaded,
 		stream.request.Operation, started, observability.ResultSuccess, observability.ReasonNone,
 		observability.Counts{Keys: int64(len(stream.noData.Items))}, nil)
+	if err := stream.reserveNoDataMemory(ctx); err != nil {
+		return err
+	}
 	stream.observeNoDataRepresentations(ctx)
 	stream.observeNoDataRenewals(ctx)
 	stream.carryNoDataMemory(ctx, request)
