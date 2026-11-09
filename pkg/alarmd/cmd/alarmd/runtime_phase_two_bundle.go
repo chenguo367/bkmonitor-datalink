@@ -1202,6 +1202,7 @@ func openProductionPhaseTwoBundleAssembly(
 		Recorder: recorder, Observer: observer, TargetFlow: targetFlow, Now: external.Now,
 		FleetAPI: fleetAPI, PublicSurfaceRestricted: publicRestricted,
 		NoDataCloseAPI: noDataCloseAPIOf(core.NoDataCloses, external.Now),
+		DropStateCache: executionStore.DropStateCacheQueryGroup,
 		ControlStream:  controlStream, StreamIdentity: streamIdentity, ViewStreamStats: viewServer.Stats, ViewClient: viewClient,
 		PublishFleet: func(ctx context.Context) {
 			publishRoleControlFacts(ctx, bundle, fleetStore, external.RoleRuntime)

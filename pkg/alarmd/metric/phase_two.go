@@ -229,6 +229,7 @@ type phaseTwoMetrics struct {
 	legacyPodCache                  *prometheus.CounterVec
 	redisPool                       *redisPoolCollector
 	renewalGate                     *renewalGateCollector
+	stateCache                      *stateCacheCollector
 	canonicalEncoding               *canonicalEncodingCollector
 	algorithmInputs                 *prometheus.CounterVec
 	seriesAdmission                 *prometheus.CounterVec
@@ -829,6 +830,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.legacyPodCache = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "legacy_pod_cache_total", Help: "Existing Python Pod cache reads by bounded result."}, []string{"result"})
 	metrics.redisPool = newRedisPoolCollector()
 	metrics.renewalGate = newRenewalGateCollector()
+	metrics.stateCache = newStateCacheCollector()
 	metrics.canonicalEncoding = newCanonicalEncodingCollector()
 	metrics.shortPeriod = newShortPeriodMetrics()
 	metrics.queryStatus = newQueryStatusMetrics()
@@ -2139,7 +2141,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 	}...), append(append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), append(m.handover.collectors(), m.sreActions.actions, m.sreActions.rollouts, m.sreActions.watched, m.sreActions.receipts, m.cliAuth.total, m.cliAuth.rosterApplied)...), append(m.controlFacts.collectors(), m.traceExport.collectors()...)...),
 		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.activeCopy, m.fleetTracker, m.effectiveTimeRefresh, m.activationRebuild, m.timelineRepair, m.activationSkippedTimelines, m.timelineUnreadableReports, m.activationHeader, m.activationBlocked, m.liveReserve, m.roundMemory, m.stateSeriesHeld, m.targetGroup, m.effectiveClose, m.logLines, m.observerPanics, m.absentClose, m.editClose, m.noDataCloseAPI, m.linkdFilterClose, m.linkdFilterCloseRequests, m.openEpisodeRecord, m.newOpens, m.frontRefused, m.processMemory, m.strategyScopeClose, m.targetScopeClose, m.controlSourceRounds, m.apmCarried, m.apmCarriedBytes, m.sourceLivenessChecks, m.sourceLivenessSeconds, m.sourceLivenessDeferred, m.sourceLivenessEvicted, m.sourceLivenessHeldEvicted, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.controlFactsWrites, m.planCarriesReads, m.queryCooldownLoads, m.eventBusinessAttribution, m.detectionSnapshots, m.detectionSnapshotStates, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
 		m.controlSourceRetainedStale, m.controlSourceLastGoodIdentity, m.platformSettings,
-		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
+		m.redisPool, m.renewalGate, m.stateCache, m.canonicalEncoding, m.legacyPodCache,
 		m.seriesAdmission, m.cmdbAddressDiffers, m.cmdbPlacedByHostID, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.cmdbIndexBusinessMappings, m.cmdbIndexRecordsRefused, m.hostDisableMonitorStates, m.cmdbIndexAge, m.cmdbIndexPublish,
 		m.fleetSnapshotBytes, m.fleetViewSnapshotLoads, m.fleetViewSnapshotBytes,
 		m.fleetSummaryBytes, m.fleetViewSummaryLoads, m.fleetViewSummaryBytes, m.fleetViewOwnedLoads, m.fleetViewOwnedBytes, m.retainedPeakCensusGroups, m.retainedPeakCensusOverflow,

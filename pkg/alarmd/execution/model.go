@@ -192,6 +192,9 @@ type OwnerFence struct {
 	LeaseToken string
 }
 
+// IsZero is a fence nobody holds.
+func (fence OwnerFence) IsZero() bool { return fence == OwnerFence{} }
+
 func (fence OwnerFence) Validate(contractRef FrozenExecutionContractRef) error {
 	if fence.QueryGroup != contractRef.Slot.QueryGroup || fence.OwnerID == "" || fence.OwnerEpoch == 0 || fence.LeaseToken == "" {
 		return errors.New("alarmd execution: valid current owner fence is required")
@@ -685,6 +688,9 @@ type StatePreflightItem struct {
 	// and what is found there is handed back beside the view (Carried),
 	// never as the view itself.
 	CarryFrom StateGeneration
+	// Sharded says the Plan is a piece of a split strategy. The State key
+	// carries no shard, so the store reads such a series back every round.
+	Sharded bool
 }
 
 type PlanGapLoadItem struct {
@@ -908,6 +914,10 @@ type RuntimeStateView struct {
 type StatePreflightRequest struct {
 	Contract FrozenExecutionContractRef
 	Items    []StatePreflightItem
+	// OwnerFence is the fence the round holds. The store serves a key from
+	// what it last wrote only under the fence it wrote with; zero serves
+	// nothing from there.
+	OwnerFence OwnerFence
 }
 
 type StatePreflightResult struct {

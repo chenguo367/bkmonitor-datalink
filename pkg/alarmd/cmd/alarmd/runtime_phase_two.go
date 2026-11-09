@@ -707,6 +707,10 @@ type phaseTwoWorkerBundleDependencies struct {
 	// maintenance goroutines and read by nothing in execution.
 	ViewClient   *viewstream.Client
 	PublishFleet func(context.Context)
+	// DropStateCache takes a Query Group's entries out of the write-through
+	// State cache when this process starts, stops, declines or hands it over;
+	// nil where there is no cache.
+	DropStateCache func(execution.QueryGroupIdentity)
 	// MeasureStores takes a census of what the stores this process writes to
 	// hold, by key family (package storecensus), while it is the Control
 	// Leader, and forgets the last one when it is not: one census for the
@@ -3594,6 +3598,7 @@ func (bundle *phaseTwoWorkerBundle) startQueryGroup(
 	queryGroup execution.QueryGroupIdentity,
 	runner phaseTwoQueryGroupRuntime,
 ) bool {
+	bundle.dropStateCache(queryGroup)
 	bundle.mu.Lock()
 	if bundle.draining || bundle.closed {
 		bundle.mu.Unlock()
@@ -3647,6 +3652,7 @@ func (bundle *phaseTwoWorkerBundle) handOverQueryGroup(
 	queryGroup execution.QueryGroupIdentity,
 	lifecycle *phaseTwoQueryGroupLifecycle,
 ) {
+	bundle.dropStateCache(queryGroup)
 	defer bundle.maintenanceWG.Done()
 	bound := bundle.dependencies.Config.ShutdownTimeout.Duration()
 	began := time.Now()
@@ -3719,6 +3725,7 @@ func (bundle *phaseTwoWorkerBundle) stopLostQueryGroup(
 	lifecycle *phaseTwoQueryGroupLifecycle,
 	err error,
 ) {
+	bundle.dropStateCache(queryGroup)
 	if !bundle.detachQueryGroup(queryGroup, lifecycle) {
 		return
 	}
@@ -4087,6 +4094,7 @@ func (bundle *phaseTwoWorkerBundle) declineHungExecutions(now time.Time) {
 // registration is written at once so the leader learns of the decline on its
 // next round rather than at the next renewal.
 func (bundle *phaseTwoWorkerBundle) declineQueryGroup(queryGroup execution.QueryGroupIdentity, entry *declinedQueryGroup) {
+	bundle.dropStateCache(queryGroup)
 	defer bundle.maintenanceWG.Done()
 	bound := bundle.dependencies.Config.ShutdownTimeout.Duration()
 	lifecycle := entry.lifecycle
@@ -4837,4 +4845,13 @@ func (bundle *phaseTwoWorkerBundle) schedulerShape() config.DerivedScheduler {
 // while fewer than the derived bound execute.
 func (dispatcher *phaseTwoRunnerDispatcher) slotsFull() bool {
 	return len(dispatcher.active) >= dispatcher.bundle.schedulerShape().ActiveExecutions
+}
+
+// dropStateCache takes the Query Group's entries out of the State cache
+// (fourth-batch design §4.3, rule 1): a held entry is written under a fence
+// this process no longer holds, or will hold anew.
+func (bundle *phaseTwoWorkerBundle) dropStateCache(queryGroup execution.QueryGroupIdentity) {
+	if drop := bundle.dependencies.DropStateCache; drop != nil {
+		drop(queryGroup)
+	}
 }

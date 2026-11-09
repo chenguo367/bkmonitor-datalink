@@ -76,6 +76,9 @@ type runtimeWitness struct {
 	framedMissing  bool
 	framedDigest   string
 	framedRevision uint64
+	// cached says these bytes came from the State cache rather than from a
+	// read: a conflict on such a key may be an external change (§4.4).
+	cached bool
 }
 
 type runtimeSlotWitnesses struct {
@@ -117,6 +120,18 @@ func (cache *runtimeWitnessCache) remember(slot execution.SlotIdentity, identity
 	cache.sequence++
 	group.sequence = cache.sequence
 	cache.evictLocked(slot.QueryGroup)
+}
+
+// markCached marks a remembered witness as served from the State cache.
+func (cache *runtimeWitnessCache) markCached(slot execution.SlotIdentity, identity execution.StateKeyIdentity) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if group := cache.groups[slot.QueryGroup]; group != nil && group.slot == slot {
+		if witness, found := group.items[identity]; found {
+			witness.cached = true
+			group.items[identity] = witness
+		}
+	}
 }
 
 func (cache *runtimeWitnessCache) take(slot execution.SlotIdentity, identity execution.StateKeyIdentity) (runtimeWitness, bool) {
@@ -266,11 +281,14 @@ type runtimeApplyPipeline struct {
 	// expected is the framed key's revision each write was built against,
 	// zero when the key was missing: what a conflict reply is read against.
 	expected []uint64
-	bytes    int
+	// cached says each write's witness came from the State cache: only
+	// those may be written back over an external change (§4.4).
+	cached []bool
+	bytes  int
 }
 
 func (pipeline *runtimeApplyPipeline) add(
-	ctx context.Context, backend FencedBatchBackend, target string, index int, write FencedWrite, expected uint64,
+	ctx context.Context, backend FencedBatchBackend, target string, index int, write FencedWrite, expected uint64, cached bool,
 ) error {
 	if len(pipeline.writes) > 0 && (pipeline.target != target || len(pipeline.writes) >= runtimeApplyBatchItems ||
 		pipeline.bytes+len(write.Value) > runtimeApplyBatchBytes) {
@@ -282,12 +300,13 @@ func (pipeline *runtimeApplyPipeline) add(
 	pipeline.indexes = append(pipeline.indexes, index)
 	pipeline.writes = append(pipeline.writes, write)
 	pipeline.expected = append(pipeline.expected, expected)
+	pipeline.cached = append(pipeline.cached, cached)
 	pipeline.bytes += len(write.Value)
 	return nil
 }
 
 func (pipeline *runtimeApplyPipeline) reset() {
-	pipeline.indexes, pipeline.writes, pipeline.expected, pipeline.bytes = pipeline.indexes[:0], pipeline.writes[:0], pipeline.expected[:0], 0
+	pipeline.indexes, pipeline.writes, pipeline.expected, pipeline.cached, pipeline.bytes = pipeline.indexes[:0], pipeline.writes[:0], pipeline.expected[:0], pipeline.cached[:0], 0
 }
 
 // flush exchanges the staged batch. When the exchange itself fails every
@@ -308,6 +327,7 @@ func (pipeline *runtimeApplyPipeline) flush(ctx context.Context) error {
 		return nil
 	}
 	stale, moved := false, false
+	var restores []int
 	for position, index := range pipeline.indexes {
 		outcome := outcomes[position]
 		if outcome.Err == nil && outcome.Status == FencedWriteStaleOwner {
@@ -319,6 +339,17 @@ func (pipeline *runtimeApplyPipeline) flush(ctx context.Context) error {
 			continue
 		}
 		pipeline.result.Items[index] = pipeline.store.classifyFencedOutcome(pipeline.request.Contract, pipeline.request.Items[index], outcome, pipeline.expected[position])
+		if pipeline.cached[position] && pipeline.store.restorable(ctx, pipeline.request, pipeline.request.Items[index].Identity, pipeline.writes[position], outcome) {
+			pipeline.writes[position].ExpectedMissing = outcome.Status == FencedWriteConflictMissing
+			pipeline.writes[position].ExpectedDigest = ""
+			if !pipeline.writes[position].ExpectedMissing {
+				pipeline.writes[position].ExpectedDigest = ExpectedValueDigest(outcome.Current)
+			}
+			restores = append(restores, position)
+		}
+	}
+	if len(restores) > 0 && !stale && !moved {
+		pipeline.restore(ctx, restores, outcomes)
 	}
 	if stale {
 		return fmt.Errorf("state: runtime state apply for %s: %w", pipeline.request.Contract.Slot.QueryGroup, ownership.ErrStaleFence)
@@ -390,6 +421,16 @@ func (store *ExecutionStore) applyRuntime(
 	}
 	pipeline := &runtimeApplyPipeline{store: store, guard: guard, request: request, result: &result}
 	written := make(map[string]struct{}, len(request.Items))
+	// staged is each pipelined write, for the State cache to keep once its
+	// outcome is known; a key written any other way is dropped from it.
+	staged := make(map[int]stateCacheEntry, len(request.Items))
+	unknown := func() {
+		// A request any part of which ended in doubt: a write of it may have
+		// landed, so none of its keys is served from the cache (rule 2).
+		for _, key := range keys {
+			store.cache.drop(key, StateCacheDepartUnknown)
+		}
+	}
 	for index, mutation := range request.Items {
 		item := execution.StateApplyItemResult{Identity: mutation.Identity}
 		// Two refusals, not one. Both reach the line as STATE_CORRUPT, and
@@ -417,6 +458,7 @@ func (store *ExecutionStore) applyRuntime(
 		batchBackend, batched := target.Backend.(FencedBatchBackend)
 		if !witnessed || !batched || duplicate {
 			if err := pipeline.flush(ctx); err != nil {
+				unknown()
 				return execution.StateApplyResult{}, err
 			}
 			casBackend, ok := target.Backend.(CompareAndSetBackend)
@@ -457,13 +499,24 @@ func (store *ExecutionStore) applyRuntime(
 		item.LegacyRecordIDs = legacyIDs
 		write := FencedWrite{Key: keys[index], ExpectedMissing: witness.framedMissing, ExpectedDigest: witness.framedDigest,
 			Value: encoded, TTL: ttl}
-		if err := pipeline.add(ctx, batchBackend, target.Name, index, write, witness.framedRevision); err != nil {
+		if guard != nil {
+			staged[index] = stateCacheEntry{key: keys[index], group: request.Contract.Slot.QueryGroup, raw: encoded,
+				digest: ExpectedValueDigest(encoded), revision: witness.framedRevision + 1, applyVersion: mutation.ApplyVersion,
+				fence: execution.OwnerFence{QueryGroup: request.Contract.Slot.QueryGroup, OwnerID: guard.OwnerID,
+					OwnerEpoch: guard.OwnerEpoch, LeaseToken: guard.LeaseToken},
+				epoch: mutation.ApplyVersion.StateApplyEpoch, segmentStart: request.Contract.ScheduleSegmentStart,
+				slot: request.Contract.Slot.EvaluationTime, usableUntil: store.options.Now().Add(ttl - store.options.StateCacheReplayAge)}
+		}
+		if err := pipeline.add(ctx, batchBackend, target.Name, index, write, witness.framedRevision, witness.cached); err != nil {
+			unknown()
 			return execution.StateApplyResult{}, err
 		}
 	}
 	if err := pipeline.flush(ctx); err != nil {
+		unknown()
 		return execution.StateApplyResult{}, err
 	}
+	store.keepWritten(keys, result, staged)
 	return result, result.Validate()
 }
 
@@ -948,3 +1001,102 @@ func (store *ExecutionStore) readStoredRecord(
 }
 
 var _ execution.FencedStateStore = (*ExecutionStore)(nil)
+
+// restorable decides whether a conflict on a key the State cache served is
+// an external change to write the round's value back over (§4.4): the key
+// gone (DEL, eviction), or bytes older than this process last wrote there
+// (a rollback) while the Query Group's Progress still has this Slot begun.
+// The stored digest alone never decides it: bytes no older than the cached
+// ones are a legitimate writer's, and that conflict is an ordinary one.
+func (store *ExecutionStore) restorable(
+	ctx context.Context, request execution.StateApplyRequest, identity execution.StateKeyIdentity, write FencedWrite, outcome FencedWriteOutcome,
+) bool {
+	if outcome.Err != nil {
+		return false
+	}
+	switch outcome.Status {
+	case FencedWriteConflictMissing:
+		return true
+	case FencedWriteConflict:
+	default:
+		return false
+	}
+	last, found := store.cache.lastWritten(write.Key)
+	if !found || ExpectedValueDigest(outcome.Current) == last.digest {
+		// This process wrote those bytes: its own concurrent write came first.
+		return false
+	}
+	view := decodeRuntime(outcome.Current, identity, request.Contract, last.applyVersion)
+	if view.Status == execution.StateDeterministicInvalid ||
+		execution.CompareApplyVersion(view.PersistedApplyVersion, last.applyVersion) != execution.ApplyVersionPersistedOlder {
+		store.cache.countDeclined(StateCacheDeclineNewerVersion)
+		return false
+	}
+	if store.options.RestoreProgressCheck == nil {
+		store.cache.countDeclined(StateCacheDeclineProgressRolledBack)
+		return false
+	}
+	begun, err := store.options.RestoreProgressCheck(ctx, request.Contract.Slot.QueryGroup, request.Contract.Slot.EvaluationTime)
+	if err != nil || !begun {
+		// The Progress went back with the State: the Slot is replayed from
+		// the store, as it would be with no cache.
+		store.cache.countDeclined(StateCacheDeclineProgressRolledBack)
+		return false
+	}
+	return true
+}
+
+// restore writes the round's values back over the external changes the
+// restorable writes met, in one more exchange. One that conflicts again is
+// the ordinary conflict already recorded.
+func (pipeline *runtimeApplyPipeline) restore(ctx context.Context, positions []int, first []FencedWriteOutcome) {
+	writes := make([]FencedWrite, len(positions))
+	for at, position := range positions {
+		writes[at] = pipeline.writes[position]
+	}
+	outcomes, err := pipeline.backend.CompareAndSetManyByDigest(ctx, pipeline.guard, writes)
+	if err != nil || len(outcomes) != len(writes) {
+		return
+	}
+	for at, position := range positions {
+		if outcomes[at].Err != nil || outcomes[at].Status != FencedWriteApplied {
+			continue
+		}
+		index := pipeline.indexes[position]
+		pipeline.result.Items[index] = execution.StateApplyItemResult{Identity: pipeline.request.Items[index].Identity, Status: execution.StateApplied}
+		cause := StateCacheRestoreRolledBack
+		if first[position].Status == FencedWriteConflictMissing {
+			cause = StateCacheRestoreMissing
+		}
+		pipeline.store.cache.countRestored(cause)
+	}
+}
+
+// keepWritten brings the State cache up to what one request left: an
+// applied pipelined write is kept as the key's bytes, and any other outcome
+// takes the key out - a conflict, an already-applied or stale refusal, a
+// sequential write, whose bytes were not staged. A write in doubt takes out
+// every key of the request.
+func (store *ExecutionStore) keepWritten(keys []string, result execution.StateApplyResult, staged map[int]stateCacheEntry) {
+	if store.cache == nil {
+		return
+	}
+	for _, item := range result.Items {
+		if item.Status == execution.StateApplyRetryable {
+			for _, key := range keys {
+				store.cache.drop(key, StateCacheDepartUnknown)
+			}
+			return
+		}
+	}
+	for index, item := range result.Items {
+		if keys[index] == "" {
+			continue
+		}
+		if entry, ok := staged[index]; ok && item.Status == execution.StateApplied {
+			store.cache.applied(entry)
+			continue
+		}
+		store.cache.drop(keys[index], StateCacheDepartConflict)
+	}
+}

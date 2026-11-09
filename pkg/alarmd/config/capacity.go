@@ -61,6 +61,16 @@ const (
 	controlTimelineCacheMinEntryBytes = 1 << 10
 
 	compileCacheMemoryDivisor = 32
+
+	// stateCacheMemoryDivisor is the write-through State cache's share of the
+	// container, taken out of the retained-bytes pool (fourth-batch design
+	// §4.5, option 1, user 11-09): on 4 GiB the pool goes 1,024 -> 896 MiB
+	// and the cache holds 128 MiB, about 82,000 series. The pool, not the
+	// container, gives it: the cache is resident heap, and with the pool full
+	// the heap stays further under the soft limit than before (2,233 against
+	// 2,367 MiB). Query permits keep their own line (DeriveExecution), which
+	// does not move.
+	stateCacheMemoryDivisor = 32
 	// Every compile cache entry is charged a 64-byte header before anything
 	// it holds (strategy.estimateCompileResultBytes), so none is smaller.
 	compileCacheMinEntryBytes = 64
@@ -471,7 +481,7 @@ func DeriveCompileCache(inputs CapacityInputs, maxCompiledPlanBytes int) Derived
 // smallest size a series can have, so it binds only where the byte accounting
 // itself has gone wrong.
 func DeriveCoordinator(inputs CapacityInputs, storeItemsPerBatch, chunkedApplyBudget uint64) PhaseTwoCoordinatorConfig {
-	retained := max(inputs.MemoryLimitBytes/retainedMemoryDivisor, uint64(bytesPerMutation))
+	retained := max(inputs.MemoryLimitBytes/retainedMemoryDivisor-DeriveStateCacheBytes(inputs), uint64(bytesPerMutation))
 	guardrail := max(chunkedApplyBudget, storeItemsPerBatch, 1)
 	return PhaseTwoCoordinatorConfig{
 		MaxRetainedBytes:  retained,
@@ -484,4 +494,10 @@ func DeriveCoordinator(inputs CapacityInputs, storeItemsPerBatch, chunkedApplyBu
 		// what an int holds is not a guardrail on this platform.
 		MaxSequencerReservations: int(min(guardrail, uint64(math.MaxInt))),
 	}
+}
+
+// DeriveStateCacheBytes is the write-through State cache's budget: the
+// container's thirty-second, taken out of the retained-bytes pool.
+func DeriveStateCacheBytes(inputs CapacityInputs) uint64 {
+	return inputs.MemoryLimitBytes / stateCacheMemoryDivisor
 }

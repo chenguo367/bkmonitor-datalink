@@ -1118,7 +1118,7 @@ func (stream *streamedExecution) evaluateSeries(
 		pending = append(pending, completedSeries{due: prepared.due, series: prepared.identity, inputs: prepared.inputs,
 			item: execution.StatePreflightItem{Identity: execution.StateKeyIdentity{
 				Plan: prepared.due.Identity, StateGeneration: prepared.due.StateGeneration, SeriesIdentityDigest: prepared.identity,
-			}, ApplyVersion: version, CarryFrom: carryFrom(prepared.due)}})
+			}, ApplyVersion: version, CarryFrom: carryFrom(prepared.due), Sharded: !prepared.due.Shard.IsZero()}})
 		if len(pending) >= batchLimit {
 			if err := flush(); err != nil {
 				return err
@@ -1778,7 +1778,7 @@ func (stream *streamedExecution) evaluateCompletedSeriesBatch(ctx context.Contex
 	for index, entry := range batch {
 		stateItems[index] = entry.item
 	}
-	stateRequest := execution.StatePreflightRequest{Contract: stream.request.Contract, Items: stateItems}
+	stateRequest := execution.StatePreflightRequest{Contract: stream.request.Contract, Items: stateItems, OwnerFence: stream.request.OwnerFence}
 	started := time.Now()
 	timedCtx, timing := execution.WithPreflightTiming(ctx)
 	loaded, err := stream.coordinator.ports.State.LoadRuntime(timedCtx, stateRequest)

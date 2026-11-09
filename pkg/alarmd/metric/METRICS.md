@@ -2095,6 +2095,42 @@ Labels: `site`, `kind`
 
 Runtime State mutations found already on disk, by where that was decided and how. site: preflight is the view the Slot loaded before evaluating, apply is the bytes the CAS met when it tried to write. kind: stable is the ordinary retry that read the stored revision and found its own statement there; revision_skew is the same statement -- same ApplyVersion, same digest -- found at a revision the mutation did not expect, which is a write that landed while its reply was lost or was sent twice, and which used to be classified STATE_VERSION_CONFLICT and send the Slot into a retry that could not succeed. revision_skew is the only reading that says whether such re-sends happen in production: non-zero and aligned with conflict bursts confirms the mechanism, a steady zero says something else writes the key. Every pair is published at zero so absent and zero read apart. Population is mutations, not Redis commands.
 
+## alarmd_state_cache_budget_bytes
+
+The State cache's budget: the container's thirty-second, taken out of the retained-bytes pool. A Query Group that would go past it is kept out and read back; the resident ones stay.
+
+## alarmd_state_cache_bytes
+
+The State cache's charge: each entry's value and key rounded to their size classes plus a fixed overhead, summed. Read against state_cache_budget_bytes.
+
+## alarmd_state_cache_departures_total
+
+Labels: `reason`
+
+Entries that left the State cache, by reason: released (the Query Group stopped, was lost, declined or handed over), unknown (a write of its request ended in doubt), conflict (its write did not apply), expired, renewal_missing, untouched (neither read nor written for two of its own intervals), over_budget (its Query Group grew past the room and left whole). Every cell exists from the start.
+
+## alarmd_state_cache_lookups_total
+
+Labels: `result`
+
+Runtime State keys a load asked the write-through State cache for, by result: hit (served from what this process last wrote), or why it was read back - miss_absent (nothing kept), miss_fence (another owner fence), miss_unknown (the last write's outcome unknown), miss_expired (past its key's life less the replay age), miss_replay (a replay, retry or older Slot), miss_activation (the Plan's activation changed: moved, put back, reactivated, edited), miss_sharded (a split strategy's Plan, never served), miss_over_budget (its Query Group kept out by the budget). Every cell exists from the start, so a zero is a reading.
+
+## alarmd_state_cache_query_groups
+
+Query Groups holding entries in the State cache.
+
+## alarmd_state_cache_restore_declined_total
+
+Labels: `reason`
+
+Conflicts on a key the State cache served that were not written back over, by reason: progress_rolled_back (the Progress went back with the State, so the Slot is replayed from the store) and newer_version (the stored bytes are no older than the cached ones: a legitimate writer's, handled as an ordinary conflict).
+
+## alarmd_state_cache_restored_total
+
+Labels: `cause`
+
+Values written back over an external change to a key the State cache served, by cause: missing (the key was deleted or evicted) and rolled_back (older bytes than this process last wrote, with the Query Group's Progress still at this Slot). A legitimate writer is never written over: see state_cache_restore_declined_total.
+
 ## alarmd_state_generation_carry_total
 
 Labels: `scope`, `result`
