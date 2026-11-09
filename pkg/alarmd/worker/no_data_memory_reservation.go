@@ -34,6 +34,12 @@ const (
 	noDataScriptArgBytes    = 2*2*16 + 16 + 24
 	noDataPresentValueBytes = 1
 	noDataAbsentValueBytes  = 80
+	// noDataGroupBuildBytes is what a first write holds a group beyond the
+	// parts above, measured rather than named: the statement's build and the
+	// client's command. TestMeasureTheFirstNoDataWriteAgainstTheHeap read a
+	// live peak of 495-498 bytes a group at 64-byte keys against 302 counted
+	// by the parts, at 100,000 and 500,000 groups (11-10).
+	noDataGroupBuildBytes = 196
 	// A map of string to int64: a header and groups of eight 24-byte slots
 	// and their control bytes, filled to seven eighths.
 	noDataCloseMapHeaderBytes = 48
@@ -58,7 +64,7 @@ func noDataFirstWriteBytes(mutation execution.PlanNoDataMutation) uint64 {
 	total := uint64(cap(mutation.Set)) * noDataGroupDeltaBytes
 	for _, group := range mutation.Set {
 		key := uint64(len(group.GroupKey))
-		total += 2*key + noDataFieldBytes + noDataFieldPrefixBytes + noDataScriptArgBytes
+		total += 2*key + noDataFieldBytes + noDataFieldPrefixBytes + noDataScriptArgBytes + noDataGroupBuildBytes
 		if group.Absent != nil {
 			total += noDataGroupAbsenceBytes + noDataAbsentValueBytes
 		} else {

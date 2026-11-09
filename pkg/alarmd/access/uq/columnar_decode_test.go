@@ -82,8 +82,9 @@ func measureAttempt(t *testing.T, points int) execution.QueryAttempt {
 }
 
 // measuredAnswer writes an answer of series series of points points each, one
-// series at a time, the dimensions of a disk series.
-func measuredAnswer(writer http.ResponseWriter, series, points int) {
+// series at a time, the dimensions of a disk series and wide more of 320
+// bytes each.
+func measuredAnswer(writer http.ResponseWriter, series, points, wide int) {
 	writer.Header().Set("Content-Type", "application/json")
 	_, _ = writer.Write([]byte(`{"series":[`))
 	var line strings.Builder
@@ -92,9 +93,14 @@ func measuredAnswer(writer http.ResponseWriter, series, points int) {
 		if index > 0 {
 			line.WriteByte(',')
 		}
+		keys, values := `"bk_target_ip","bk_target_cloud_id","device_name","mountpoint"`,
+			fmt.Sprintf(`"192.0.2.%d","0","/dev/vd%c%d","/data%d"`, index%256, 'a'+index%26, index%7, index)
+		for tag := 0; tag < wide; tag++ {
+			keys += fmt.Sprintf(`,"tag%02d"`, tag)
+			values += fmt.Sprintf(`,"%0320d"`, index*wide+tag)
+		}
 		fmt.Fprintf(&line, `{"name":"_result0","columns":["_time","_result"],"types":["int64","float64"],`+
-			`"group_keys":["bk_target_ip","bk_target_cloud_id","device_name","mountpoint"],`+
-			`"group_values":["192.0.2.%d","0","/dev/vd%c%d","/data%d"],"values":[`, index%256, 'a'+index%26, index%7, index)
+			`"group_keys":[%s],"group_values":[%s],"values":[`, keys, values)
 		for point := 0; point < points; point++ {
 			if point > 0 {
 				line.WriteByte(',')
@@ -107,10 +113,10 @@ func measuredAnswer(writer http.ResponseWriter, series, points int) {
 	_, _ = writer.Write([]byte(`],"is_partial":false}`))
 }
 
-func newMeasureServer(t *testing.T, series, points int) *httptest.Server {
+func newMeasureServer(t *testing.T, series, points, wide int) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		measuredAnswer(writer, series, points)
+		measuredAnswer(writer, series, points, wide)
 	}))
 }
 
@@ -126,7 +132,9 @@ func (sink *heldSink) ConsumeProviderSeries(_ context.Context, batch execution.P
 // the heap they take: N series of P points read through the production
 // decoder and kept, as a Slot keeps them, counted at their RetainedBytes and
 // measured as the HeapAlloc they add once the decoder's garbage is
-// collected. Their ratio must fall within [0.8, 1.25] at every shape. It is a
+// collected. Their ratio must fall within [0.8, 1.25] at every shape, the
+// last one a series of about 7 KB on the wire, mostly dimensions, as the
+// largest Query Group seen in a 4 GiB replica had. It is a
 // measurement of hundreds of MiB, run on demand with
 // ALARMD_MEASURE_RETAINED_HEAP=1; it prints the wire bytes beside it, the
 // count the share read before.
@@ -134,9 +142,17 @@ func TestMeasureTheRetainedBytesAgainstTheHeap(t *testing.T) {
 	if os.Getenv("ALARMD_MEASURE_RETAINED_HEAP") == "" {
 		t.Skip("a measurement: set ALARMD_MEASURE_RETAINED_HEAP=1")
 	}
+	shapes := make([]struct{ series, points, wide int }, 0, 9)
 	for _, series := range []int{10_000, 100_000} {
 		for _, points := range []int{1, 5, 15, 30} {
-			server := newMeasureServer(t, series, points)
+			shapes = append(shapes, struct{ series, points, wide int }{series, points, 0})
+		}
+	}
+	shapes = append(shapes, struct{ series, points, wide int }{50_000, 5, 21})
+	for _, shape := range shapes {
+		series, points, wide := shape.series, shape.points, shape.wide
+		{
+			server := newMeasureServer(t, series, points, wide)
 			client, err := NewClientWithLimits(server.URL, "alarmd-shadow", server.Client(),
 				Limits{MaxSeriesBytes: 8 << 20, MaxSeries: uint64(series), MaxRecords: uint64(series * points)})
 			if err != nil {
@@ -160,8 +176,9 @@ func TestMeasureTheRetainedBytesAgainstTheHeap(t *testing.T) {
 			}
 			heap := after.HeapAlloc - before.HeapAlloc
 			ratio := float64(counted) / float64(heap)
-			t.Logf("series=%d points=%d counted=%d heap=%d ratio=%.3f wire=%d wire_ratio=%.3f", series, points, counted, heap, ratio,
-				completion.Delivery.Bytes, float64(completion.Delivery.Bytes)/float64(heap))
+			t.Logf("series=%d points=%d wide=%d counted=%d (%d a series) heap=%d ratio=%.3f wire=%d (%d a series) wire_ratio=%.3f",
+				series, points, wide, counted, counted/uint64(series), heap, ratio,
+				completion.Delivery.Bytes, completion.Delivery.Bytes/uint64(series), float64(completion.Delivery.Bytes)/float64(heap))
 			runtime.KeepAlive(sink)
 			server.Close()
 			if len(sink.datasets) != series || ratio < 0.8 || ratio > 1.25 {

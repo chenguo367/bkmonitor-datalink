@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
@@ -165,9 +166,34 @@ func TestAColumnarRunCountsItsSeriesOnceAndItsPointsAsColumns(t *testing.T) {
 // A value kept in the side table counts its bytes and its entry: the same
 // series with string values for numbers costs at least the strings more.
 func TestASideTableValueCountsItsBytes(t *testing.T) {
-	numbers := NewDataset(columnarSeries(digestA, 1757462400, `1`, `2`, `3`)).RetainedBytes()
-	strings := NewDataset(columnarSeries(digestA, 1757462400, `"aaaaaaaaaaaaaaaaaaaa"`, `"bbbbbbbbbbbbbbbbbbbb"`, `3`)).RetainedBytes()
-	if floor := uint64(2 * len(`"aaaaaaaaaaaaaaaaaaaa"`)); strings < numbers+floor {
-		t.Fatalf("two string values cost %d more than numbers, want at least their %d bytes", strings-numbers, floor)
+	long := `"` + strings.Repeat("a", 500) + `"`
+	short := NewDataset(columnarSeries(digestA, 1757462400, `"a"`, `"b"`, `3`)).RetainedBytes()
+	longer := NewDataset(columnarSeries(digestA, 1757462400, long, long, `3`)).RetainedBytes()
+	if want := uint64(2 * (len(long) - len(`"a"`))); longer-short != want {
+		t.Fatalf("two strings of %d bytes cost %d more than two of %d, want their %d bytes more", len(long), longer-short, len(`"a"`), want)
+	}
+}
+
+// An identity field that is a dimension of the same bytes is counted once:
+// a series whose identity is its dimensions costs a value's bytes less than
+// the same series whose identity value differs from its dimension.
+func TestAnIdentityFieldThatIsADimensionIsCountedOnce(t *testing.T) {
+	value := json.RawMessage(`"` + strings.Repeat("x", 1000) + `"`)
+	other := json.RawMessage(`"` + strings.Repeat("y", 1000) + `"`)
+	series := func(dimension json.RawMessage) []contract.CanonicalRecordV2 {
+		fields := []contract.DimensionFieldV2{{Name: "tag", Value: value}}
+		dimensions := map[string]json.RawMessage{"tag": dimension}
+		return []contract.CanonicalRecordV2{{RecordID: "r1", SourceTime: 60, BusinessID: "2",
+			DimensionIdentity: contract.DimensionIdentityV2{Fields: fields, Digest: digestA},
+			Values:            map[string]json.RawMessage{"_result_": json.RawMessage(`1`)}, Dimensions: dimensions}}
+	}
+	shared, apart := NewDataset(series(value)), NewDataset(series(other))
+	if got, want := apart.RetainedBytes()-shared.RetainedBytes(), uint64(len(value)); got != want {
+		t.Fatalf("an identity apart from its dimension cost %d more, want its %d bytes", got, want)
+	}
+	record, _ := shared.Record(0)
+	if !reflect.DeepEqual(record.DimensionIdentity(), series(value)[0].DimensionIdentity) ||
+		!reflect.DeepEqual(record.Dimensions(), series(value)[0].Dimensions) {
+		t.Fatal("a shared value reads back differently")
 	}
 }

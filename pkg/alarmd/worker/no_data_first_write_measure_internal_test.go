@@ -35,7 +35,7 @@ func liveHeapPeak(call func()) uint64 {
 	finished := make(chan struct{})
 	go func() {
 		defer close(finished)
-		ticker := time.NewTicker(time.Millisecond)
+		ticker := time.NewTicker(time.Millisecond) // fixed-wait: the sampling interval of a measurement; it waits on no condition
 		defer ticker.Stop()
 		for {
 			metrics.Read(sample)

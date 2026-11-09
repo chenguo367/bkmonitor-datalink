@@ -35,7 +35,8 @@ var (
 
 // RetainedBytes is what the Dataset holds on the heap, as its structure
 // says: the runs and their starts; per columnar run its header, its series
-// parts once - identity, dimensions - and its columns, eight bytes a point
+// parts once - identity, dimensions, an identity field's value counted once
+// where it is a dimension's - and its columns, eight bytes a point
 // for the time and eight for the value, the record ids end to end, and the
 // side table and its marks; per record kept whole the record and its maps.
 // It is computed, not read from the runtime, so the same Dataset always
@@ -54,7 +55,7 @@ func (dataset *Dataset) RetainedBytes() uint64 {
 			}
 			continue
 		}
-		total += identityBytes(run.identity) + rawMapBytes(run.dimensions) + uint64(len(run.ids)) +
+		total += identityBytes(run.identity) - sharedIdentityBytes(run) + rawMapBytes(run.dimensions) + uint64(len(run.ids)) +
 			8*uint64(cap(run.times)) + 8*uint64(cap(run.values)) + 8*uint64(cap(run.sideMarks)) +
 			uint64(cap(run.side))*datasetSideBytes
 		for _, side := range run.side {
@@ -80,6 +81,18 @@ func identityBytes(identity contract.DimensionIdentityV2) uint64 {
 		total += uint64(len(field.Name) + len(field.Value))
 	}
 	return total
+}
+
+// sharedIdentityBytes is what of a run's identity is its dimensions' bytes,
+// held and counted once.
+func sharedIdentityBytes(run *datasetRun) uint64 {
+	var shared uint64
+	for _, field := range run.identity.Fields {
+		if value, ok := run.dimensions[field.Name]; ok && len(value) > 0 && unsafe.SliceData(value) == unsafe.SliceData(field.Value) {
+			shared += uint64(len(value))
+		}
+	}
+	return shared
 }
 
 func rawMapBytes(values map[string]json.RawMessage) uint64 {

@@ -184,6 +184,13 @@ func newColumnarRun(records []contract.CanonicalRecordV2) datasetRun {
 	run := datasetRun{business: first.BusinessID, identity: RecordView{record: first}.DimensionIdentity(),
 		dimensions: cloneRawMap(first.Dimensions), received: first.ReceivedTime, idWidth: len(first.RecordID),
 		times: make([]int64, len(records)), values: make([]float64, len(records))}
+	// An identity field is a dimension of the same name and bytes: it is kept
+	// as those bytes once, the run handing either out only as a copy.
+	for index, field := range run.identity.Fields {
+		if value, ok := run.dimensions[field.Name]; ok && string(value) == string(field.Value) {
+			run.identity.Fields[index].Value = value
+		}
+	}
 	for field := range first.Values {
 		run.valueField = field
 	}
