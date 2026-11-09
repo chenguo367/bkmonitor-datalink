@@ -11,6 +11,7 @@ package metric
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http/httptest"
 	"strings"
@@ -49,19 +50,91 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
 )
 
-func TestRecorderUsesPrivateRegistries(t *testing.T) {
-	first := NewRecorder(BuildInfo{Version: "v1", Commit: "a", SchemaVersion: "none"})
-	second := NewRecorder(BuildInfo{Version: "v2", Commit: "b", SchemaVersion: "none"})
+// cgroupShapes are the files the memory gauges read, as a host of each kind
+// has them: none outside a container, cgroup v1, cgroup v2. Every shape
+// serves a container_memory_cgroup_info line whose version label says which.
+var cgroupShapes = []struct {
+	name, version string
+	files         map[string]string
+}{
+	{"no cgroup", "unknown", map[string]string{}},
+	{"cgroup v1", "v1", map[string]string{"/proc/self/cgroup": "11:memory:/kubepods/pod1/c1\n", "/sys/fs/cgroup/memory/memory.usage_in_bytes": "1\n"}},
+	{"cgroup v2", "v2", map[string]string{"/proc/self/cgroup": "0::/kubepods/pod1/c1\n", "/sys/fs/cgroup/memory.current": "1\n"}},
+}
 
-	if first.Gatherer() == second.Gatherer() {
-		t.Fatal("recorders unexpectedly share a registry")
+// readingCgroup has the recorder's memory gauges read files instead of the
+// host's.
+func readingCgroup(recorder *Recorder, files map[string]string) {
+	recorder.phaseTwo.processMemory.read = func(name string) ([]byte, error) {
+		if body, ok := files[name]; ok {
+			return []byte(body), nil
+		}
+		return nil, errors.New("not here")
 	}
-	if got := scrape(t, first); !strings.Contains(got, `version="v1"`) || strings.Contains(got, `version="v2"`) {
-		t.Fatalf("first registry contains unexpected build labels:\n%s", got)
+}
+
+func TestRecorderUsesPrivateRegistries(t *testing.T) {
+	for _, shape := range cgroupShapes {
+		t.Run(shape.name, func(t *testing.T) {
+			first := NewRecorder(BuildInfo{Version: "v1", Commit: "a", SchemaVersion: "none"})
+			second := NewRecorder(BuildInfo{Version: "v2", Commit: "b", SchemaVersion: "none"})
+			readingCgroup(first, shape.files)
+			readingCgroup(second, shape.files)
+
+			if first.Gatherer() == second.Gatherer() {
+				t.Fatal("recorders unexpectedly share a registry")
+			}
+			// The fixture: the cgroup's version is served under the same
+			// label name as the build's.
+			if got := seriesLabels(t, second, "alarmd_container_memory_cgroup_info"); len(got) != 1 || got[0]["version"] != shape.version {
+				t.Fatalf("fixture: cgroup info = %v, want one of version %s", got, shape.version)
+			}
+			// Each registry's build_info is its own build and only that; the
+			// other recorder's build is in neither.
+			if got := buildLabels(t, first); len(got) != 1 || got[0] != "v1/a" {
+				t.Fatalf("first registry's build_info = %v, want only v1/a", got)
+			}
+			if got := buildLabels(t, second); len(got) != 1 || got[0] != "v2/b" {
+				t.Fatalf("second registry's build_info = %v, want only v2/b", got)
+			}
+		})
 	}
-	if got := scrape(t, second); !strings.Contains(got, `version="v2"`) || strings.Contains(got, `version="v1"`) {
-		t.Fatalf("second registry contains unexpected build labels:\n%s", got)
+}
+
+// buildLabels is each alarmd_build_info series the recorder serves, as
+// version/commit. It reads that family alone: other families carry a version
+// label too (container_memory_cgroup_info's is the cgroup's).
+func buildLabels(t *testing.T, recorder *Recorder) []string {
+	t.Helper()
+	var builds []string
+	for _, labels := range seriesLabels(t, recorder, "alarmd_build_info") {
+		builds = append(builds, labels["version"]+"/"+labels["commit"])
 	}
+	return builds
+}
+
+// seriesLabels is the labels of each series of one family the recorder
+// serves.
+func seriesLabels(t *testing.T, recorder *Recorder, name string) []map[string]string {
+	t.Helper()
+	families, err := recorder.Gatherer().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var series []map[string]string
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.Metric {
+			labels := map[string]string{}
+			for _, pair := range metric.Label {
+				labels[pair.GetName()] = pair.GetValue()
+			}
+			series = append(series, labels)
+		}
+	}
+	return series
 }
 
 func TestUnknownLabelValuesCollapseToOther(t *testing.T) {
