@@ -128,6 +128,36 @@ func TestAQueryGroupLargerThanTheCacheStaysOutRatherThanComingInEachRound(t *tes
 	}
 }
 
+// A replay's write for an older Slot, while the group is kept out, neither
+// counts toward the round being measured nor closes it: the next round is
+// still judged by a whole round of the group.
+func TestAReplayWhileKeptOutDoesNotCutTheRoundShort(t *testing.T) {
+	cache := bareCache(10)
+	writeSeries(cache, "big", 60, 0, 15)
+	writeSeries(cache, "big", 120, 0, 15)
+	writeSeries(cache, "big", 60, 0, 1)
+	writeSeries(cache, "big", 180, 0, 15)
+	if held, left := heldOf(cache, "big"), cache.stats().Departures[StateCacheDepartOverBudget]; held != 0 || left != 10 {
+		t.Fatalf("held %d entries, over_budget %d after a replay between two rounds of 15; want it still out, left once", held, left)
+	}
+}
+
+// A Query Group given back for a Slot is measured by all it held for its
+// latest Slot: beside another group's entry it no longer fits, and stays out
+// rather than coming back to be given back again.
+func TestAGroupGivenBackComesBackOnlyWhenWhatItHeldFits(t *testing.T) {
+	cache := bareCache(10)
+	writeSeries(cache, "big", 60, 0, 10)
+	cache.YieldRetainedBytes(1)
+	writeSeries(cache, "own", 60, 0, 1)
+	writeSeries(cache, "big", 120, 0, 10)
+	stats := cache.stats()
+	if held := heldOf(cache, "big"); held != 0 || stats.Departures[StateCacheDepartOverBudget] != 0 || heldOf(cache, "own") != 1 {
+		t.Fatalf("held big %d, own %d, departures %v; want the 10 given back kept out beside the other group's entry, "+
+			"and nothing else leaving", held, heldOf(cache, "own"), stats.Departures)
+	}
+}
+
 // A Query Group kept out comes back at the first round after one whole round
 // of it fits: when it shrinks, once a round of the smaller size has been
 // measured, and when the Slots leave the pool room for it, at the next round.
