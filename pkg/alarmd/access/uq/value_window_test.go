@@ -91,9 +91,10 @@ func wantRefused(t *testing.T, completion execution.ProviderCompletion, detail s
 func TestAValuePastItsBoundIsRefusedBeforeItIsHeld(t *testing.T) {
 	limits := DefaultLimits()
 	limits.MaxSeriesBytes = 64 << 10
-	// A series of half the bound grows the decoder's buffer, and it reads
-	// ahead into the next one to fill it: the next window is measured from
-	// where it consumed to, not from what it pulled.
+	// A series of half the bound grows the decoder's buffer, and the read
+	// that ends it fills the buffer from the next one - the two arrive in one
+	// read, as a body does over the network: the next window is measured from
+	// where the decoder consumed to, not from what it pulled.
 	opening := `{"series":[`
 	half := `{"name":"_result0","columns":["_time","_result"],"types":["int64","float64"],"group_keys":["bk_target_ip"],"group_values":["` +
 		strings.Repeat("x", 32<<10) + `"],"values":[[1700123456789,12.5]]}`
@@ -109,7 +110,7 @@ func TestAValuePastItsBoundIsRefusedBeforeItIsHeld(t *testing.T) {
 			"response=limit_response_bytes", otherValueBytes},
 		{"a series", answerOf(`{"series":[{"name":"`, int64(64<<20), `"}],"is_partial":false}`),
 			"response=limit_series_bytes", 64 << 10},
-		{"a series after one the decoder read ahead of", answerOf(opening+half+`,{"name":"`, int64(64<<20), `"}],"is_partial":false}`),
+		{"a series after one the decoder read ahead of", answerOf(opening+half+`,{"name":"`+strings.Repeat("x", 64<<10), int64(64<<20), `"}],"is_partial":false}`),
 			"response=limit_series_bytes", int64(len(opening)+len(half)) + 64<<10},
 		// Met where the decoder's error is replaced with words of its own
 		// ("series must be an array"): still the limit it is.
