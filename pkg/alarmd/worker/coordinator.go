@@ -2901,37 +2901,38 @@ func (coordinator *SlotExecutionCoordinator) stateHorizon(due execution.DuePlan)
 }
 
 // The share is the pool less what the other Query Groups of a replica hold
-// beside the largest, split between the large ones one replica holds at once.
-// Both read from a production deployment at 0.6.4882 over three hours of
-// 11-10, retained bytes as the Slots reserve them since batch 7 - the input
-// at its live heap, output and State as before (sizing.md, the share):
+// beside the largest, split between the large ones one replica holds at once
+// (sizing.md, the share):
 //
-//   - largeQueryGroupsPerWorker: of 842 Query Groups read (a lower bound;
-//     the completion lines are sampled), one holds 25% of the largest's 677
-//     MiB or more, so no replica held two at once. The largest is 677 MiB,
-//     the next 84, the 99th percentile 25.
-//   - otherGroupsPoolDivisor: the pool's eighth for the rest - 128 MiB on 4
-//     GiB - where the most the other groups of the replica holding the
-//     largest held beside it was 102 MiB (779 reserved at most, 677 of it
-//     the largest) and the second largest Query Group is 84.
+//   - largeQueryGroupsPerWorker: of 842 Query Groups read from a production
+//     deployment at 0.6.4882 over three hours of 11-10 (a lower bound; the
+//     completion lines are sampled), one holds 25% of the largest's 677 MiB
+//     or more, so no replica held two at once. The largest is 677 MiB, the
+//     next 84, the 99th percentile 25.
+//   - otherGroupsPoolDivisor: the pool's quarter for the rest, 256 MiB on 4
+//     GiB. The readings above leave room for an eighth - the most the other
+//     groups held beside the largest was 102 MiB - but a replica taking the
+//     largest group over held about 840 MiB of live heap with almost nothing
+//     reserved (L110). The quarter stays until that is found, so a share
+//     raised on the live heap is not stacked on heap the pool does not see.
 const (
 	largeQueryGroupsPerWorker = 1
-	otherGroupsPoolDivisor    = 8
+	otherGroupsPoolDivisor    = 4
 )
 
 // qgShareBytes is the most of the retained-byte pool one Query Group's Slot may
-// hold: seven eighths of it on a replica that holds one large group at once.
+// hold: three quarters of it on a replica that holds one large group at once.
 //
 // A share exists because acquireEffects otherwise only asks whether the pool
 // has room, so one object may legitimately take all of it and every other Query
 // Group on the replica starves. Placement spreads large objects across
 // replicas, which makes that less likely; it does not stop one object from
-// filling the replica it lands on. On a 4 GiB replica the share is 896 MiB;
+// filling the replica it lands on. On a 4 GiB replica the share is 768 MiB;
 // the largest Query Group measured, 95,760 series, reserved 628 MiB in a Slot
 // whose State held three points a series, about 729 MiB with the five its
-// trigger window keeps (sizing.md). A strategy that still does not fit is refused by name rather
-// than let fill the pool, and an object nearing its share is reported before
-// it arrives (fleet's RETAINED_SHARE_APPROACHING).
+// trigger window keeps (sizing.md). A strategy that still does not fit is
+// refused by name rather than let fill the pool, and an object nearing its
+// share is reported before it arrives (fleet's RETAINED_SHARE_APPROACHING).
 func (coordinator *SlotExecutionCoordinator) qgShareBytes() uint64 {
 	pool := coordinator.budget.MaxRetainedBytes
 	return (pool - pool/otherGroupsPoolDivisor) / largeQueryGroupsPerWorker

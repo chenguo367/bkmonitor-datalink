@@ -236,7 +236,7 @@ func TestAPlanWhoseMemoryWasRefusedSkipsItsNoDataRound(t *testing.T) {
 		t.Fatal(err)
 	}
 	stream.noDataRefused = map[execution.PlanNoDataIdentity]execution.NoDataApplyItemResult{
-		due.NoDataIdentity(): noDataBytesRefusal(due.NoDataIdentity(), 5000, 1<<30, 896<<20)}
+		due.NoDataIdentity(): noDataBytesRefusal(due.NoDataIdentity(), 5000, 1<<30, 768<<20)}
 	// Nothing reaches the batch, so the fixture's missing state port is the
 	// assertion: a series sent on would panic here.
 	if err := stream.evaluateNoData(context.Background(), nil, 16); err != nil {

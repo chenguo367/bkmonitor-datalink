@@ -242,8 +242,8 @@ func TestSlotExecutionCoordinatorBudgetsRetainedSeriesAndBytes(t *testing.T) {
 }
 
 func TestSlotExecutionCoordinatorRejectsCumulativeUQPayloadBeforeSideEffectsAndReleasesReservation(t *testing.T) {
-	// Two MiB, so one 900 KiB batch fits the share (seven eighths of the
-	// pool, 1.75 MiB) and the second one's cumulative total does not.
+	// Two MiB, so one 900 KiB batch fits the share (three quarters of the
+	// pool, 1.5 MiB) and the second one's cumulative total does not.
 	fixture := newFixtureWithBudget(t, worker.ProvisionalBudget{
 		MaxSeries: 100, MaxRetainedBytes: 2 << 20, MaxStateMutations: 100, MaxEvents: 100, MaxGapMutations: 10,
 	})
@@ -257,7 +257,7 @@ func TestSlotExecutionCoordinatorRejectsCumulativeUQPayloadBeforeSideEffectsAndR
 	if fixture.ports.eventCount != 0 || fixture.ports.stateApplyCalls != 0 || !isZeroProgressCommit(fixture.ports.lastProgress) {
 		t.Fatal("retained-byte rejection reached Event, State or Progress")
 	}
-	// The share, not the pool. One Query Group may hold seven eighths of the
+	// The share, not the pool. One Query Group may hold three quarters of the
 	// retained-byte budget, so a single object's cumulative payload crosses its share
 	// before it can reach the pool - the pool's own retained-byte refusal needs
 	// two Query Groups running at once. The property this case is about is
@@ -276,9 +276,9 @@ func TestSlotExecutionCoordinatorRejectsCumulativeUQPayloadBeforeSideEffectsAndR
 	// and the share it crossed, and no shared usage: nothing another Query
 	// Group did is part of why this one was refused, and reporting a pool
 	// figure here would point the reader at a neighbour that is not involved.
-	// Limit is seven eighths of the 2 MiB budget.
+	// Limit is three quarters of the 2 MiB budget.
 	if rejection == nil || rejection.Phase != "normal_output" || rejection.OwnUsed == nil ||
-		*rejection.OwnUsed < 900<<10 || rejection.SharedUsed != 0 || rejection.Limit != 7<<18 {
+		*rejection.OwnUsed < 900<<10 || rejection.SharedUsed != 0 || rejection.Limit != 3<<19 {
 		t.Fatalf("missing exact failed-reservation facts: %+v", rejection)
 	}
 	usedAtRejection := *rejection.OwnUsed

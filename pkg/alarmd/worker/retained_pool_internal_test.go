@@ -20,8 +20,9 @@ import (
 
 // The Query Group a 4 GiB replica refused for its share once the State cache
 // took its budget out of the pool: about 7,358 retained bytes a series (the
-// refusal's own 704,641,308 bytes over its 95,760 series). The share is
-// seven eighths of the 1 GiB pool, 896 MiB.
+// refusal's own 704,641,308 bytes over its 95,760 series). Each of its Slots
+// held under 729.6 MiB before - 95% of the 768 MiB share, where nothing
+// reported it approaching.
 const (
 	largeGroupSeriesBytes = 7_358
 	fourGiB               = 4 << 30
@@ -49,7 +50,7 @@ func holdSeries(stream *streamedExecution, series int) (int, error) {
 // On a 4 GiB replica with the State cache on, a Query Group of 100,000 such
 // series - about 702 MiB, which ran on the release before the cache - holds
 // every series: the cache takes nothing out of the share one Query Group may
-// hold. The same group grown past 896 MiB is refused, by the share, at the
+// hold. The same group grown past 768 MiB is refused, by the share, at the
 // series that crosses it.
 func TestALargeQueryGroupHoldsItsWholeShareWithTheStateCacheOn(t *testing.T) {
 	co := coordinatorOfReplica(fourGiB)
@@ -60,13 +61,13 @@ func TestALargeQueryGroupHoldsItsWholeShareWithTheStateCacheOn(t *testing.T) {
 
 	co = coordinatorOfReplica(fourGiB)
 	stream = &streamedExecution{coordinator: co, began: true}
-	share := uint64(896 << 20)
-	held, err := holdSeries(stream, 130_000)
+	share := uint64(768 << 20)
+	held, err := holdSeries(stream, 110_000)
 	if _, byShare := execution.ShareRefusalOf(err); err == nil || !byShare {
-		t.Fatalf("a group past 896 MiB held %d series, refusal %v; want a share refusal", held, err)
+		t.Fatalf("a group past 768 MiB held %d series, refusal %v; want a share refusal", held, err)
 	}
 	if want := int(share / largeGroupSeriesBytes); held != want {
-		t.Fatalf("refused after %d series, want after %d: the share is 896 MiB", held, want)
+		t.Fatalf("refused after %d series, want after %d: the share is 768 MiB", held, want)
 	}
 }
 

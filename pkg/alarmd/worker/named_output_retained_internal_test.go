@@ -72,9 +72,9 @@ func TestANamedOutputTableIsChargedToTheSlotAndReleasedWithIt(t *testing.T) {
 func TestANamedOutputTablePastTheShareIsRefused(t *testing.T) {
 	completion := namedOutputCompletion(10)
 	retained := namedOutputRecordsRetainedBytes(completion)
-	// The share is seven eighths of the pool: room for the Slot's own 100
+	// The share is three quarters of the pool: room for the Slot's own 100
 	// bytes and not for the table beside them.
-	co, stream := namedOutputStream((100+retained)/7*8-8, 100)
+	co, stream := namedOutputStream((100+retained)/3*4-4, 100)
 	err := stream.retainNamedOutputs(context.Background(), completion)
 	refusal, deterministic := execution.ShareRefusalOf(fmt.Errorf("alarmd worker: complete Slot: %w", err))
 	if err == nil || !deterministic || refusal.RequestedBytes != retained || refusal.OwnUsedBytes != 100 {
@@ -90,11 +90,11 @@ func TestANamedOutputTablePastTheShareIsRefused(t *testing.T) {
 // the next is refused at once, as a share refusal of the Slot's own total,
 // and reserves nothing; a release makes the room again.
 func TestTwoNamedQueriesOfASlotCannotExceedTheShareBetweenThem(t *testing.T) {
-	co, stream := namedOutputStream(1000, 0) // a share of 875
+	co, stream := namedOutputStream(1000, 0) // a share of 750
 	if err := stream.ReserveRetainedBytes(context.Background(), 700); err != nil {
 		t.Fatal(err)
 	}
-	err := stream.ReserveRetainedBytes(context.Background(), 200)
+	err := stream.ReserveRetainedBytes(context.Background(), 100)
 	if _, deterministic := execution.ShareRefusalOf(err); err == nil || !deterministic {
 		t.Fatalf("the second query past the share: %v", err)
 	}

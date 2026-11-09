@@ -58,10 +58,10 @@ func TestASlotIsChargedForItsNamedOutputsAndRefusedPastItsShare(t *testing.T) {
 			table.RetainedBytes(), named, err)
 	}
 	f = newFixtureWithBudget(t, budget)
-	table = withNamedOutputs(f, (1<<20-1<<20/8)/200)
+	table = withNamedOutputs(f, 1<<20/4*3/200)
 	_, err = f.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
 	refusal, deterministic := execution.ShareRefusalOf(err)
-	if err == nil || !deterministic || refusal.RequestedBytes != table.RetainedBytes() || refusal.LimitBytes != 1<<20-1<<20/8 {
+	if err == nil || !deterministic || refusal.RequestedBytes != table.RetainedBytes() || refusal.LimitBytes != 1<<20/4*3 {
 		t.Fatalf("refusal %+v deterministic %v error %v", refusal, deterministic, err)
 	}
 	if reserved := worker.RetainedReserved(f.coordinator); reserved != 0 {
