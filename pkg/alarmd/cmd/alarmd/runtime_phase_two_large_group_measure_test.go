@@ -348,6 +348,15 @@ func TestMeasureALargeQueryGroupsTakeoverAgainstTheHeap(t *testing.T) {
 	}))
 	defer uqServer.Close()
 	cfg := largeGroupConfig(t, address, uqServer.URL)
+	// What the second owner's rounds did, stage by stage, so a round that
+	// ran nothing reads as that rather than as a takeover that held nothing.
+	var stagesMu sync.Mutex
+	stages := map[observability.Stage]int{}
+	observer := observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+		stagesMu.Lock()
+		stages[observation.Stage]++
+		stagesMu.Unlock()
+	})
 	open := func(recorder *metric.Recorder) *phaseTwoWorkerBundle {
 		bundle, err := openProductionPhaseTwoBundleWithDependencies(
 			ctx, cfg, recorder, observability.Discard(observability.ComponentRuntime), newPhaseTwoApplicationHealth(),
@@ -355,7 +364,7 @@ func TestMeasureALargeQueryGroupsTakeoverAgainstTheHeap(t *testing.T) {
 				return controlplane.NewLegacyRedisStrategySource(client, prefix)
 			},
 			phaseTwoProductionExternalDependencies{
-				Now: now, HTTPClient: uqServer.Client(),
+				Now: now, HTTPClient: uqServer.Client(), AdditionalObserver: observer,
 				PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
 					return &recordingPhaseTwoEventSink{}, nil
 				}),
@@ -386,7 +395,11 @@ func TestMeasureALargeQueryGroupsTakeoverAgainstTheHeap(t *testing.T) {
 	before := largeGroupLiveHeap()
 	clock.Store(base + 3*60 + 30)
 	recorder := metric.NewRecorder(metric.BuildInfo{})
+	stagesMu.Lock()
+	clear(stages)
+	stagesMu.Unlock()
 	second := open(recorder)
+	t.Logf("the second owner holds %d Query Groups", len(second.queryGroups))
 	defer func() { _ = second.Shutdown(ctx) }()
 	var worst, worstLive, worstReserved, missed atomic.Uint64
 	var worstAt atomic.Int64
@@ -434,6 +447,11 @@ func TestMeasureALargeQueryGroupsTakeoverAgainstTheHeap(t *testing.T) {
 	<-sampled
 	runtime.GC()
 	after := largeGroupLiveHeap()
+	stagesMu.Lock()
+	t.Logf("the second owner's stages: slot_completed %d replay_takeover %d slot_diverted %d slot_skipped %d query_completed %d takeover_completed %d",
+		stages[observability.StageSlotCompleted], stages[observability.StageReplayTakeover], stages[observability.StageSlotDiverted],
+		stages[observability.StageSlotSkipped], stages[observability.StageQueryCompleted], stages[observability.StageTakeoverCompleted])
+	stagesMu.Unlock()
 	if missed.Load() > 0 {
 		t.Logf("%d samples found no reservation reading", missed.Load())
 	}
