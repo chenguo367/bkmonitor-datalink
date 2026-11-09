@@ -90,9 +90,11 @@ type RetainedHolderReading struct {
 	// asked for.
 	Holders []RetainedHolder
 	// Oldest is the Slot that has held the longest, listed or not; nil when
-	// none holds anything.
+	// no Slot runs. A Slot is a holder from when its stream begins, at no
+	// bytes until it reserves, so a Slot running long while reserving
+	// nothing is the oldest at zero bytes.
 	Oldest *RetainedHolder
-	// Total is how many Slots hold anything.
+	// Total is how many Slots run or hold anything.
 	Total int
 	// Attributed is what every row adds up to, listed or not, and Held the
 	// pool's own figure (RetainedReserved), read just after: a Slot that
@@ -123,9 +125,6 @@ func RetainedHolders(coordinator *SlotExecutionCoordinator, limit int) RetainedH
 		var bytes uint64
 		for _, value := range holding.bytes {
 			bytes += value
-		}
-		if bytes == 0 {
-			continue
 		}
 		key := slotKey{holding.slot, holding.operation}
 		row, seen := bySlot[key]

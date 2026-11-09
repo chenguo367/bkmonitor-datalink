@@ -371,6 +371,15 @@ func (stream *streamedExecution) Begin(ctx context.Context, header execution.Int
 	}
 	prepared.inputBuilder = inputBuilder
 	stream.began = true
+	// Listed as a holder from here, holding nothing yet: a Slot that runs is
+	// named by the retained holders for as long as it runs, so one that
+	// holds its structures while reserving nothing reads as the oldest
+	// holder of no bytes rather than not at all. releaseProvisional removes
+	// it.
+	if !stream.holding {
+		stream.holding, stream.heldSince = true, time.Now()
+		stream.coordinator.holders.add(stream)
+	}
 	// Started here rather than at the Slot's evaluation time: this is when
 	// this replica began working on it, and the gap between the two is the
 	// scheduler's to answer for, not the Slot's.
