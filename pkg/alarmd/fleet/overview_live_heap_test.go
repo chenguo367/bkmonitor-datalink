@@ -34,8 +34,8 @@ func TestTheOverviewReadsALiveHeapAgainstTheReservationOfItsOwnCollection(t *tes
 	}
 	for _, c := range cases {
 		facts := &FlowFacts{QueryDuration: FlowHistogram{Buckets: make([]uint64, len(FlowQueryBounds))},
-			DecisionLag:  FlowHistogram{Buckets: make([]uint64, len(FlowDecisionBounds))},
-			RuntimeRedis: FlowHistogram{Buckets: make([]uint64, len(FlowRedisBounds))},
+			DecisionLag:   FlowHistogram{Buckets: make([]uint64, len(FlowDecisionBounds))},
+			RuntimeRedis:  FlowHistogram{Buckets: make([]uint64, len(FlowRedisBounds))},
 			LiveHeapBytes: &heap, LiveHeapReserved: c.reserved}
 		overview := overviewOf(flowHealth(at, started, facts), nil, false, at)
 		newOverviewFlows().apply(&overview, flowHealth(at, started, facts), at)

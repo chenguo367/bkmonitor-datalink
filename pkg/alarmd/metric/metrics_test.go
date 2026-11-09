@@ -594,6 +594,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("heap_inuse_profiled_bytes"):  1,
 		fqName("heap_inuse_profile_records"): 1,
 		fqName("heap_inuse_live_bytes"):      1,
+		fqName("heap_inuse_reserved_bytes"):  2,
 		fqName("control_cache_audit_total"):  4,
 		fqName("legacy_pod_cache_total"):     3,
 		// Filters and reasons are closed vocabularies in the recorder.

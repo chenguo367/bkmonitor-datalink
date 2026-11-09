@@ -929,6 +929,12 @@ Allocation stacks with live memory in the last profile read, the population the 
 
 Live heap the allocation samples add up to after scaling, every site included, read right after a forced collection so that it and heap_inuse_live_bytes describe the same cycle. The two agreeing, within a few percent, is the condition for trusting heap_inuse_site_bytes at all; a ratio far from one is the instrument failing, not a lag to be explained away.
 
+## alarmd_heap_inuse_reserved_bytes
+
+Labels: `at`
+
+What the retained-byte pool held at the collection heap_inuse_live_bytes was read from: at=gc_start just before it was forced, at=gc_end just after the live heap was read. Live heap less this is heap no Slot has reserved, and is that only when the two agree; when they differ a Slot took or gave back its reservation during the reading, and the live heap may hold it either way. Read the pair, never capacity_reserved, against the live heap: capacity_reserved is read by another collector of the same scrape, before or after the collection, and the live heap is refreshed only once a minute. Absent until the pool is bound.
+
 ## alarmd_heap_inuse_site_bytes
 
 Labels: `site`

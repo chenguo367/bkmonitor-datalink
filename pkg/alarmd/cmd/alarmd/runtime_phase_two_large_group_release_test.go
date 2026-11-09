@@ -183,7 +183,7 @@ func TestALargeQueryGroupsSlotLeavesNothingLiveOnceItsReservationIsBack(t *testi
 			}
 		}
 		emptied := time.Now()
-		for index, offset := range releasedReadOffsets {
+		for index, offset := range releasedReadOffsets { // fixed-wait: each read is taken at its set offset after the release, the quantity measured
 			if wait := time.Until(emptied.Add(offset)); wait > 0 {
 				time.Sleep(wait) // fixed-wait: the read is taken at a set time after the release, the quantity measured
 			}
@@ -209,7 +209,7 @@ func TestALargeQueryGroupsSlotLeavesNothingLiveOnceItsReservationIsBack(t *testi
 	}
 	select {
 	case <-measured:
-	case <-time.After(releasedReadOffsets[len(releasedReadOffsets)-1] + time.Minute):
+	case <-time.After(releasedReadOffsets[len(releasedReadOffsets)-1] + time.Minute): // fixed-wait: a bound on a pool that never reads empty, which the length check below then reports
 		close(done)
 		<-measured
 	}
