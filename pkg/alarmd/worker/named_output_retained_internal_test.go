@@ -90,11 +90,11 @@ func TestANamedOutputTablePastTheShareIsRefused(t *testing.T) {
 // the next is refused at once, as a share refusal of the Slot's own total,
 // and reserves nothing; a release makes the room again.
 func TestTwoNamedQueriesOfASlotCannotExceedTheShareBetweenThem(t *testing.T) {
-	co, stream := namedOutputStream(1000, 0) // a share of 750
+	co, stream := namedOutputStream(1000, 0) // a share of 875
 	if err := stream.ReserveRetainedBytes(context.Background(), 700); err != nil {
 		t.Fatal(err)
 	}
-	err := stream.ReserveRetainedBytes(context.Background(), 100)
+	err := stream.ReserveRetainedBytes(context.Background(), 200)
 	if _, deterministic := execution.ShareRefusalOf(err); err == nil || !deterministic {
 		t.Fatalf("the second query past the share: %v", err)
 	}
