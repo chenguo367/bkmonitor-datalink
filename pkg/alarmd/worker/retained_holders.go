@@ -72,6 +72,29 @@ func (registry *retainedHolderRegistry) remove(source retainedHolderSource) {
 	delete(registry.live, source)
 }
 
+// heldBy is what one Slot holds on the retained budget now, its stream and
+// its Plans' kept frames together: the Slot's side of a share it may not
+// pass.
+func (registry *retainedHolderRegistry) heldBy(slot execution.SlotIdentity, operation execution.Operation) uint64 {
+	registry.mu.Lock()
+	sources := make([]retainedHolderSource, 0, len(registry.live))
+	for source := range registry.live {
+		sources = append(sources, source)
+	}
+	registry.mu.Unlock()
+	var held uint64
+	for _, source := range sources {
+		holding := source.retainedHolding()
+		if holding.slot != slot || holding.operation != operation {
+			continue
+		}
+		for _, value := range holding.bytes {
+			held += value
+		}
+	}
+	return held
+}
+
 // RetainedHolder is one Slot's hold on the retained budget at the moment of
 // reading: its stream and its Plans' kept frames together.
 type RetainedHolder struct {

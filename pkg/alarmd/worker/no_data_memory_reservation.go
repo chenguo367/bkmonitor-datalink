@@ -102,10 +102,12 @@ func noDataBytesRefusal(identity execution.PlanNoDataIdentity, groups int, bytes
 
 // holdNoDataFirstWrites reserves what the writes of whole memories hold
 // against the retained pool, for the length of the write, and says which
-// mutations go on to the store. A whole memory past the share one Query
-// Group's Slot may hold never fits, whatever else is running: that Plan's
-// memory alone is refused, named and counted, and nothing else about the
-// Slot changes - its threshold results were already sent. What is within the
+// mutations go on to the store. A whole memory that would take the Slot past
+// the share one Query Group's Slot may hold - beside what the Slot still holds
+// when it writes, as a loaded memory is judged (reserveNoDataMemory) - never
+// fits, whatever else is running: that Plan's memory alone is refused, named
+// and counted, and nothing else about the Slot changes - its threshold
+// results were already sent. What is within the
 // share but finds no room in the pool is the Slot's RESOURCE_HARD_STOP, and
 // the Slot is retried. The caller gives back what was held. A coordinator
 // with no retained budget - only a test builds one - holds nothing.
@@ -116,6 +118,7 @@ func (coordinator *SlotExecutionCoordinator) holdNoDataFirstWrites(
 		return mutations, 0, nil
 	}
 	share := coordinator.qgShareBytes()
+	slotHeld := coordinator.holders.heldBy(request.Contract.Slot, request.Operation)
 	kept := make([]execution.PlanNoDataMutation, 0, len(mutations))
 	var held uint64
 	for _, mutation := range mutations {
@@ -124,7 +127,7 @@ func (coordinator *SlotExecutionCoordinator) holdNoDataFirstWrites(
 			continue
 		}
 		bytes := noDataFirstWriteBytes(mutation)
-		if share > 0 && bytes > share {
+		if share > 0 && slotHeld+held+bytes > share {
 			coordinator.observeNoDataMemoryRefusal(ctx, request, noDataBytesRefusal(mutation.Identity, len(mutation.Set), bytes, share))
 			continue
 		}
