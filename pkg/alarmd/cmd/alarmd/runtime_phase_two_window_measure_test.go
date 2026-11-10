@@ -666,10 +666,14 @@ type windowMeasureResult struct {
 	reservedPeak                    uint64
 	rejected                        float64
 	refusals                        map[string]int
-	batches, events                 int64
-	keptRuns, outside               uint64
-	witnessItems, witnessBytes      float64
-	commands                        map[string]int64
+	// noDataMemoryRefused is the Plans whose no-data memory a write was
+	// refused for, over every Slot of the shape, warm-ups included: the
+	// first write is the first Slot's.
+	noDataMemoryRefused        int
+	batches, events            int64
+	keptRuns, outside          uint64
+	witnessItems, witnessBytes float64
+	commands                   map[string]int64
 	// redisCallers is the Redis round trips' wall time by the job that
 	// made them, summed over calls that may overlap.
 	redisCallers map[string]float64
@@ -737,9 +741,13 @@ func TestMeasureWindowedSlotsOnAFourGiBReplica(t *testing.T) {
 			// what the Slot keeps that no share charges, beside the
 			// process's fixed resident part.
 			uncharged := int64(measured.livePeak) - int64(measured.reservedPeak)
+			// A no-data memory not written for the share is a failure at this
+			// scale too: the round succeeded, and the next one judges
+			// absence without it.
 			t.Logf("shape=%s criterion success=%t share_refusals=%d round_within_40s=%t peak_rss_within_2.5GiB=%t "+
 				"live_minus_reserved=%d gc_cpu=%.2fs",
-				shape, measured.result == string(observability.ResultSuccess), len(measured.refusals),
+				shape, measured.result == string(observability.ResultSuccess) && measured.noDataMemoryRefused == 0,
+				len(measured.refusals)+measured.noDataMemoryRefused,
 				measured.took <= 40*time.Second, rss, uncharged, measured.gcCPU)
 			if measured.completed && measured.result != string(observability.ResultSuccess) {
 				t.Errorf("shape %s: the measured Slot ended %s/%s", shape, measured.result, measured.reason)
@@ -762,7 +770,7 @@ func (measured windowMeasureResult) line(shape windowMeasureShape) string {
 		runErr = measured.runErr.Error()
 	}
 	return fmt.Sprintf("series=%d points=%d no_data=%t result=%s reason=%s cause=%s run_err=%q "+
-		"share_rejected=%.0f refusals=[%s] took=%s slot_ms=%d input_ms=%d preflight_ms=%d evaluate_ms=%d "+
+		"share_rejected=%.0f refusals=[%s] no_data_memory_refused=%d took=%s slot_ms=%d input_ms=%d preflight_ms=%d evaluate_ms=%d "+
 		"cpu=%.2fs cpu_user=%.2fs cpu_sys=%.2fs gc_cpu=%.2fs redis_cpu=%.2fs round_peak_rss=%d (reset %t) "+
 		"heap_objects_peak=%d (before %d) live_marked_peak=%d (before %d) runtime_held_peak=%d "+
 		"maxrss_before=%d maxrss_after=%d reserved_peak=%d retained_peak=%d (input %d output %d state %d gap %d) share=%d "+
@@ -773,7 +781,7 @@ func (measured windowMeasureResult) line(shape windowMeasureShape) string {
 		"unattributed_ms=%d input_slices=%d input_slices_discarded=%d first_seen_unseen_slices=%d first_seen_unseen_series=%d "+
 		"redis_wall_by_caller=[%s] memory_at_held_peak=[%s] memory_after=[%s]",
 		shape.series, shape.points, shape.noData, measured.result, measured.reason, measured.cause, runErr,
-		measured.rejected, strings.Join(refusals, ","), measured.took.Round(time.Millisecond),
+		measured.rejected, strings.Join(refusals, ","), measured.noDataMemoryRefused, measured.took.Round(time.Millisecond),
 		measured.timing.Slot, measured.timing.Input, measured.timing.Preflight, measured.timing.Evaluate,
 		measured.cpu, measured.cpuUser, measured.cpuSystem, measured.gcCPU, measured.redisCPU,
 		measured.roundPeakRSS, measured.roundPeakReset,
@@ -827,6 +835,11 @@ func measureWindowedShape(t *testing.T, shape windowMeasureShape) windowMeasureR
 	var mu sync.Mutex
 	measured := windowMeasureResult{refusals: map[string]int{}}
 	observer := observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+		if observation.Stage == observability.StageNoDataMemoryRefused {
+			mu.Lock()
+			measured.noDataMemoryRefused++
+			mu.Unlock()
+		}
 		if !measuring.Load() {
 			// The warm-up Slots: each completion and the first error each
 			// stage raised, so a shape whose earlier Slots failed says how.

@@ -315,6 +315,10 @@ const (
 	RejectionClassVMSampleLimit = "VM_SAMPLE_LIMIT"
 	RejectionClassPromQLParse   = "PROMQL_PARSE"
 	RejectionClassInvalidQuery  = "INVALID_QUERY"
+	// RejectionClassQueryTooLong is the store refusing a query longer than
+	// it takes (VictoriaMetrics' -search.maxQueryLen): for a read in an input
+	// slice, the slice's conditions made it so (INPUT_SLICE_QUERY_TOO_LONG).
+	RejectionClassQueryTooLong = "QUERY_TOO_LONG"
 )
 
 type ProviderRejection struct {

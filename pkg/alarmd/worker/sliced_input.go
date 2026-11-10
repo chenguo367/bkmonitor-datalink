@@ -69,6 +69,8 @@ type sliceReading struct {
 	// can be sliced on: it is read whole and judged by its share alone, as
 	// before slicing.
 	unsliceable bool
+	// unsupported is why it cannot be sliced (execution.InputSliceReason*).
+	unsupported string
 	// leaveInput ends the input phase of a slice after the first.
 	leaveInput func()
 	// landed is how many series of each Plan the slices written so far held,
@@ -115,7 +117,10 @@ func (stream *streamedExecution) sliceLimit() uint64 {
 // Slot with nothing to slice on is read whole and judged by its share alone,
 // as before slicing.
 func (stream *streamedExecution) admitSliceInput(ctx context.Context, batch execution.SeriesExecutionBatch, retained uint64) error {
-	if !stream.slicing() || stream.slices.unsliceable {
+	if !stream.slicing() {
+		return nil
+	}
+	if stream.slices.unsliceable {
 		return nil
 	}
 	reading := stream.slices
@@ -127,6 +132,7 @@ func (stream *streamedExecution) admitSliceInput(ctx context.Context, batch exec
 	if reading.tree == nil {
 		if _, err := stream.sliceDimensions(); err != nil {
 			reading.unsliceable = true
+			reading.unsupported, _ = execution.InputSliceUnsupportedOf(err)
 			return nil
 		}
 	}
@@ -473,9 +479,17 @@ func growOpenStatement(previous, open execution.PlanGapMutation) (execution.Plan
 		case held < 0:
 			scopes = append(scopes, proposed)
 			grows = true
-		case proposed.RequiredFullSlots > scopes[held].RequiredFullSlots:
-			scopes[held].RequiredFullSlots = proposed.RequiredFullSlots
-			grows = true
+		default:
+			if proposed.RequiredFullSlots > scopes[held].RequiredFullSlots {
+				scopes[held].RequiredFullSlots = proposed.RequiredFullSlots
+				grows = true
+			}
+			// A later slice answering a held scope worse: the worse reason
+			// is what the marker says (execution.GapReasonRank).
+			if execution.GapReasonRank(proposed.ReasonCode) > execution.GapReasonRank(scopes[held].ReasonCode) {
+				scopes[held].ReasonCode = proposed.ReasonCode
+				grows = true
+			}
 		}
 	}
 	if !grows {
@@ -596,6 +610,10 @@ func InputSliceRefusal(err error) (string, bool) {
 	if errors.Is(err, inputslice.ErrValueConcentrated) {
 		return contract.ReasonInputSliceValueConcentrated, true
 	}
+	var tooLong *inputSliceQueryTooLongError
+	if errors.As(err, &tooLong) {
+		return contract.ReasonInputSliceQueryTooLong, true
+	}
 	return "", false
 }
 
@@ -641,4 +659,59 @@ func (stream *streamedExecution) sliceCeilingFactor() uint64 {
 		return 1
 	}
 	return min(uint64(stream.slices.tree.Leaves()+stream.slices.tree.Discarded()), 2*inputslice.MaxLeaves-1)
+}
+
+// sliceQueryTooLong is a slice whose read the store refused as longer than
+// it takes: the slice's conditions made the query so, and the Slot cannot
+// be read in that slice (INPUT_SLICE_QUERY_TOO_LONG). A read of the whole
+// Query Group refused so is the query's own length, and stays the query's
+// rejection.
+func sliceQueryTooLong(slice execution.InputSlice, completion execution.QueryExecutionCompletion) error {
+	if slice.IsZero() {
+		return nil
+	}
+	for _, query := range completion.PhysicalQueries {
+		for _, attempt := range query.RouteFacts.Attempts {
+			if attempt.Rejection != nil && attempt.Rejection.Class == execution.RejectionClassQueryTooLong {
+				return &inputSliceQueryTooLongError{bytes: slice.ConditionBytes()}
+			}
+		}
+	}
+	return nil
+}
+
+// inputSliceQueryTooLongError is a slice whose conditions, of bytes bytes,
+// made its query longer than the store takes.
+type inputSliceQueryTooLongError struct{ bytes int }
+
+func (err *inputSliceQueryTooLongError) Error() string {
+	return fmt.Sprintf("alarmd worker: the store refused an input slice's query as too long (the slice's conditions are %d bytes)", err.bytes)
+}
+
+// unsliceableShareRefusal is a Slot that could not be sliced refused by its
+// share: the share's refusal, its facts and its finalization as they are
+// (DeterministicShareRefusal), named for why the Slot was read whole
+// (INPUT_SLICE_UNSUPPORTED with the reason on the query failure line).
+type unsliceableShareRefusal struct {
+	unsupported execution.InputSliceUnsupportedError
+	share       error
+}
+
+func (err *unsliceableShareRefusal) Error() string {
+	return err.unsupported.Error() + ", read whole: " + err.share.Error()
+}
+
+func (err *unsliceableShareRefusal) Unwrap() []error {
+	return []error{&err.unsupported, err.share}
+}
+
+// nameUnsliceableRefusal is err, a refusal of the input the Slot is
+// reading, named for why the Slot was read whole when it could not be
+// sliced and its share refused it.
+func (stream *streamedExecution) nameUnsliceableRefusal(err error) error {
+	var exceeded *provisionalBudgetExceededError
+	if !stream.slicing() || !stream.slices.unsliceable || !errors.As(err, &exceeded) || !exceeded.share {
+		return err
+	}
+	return &unsliceableShareRefusal{unsupported: execution.InputSliceUnsupportedError{Reason: stream.slices.unsupported}, share: err}
 }

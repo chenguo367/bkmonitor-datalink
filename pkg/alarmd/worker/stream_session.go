@@ -608,7 +608,7 @@ func (stream *streamedExecution) ConsumeSeries(ctx context.Context, batch execut
 		return err
 	}
 	if err := stream.reserveProvisional(ctx, batch.Delivery.Series, retained); err != nil {
-		return err
+		return stream.nameUnsliceableRefusal(err)
 	}
 	stream.series += batch.Delivery.Series
 	stream.retainBytes(retainPhaseInput, retained)
@@ -2467,11 +2467,36 @@ func uncommittedGapMutations(gaps execution.GapLoadResult, mutations []execution
 		if found && (marker.Status == execution.GapFound || marker.Status == execution.GapClearedTombstone) &&
 			marker.LastScheduleRevision == mutation.ScheduleRevision &&
 			execution.CompareApplyVersion(marker.PersistedApplyVersion, mutation.ApplyVersion) == execution.ApplyVersionEqual {
+			// Written by an earlier attempt of this Slot. A retry that
+			// proposes more - a scope the marker lacks, or a worse reason,
+			// as a retry read in other slices or answered worse can - grows
+			// it from the revision it found (execution.ExtendSameSlotGap);
+			// one that proposes nothing more writes nothing.
+			if grown, extends := extendCommittedGap(marker, mutation); extends {
+				pending = append(pending, grown)
+			}
 			continue
 		}
 		pending = append(pending, mutation)
 	}
 	return pending
+}
+
+// extendCommittedGap is mutation as the growth of a marker this Slot already
+// wrote, from the revision it was read at, when it grows it.
+func extendCommittedGap(marker execution.GapGuardSnapshot, mutation execution.PlanGapMutation) (execution.PlanGapMutation, bool) {
+	if marker.Status != execution.GapFound {
+		return execution.PlanGapMutation{}, false
+	}
+	if _, extends := execution.ExtendSameSlotGap(marker.Scopes, mutation.Scopes); !extends {
+		return execution.PlanGapMutation{}, false
+	}
+	mutation.ExpectedMarkerRevision, mutation.MutationDigest = marker.MarkerRevision, ""
+	grown, err := execution.BuildPlanGapMutation(mutation)
+	if err != nil {
+		return execution.PlanGapMutation{}, false
+	}
+	return grown, true
 }
 
 func (stream *streamedExecution) observeEvaluationCompleted(

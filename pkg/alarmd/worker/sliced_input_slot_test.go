@@ -424,16 +424,20 @@ func TestASourceThatIgnoresTheSliceEndsValueConcentratedWithinKMax(t *testing.T)
 }
 
 // A Slot with nothing to slice on - no query facts, or a PromQL query - is
-// read whole and judged by its share alone, as before slicing: past half its
-// share and within it, it completes in one read; past its share it is
-// refused QG_BUDGET_SHARE_EXCEEDED, never split.
+// read whole, as before slicing: past half its share and within it, it
+// completes in one read; past its share it is refused for why it could not be
+// sliced, INPUT_SLICE_UNSUPPORTED with the reason on its query failure line
+// (storage_dialect for a Slot whose facts say no store, promql for a PromQL
+// query), never split; the share's own line and its deterministic refusal,
+// which the scheduler gives the Slot up on, stay as they are.
 func TestAnUnsliceableSlotIsReadWholeAndJudgedByItsShare(t *testing.T) {
 	promql := sliceableFacts()
 	promql.PromQL = &execution.PromQLQuery{Expression: "avg by (host) (cpu_usage)"}
 	for _, test := range []struct {
 		name  string
 		facts *execution.QueryPlanFacts
-	}{{name: "no_facts"}, {name: "promql", facts: promql}} {
+		why   string
+	}{{name: "no_facts", why: execution.InputSliceReasonStorageDialect}, {name: "promql", facts: promql, why: execution.InputSliceReasonPromQL}} {
 		t.Run(test.name+"/within_share", func(t *testing.T) {
 			fixture := newSlicedFixture(t, slicedHosts(12, 40<<10), test.facts, 200)
 			result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
@@ -453,11 +457,54 @@ func TestAnUnsliceableSlotIsReadWholeAndJudgedByItsShare(t *testing.T) {
 			if err == nil || result.Completed {
 				t.Fatalf("Execute() result=%+v err=%v, want the Slot refused by its share", result, err)
 			}
-			if _, sliced := worker.InputSliceRefusal(err); sliced || len(fixture.source.calls) != 1 {
-				t.Fatalf("err %v after %d reads, want one read refused by the share, not a slicing refusal", err, len(fixture.source.calls))
+			word, sliced := worker.InputSliceRefusal(err)
+			why, _ := execution.InputSliceUnsupportedOf(err)
+			if !sliced || word != contract.ReasonInputSliceUnsupported || why != test.why || len(fixture.source.calls) != 1 {
+				t.Fatalf("err %v (%s, %q) after %d reads, want one read refused INPUT_SLICE_UNSUPPORTED for %s",
+					err, word, why, len(fixture.source.calls), test.why)
 			}
+			named := false
+			for _, observation := range *fixture.observations {
+				named = named || (observation.ReasonCode == observability.ReasonCode(contract.ReasonInputSliceUnsupported) &&
+					observation.QueryFailure != nil && observation.QueryFailure.Detail == test.why)
+			}
+			if !named {
+				t.Fatalf("no INPUT_SLICE_UNSUPPORTED line saying %s; observed %+v", test.why, *fixture.observations)
+			}
+			// The share's own line and its finalization stay: the Slot's
+			// bytes against the share, and a refusal the scheduler gives the
+			// Slot up on rather than reading it whole again.
 			assertCapacityRejectionReason(t, fixture.observations, observability.CapacityBudgetRetainedBytes, contract.ReasonQGBudgetShareExceeded)
+			if _, deterministic := execution.ShareRefusalOf(err); !deterministic {
+				t.Fatalf("err %v is not the share's deterministic refusal: the scheduler would read the Slot whole until its replay age", err)
+			}
 		})
+	}
+}
+
+// A slice may take half of what the share leaves, the other half being its
+// windows': a Slot whose input is past that half and within the whole share
+// is still read in slices, none of them past the half, and every series is
+// written once.
+func TestASlotBetweenHalfItsShareAndItsShareIsStillReadInSlices(t *testing.T) {
+	series := slicedHosts(14, 40<<10)
+	fixture := newSlicedFixture(t, series, sliceableFacts(), 200)
+	result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
+	if err != nil || !result.Completed {
+		t.Fatalf("Execute() result=%+v err=%v, want the Slot completed in slices", result, err)
+	}
+	landed := fixture.source.landed()
+	if len(landed) < 2 {
+		t.Fatalf("landed %d reads of %d bytes of padding, want more than one slice past half the share %d",
+			len(landed), 14*(40<<10), slicedShare/2)
+	}
+	for _, call := range landed {
+		if call.padding > slicedShare/2 {
+			t.Fatalf("a landed slice held %d bytes of padding alone, past the slice limit %d", call.padding, slicedShare/2)
+		}
+	}
+	if len(fixture.state.saved) != len(series) {
+		t.Fatalf("%d series saved, want the %d", len(fixture.state.saved), len(series))
 	}
 }
 
@@ -992,13 +1039,12 @@ func TestTheNextSlotOfAQueryGroupStartsWithTheSlicesItsLastReadNeeded(t *testing
 }
 
 // A later slice that answers the Plan's scope worse than the slice that
-// opened its marker - UNAVAILABLE after PARTIAL - is already guarded by it:
-// its head writes nothing more, since the store keeps a scope's reason
-// within its Slot and refuses a second statement that changes it as a
-// CONFLICT, which would fail the attempt for a marker that already covers
-// every event. The Slot completes in one attempt with the marker as opened,
-// every event after the PARTIAL answer under it.
-func TestALaterSliceAnsweringWorseKeepsTheMarkerItFindsWithoutAConflict(t *testing.T) {
+// opened its marker - UNAVAILABLE after PARTIAL - raises the scope's reason:
+// within its Slot a marker's reason only rises (execution.GapReasonRank), so
+// its head's statement is applied, not refused as a CONFLICT. The Slot
+// completes in one attempt with the marker saying UNAVAILABLE, every event
+// after the PARTIAL answer under it.
+func TestALaterSliceAnsweringWorseRaisesTheMarkersReason(t *testing.T) {
 	fixture := newSlicedFixture(t, slicedHosts(24, 40<<10), sliceableFacts(), 3)
 	fixture.ports.gapMissing = true
 	gaps := &markerStore{t: t, ports: fixture.ports}
@@ -1030,6 +1076,11 @@ func TestALaterSliceAnsweringWorseKeepsTheMarkerItFindsWithoutAConflict(t *testi
 	}
 	if !gaps.marker.gapped() || len(events.uncovered) != 0 || len(gaps.shrunk) != 0 {
 		t.Fatalf("marker %+v; event batches %v went out with no marker over them; the marker shrank %v", gaps.marker, events.uncovered, gaps.shrunk)
+	}
+	for _, scope := range gaps.marker.Scopes {
+		if scope.Status == execution.GapStatusGapped && execution.GapReasonRank(scope.ReasonCode) < execution.GapReasonRank(execution.ReasonCode(contract.ReasonQueryUnavailable)) {
+			t.Fatalf("marker scope %+v still says the first slice's PARTIAL, want the later slice's UNAVAILABLE", scope)
+		}
 	}
 }
 

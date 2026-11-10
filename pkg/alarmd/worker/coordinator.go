@@ -587,6 +587,10 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 		if err := completionCtx.Err(); err != nil {
 			return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: completion deadline: %w", err)
 		}
+		if tooLong := sliceQueryTooLong(queryRequest.Slice, sliceCompletion); tooLong != nil {
+			coordinator.observeQueryFailure(ctx, request.Operation, started, "execute", tooLong)
+			return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: query: %w", tooLong)
+		}
 		if completion, err = foldSliceCompletion(completion, sliceCompletion); err != nil {
 			return execution.SlotExecutionResult{}, err
 		}

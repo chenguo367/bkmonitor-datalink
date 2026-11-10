@@ -41,10 +41,10 @@ func levelOpen(level uint32, reason string, required uint32) execution.GapScopeM
 // by the rule the store extends a marker at its own version by
 // (execution.ExtendSameSlotGap), not by the fold of the reasons: a slice
 // that opens a scope the marker lacks grows it, one revision on, the scopes
-// it held kept as they were; a slice that only answers a held scope worse
-// writes nothing, since the store would refuse the changed reason as a
-// CONFLICT and the scope already guards it; a statement of another marker
-// is refused by name.
+// it held kept as they were; a slice that answers a held scope worse raises
+// its reason, UNAVAILABLE over PARTIAL, as the store extends a marker at its
+// version; one that answers it better writes nothing; a statement of another
+// marker is refused by name.
 func TestASliceGrowsTheMarkerOnlyByWhatTheStoreExtendsItWith(t *testing.T) {
 	previous := openStatementFor(t, 3, levelOpen(5, contract.ReasonQueryPartial, 1))
 	grown, grows, err := growOpenStatement(previous, openStatementFor(t, 3, levelOpen(6, contract.ReasonQueryUnavailable, 1)))
@@ -61,12 +61,70 @@ func TestASliceGrowsTheMarkerOnlyByWhatTheStoreExtendsItWith(t *testing.T) {
 		t.Fatal("the store would not extend the marker with the grown statement")
 	}
 
-	if _, grows, err := growOpenStatement(previous, openStatementFor(t, 3, levelOpen(5, contract.ReasonQueryUnavailable, 1))); err != nil || grows {
-		t.Fatalf("a worse answer on a held scope grows = %v, %v; want nothing written", grows, err)
+	worse, grows, err := growOpenStatement(previous, openStatementFor(t, 3, levelOpen(5, contract.ReasonQueryUnavailable, 1)))
+	if err != nil || !grows || len(worse.Scopes) != 1 || worse.Scopes[0].ReasonCode != execution.ReasonCode(contract.ReasonQueryUnavailable) {
+		t.Fatalf("a worse answer on a held scope grows = %+v, %v, %v; want the scope raised to UNAVAILABLE", worse, grows, err)
+	}
+	if _, extended := execution.ExtendSameSlotGap(held, worse.Scopes); !extended {
+		t.Fatal("the store would not extend the marker with the raised reason")
+	}
+	unavailable := openStatementFor(t, 3, levelOpen(5, contract.ReasonQueryUnavailable, 1))
+	if _, grows, err := growOpenStatement(unavailable, openStatementFor(t, 3, levelOpen(5, contract.ReasonQueryPartial, 1))); err != nil || grows {
+		t.Fatalf("a better answer on a held scope grows = %v, %v; want nothing written", grows, err)
 	}
 	other := openStatementFor(t, 3, levelOpen(6, contract.ReasonQueryPartial, 1))
 	other.Identity.StateGeneration = "state-v2"
 	if _, _, err := growOpenStatement(previous, other); err == nil {
 		t.Fatal("grew a marker with another marker's statement")
+	}
+}
+
+// A retry of a Slot whose earlier attempt already wrote the Plan's marker at
+// this version is read again, in slices that need not be the first
+// attempt's and with answers that need not be the same. What it proposes
+// beyond the marker - a scope the marker lacks, a worse reason - is written,
+// from the revision it read; what the marker already says is not written
+// again. Before this the retry's statement was dropped whole at the Slot's
+// version, and a scope only the retry answered went out with no marker over
+// its events.
+func TestARetrysStatementGrowsTheMarkerItsFirstAttemptWrote(t *testing.T) {
+	written := openStatementFor(t, 3, levelOpen(5, contract.ReasonQueryPartial, 1))
+	loaded := execution.GapLoadResult{Items: []execution.GapGuardSnapshot{{
+		Identity: written.Identity, MarkerRevision: 4, PersistedApplyVersion: written.ApplyVersion,
+		PersistedMutationDigest: written.MutationDigest, Status: execution.GapFound, LastScheduleRevision: written.ScheduleRevision,
+		Scopes: []execution.GapScopeState{{Scope: written.Scopes[0].Scope, Status: execution.GapStatusGapped,
+			ReasonCode: written.Scopes[0].ReasonCode, RequiredFullSlots: 1}},
+	}}}
+	for _, test := range []struct {
+		name   string
+		retry  execution.PlanGapMutation
+		writes bool
+	}{
+		{"the same statement", openStatementFor(t, 3, levelOpen(5, contract.ReasonQueryPartial, 1)), false},
+		{"a scope the marker lacks", openStatementFor(t, 3, levelOpen(5, contract.ReasonQueryPartial, 1), levelOpen(6, contract.ReasonQueryPartial, 1)), true},
+		{"a worse reason", openStatementFor(t, 3, levelOpen(5, contract.ReasonQueryUnavailable, 1)), true},
+		{"a better reason on a scope held worse", openStatementFor(t, 3, levelOpen(5, contract.ReasonQueryPartial, 1)), false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			marker := loaded
+			if test.name == "a better reason on a scope held worse" {
+				marker = execution.GapLoadResult{Items: append([]execution.GapGuardSnapshot(nil), loaded.Items...)}
+				marker.Items[0].Scopes = []execution.GapScopeState{{Scope: written.Scopes[0].Scope, Status: execution.GapStatusGapped,
+					ReasonCode: execution.ReasonCode(contract.ReasonQueryUnavailable), RequiredFullSlots: 1}}
+			}
+			pending := uncommittedGapMutations(marker, []execution.PlanGapMutation{test.retry})
+			if !test.writes {
+				if len(pending) != 0 {
+					t.Fatalf("pending = %+v, want nothing written again", pending)
+				}
+				return
+			}
+			if len(pending) != 1 || pending[0].ExpectedMarkerRevision != 4 || pending[0].ValidateDigest() != nil {
+				t.Fatalf("pending = %+v, want the retry's statement from the revision it read, 4", pending)
+			}
+			if _, extends := execution.ExtendSameSlotGap(marker.Items[0].Scopes, pending[0].Scopes); !extends {
+				t.Fatal("the store would not extend the marker with the retry's statement")
+			}
+		})
 	}
 }

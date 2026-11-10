@@ -105,7 +105,21 @@ func (coordinator *SlotExecutionCoordinator) observeQueryFailure(ctx context.Con
 	reason := observability.ReasonInternalUnknown
 	var exceeded *provisionalBudgetExceededError
 	var diagnostic interface{ QueryFailure() (string, string) }
-	if errors.As(err, &exceeded) {
+	// A Slot that has to be read in slices and cannot be is named by why,
+	// before the share that refused it (an unsliceable Slot past its share
+	// carries both).
+	if word, sliced := InputSliceRefusal(err); sliced {
+		facts.Category = observability.QueryFailureCategoryBudget
+		reason = observability.ReasonCode(word)
+		// Why it cannot be sliced, on the line: promql, storage_dialect,
+		// dimension_not_grouped.
+		if why, unsupported := execution.InputSliceUnsupportedOf(err); unsupported {
+			facts.Detail = why
+		}
+		if errors.As(err, &exceeded) {
+			facts.Code = observability.CapacityBudgetFailureCode(exceeded.budget)
+		}
+	} else if errors.As(err, &exceeded) {
 		facts.Category = observability.QueryFailureCategoryBudget
 		facts.Code = observability.CapacityBudgetFailureCode(exceeded.budget)
 		// Named rather than internal_unknown, and by the same rule the capacity
@@ -120,9 +134,6 @@ func (coordinator *SlotExecutionCoordinator) observeQueryFailure(ctx context.Con
 		if exceeded.others {
 			reason = observability.ReasonCode(contract.ReasonResourcePoolHeldByOthers)
 		}
-	} else if word, sliced := InputSliceRefusal(err); sliced {
-		facts.Category = observability.QueryFailureCategoryBudget
-		reason = observability.ReasonCode(word)
 	} else if errors.As(err, &diagnostic) {
 		facts.Category, facts.Code = diagnostic.QueryFailure()
 		// A provider that stopped answering partway is the provider's
