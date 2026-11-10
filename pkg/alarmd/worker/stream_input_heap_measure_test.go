@@ -45,10 +45,13 @@ func TestMeasureTheStreamedInputChargeAgainstTheHeap(t *testing.T) {
 	const series = 100_000
 	for _, points := range []int{1, 5, 15, 30} {
 		header, batches := workerG4StreamFixture(t, strategy.DetectorKindSimpleRingRatio)
-		primary, _ := shareFixtureQueries(t, header)
+		primary, dependency := shareFixtureQueries(t, header)
 		template := batches[primary.index].Inputs[0]
 		window := template.QueryWindow
 		step := (window.End - window.Start) / int64(points)
+		dependencyTemplate := batches[dependency.index].Inputs[0]
+		dependencyWindow := dependencyTemplate.QueryWindow
+		dependencyStep := (dependencyWindow.End - dependencyWindow.Start) / int64(points)
 		var charged, heap, datasets uint64
 		// A budget the series fit whole: the measurement is of the charge,
 		// not of a refusal.
@@ -64,13 +67,25 @@ func TestMeasureTheStreamedInputChargeAgainstTheHeap(t *testing.T) {
 			runtime.GC()
 			runtime.ReadMemStats(&before)
 			start := worker.RetainedInputOf(consumer)
+			// Each series from both queries, as the decoder hands them on: one
+			// run a series, every point of an answer received at the one
+			// moment the answer was (access/uq/client.go), the dependency's
+			// without its dimensions (access/source.go).
 			for index := 0; index < series; index++ {
-				batch, err := measuredSeriesBatch(batches[primary.index], template, index, points, window.Start, step)
+				batch, err := measuredSeriesBatch(batches[primary.index], template, index, points, window.Start, step, window.End, false)
 				if err != nil {
 					return execution.QueryExecutionCompletion{}, err
 				}
-				datasets += batch.Dataset.RetainedBytes()
+				previous, err := measuredSeriesBatch(batches[dependency.index], dependencyTemplate, index, points,
+					dependencyWindow.Start, dependencyStep, dependencyWindow.End, true)
+				if err != nil {
+					return execution.QueryExecutionCompletion{}, err
+				}
+				datasets += batch.Dataset.RetainedBytes() + previous.Dataset.RetainedBytes()
 				if err := consumer.ConsumeSeries(ctx, batch); err != nil {
+					return execution.QueryExecutionCompletion{}, err
+				}
+				if err := consumer.ConsumeSeries(ctx, previous); err != nil {
 					return execution.QueryExecutionCompletion{}, err
 				}
 			}
@@ -84,7 +99,7 @@ func TestMeasureTheStreamedInputChargeAgainstTheHeap(t *testing.T) {
 			t.Fatalf("points=%d: the Slot ended %v before its series were measured", points, err)
 		}
 		ratio := float64(charged) / float64(heap)
-		t.Logf("series=%d points=%d charged=%d (%d a series, its Dataset %d) heap=%d (%d a series) ratio=%.3f",
+		t.Logf("series=%d points=%d charged=%d (%d a series, its two Datasets %d) heap=%d (%d a series) ratio=%.3f",
 			series, points, charged, charged/series, datasets/series, heap, heap/series, ratio)
 		if ratio < 0.8 || ratio > 1.25 {
 			t.Errorf("points=%d: charged %d for a heap of %d (ratio %.3f), want within [0.8, 1.25]", points, charged, heap, ratio)
@@ -97,7 +112,7 @@ func TestMeasureTheStreamedInputChargeAgainstTheHeap(t *testing.T) {
 // it.
 func measuredSeriesBatch(
 	shape execution.SeriesExecutionBatch, template execution.NamedInputBinding,
-	index, points int, start, step int64,
+	index, points int, start, step, receivedAt int64, dependency bool,
 ) (execution.SeriesExecutionBatch, error) {
 	dimensions := map[string]json.RawMessage{
 		"bk_target_cloud_id": json.RawMessage(fmt.Sprintf(`"%03d"`, index%1000)),
@@ -120,9 +135,12 @@ func measuredSeriesBatch(
 		records = append(records, contract.CanonicalRecordV2{RecordID: recordID, SourceTime: at, BusinessID: "2",
 			DimensionIdentity: contract.DimensionIdentityV2{Fields: fields, Digest: identity.Digest},
 			Values:            map[string]json.RawMessage{"value": json.RawMessage(`12.5`)},
-			Dimensions:        dimensions, ReceivedTime: at})
+			Dimensions:        dimensions, ReceivedTime: receivedAt})
 	}
 	dataset := execution.NewDatasetOfDerivedRecordIDs(records)
+	if dependency {
+		dataset = dataset.WithoutDimensions()
+	}
 	digest, err := contract.DeriveSeriesRecordsDigestV2("alarmd-provider-series-delivery-v1", records, identity)
 	if err != nil {
 		return execution.SeriesExecutionBatch{}, err

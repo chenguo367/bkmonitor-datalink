@@ -143,8 +143,8 @@ func TestACompletedSlotSaysWhichPhaseSpentItsTime(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			timing := runSlowSlot(t, testCase.input, testCase.preflight, testCase.evaluate, testCase.apply)
 			delayed, delayedMillis := testCase.phase(timing)
-			t.Logf("slot=%d input=%d preflight=%d evaluate=%d apply=%d",
-				timing.Slot, timing.Input, timing.Preflight, timing.Evaluate, timing.Apply)
+			t.Logf("slot=%d input=%d preflight=%d evaluate=%d apply=%d unattributed=%d",
+				timing.Slot, timing.Input, timing.Preflight, timing.Evaluate, timing.Apply, timing.Unattributed)
 
 			if delayedMillis < moved {
 				t.Fatalf("%s_millis = %d after %v was spent there, want at least %d: the phase did not charge its "+
@@ -160,15 +160,26 @@ func TestACompletedSlotSaysWhichPhaseSpentItsTime(t *testing.T) {
 					"anything else reporting as much is the same duration under a second name",
 					other, otherMillis, delayed, delayedMillis, delayed)
 			}
-			// The total holds the parts. They do not sum to it -- the
-			// completion does more than these four, and a Slot cut into
-			// windows writes some while it evaluates, which this one is
-			// not -- so this is the only
-			// relation between them that always holds, and it is the one that
-			// catches a phase measured against a different clock.
-			if sum := timing.Input + timing.Preflight + timing.Evaluate + timing.Apply; timing.Slot < sum {
-				t.Fatalf("slot_millis = %d under its own phases' %d: the parts are being measured against a clock "+
-					"the total is not", timing.Slot, sum)
+			// The phases partition the Slot from the completion on, and the
+			// input is the stretch before it: their sum, the unattributed
+			// time included, is the total less what rounding each to the
+			// millisecond drops. A phase measured against another clock, or
+			// one duration charged twice, breaks it either way.
+			phases := []uint64{timing.Input, timing.Preflight, timing.Evaluate, timing.Apply, timing.RecordIDs, timing.Cut,
+				timing.Merge, timing.Series, timing.NoDataRead, timing.NoDataWrite, timing.Unattributed}
+			var sum uint64
+			for _, phase := range phases {
+				sum += phase
+			}
+			if sum > timing.Slot || timing.Slot-sum > uint64(len(phases))+1 {
+				t.Fatalf("slot_millis = %d and its phases sum to %d: they partition it, so they differ by rounding alone",
+					timing.Slot, sum)
+			}
+			// And what no phase claims is small beside a delay a phase did:
+			// the time a Slot spends is in a phase that names it.
+			if timing.Unattributed*20 >= timing.Slot {
+				t.Fatalf("unattributed_millis = %d of slot_millis = %d, want under 5%%: the Slot spent time no phase names",
+					timing.Unattributed, timing.Slot)
 			}
 		})
 	}

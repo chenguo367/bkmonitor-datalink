@@ -162,6 +162,10 @@ type streamedExecution struct {
 	// spentByPhase is this execution's wall clock split the same way, in
 	// nanoseconds, summed over every call of each phase.
 	spentByPhase [slotPhaseCount]uint64
+	// clockPhase is the phase the clock is charging and clockSince when it
+	// last moved; zero until the completion starts it (enter).
+	clockPhase slotPhase
+	clockSince time.Time
 	// beganAt is when this execution started, for the total the phases are
 	// read against. Zero on an execution that never began, which reports no
 	// duration rather than the time since the epoch.
@@ -203,10 +207,10 @@ type streamedExecution struct {
 
 // slotPhase says which part of a Slot a stretch of wall clock was spent in.
 //
-// The three are the parts a Slot can be slow in for unrelated causes: waiting
-// for its records, reading State, and deciding. They are not a partition of
-// the Slot -- the completion does more than these three -- and the total is
-// carried beside them so the remainder is visible rather than implied.
+// From the completion on they are a partition of the Slot: the clock charges
+// one phase at a time (enter), a phase entered inside another takes its time
+// from it, and what no phase claims is slotPhaseOther, reported as the Slot's
+// unattributed time rather than left to be inferred from the total.
 type slotPhase int
 
 const (
@@ -223,15 +227,61 @@ const (
 	slotPhasePreflight
 	slotPhaseEvaluate
 	// slotPhaseApply is the writes: every window's events, State and gaps,
-	// the head and the tail, or the one apply of a Slot not cut into
-	// windows, the wait for its Sequence included. A window cut while the
-	// Slot is evaluated is inside Evaluate as well.
+	// and the tail, or the one apply of a Slot not cut into windows, the wait
+	// for its Sequence included.
 	slotPhaseApply
 	// slotPhaseRecordIDs is deriving the record ids of the series a window
-	// reads, inside Evaluate.
+	// reads.
 	slotPhaseRecordIDs
+	// slotPhaseCut is cutting a window while the Slot is evaluated: the
+	// window's head (its open statements, the first-seen judgement) less the
+	// reads and writes inside it, which are Preflight and Apply.
+	slotPhaseCut
+	// slotPhaseMerge is folding one series' result into the Slot's.
+	slotPhaseMerge
+	// slotPhaseSeries is one series' work around its evaluation: its
+	// bindings, its effective-time facts and its result, the evaluation and
+	// the reads inside it apart.
+	slotPhaseSeries
+	// slotPhaseNoDataRead is a no-data round's reading of its memory and its
+	// judgement, the windows it cuts apart.
+	slotPhaseNoDataRead
+	// slotPhaseNoDataWrite is writing the no-data memory and its ends.
+	slotPhaseNoDataWrite
+	// slotPhaseOther is every moment after the completion no phase above
+	// claims: the Slot's unattributed time.
+	slotPhaseOther
 	slotPhaseCount
 )
+
+// enter charges this execution's clock to phase until the returned leave is
+// called, and to the phase that was charging before from then on. A phase
+// entered inside another takes its time from that one, so from the completion
+// on the phases partition the Slot. Before the completion the clock is not
+// running - the input phase is the whole of that stretch - and enter does
+// nothing.
+func (stream *streamedExecution) enter(phase slotPhase) (leave func()) {
+	if stream == nil || stream.clockSince.IsZero() {
+		return func() {}
+	}
+	previous := stream.clockPhase
+	stream.chargeClock()
+	stream.clockPhase = phase
+	return func() {
+		stream.chargeClock()
+		stream.clockPhase = previous
+	}
+}
+
+// chargeClock gives the time since the clock last moved to the phase it is
+// charging.
+func (stream *streamedExecution) chargeClock() {
+	now := time.Now()
+	if elapsed := now.Sub(stream.clockSince); elapsed > 0 {
+		stream.spentByPhase[stream.clockPhase] += uint64(elapsed)
+	}
+	stream.clockSince = now
+}
 
 // spend records wall clock against the phase that spent it, from since to now.
 //
@@ -1083,6 +1133,7 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 	// waited for its records, and charging that wait to nothing would make a
 	// refused Slot look instantaneous.
 	stream.spend(slotPhaseInput, stream.beganAt)
+	stream.clockPhase, stream.clockSince = slotPhaseOther, time.Now()
 	if err := completion.Validate(stream.header, stream.delivered); err != nil {
 		return wrapCompletionContractError(codeCompletionInvalid, err)
 	}
@@ -2118,6 +2169,7 @@ func (stream *streamedExecution) evaluateCompletedSeriesBatch(ctx context.Contex
 	}
 	stateRequest := execution.StatePreflightRequest{Contract: stream.request.Contract, Items: stateItems, OwnerFence: stream.request.OwnerFence}
 	started := time.Now()
+	leave := stream.enter(slotPhasePreflight)
 	timedCtx, timing := execution.WithPreflightTiming(ctx)
 	loaded, err := stream.coordinator.ports.State.LoadRuntime(timedCtx, stateRequest)
 	if err == nil {
@@ -2126,7 +2178,7 @@ func (stream *streamedExecution) evaluateCompletedSeriesBatch(ctx context.Contex
 	// Both outcomes: a read that did not come back is the one that took the
 	// longest, and leaving it out would make the phase's total fall exactly
 	// when the reads started timing out.
-	stream.spend(slotPhasePreflight, started)
+	leave()
 	if err != nil {
 		// The read's own facts, because they are the ones that decide what to
 		// do. A read that did not come back has no byte count - that is why the
@@ -2184,6 +2236,7 @@ func (stream *streamedExecution) evaluateCompletedSeriesBatch(ctx context.Contex
 }
 
 func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry completedSeries, view execution.RuntimeStateView) error {
+	defer stream.enter(slotPhaseSeries)()
 	due, series, inputs := entry.due, entry.series, entry.inputs
 	if view.VersionComparison == execution.ApplyVersionEqual {
 		resumed, gapSuperseded, err := resumedSeriesResult(stream.header, due, view, stream.gaps)
@@ -2239,9 +2292,10 @@ func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry
 		}
 	}
 	started := time.Now()
+	leaveEvaluate := stream.enter(slotPhaseEvaluate)
 	execution.MarkStage(ctx, execution.SlotStageEvaluate)
 	evaluated, err := stream.coordinator.ports.Evaluator.Evaluate(ctx, request)
-	stream.spend(slotPhaseEvaluate, started)
+	leaveEvaluate()
 	if err != nil {
 		stream.observeEvaluationFailure(ctx, started, due, err)
 		return wrapEvaluationError(codeEvaluationFailed, fmt.Errorf("alarmd worker: evaluate series: %w", err))
@@ -2295,6 +2349,7 @@ func (stream *streamedExecution) mergeEvaluatedSeries(
 	views []execution.RuntimeStateView,
 	items []execution.StatePreflightItem,
 ) error {
+	defer stream.enter(slotPhaseMerge)()
 	measured := stream.measureMerge(evaluated, retained, uint64(len(views))*loadedKeyHeldBytes)
 	stream.windows.reached = position
 	if err := stream.windowBeforeMerge(ctx, evaluated, measured); err != nil {

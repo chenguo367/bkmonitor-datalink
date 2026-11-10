@@ -12,7 +12,6 @@ package worker
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
@@ -237,12 +236,12 @@ func (stream *streamedExecution) prepassBatch(
 ) (bool, error) {
 	request := execution.StatePreflightRequest{Contract: stream.request.Contract, Items: items,
 		OwnerFence: stream.request.OwnerFence, Unwitnessed: true}
-	started := time.Now()
+	leave := stream.enter(slotPhasePreflight)
 	loaded, err := stream.coordinator.ports.State.LoadRuntime(ctx, request)
 	if err == nil {
 		loaded, err = execution.ClassifyStatePreflight(request, loaded)
 	}
-	stream.spend(slotPhasePreflight, started)
+	leave()
 	if err != nil {
 		return false, fmt.Errorf("alarmd worker: first-seen State pre-pass: %w", err)
 	}

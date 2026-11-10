@@ -582,7 +582,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	}
 
 	var result execution.SlotExecutionResult
-	applyStarted := time.Now()
+	leaveApply := stream.enter(slotPhaseApply)
 	if stream.windows.started {
 		// Cut into windows while it was evaluated: the earlier windows and
 		// the head are written, the last window and the tail are left.
@@ -598,7 +598,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 			return executeErr
 		})
 	}
-	stream.spend(slotPhaseApply, applyStarted)
+	leaveApply()
 	if err != nil {
 		var protection *activationProtectionRequiredError
 		if errors.As(err, &protection) {
@@ -648,13 +648,22 @@ func (stream *streamedExecution) timing() execution.SlotTiming {
 	if stream == nil {
 		return execution.SlotTiming{}
 	}
+	if !stream.clockSince.IsZero() {
+		stream.chargeClock()
+	}
 	return execution.SlotTiming{
-		Slot:      stream.slotMillis(),
-		Input:     stream.spentMillis(slotPhaseInput),
-		Preflight: stream.spentMillis(slotPhasePreflight),
-		Evaluate:  stream.spentMillis(slotPhaseEvaluate),
-		Apply:     stream.spentMillis(slotPhaseApply),
-		RecordIDs: stream.spentMillis(slotPhaseRecordIDs),
+		Slot:         stream.slotMillis(),
+		Input:        stream.spentMillis(slotPhaseInput),
+		Preflight:    stream.spentMillis(slotPhasePreflight),
+		Evaluate:     stream.spentMillis(slotPhaseEvaluate),
+		Apply:        stream.spentMillis(slotPhaseApply),
+		RecordIDs:    stream.spentMillis(slotPhaseRecordIDs),
+		Cut:          stream.spentMillis(slotPhaseCut),
+		Merge:        stream.spentMillis(slotPhaseMerge),
+		Series:       stream.spentMillis(slotPhaseSeries),
+		NoDataRead:   stream.spentMillis(slotPhaseNoDataRead),
+		NoDataWrite:  stream.spentMillis(slotPhaseNoDataWrite),
+		Unattributed: stream.spentMillis(slotPhaseOther),
 	}
 }
 

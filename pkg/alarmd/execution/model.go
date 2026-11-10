@@ -4725,10 +4725,10 @@ func applyVersionFacts(version ApplyVersion) observability.ApplyVersionFacts {
 // SlotTiming is where one Slot's wall clock went, in milliseconds.
 //
 // Slot is the whole of it, from this replica taking the Slot up to the
-// completion row. The three beside it are the parts a Slot can be slow in for
-// unrelated reasons, and they deliberately do not sum to it: what is left over
-// is everything else the completion does, and carrying the total beside the
-// parts is what makes that remainder visible instead of implied.
+// completion row, and the phases beside it partition it: the clock charges one
+// phase at a time, a phase inside another takes its time from it, and what no
+// phase claims is Unattributed, carried as a number of its own rather than left
+// to be inferred from the total.
 //
 // Input runs from the moment this replica takes the Slot up to the completion
 // arriving -- the wait before the first record included, not from it. It is
@@ -4739,22 +4739,27 @@ func applyVersionFacts(version ApplyVersion) observability.ApplyVersionFacts {
 // that took eight seconds already spent three days being read as a slow data
 // source.
 //
-// Preflight and Evaluate are sums over one Slot's batches and series, not
-// single calls. Each call is already on its own line; what no line could
-// answer is what the Slot spent in each in total, which is the question asked
-// of a Slot that overran its period.
-//
-// Apply is the Slot's writes - its windows' events, State and gaps, the head
-// and the tail, the waits for their Sequences included - and RecordIDs the
-// record ids its windows derived. Both overlap Evaluate: a window cut while
-// the Slot is evaluated, and the ids it reads, are spent inside it.
+// The rest are sums over one Slot's batches, series and windows, not single
+// calls. Preflight is the State reads, the first-seen pre-pass's included;
+// Evaluate the evaluator; RecordIDs the record ids the windows derive; Series
+// one series' work around its evaluation; Merge folding its result into the
+// Slot's; Cut a window's head while the Slot is evaluated; Apply the writes -
+// the windows' events, State and gaps and the tail, the waits for their
+// Sequences included; NoDataRead a no-data round's reading of its memory and
+// its judgement; NoDataWrite the memory and its ends written.
 type SlotTiming struct {
-	Slot      uint64
-	Input     uint64
-	Preflight uint64
-	Evaluate  uint64
-	Apply     uint64
-	RecordIDs uint64
+	Slot         uint64
+	Input        uint64
+	Preflight    uint64
+	Evaluate     uint64
+	Apply        uint64
+	RecordIDs    uint64
+	Cut          uint64
+	Merge        uint64
+	Series       uint64
+	NoDataRead   uint64
+	NoDataWrite  uint64
+	Unattributed uint64
 }
 
 // SlotBudgetUsage is one Slot's own consumption of the budgets it was admitted

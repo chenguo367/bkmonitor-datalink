@@ -259,7 +259,7 @@ func (stream *streamedExecution) windowBeforeMerge(ctx context.Context, next exe
 // cutWindow applies the window being filled, every series before
 // windows.reached, running the head first if no window has been applied.
 func (stream *streamedExecution) cutWindow(ctx context.Context) error {
-	defer stream.spend(slotPhaseApply, time.Now())
+	defer stream.enter(slotPhaseCut)()
 	windows := &stream.windows
 	if !windows.started {
 		started, err := stream.coordinator.applyWindowHead(ctx, stream)
@@ -460,6 +460,7 @@ func (stream *streamedExecution) windowParts(views []execution.RuntimeStateView)
 // results would renew a key an earlier window wrote, and the Slot would
 // write it twice.
 func (coordinator *SlotExecutionCoordinator) applyWindow(ctx context.Context, stream *streamedExecution, final bool) error {
+	defer stream.enter(slotPhaseApply)()
 	windows := &stream.windows
 	apply := windows.apply
 	views := stream.state.Items

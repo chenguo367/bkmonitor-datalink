@@ -383,6 +383,7 @@ func (coordinator *SlotExecutionCoordinator) applyNoDataMemory(
 	if len(mutations) == 0 {
 		return nil
 	}
+	defer retainedOwnerFrom(ctx).enter(slotPhaseNoDataWrite)()
 	held, mutations, refused, err := coordinator.holdNoDataFirstWrites(ctx, request, mutations)
 	if err != nil {
 		return err

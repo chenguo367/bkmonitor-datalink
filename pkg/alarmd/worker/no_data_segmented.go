@@ -230,6 +230,7 @@ func (stream *streamedExecution) decideNoDataRound(
 	ctx context.Context, due execution.DuePlan, present *nodata.PresentSet, completeness execution.Completeness,
 	emit func(completedSeries) error,
 ) (noDataRound, error) {
+	defer stream.enter(slotPhaseNoDataRead)()
 	config := due.CompiledPlan.NoData()
 	if config == nil {
 		return noDataRound{outcome: nodata.OutcomeNone}, nil

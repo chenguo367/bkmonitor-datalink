@@ -158,14 +158,19 @@ type SlotBudgetUsageFacts struct {
 // phases are: a phase that is usually nothing and occasionally the whole Slot
 // is the one worth finding, and its zeros are its denominator.
 //
-// Apply is the Slot's writes, the waits for their Sequences included, and
-// RecordIDs the record ids its windows derived; both overlap Evaluate (see
-// execution.SlotTiming).
+// From the completion on the phases partition the Slot, and Unattributed is
+// what none of them claims (see execution.SlotTiming).
 type SlotTimingFacts struct {
-	Slot      uint64 `json:"slot_millis"`
-	Input     uint64 `json:"input_millis"`
-	Preflight uint64 `json:"preflight_millis"`
-	Evaluate  uint64 `json:"evaluate_millis"`
-	Apply     uint64 `json:"apply_millis"`
-	RecordIDs uint64 `json:"record_ids_millis"`
+	Slot         uint64 `json:"slot_millis"`
+	Input        uint64 `json:"input_millis"`
+	Preflight    uint64 `json:"preflight_millis"`
+	Evaluate     uint64 `json:"evaluate_millis"`
+	Apply        uint64 `json:"apply_millis"`
+	RecordIDs    uint64 `json:"record_ids_millis"`
+	Cut          uint64 `json:"cut_millis"`
+	Merge        uint64 `json:"merge_millis"`
+	Series       uint64 `json:"series_millis"`
+	NoDataRead   uint64 `json:"no_data_read_millis"`
+	NoDataWrite  uint64 `json:"no_data_write_millis"`
+	Unattributed uint64 `json:"unattributed_millis"`
 }

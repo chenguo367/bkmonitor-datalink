@@ -191,6 +191,7 @@ func (stream *streamedExecution) noDataEndRound() noDataEndRound {
 // (withheld) is left as it was.
 func (coordinator *SlotExecutionCoordinator) applyNoDataEnds(ctx context.Context, request execution.SlotExecutionRequest,
 	header execution.InternalExecutionHeader, summary *slotEvaluationSummary, withheld map[execution.PlanIdentity]struct{}) error {
+	defer retainedOwnerFrom(ctx).enter(slotPhaseNoDataWrite)()
 	round := noDataEndsFrom(ctx)
 	index := coordinator.ports.NoDataEnds
 	if len(round) == 0 || index == nil || coordinator.ports.OpenAlerts == nil {

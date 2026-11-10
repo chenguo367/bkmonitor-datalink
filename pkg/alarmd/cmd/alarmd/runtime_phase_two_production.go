@@ -3590,7 +3590,8 @@ func slotBudgetUsageFacts(usage execution.SlotBudgetUsage) *observability.SlotBu
 func slotTimingFacts(timing execution.SlotTiming) *observability.SlotTimingFacts {
 	return &observability.SlotTimingFacts{
 		Slot: timing.Slot, Input: timing.Input, Preflight: timing.Preflight, Evaluate: timing.Evaluate,
-		Apply: timing.Apply, RecordIDs: timing.RecordIDs,
+		Apply: timing.Apply, RecordIDs: timing.RecordIDs, Cut: timing.Cut, Merge: timing.Merge, Series: timing.Series,
+		NoDataRead: timing.NoDataRead, NoDataWrite: timing.NoDataWrite, Unattributed: timing.Unattributed,
 	}
 }
 
