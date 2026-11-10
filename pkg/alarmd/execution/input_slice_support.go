@@ -9,7 +9,10 @@
 
 package execution
 
-import "slices"
+import (
+	"slices"
+	"strings"
+)
 
 // The reasons an InputSliceUnsupportedError names. The set is closed: a row
 // that carries one is read by these words alone.
@@ -30,7 +33,36 @@ const (
 	// replays a kept read of the whole Query Group and sends no query the
 	// conditions could go into.
 	InputSliceReasonSupplement = "supplement"
+	// InputSliceReasonCrossSeries is a query that combines series across
+	// the dimensions sliced on: a clause function that aggregates over
+	// every series (topk, bottomk, sum, ... with no grouping), or a metric
+	// merge other than an element-wise combination of its references. Each
+	// slice would answer its own top k, sum or match, and the union of the
+	// slices would not be the whole read's answer.
+	InputSliceReasonCrossSeries = "cross_series"
 )
+
+// crossSeriesFunctions are the functions that, with no grouping of their
+// own, aggregate over every series they are given: PromQL's aggregation
+// operators (controlplane promQLAggregations).
+var crossSeriesFunctions = map[string]bool{
+	"sum": true, "min": true, "max": true, "avg": true, "group": true, "stddev": true, "stdvar": true, "count": true,
+	"count_values": true, "bottomk": true, "topk": true, "quantile": true, "limitk": true, "limit_ratio": true,
+}
+
+// elementwiseFunctions are the functions a metric merge may apply and stay
+// element-wise: each output series is its input series' own value changed.
+var elementwiseFunctions = map[string]bool{
+	"abs": true, "ceil": true, "floor": true, "round": true, "ln": true, "log2": true, "log10": true,
+	"sgn": true, "sqrt": true, "exp": true, "clamp": true, "clamp_min": true, "clamp_max": true,
+}
+
+// matchingModifiers are the words that make a binary operation match
+// series on fewer labels than all of them, or many to one, or that group
+// an aggregation: any of them can match series of two slices together.
+var matchingModifiers = map[string]bool{
+	"on": true, "ignoring": true, "group_left": true, "group_right": true, "by": true, "without": true,
+}
 
 // sliceableDataSources are the query-list data sources whose conditions the
 // provider renders as Prometheus matchers for VictoriaMetrics: the unnamed
@@ -69,6 +101,11 @@ func SliceableDimensions(facts ...QueryPlanFacts) ([]string, error) {
 	for _, fact := range facts {
 		if !sliceableDialect(fact) {
 			return nil, &InputSliceUnsupportedError{Reason: InputSliceReasonStorageDialect}
+		}
+	}
+	for _, fact := range facts {
+		if crossSeries(fact) {
+			return nil, &InputSliceUnsupportedError{Reason: InputSliceReasonCrossSeries}
 		}
 	}
 	var candidates []string
@@ -174,6 +211,62 @@ func groupedByEvery(dimension string, facts []QueryPlanFacts) bool {
 					return false
 				}
 			}
+		}
+	}
+	return true
+}
+
+// crossSeries is whether facts combine series across any dimension: a
+// clause function aggregating every series with no grouping, or a metric
+// merge that is not element-wise.
+func crossSeries(facts QueryPlanFacts) bool {
+	for _, clause := range facts.QueryList {
+		for _, function := range append([]QueryFunction{clause.TimeAggregation}, clause.Functions...) {
+			if crossSeriesFunctions[strings.ToLower(function.Method)] && len(function.Dimensions) == 0 && !function.Without {
+				return true
+			}
+		}
+	}
+	return !elementwiseMerge(facts.MetricMerge)
+}
+
+// elementwiseMerge is whether a metric merge expression combines its
+// references series by series: references, numbers, arithmetic and
+// comparison operators, and, or, unless and bool, and the element-wise
+// functions, nothing else. Binary operators without a matching modifier
+// match series on all their labels, the dimension sliced on among them, so
+// no two slices' series meet. Anything it cannot read - a selector, a range,
+// a string, a modifier, another function - is taken to cross series. The
+// empty expression is the references joined by or.
+func elementwiseMerge(expression string) bool {
+	s := strings.ToLower(expression)
+	for i := 0; i < len(s); {
+		c := s[i]
+		switch {
+		case c == ' ' || c == '\t' || c == '\n' || c == '(' || c == ')' || c == ',' || strings.IndexByte("+-*/%^=!<>.", c) >= 0:
+			i++
+		case c >= '0' && c <= '9':
+			i++
+		case c == '_' || (c >= 'a' && c <= 'z'):
+			j := i
+			for j < len(s) && (s[j] == '_' || (s[j] >= 'a' && s[j] <= 'z') || (s[j] >= '0' && s[j] <= '9')) {
+				j++
+			}
+			word := s[i:j]
+			k := j
+			for k < len(s) && (s[k] == ' ' || s[k] == '\t' || s[k] == '\n') {
+				k++
+			}
+			called := k < len(s) && s[k] == '('
+			switch {
+			case matchingModifiers[word] || crossSeriesFunctions[word]:
+				return false
+			case called && !elementwiseFunctions[word]:
+				return false
+			}
+			i = j
+		default:
+			return false
 		}
 	}
 	return true

@@ -56,8 +56,11 @@ const (
 	// not take an absence memory for. Not a failure of the round -- it judged
 	// and its results went out -- and in no column; listed under its own line
 	// because what it loses is silent: the memory stays at the last version
-	// that was written, a group that goes absent after that is never recorded
-	// as first absent, and its no-data alert never fires.
+	// that was written (none, for a first write), and a group that goes
+	// absent after that is never recorded as first absent: under a HISTORY
+	// roster its no-data alert never fires; under a static roster it fires,
+	// its absence always one period long, never stopped by the horizon, and
+	// a group the roster drops is never told recovered.
 	KindNoDataMemoryRefused = "NO_DATA_MEMORY_REFUSED"
 	// KindReadBeforeComplete is an object the late-data lookback found read
 	// before its data was complete, in two of its latest three classified

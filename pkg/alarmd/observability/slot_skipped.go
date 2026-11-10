@@ -100,6 +100,10 @@ type SlotSkipShareFacts struct {
 	RequestedBytes uint64
 	LimitBytes     uint64
 	Refusals       uint32
+	// Reason is the refusal's own code when it was not the share's -
+	// INPUT_SLICE_VALUE_CONCENTRATED or INPUT_SLICE_QUERY_TOO_LONG - and
+	// Detail why; both empty for the share's.
+	Reason, Detail string
 }
 
 // SlotSkippedFacts is one Slot, or one range of them, finalised as skipped.
@@ -248,6 +252,10 @@ func appendSlotSkippedAttributes(attributes []slog.Attr, facts *SlotSkippedFacts
 			slog.Uint64("share_limit_bytes", share.LimitBytes),
 			slog.Uint64("share_refusals", uint64(share.Refusals)),
 		)
+		if share.Reason != "" {
+			attributes = append(attributes, slog.String("share_refusal_reason", share.Reason),
+				slog.String("share_refusal_detail", share.Detail))
+		}
 	}
 	return attributes
 }

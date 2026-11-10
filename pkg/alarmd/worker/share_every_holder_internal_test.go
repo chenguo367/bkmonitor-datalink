@@ -137,6 +137,13 @@ func TestANoDataFirstWriteIsJudgedWithTheRestOfItsSlot(t *testing.T) {
 	if !refused || store.writes != 0 {
 		t.Fatalf("a first write past the share: refused %t after %d writes, want it refused and not written", refused, store.writes)
 	}
+	// The refusal leaves no memory and nothing held: the next round, the
+	// Slot holding less, writes the same first write whole.
+	stream.unretain(retainPhaseInput, stream.retainedTotal())
+	coordinator.reservations.retainedBytes = 0
+	if err := coordinator.applyNoDataMemory(ctx, request, refusedMemoryDue(t), []execution.PlanNoDataMutation{mutation}); err != nil || store.writes != 1 {
+		t.Fatalf("the next round's first write ended %v after %d writes, want it written once", err, store.writes)
+	}
 
 	coordinator, store, observed = pooledNoDataFixture(4 << 20)
 	stream = &streamedExecution{coordinator: coordinator, began: true}

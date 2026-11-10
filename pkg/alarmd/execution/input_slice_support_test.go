@@ -43,6 +43,14 @@ func TestSliceableDimensionsAreTheRawGroupByLabelsEveryQueryShares(t *testing.T)
 	elastic.TSDBMap = map[string][]execution.QueryStorage{"a": {{StorageType: "elasticsearch"}}}
 	custom := groupedFacts("host")
 	custom.SourceSemantics = []string{"custom/time_series"}
+	// Across series: a clause's top k of every series, a metric merge's.
+	topk := groupedFacts("host")
+	topk.QueryList[0].Functions = append(topk.QueryList[0].Functions, execution.QueryFunction{Method: "topk", Arguments: []execution.QueryScalar{{Kind: execution.QueryScalarNumber, NumberValue: "1"}}})
+	merged := func(expression string) execution.QueryPlanFacts {
+		facts := groupedFacts("host")
+		facts.MetricMerge = expression
+		return facts
+	}
 	for _, test := range []struct {
 		name   string
 		facts  []execution.QueryPlanFacts
@@ -60,6 +68,15 @@ func TestSliceableDimensionsAreTheRawGroupByLabelsEveryQueryShares(t *testing.T)
 		{name: "events", facts: []execution.QueryPlanFacts{events}, reason: "storage_dialect"},
 		{name: "elasticsearch", facts: []execution.QueryPlanFacts{elastic}, reason: "storage_dialect"},
 		{name: "no_queries", reason: "storage_dialect"},
+		{name: "clause_topk_of_every_series", facts: []execution.QueryPlanFacts{topk}, reason: "cross_series"},
+		{name: "merge_topk", facts: []execution.QueryPlanFacts{merged("topk(1, a)")}, reason: "cross_series"},
+		{name: "merge_sum", facts: []execution.QueryPlanFacts{merged("sum(a)")}, reason: "cross_series"},
+		{name: "merge_on", facts: []execution.QueryPlanFacts{merged("a / on(region) b")}, reason: "cross_series"},
+		{name: "merge_group_left", facts: []execution.QueryPlanFacts{merged("a * ignoring(host) group_left b")}, reason: "cross_series"},
+		{name: "merge_selector", facts: []execution.QueryPlanFacts{merged(`a{host="x"}`)}, reason: "cross_series"},
+		{name: "merge_divided", facts: []execution.QueryPlanFacts{merged("a / b")}, want: []string{"host"}},
+		{name: "merge_or", facts: []execution.QueryPlanFacts{merged("a or b")}, want: []string{"host"}},
+		{name: "merge_abs_of_difference", facts: []execution.QueryPlanFacts{merged("abs(a - b) > 10")}, want: []string{"host"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got, err := execution.SliceableDimensions(test.facts...)

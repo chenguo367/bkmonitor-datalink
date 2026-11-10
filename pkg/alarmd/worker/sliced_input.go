@@ -148,18 +148,10 @@ func (stream *streamedExecution) admitSliceInput(ctx context.Context, batch exec
 }
 
 // sliceDimensions is what the Slot's physical queries can be sliced on, by
-// their frozen facts (execution.SliceableDimensions).
+// their frozen facts, the PRIMARY requirements' first so the order is the
+// Plan's own group-by (execution.InternalExecutionHeader.SliceableDimensions).
 func (stream *streamedExecution) sliceDimensions() ([]string, error) {
-	refs := make([]string, 0, len(stream.header.QueryFacts))
-	for ref := range stream.header.QueryFacts {
-		refs = append(refs, string(ref))
-	}
-	sort.Strings(refs)
-	facts := make([]execution.QueryPlanFacts, 0, len(refs))
-	for _, ref := range refs {
-		facts = append(facts, stream.header.QueryFacts[execution.LogicalQueryRef(ref)])
-	}
-	return execution.SliceableDimensions(facts...)
+	return stream.header.SliceableDimensions()
 }
 
 // noteSliceInput counts a batch reserved for the slice being read.
@@ -456,11 +448,12 @@ func (coordinator *SlotExecutionCoordinator) applySliceHead(ctx context.Context,
 // slice's head left (previous) by what this slice's open adds, and whether
 // it adds anything. It is a second statement at the Slot's version, so it
 // says only what the store extends a marker with at its own version
-// (execution.ExtendSameSlotGap): a scope the marker does not hold, and more
-// FULL Slots on one it does. A scope both hold keeps the reason it was
-// opened with - the store refuses a scope's reason changed within its Slot
-// as a CONFLICT, and the scope guards this slice's events gapped either
-// way - so the marker never shrinks and every event written stays under it.
+// (execution.ExtendSameSlotGap): a scope the marker does not hold, more
+// FULL Slots on one it does, or a worse reason on one it does (UNAVAILABLE
+// over PARTIAL, execution.GapReasonRank). Fewer FULL Slots or another reason
+// of the same rank is no growth - the store refuses either alone as a
+// CONFLICT - so the marker never shrinks and every event written stays
+// under it.
 func growOpenStatement(previous, open execution.PlanGapMutation) (execution.PlanGapMutation, bool, error) {
 	if previous.Identity != open.Identity || previous.ScheduleRevision != open.ScheduleRevision ||
 		execution.CompareApplyVersion(previous.ApplyVersion, open.ApplyVersion) != execution.ApplyVersionEqual {
@@ -714,4 +707,44 @@ func (stream *streamedExecution) nameUnsliceableRefusal(err error) error {
 		return err
 	}
 	return &unsliceableShareRefusal{unsupported: execution.InputSliceUnsupportedError{Reason: stream.slices.unsupported}, share: err}
+}
+
+// finalSliceRefusal is err, a Slot whose slices no split separates
+// (INPUT_SLICE_VALUE_CONCENTRATED) or whose slice the store will not take
+// (INPUT_SLICE_QUERY_TOO_LONG), as the deterministic refusal the scheduler
+// finalizes a Slot on, the way it does one past its share: the same window
+// read again splits the same way and is refused the same way, and every
+// retry reads the slices landed before it again. Its code and why stay on
+// the refusal (execution.ShareRefusal Reason and Detail). Any other error
+// is err.
+func (stream *streamedExecution) finalSliceRefusal(err error) error {
+	word, sliced := InputSliceRefusal(err)
+	if !sliced || word == contract.ReasonInputSliceUnsupported || !stream.slicing() {
+		return err
+	}
+	refusal := execution.ShareRefusal{Phase: "input_slice", OwnUsedBytes: stream.slices.read,
+		LimitBytes: stream.coordinator.qgShareBytes(), Reason: word}
+	var concentrated *inputslice.ValueConcentratedError
+	var tooLong *inputSliceQueryTooLongError
+	switch {
+	case errors.As(err, &concentrated):
+		refusal.Detail = concentrated.Reason + " on " + concentrated.Dimension
+	case errors.As(err, &tooLong):
+		refusal.Detail = fmt.Sprintf("conditions of %d bytes", tooLong.bytes)
+	}
+	return &finalSliceRefusalError{err: err, refusal: refusal}
+}
+
+// finalSliceRefusalError is a slice refusal the scheduler finalizes on.
+type finalSliceRefusalError struct {
+	err     error
+	refusal execution.ShareRefusal
+}
+
+func (err *finalSliceRefusalError) Error() string { return err.err.Error() }
+
+func (err *finalSliceRefusalError) Unwrap() error { return err.err }
+
+func (err *finalSliceRefusalError) DeterministicShareRefusal() (execution.ShareRefusal, bool) {
+	return err.refusal, true
 }

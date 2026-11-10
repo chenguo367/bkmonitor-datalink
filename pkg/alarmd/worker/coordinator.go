@@ -553,6 +553,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 		sliceCompletion, err := coordinator.ports.Query.Execute(ctx, queryRequest, stream)
 		if err != nil && stream.slicing() && errors.Is(err, errSliceOverflow) {
 			if refused := stream.splitSlice(leaf); refused != nil {
+				refused = stream.finalSliceRefusal(refused)
 				coordinator.observeQueryFailure(ctx, request.Operation, started, "execute", refused)
 				return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: query: %w", refused)
 			}
@@ -588,6 +589,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 			return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: completion deadline: %w", err)
 		}
 		if tooLong := sliceQueryTooLong(queryRequest.Slice, sliceCompletion); tooLong != nil {
+			tooLong = stream.finalSliceRefusal(tooLong)
 			coordinator.observeQueryFailure(ctx, request.Operation, started, "execute", tooLong)
 			return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: query: %w", tooLong)
 		}

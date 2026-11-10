@@ -135,3 +135,105 @@ func TestAlarmdInputSlicesPartitionTheUnslicedSeries(t *testing.T) {
 		t.Fatal("setup: the unsliced query reads none of the series")
 	}
 }
+
+// sliceIntoEveryGroup is conditions with a slice's fields ANDed into every
+// OR group, the way alarmd puts them (pkg/alarmd/access/uq withInputSlice):
+// after each group's own fields, before the next or.
+func sliceIntoEveryGroup(conditions Conditions, slice []ConditionField) Conditions {
+	var sliced Conditions
+	for index, field := range conditions.FieldList {
+		if index > 0 {
+			if conditions.ConditionList[index-1] == ConditionOr {
+				for _, condition := range slice {
+					sliced.FieldList = append(sliced.FieldList, condition)
+					sliced.ConditionList = append(sliced.ConditionList, ConditionAnd)
+				}
+			}
+			sliced.ConditionList = append(sliced.ConditionList, conditions.ConditionList[index-1])
+		}
+		sliced.FieldList = append(sliced.FieldList, field)
+	}
+	for _, condition := range slice {
+		sliced.FieldList = append(sliced.FieldList, condition)
+		sliced.ConditionList = append(sliced.ConditionList, ConditionAnd)
+	}
+	return sliced
+}
+
+// An OR group whose every condition has an empty value is skipped by this
+// service (AnalysisConditions), and the group it leaves reads every series.
+// With the slice ANDed into it the group is the slice alone, so the slices
+// still partition what the unsliced query reads: A="" or B=2, read whole
+// and in the recorded slices of host, under both readings.
+func TestAnOrGroupOfOnlyEmptyValuesIsReadTheSameWholeAndInSlices(t *testing.T) {
+	raw, err := os.ReadFile(alarmdInputSlicePartition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recorded struct {
+		Slices []Conditions `json:"slices"`
+	}
+	if err = json.Unmarshal(raw, &recorded); err != nil {
+		t.Fatal(err)
+	}
+	unsliced := Conditions{
+		FieldList:     []ConditionField{{DimensionName: "A", Operator: "eq"}, {DimensionName: "B", Operator: "eq", Value: []string{"2"}}},
+		ConditionList: []string{ConditionOr},
+	}
+	slices := make([]Conditions, 0, len(recorded.Slices))
+	for _, recordedSlice := range recorded.Slices {
+		var fields []ConditionField
+		for _, field := range recordedSlice.FieldList {
+			if field.DimensionName == "host" && !containsField(fields, field) {
+				fields = append(fields, field)
+			}
+		}
+		if len(fields) == 0 {
+			t.Fatalf("setup: a recorded slice has no host condition: %+v", recordedSlice)
+		}
+		slices = append(slices, sliceIntoEveryGroup(unsliced, fields))
+	}
+	hosts := []*string{nil}
+	for _, host := range []string{"", "a", "ba", "b", "ab", "节点a", "\xff"} {
+		host := host
+		hosts = append(hosts, &host)
+	}
+	for _, groups := range []map[string]string{{"A": "1"}, {"B": "2"}, {}} {
+		for _, host := range hosts {
+			series := map[string]string{}
+			for key, value := range groups {
+				series[key] = value
+			}
+			if host != nil {
+				series["host"] = *host
+			}
+			for name, matches := range map[string]func(*testing.T, Conditions, map[string]string) bool{
+				"local": matchesByLocalFilter, "prometheus": matchesByPrometheusMatchers,
+			} {
+				in := 0
+				for _, slice := range slices {
+					if matches(t, slice, series) {
+						in++
+					}
+				}
+				want := 0
+				if matches(t, unsliced, series) {
+					want = 1
+				}
+				if in != want {
+					t.Errorf("%s: series %q is in %d slices, want %d", name, series, in, want)
+				}
+			}
+		}
+	}
+}
+
+func containsField(fields []ConditionField, field ConditionField) bool {
+	for _, held := range fields {
+		if held.DimensionName == field.DimensionName && held.Operator == field.Operator && len(held.Value) == len(field.Value) &&
+			(len(held.Value) == 0 || held.Value[0] == field.Value[0]) {
+			return true
+		}
+	}
+	return false
+}

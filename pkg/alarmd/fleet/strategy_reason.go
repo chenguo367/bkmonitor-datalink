@@ -417,7 +417,7 @@ var checkSentences = map[Check]string{
 	CheckDetectionAbandoned:       "有一段检测轮次被放弃，那段时间没有检测；由本服务处理",
 	CheckTimelinePruned:           "有一段待检测的轮次被裁掉，那段时间没有检测；由本服务处理",
 	CheckBookkeepingAbandoned:     "检测照常做了、告警也发了，只是进度没有记下来（控制面存储写入失败）；由本服务处理",
-	CheckNoDataMemoryRefused:      "阈值检测照常，但存储不收无数据检测的记录，这条策略的无数据告警发不出来；由本服务处理",
+	CheckNoDataMemoryRefused:      "阈值检测照常，但存储不收无数据检测的记录：按历史名册的分组缺席发不出告警，按静态名册的缺席不累计时长、移出名册后不发恢复；由本服务处理",
 	CheckAwaitingView:             "alarmd 的执行视图迟迟没有带上这条策略的检测对象，暂时没在检测；由本服务处理",
 	CheckDependencyDown:           "alarmd 依赖的服务没应答，这条策略暂时检测不了；由本服务处理",
 	CheckDefect:                   "alarmd 处理这条策略时遇到程序缺陷，每轮都会重复；由本服务处理",

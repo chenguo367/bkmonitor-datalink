@@ -415,6 +415,12 @@ func TestASourceThatIgnoresTheSliceEndsValueConcentratedWithinKMax(t *testing.T)
 	if reason, ok := worker.InputSliceRefusal(err); !ok || reason != contract.ReasonInputSliceValueConcentrated {
 		t.Fatalf("refusal = %q, %v (err %v), want %s", reason, ok, err, contract.ReasonInputSliceValueConcentrated)
 	}
+	// Deterministic: the scheduler finalizes it as it does a share refusal,
+	// under its own code and why.
+	if refusal, final := execution.ShareRefusalOf(err); !final || refusal.Reason != contract.ReasonInputSliceValueConcentrated ||
+		refusal.Detail == "" || refusal.LimitBytes != slicedShare {
+		t.Fatalf("share refusal of %v = %+v, %t; want a final one under %s with why", err, refusal, final, contract.ReasonInputSliceValueConcentrated)
+	}
 	if reads := len(fixture.source.calls); reads > 2*inputslice.MaxLeaves-1 {
 		t.Fatalf("%d reads before the refusal, past the 2*K_max-1 bound", reads)
 	}
@@ -475,8 +481,66 @@ func TestAnUnsliceableSlotIsReadWholeAndJudgedByItsShare(t *testing.T) {
 			// bytes against the share, and a refusal the scheduler gives the
 			// Slot up on rather than reading it whole again.
 			assertCapacityRejectionReason(t, fixture.observations, observability.CapacityBudgetRetainedBytes, contract.ReasonQGBudgetShareExceeded)
-			if _, deterministic := execution.ShareRefusalOf(err); !deterministic {
-				t.Fatalf("err %v is not the share's deterministic refusal: the scheduler would read the Slot whole until its replay age", err)
+			if refusal, deterministic := execution.ShareRefusalOf(err); !deterministic || refusal.Reason != "" {
+				t.Fatalf("err %v is %+v, %t; want the share's own deterministic refusal: the scheduler would read the Slot whole until its replay age",
+					err, refusal, deterministic)
+			}
+		})
+	}
+}
+
+// A Slot whose queries combine series across the dimension sliced on - a
+// clause's top k of every series, a metric merge's top k - cannot be read in
+// slices: each slice would answer its own top k. Past its share it is refused
+// as INPUT_SLICE_UNSUPPORTED, cross_series, after one whole read. A merge
+// that combines its references series by series, a / b or a or b, is read
+// in slices, every series once.
+func TestASlotCombiningSeriesAcrossTheSliceIsNotSliced(t *testing.T) {
+	clauseTopK := sliceableFacts()
+	clauseTopK.QueryList[0].Functions = append(clauseTopK.QueryList[0].Functions,
+		execution.QueryFunction{Method: "topk", Arguments: []execution.QueryScalar{{Kind: execution.QueryScalarNumber, NumberValue: "1"}}})
+	merged := func(expression string) *execution.QueryPlanFacts {
+		facts := sliceableFacts()
+		facts.MetricMerge = expression
+		return facts
+	}
+	for _, test := range []struct {
+		name  string
+		facts *execution.QueryPlanFacts
+	}{{"clause_topk", clauseTopK}, {"merge_topk", merged("topk(1, a)")}} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newSlicedFixture(t, slicedHosts(24, 40<<10), test.facts, 200)
+			result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
+			why, _ := execution.InputSliceUnsupportedOf(err)
+			if err == nil || result.Completed || why != execution.InputSliceReasonCrossSeries || len(fixture.source.calls) != 1 {
+				t.Fatalf("Execute() result=%+v err=%v after %d reads, want one whole read refused for cross_series",
+					result, err, len(fixture.source.calls))
+			}
+			if fixture.ports.eventCount != 0 || len(fixture.state.saved) != 0 {
+				t.Fatal("a refused Slot wrote events or State")
+			}
+		})
+	}
+	for _, expression := range []string{"a / b", "a or b"} {
+		t.Run(expression, func(t *testing.T) {
+			series := slicedHosts(24, 40<<10)
+			fixture := newSlicedFixture(t, series, merged(expression), 200)
+			result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
+			if err != nil || !result.Completed {
+				t.Fatalf("Execute() result=%+v err=%v, want the Slot completed in slices", result, err)
+			}
+			landed := fixture.source.landed()
+			reads := make([][]string, 0, len(landed))
+			for _, call := range landed {
+				reads = append(reads, call.delivered)
+			}
+			for _, one := range series {
+				if read := countDigests(reads...)[one.digest()]; read != 1 || len(landed) < 2 {
+					t.Fatalf("series %s read in %d of %d landed slices, want once in more than one slice", one.host, read, len(landed))
+				}
+			}
+			if len(fixture.state.saved) != len(series) {
+				t.Fatalf("%d series saved, want the %d", len(fixture.state.saved), len(series))
 			}
 		})
 	}

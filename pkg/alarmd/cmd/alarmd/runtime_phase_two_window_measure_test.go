@@ -69,12 +69,18 @@ const windowMeasureMaxGroups = 500_000
 type windowMeasureShape struct {
 	series, points int
 	noData         bool
+	// cold is a no-data shape whose memory is gone when the measured Slot
+	// begins: its first write lands in the measured Slot, not a warm-up.
+	cold bool
 }
 
 func (shape windowMeasureShape) String() string {
 	state := "off"
 	if shape.noData {
 		state = "on"
+	}
+	if shape.cold {
+		state += "/cold"
 	}
 	return fmt.Sprintf("%dx%d/%s", shape.series, shape.points, state)
 }
@@ -90,6 +96,8 @@ func windowMeasureShapes() []windowMeasureShape {
 			}
 		}
 	}
+	// The largest no-data first write, in the measured Slot.
+	shapes = append(shapes, windowMeasureShape{series: 500_000, points: 30, noData: true, cold: true})
 	named := strings.TrimSpace(os.Getenv("ALARMD_MEASURE_WINDOWS_SHAPE"))
 	if named == "" {
 		return shapes
@@ -110,11 +118,12 @@ func windowMeasureShapes() []windowMeasureShape {
 	for name := range wanted {
 		var shape windowMeasureShape
 		var state string
-		if _, err := fmt.Sscanf(strings.ReplaceAll(name, "/", " "), "%dx%d %s", &shape.series, &shape.points, &state); err != nil ||
-			shape.series <= 0 || shape.points <= 0 || (state != "on" && state != "off") {
+		base, cold := strings.CutSuffix(name, "/cold")
+		if _, err := fmt.Sscanf(strings.ReplaceAll(base, "/", " "), "%dx%d %s", &shape.series, &shape.points, &state); err != nil ||
+			shape.series <= 0 || shape.points <= 0 || (state != "on" && state != "off") || (cold && state != "on") {
 			continue
 		}
-		shape.noData = state == "on"
+		shape.noData, shape.cold = state == "on", cold
 		chosen = append(chosen, shape)
 	}
 	return chosen
@@ -769,7 +778,7 @@ func (measured windowMeasureResult) line(shape windowMeasureShape) string {
 	if measured.runErr != nil {
 		runErr = measured.runErr.Error()
 	}
-	return fmt.Sprintf("series=%d points=%d no_data=%t result=%s reason=%s cause=%s run_err=%q "+
+	return fmt.Sprintf("goarch=%s goroot=%s series=%d points=%d no_data=%t result=%s reason=%s cause=%s run_err=%q "+
 		"share_rejected=%.0f refusals=[%s] no_data_memory_refused=%d took=%s slot_ms=%d input_ms=%d preflight_ms=%d evaluate_ms=%d "+
 		"cpu=%.2fs cpu_user=%.2fs cpu_sys=%.2fs gc_cpu=%.2fs redis_cpu=%.2fs round_peak_rss=%d (reset %t) "+
 		"heap_objects_peak=%d (before %d) live_marked_peak=%d (before %d) runtime_held_peak=%d "+
@@ -780,7 +789,7 @@ func (measured windowMeasureResult) line(shape windowMeasureShape) string {
 		"apply_ms=%d record_ids_ms=%d cut_ms=%d merge_ms=%d series_ms=%d no_data_read_ms=%d no_data_write_ms=%d "+
 		"unattributed_ms=%d input_slices=%d input_slices_discarded=%d first_seen_unseen_slices=%d first_seen_unseen_series=%d "+
 		"redis_wall_by_caller=[%s] memory_at_held_peak=[%s] memory_after=[%s]",
-		shape.series, shape.points, shape.noData, measured.result, measured.reason, measured.cause, runErr,
+		runtime.GOARCH, runtime.GOROOT(), shape.series, shape.points, shape.noData, measured.result, measured.reason, measured.cause, runErr,
 		measured.rejected, strings.Join(refusals, ","), measured.noDataMemoryRefused, measured.took.Round(time.Millisecond),
 		measured.timing.Slot, measured.timing.Input, measured.timing.Preflight, measured.timing.Evaluate,
 		measured.cpu, measured.cpuUser, measured.cpuSystem, measured.gcCPU, measured.redisCPU,
@@ -916,6 +925,9 @@ func measureWindowedShape(t *testing.T, shape windowMeasureShape) windowMeasureR
 		}
 	}
 
+	if shape.cold {
+		forgetNoDataMemory(ctx, t, redisClient)
+	}
 	runtime.GC()
 	samples := windowMeasureRuntimeSamples()
 	measured.objectsBefore, measured.liveBefore, _ = windowMeasureRuntimeSample(samples)
@@ -1090,5 +1102,27 @@ func TestMeasureDimensionRepetitionForInterning(t *testing.T) {
 		}
 		t.Logf("shape=%s series=%d value_bytes=%d interned_saves=%d (%d a series) name_saves=%d (%d a series)",
 			shape.name, shape.series, total, saved, saved/uint64(shape.series), names, names/uint64(shape.series))
+	}
+}
+
+// forgetNoDataMemory deletes every no-data memory the warm-up Slots wrote,
+// its staged pieces with it, so the next Slot writes it first.
+func forgetNoDataMemory(ctx context.Context, t *testing.T, client *redis.Client) {
+	t.Helper()
+	deleted := 0
+	for _, pattern := range []string{"*:nodata-hash:*", "*:nodata-hash-shard:*", "*:nodata-stage:*", "*:nodata-stage-shard:*"} {
+		iter := client.Scan(ctx, 0, pattern, 1000).Iterator()
+		for iter.Next(ctx) {
+			if err := client.Del(ctx, iter.Val()).Err(); err != nil {
+				t.Fatal(err)
+			}
+			deleted++
+		}
+		if err := iter.Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if deleted == 0 {
+		t.Fatal("a cold shape found no no-data memory to forget: the warm-up Slots wrote none")
 	}
 }
