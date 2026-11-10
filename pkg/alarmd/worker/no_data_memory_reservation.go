@@ -148,7 +148,7 @@ func (coordinator *SlotExecutionCoordinator) holdNoDataFirstWrites(
 			continue
 		}
 		segment := noDataFirstWriteSegmentBytes(mutation)
-		if owner != nil && owner.began && share > 0 && owner.retainedTotal()+segment > share {
+		if owner != nil && share > 0 && owner.retainedTotal()+segment > share {
 			refused = append(refused, noDataBytesRefusal(mutation.Identity, len(mutation.Set), segment, share))
 			continue
 		}

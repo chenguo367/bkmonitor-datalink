@@ -473,7 +473,7 @@ func (coordinator *SlotExecutionCoordinator) holdRetained(owner *streamedExecuti
 		coordinator.reservations.retainedBytes += bytes
 	}
 	coordinator.reservations.mu.Unlock()
-	if err == nil && owner != nil && owner.began {
+	if err == nil && owner != nil {
 		owner.retainBytes(retainPhaseState, bytes)
 	}
 	return err
@@ -484,7 +484,7 @@ func (coordinator *SlotExecutionCoordinator) letGoRetained(owner *streamedExecut
 	if bytes == 0 {
 		return
 	}
-	if owner != nil && owner.began {
+	if owner != nil {
 		// From the owner's State phase and the pool together; a stream
 		// already released has given the pool its bytes back.
 		owner.unretain(retainPhaseState, bytes)

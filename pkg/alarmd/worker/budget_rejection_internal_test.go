@@ -94,28 +94,36 @@ func TestBudgetRejectionOutputAndQueryFreeOwnership(t *testing.T) {
 	}
 }
 
+// A gap fact within the Slot's share that the pool has no room for - others
+// hold all of it but 100 bytes - is refused with the pool as it stood: for a
+// Slot that began, for what others hold (its own, the pool's and the
+// others' bytes); for a query-free owner, whose usage is not the whole
+// execution's, as the pool's own refusal with no usage of its own.
 func TestGapLoadBudgetRejectionUsesFailedReservationSnapshot(t *testing.T) {
 	for _, normal := range []bool{true, false} {
 		co, store, request := gapReservationFixture()
-		co.budget.MaxRetainedBytes = 1
+		co.budget.MaxRetainedBytes = 1 << 20
+		others := co.budget.MaxRetainedBytes - 100
+		co.reservations.retainedBytes = others
 		stream := &streamedExecution{coordinator: co, began: normal}
 		_, err := stream.loadGapFacts(context.Background(), request)
 		var exceeded *provisionalBudgetExceededError
-		if !errors.As(err, &exceeded) || exceeded.facts == nil {
+		if !errors.As(err, &exceeded) || exceeded.facts == nil || exceeded.share {
 			t.Fatal(err)
 		}
 		f := exceeded.facts
-		if f.SharedUsed != 0 || f.Requested <= 1 || f.Limit != 1 {
+		if f.SharedUsed != others || f.Requested <= 100 || f.Limit != co.budget.MaxRetainedBytes {
 			t.Fatalf("facts=%+v", f)
 		}
 		if normal {
-			if f.Phase != "normal_gap" || f.OwnUsed == nil || *f.OwnUsed != 0 {
+			if f.Phase != "normal_gap" || f.OwnUsed == nil || *f.OwnUsed != 0 || !exceeded.others ||
+				f.OthersUsed == nil || *f.OthersUsed != others {
 				t.Fatalf("facts=%+v", f)
 			}
-		} else if f.Phase != "query_free" || f.OwnUsed != nil {
+		} else if f.Phase != "query_free" || f.OwnUsed != nil || exceeded.others {
 			t.Fatalf("facts=%+v", f)
 		}
-		if store.reads != 1 || co.reservations.gapFacts != 0 || co.reservations.retainedBytes != 0 || len(stream.gaps.Items) != 0 {
+		if store.reads != 1 || co.reservations.gapFacts != 0 || co.reservations.retainedBytes != others || len(stream.gaps.Items) != 0 {
 			t.Fatal("failed Gap reservation mutated ownership")
 		}
 	}

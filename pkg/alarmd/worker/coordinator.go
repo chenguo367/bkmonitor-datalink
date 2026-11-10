@@ -258,12 +258,14 @@ func (coordinator *SlotExecutionCoordinator) releaseProvisional(series, retained
 // refuses is refused for what others hold (RESOURCE_POOL_HELD_BY_OTHERS),
 // never for being too large. Share before pool and against the stream's own
 // total, not what is free: a share measured against what happens to be free
-// would mean a different thing every round. A stream that has not begun
-// (query-free finalization, the worker's own preparation) belongs to no Query
-// Group and is judged against the pool alone (RESOURCE_HARD_STOP).
+// would mean a different thing every round. Every Slot's execution is judged
+// against its share, a query-free one's included; the pool's refusal of one
+// that began is named for the others holding it, and what belongs to no Slot
+// - the worker's own preparation - and a query-free owner, whose usage is not
+// the whole execution's, is the pool's RESOURCE_HARD_STOP.
 func (coordinator *SlotExecutionCoordinator) judgeRetainedLocked(stream *streamedExecution, retainedBytes uint64, phase string) error {
 	owned := stream != nil && stream.began
-	if share := coordinator.qgShareBytes(); owned && share > 0 && retainedBytes > 0 && stream.retainedTotal()+retainedBytes > share {
+	if share := coordinator.qgShareBytes(); stream != nil && share > 0 && retainedBytes > 0 && stream.retainedTotal()+retainedBytes > share {
 		return shareRejection(phase, stream.retainedTotal(), retainedBytes, share, stream.ownBudgetUsage(coordinator.budget))
 	}
 	if coordinator.fitsLocked(retainedBytes) {
@@ -398,7 +400,7 @@ func (held *heldFrames) keep(chunk []admittedState) {
 	if !held.refused && held.coordinator.holdRetained(held.owner, total, "frames") == nil {
 		held.bytes += total
 		held.bytesNow.Store(held.bytes)
-		if !held.holding && (held.owner == nil || !held.owner.began) {
+		if !held.holding && held.owner == nil {
 			held.holding, held.since = true, time.Now()
 			held.coordinator.holders.add(held)
 		}
