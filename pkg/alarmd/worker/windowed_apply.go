@@ -280,7 +280,7 @@ func (stream *streamedExecution) headOpenStatements() (map[execution.PlanIdentit
 		}
 	}
 	for _, due := range stream.header.DuePlans {
-		if len(stream.planSeries[due.Identity]) != 0 {
+		if stream.planSeriesCount(due.Identity) != 0 {
 			continue
 		}
 		bindings := stream.noSeriesBindings(due)

@@ -620,7 +620,11 @@ func (stream *streamedExecution) timing() execution.SlotTiming {
 
 // budgetUsage is what this execution took of each budget, for the completion
 // row. It reads the same counters the rejection path reports, so a completion
-// and a refusal of the same Slot describe the same quantities.
+// and a refusal of the same Slot describe the same quantities. The retained
+// bytes are the Slot's peak, and each phase's share of them at that peak, so
+// the four still add up: a Slot applied window by window gave bytes back as
+// its windows landed, and what it held at its end is not what capacity is
+// sized from (workerCostSource, retainedPeaks).
 func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 	if stream == nil {
 		return execution.SlotBudgetUsage{}
@@ -629,11 +633,11 @@ func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 	return execution.SlotBudgetUsage{
 		StateMutations: stream.effectsSpent.states + stream.effects.states, GapMutations: stream.effectsSpent.gaps + stream.effects.gaps,
 		Events: stream.effectsSpent.events + stream.effects.events, EventsWithoutMessage: stream.summary.withoutMessage,
-		RetainedBytes: stream.retainedTotal(), Series: stream.series,
-		RetainedInputBytes:  stream.retainedByPhase[retainPhaseInput],
-		RetainedGapBytes:    stream.retainedByPhase[retainPhaseGap],
-		RetainedOutputBytes: stream.retainedByPhase[retainPhaseOutput],
-		RetainedStateBytes:  stream.retainedByPhase[retainPhaseState],
+		RetainedBytes: stream.peakRetained, Series: stream.series,
+		RetainedInputBytes:  stream.peakByPhase[retainPhaseInput],
+		RetainedGapBytes:    stream.peakByPhase[retainPhaseGap],
+		RetainedOutputBytes: stream.peakByPhase[retainPhaseOutput],
+		RetainedStateBytes:  stream.peakByPhase[retainPhaseState],
 		StateMutationsLimit: budget.MaxStateMutations, GapMutationsLimit: budget.MaxGapMutations,
 		EventsLimit: budget.MaxEvents, RetainedBytesLimit: budget.MaxRetainedBytes, SeriesLimit: budget.MaxSeries,
 		RetainedShareBytes: stream.coordinator.qgShareBytes(),

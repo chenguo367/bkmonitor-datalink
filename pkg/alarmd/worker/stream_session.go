@@ -33,6 +33,10 @@ type streamedExecution struct {
 	// so a window that lets its series' bindings go gives their bytes back
 	// once nothing of the Slot reads them (dropWindowInputs).
 	inputHolds map[execution.SeriesIdentityDigest]*seriesInputHold
+	// planSeries is, by Plan, the series the stream bound, until the
+	// completion: it is read for the evaluation's order there and only
+	// counted after, so the completion leaves the counts (planSeriesCounts)
+	// and lets the sets go.
 	planSeries map[execution.PlanIdentity]map[execution.SeriesIdentityDigest]struct{}
 	// hostOverlays holds, by Plan and series, the dimensions the platform's
 	// fuller writes for a host CMDB placed by id with another address
@@ -40,9 +44,10 @@ type streamedExecution struct {
 	// which most Slots never do.
 	hostOverlays map[execution.PlanIdentity]map[execution.SeriesIdentityDigest]map[string]json.RawMessage
 	// planSeriesCounts is len(planSeries[plan]) once per Plan, for the
-	// evaluation lines: the number is constant for a Plan within a Slot and
-	// the lines are one per series, so it is counted on the first line and
-	// the same pointer rides on the rest.
+	// evaluation lines and every reader after the completion, which fills it
+	// for every due Plan when it lets planSeries go: the number is constant
+	// for a Plan within a Slot and the lines are one per series, so the same
+	// pointer rides on all of them.
 	planSeriesCounts map[execution.PlanIdentity]*int
 	// completionOnly holds, per Plan without streamed PRIMARY series, the exact
 	// set validated by validateCompletionOnlyExactSet: one completion binding
@@ -119,6 +124,13 @@ type streamedExecution struct {
 	// be incremented by a site that names no phase while every assertion on
 	// the total still passes.
 	retainedByPhase [retainPhaseCount]uint64
+	// peakRetained is the most this execution held at once, and
+	// peakByPhase retainedByPhase at that moment, for the completion row: a
+	// Slot applied window by window gives bytes back as it goes, so what it
+	// holds at its end is not what it needed, and capacity is sized from
+	// what it needed.
+	peakRetained uint64
+	peakByPhase  [retainPhaseCount]uint64
 	// retainedInputNow is retainedByPhase's input share kept again for a
 	// reader on another goroutine: access reads it across an in-place
 	// readiness wait while the series path keeps adding.
@@ -268,6 +280,9 @@ const (
 // panics here rather than being dropped into the total unattributed.
 func (stream *streamedExecution) retainBytes(phase retainPhase, retained uint64) {
 	stream.retainedByPhase[phase] += retained
+	if total := stream.retainedTotal(); total > stream.peakRetained {
+		stream.peakRetained, stream.peakByPhase = total, stream.retainedByPhase
+	}
 	stream.retainedNow[phase].Add(retained)
 	if phase == retainPhaseInput {
 		stream.retainedInputNow.Add(retained)
@@ -1076,6 +1091,13 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 			}
 		}
 	}
+	// The order is taken; from here on a Plan's series are only counted.
+	counts := make(map[execution.PlanIdentity]*int, len(stream.header.DuePlans))
+	for _, due := range stream.header.DuePlans {
+		matched := len(stream.planSeries[due.Identity])
+		counts[due.Identity] = &matched
+	}
+	stream.planSeries, stream.planSeriesCounts = nil, counts
 	if err := stream.loadGaps(ctx); err != nil {
 		return err
 	}
@@ -1186,7 +1208,7 @@ func (stream *streamedExecution) evaluateSeries(
 		return stream.completeWithoutSeries(ctx, completion)
 	}
 	for _, due := range stream.header.DuePlans {
-		if len(stream.planSeries[due.Identity]) != 0 {
+		if stream.planSeriesCount(due.Identity) != 0 {
 			continue
 		}
 		started := time.Now()
@@ -2074,6 +2096,18 @@ func (stream *streamedExecution) observeEvaluationCompleted(
 	stream.coordinator.ports.Observer.Observe(ctx, observation)
 }
 
+// planSeriesCount is how many series the stream bound for the Plan: from
+// planSeries until the completion, from the counts it leaves after.
+func (stream *streamedExecution) planSeriesCount(plan execution.PlanIdentity) int {
+	if stream.planSeries == nil {
+		if counted := stream.planSeriesCounts[plan]; counted != nil {
+			return *counted
+		}
+		return 0
+	}
+	return len(stream.planSeries[plan])
+}
+
 // planSeriesMatched is how many PRIMARY series the Slot bound to the Plan,
 // for the line: the number that separates a guard warming from a guard on a
 // Plan with nothing to warm on. Counted from what the stream bound, which is
@@ -2083,7 +2117,7 @@ func (stream *streamedExecution) planSeriesMatched(due execution.DuePlan) *int {
 	if cached := stream.planSeriesCounts[due.Identity]; cached != nil {
 		return cached
 	}
-	matched := len(stream.planSeries[due.Identity])
+	matched := stream.planSeriesCount(due.Identity)
 	if stream.planSeriesCounts == nil {
 		stream.planSeriesCounts = make(map[execution.PlanIdentity]*int)
 	}
