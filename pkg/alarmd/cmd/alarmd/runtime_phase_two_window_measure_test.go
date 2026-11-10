@@ -15,13 +15,14 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
-	"path/filepath"
+	"os/exec"
 	"runtime"
 	"runtime/debug"
 	"runtime/metrics"
@@ -49,8 +50,8 @@ import (
 // of 500,000 series - and 100,000, the two peaks of which may differ by one
 // window at most - at 1, 5, 15 and 30 points a series, with no-data off and
 // on (max_groups 500,000), through the production bundle on a real Redis
-// under the budgets a 4 GiB replica derives. Each prints one line a shape and
-// asserts only that the run completed. Run on demand with
+// under the budgets a 4 GiB replica derives, the fake UQ in a process of its
+// own. Each prints one line a shape and fails a shape that did not succeed. Run on demand with
 // ALARMD_MEASURE_WINDOWS=1; ALARMD_MEASURE_WINDOWS_SHAPE narrows the run to
 // the shapes it names, comma separated (500000x30/on), which is how the
 // serial run gives each shape its own process: the peak resident set the
@@ -123,7 +124,7 @@ func windowMeasureShapes() []windowMeasureShape {
 func windowMeasureStrategy(t *testing.T, shape windowMeasureShape) []byte {
 	t.Helper()
 	raw := largeGroupStrategy(t)
-	if !shape.noData {
+	if !shape.noData && shape.points == 1 {
 		return raw
 	}
 	var document map[string]any
@@ -131,6 +132,23 @@ func windowMeasureStrategy(t *testing.T, shape windowMeasureShape) []byte {
 		t.Fatal(err)
 	}
 	item := document["items"].([]any)[0].(map[string]any)
+	if shape.points > 1 {
+		// N points a series in one Slot, the period and the aggregation
+		// staying 60 s: the advanced ring comparison over the N - 1 steps
+		// before the Slot's own reads them as one history dataset beside
+		// the Slot's point (strategy.TraditionalHistoryGroups), which is the
+		// production path that puts N points of a series into one Slot.
+		item["algorithms"] = []any{map[string]any{"level": 1, "type": "AdvancedRingRatio", "unit_prefix": "",
+			"config": map[string]any{"floor": 50, "ceil": nil, "floor_interval": shape.points - 1,
+				"ceil_interval": nil, "fetch_type": "avg"}}}
+	}
+	if !shape.noData {
+		encoded, err := json.Marshal(document)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return encoded
+	}
 	item["no_data_config"] = map[string]any{"is_enabled": true, "continuous": 1, "level": 1,
 		"agg_dimension": []any{"device_name"}, "max_groups": windowMeasureMaxGroups}
 	encoded, err := json.Marshal(document)
@@ -140,18 +158,55 @@ func windowMeasureStrategy(t *testing.T, shape windowMeasureShape) []byte {
 	return encoded
 }
 
-// writeWindowMeasureAnswer writes the answer for a query starting at start
-// (seconds) to path: series series of points points each, 60 / points
-// seconds apart inside the minute the query reads, every tenth series at 90
-// - over the strategy's threshold of 80, so the Slot has events to send -
-// and the rest at 12.5. The dimensions are largeGroupAnswer's.
-func writeWindowMeasureAnswer(path string, series, points int, start int64) error {
-	file, err := os.Create(path)
-	if err != nil {
-		return err
+// windowMeasureUQSeries is the environment that makes this test binary the
+// fake UQ of a measurement, in a process of its own (TestMeasureWindowUQServer):
+// its value is the series count. Generating and serving half a million
+// series' answers is not alarmd's memory or CPU, so neither is in the
+// process measured.
+const windowMeasureUQSeries = "ALARMD_MEASURE_UQ_SERIES"
+
+// windowMeasureUQAddress prefixes the line the fake UQ prints its address on.
+const windowMeasureUQAddress = "window-measure-uq "
+
+// windowMeasureStep is the data step of the shapes: the strategy's 60 s.
+const windowMeasureStep = int64(60)
+
+// windowMeasureAnswers answers a query for [start_time, end_time) with every
+// series' points at each step in it: one for the Slot's own minute, and the
+// history a multi-point shape's ring comparison reads for the rest.
+type windowMeasureAnswers struct{ series int }
+
+func (answers windowMeasureAnswers) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	var query struct {
+		StartTime string `json:"start_time"`
+		EndTime   string `json:"end_time"`
 	}
-	out := bufio.NewWriterSize(file, 1<<20)
-	step := int64(60 / points)
+	if err := json.NewDecoder(request.Body).Decode(&query); err != nil {
+		http.Error(writer, err.Error(), http.StatusBadRequest)
+		return
+	}
+	start, err := strconv.ParseInt(strings.TrimSpace(query.StartTime), 10, 64)
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusBadRequest)
+		return
+	}
+	end, err := strconv.ParseInt(strings.TrimSpace(query.EndTime), 10, 64)
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	out := bufio.NewWriterSize(writer, 1<<20)
+	_ = writeWindowMeasureAnswer(out, answers.series, start, end)
+	_ = out.Flush()
+}
+
+// writeWindowMeasureAnswer writes the answer for [start, end): series series,
+// the three dimensions at the lengths the largest group's carry at most - a
+// cloud id of three bytes, an address of fourteen, a device name of 32 - and a
+// point at each step of the range.
+func writeWindowMeasureAnswer(out *bufio.Writer, series int, start, end int64) error {
+	first := (start + windowMeasureStep - 1) / windowMeasureStep * windowMeasureStep
 	_, _ = out.WriteString(`{"series":[`)
 	var line []byte
 	for index := 0; index < series; index++ {
@@ -166,100 +221,83 @@ func writeWindowMeasureAnswer(path string, series, points int, start int64) erro
 		if index%10 == 0 {
 			value = "90"
 		}
-		for point := 0; point < points; point++ {
-			if point > 0 {
+		for at := first; at < end; at += windowMeasureStep {
+			if at > first {
 				line = append(line, ',')
 			}
 			line = append(line, '[')
-			line = strconv.AppendInt(line, (start+int64(point)*step)*1000, 10)
+			line = strconv.AppendInt(line, at*1000, 10)
 			line = append(line, ',')
 			line = append(line, value...)
 			line = append(line, ']')
 		}
 		line = append(line, "]}"...)
 		if _, err := out.Write(line); err != nil {
-			_ = file.Close()
 			return err
 		}
 	}
-	_, _ = out.WriteString(`],"status":null,"trace_id":"window-measure","is_partial":false,"result_table_id":["system.cpu"]}`)
-	if err := out.Flush(); err != nil {
-		_ = file.Close()
-		return err
-	}
-	return file.Close()
+	_, err := out.WriteString(`],"status":null,"trace_id":"window-measure","is_partial":false,"result_table_id":["system.cpu"]}`)
+	return err
 }
 
-// windowMeasureAnswers serves each query's answer from a file written for
-// its start, so the answer neither sits on the heap measured nor costs the
-// process more than a copy while the Slot runs. A start no file was written
-// for ahead of its Slot is written when it is asked for, and counted.
-type windowMeasureAnswers struct {
-	dir            string
-	series, points int
-	mu             sync.Mutex
-	files          map[int64]string
-	lateWrites     atomic.Int64
+// TestMeasureWindowUQServer is the fake UQ of a window measurement when the
+// measurement runs this binary with windowMeasureUQSeries set: it prints its
+// address and serves until its standard input closes.
+func TestMeasureWindowUQServer(t *testing.T) {
+	raw := os.Getenv(windowMeasureUQSeries)
+	if raw == "" {
+		t.Skip("the fake UQ of a window measurement, which runs it in a process of its own")
+	}
+	series, err := strconv.Atoi(raw)
+	if err != nil || series <= 0 {
+		t.Fatalf("%s=%q is no series count", windowMeasureUQSeries, raw)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: windowMeasureAnswers{series: series}, ReadHeaderTimeout: time.Minute}
+	fmt.Printf("%s%s\n", windowMeasureUQAddress, listener.Addr())
+	go func() {
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		_ = server.Close()
+	}()
+	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		t.Fatal(err)
+	}
 }
 
-func (answers *windowMeasureAnswers) prepare(start int64) (string, error) {
-	answers.mu.Lock()
-	defer answers.mu.Unlock()
-	if path, ok := answers.files[start]; ok {
-		return path, nil
+// startWindowMeasureUQ runs the fake UQ in a process of its own and returns
+// its URL; the process ends with the test.
+func startWindowMeasureUQ(t *testing.T, series int) string {
+	t.Helper()
+	command := exec.Command(os.Args[0], "-test.run=^TestMeasureWindowUQServer$", "-test.count=1")
+	command.Env = append(os.Environ(), fmt.Sprintf("%s=%d", windowMeasureUQSeries, series))
+	command.Stderr = os.Stderr
+	stdin, err := command.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
 	}
-	path := filepath.Join(answers.dir, fmt.Sprintf("answer-%d.json", start))
-	if err := writeWindowMeasureAnswer(path, answers.series, answers.points, start); err != nil {
-		return "", err
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
 	}
-	answers.files[start] = path
-	return path, nil
-}
-
-// drop removes every answer file but the one for keep.
-func (answers *windowMeasureAnswers) drop(keep int64) {
-	answers.mu.Lock()
-	defer answers.mu.Unlock()
-	for start, path := range answers.files {
-		if start != keep {
-			_ = os.Remove(path)
-			delete(answers.files, start)
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = stdin.Close()
+		_ = command.Wait()
+	})
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		if address, ok := strings.CutPrefix(scanner.Text(), windowMeasureUQAddress); ok {
+			go func() { _, _ = io.Copy(io.Discard, stdout) }()
+			return "http://" + address
 		}
 	}
-}
-
-func (answers *windowMeasureAnswers) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	var query struct {
-		StartTime string `json:"start_time"`
-	}
-	if err := json.NewDecoder(request.Body).Decode(&query); err != nil {
-		http.Error(writer, err.Error(), http.StatusBadRequest)
-		return
-	}
-	start, err := strconv.ParseInt(strings.TrimSpace(query.StartTime), 10, 64)
-	if err != nil {
-		http.Error(writer, err.Error(), http.StatusBadRequest)
-		return
-	}
-	answers.mu.Lock()
-	_, ready := answers.files[start]
-	answers.mu.Unlock()
-	if !ready {
-		answers.lateWrites.Add(1)
-	}
-	path, err := answers.prepare(start)
-	if err != nil {
-		http.Error(writer, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		http.Error(writer, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer file.Close()
-	writer.Header().Set("Content-Type", "application/json")
-	_, _ = io.Copy(writer, file)
+	t.Fatalf("the fake UQ ended before it said its address: %v", scanner.Err())
+	return ""
 }
 
 // countingWindowEventSink encodes every event as the output does and keeps
@@ -462,7 +500,6 @@ type windowMeasureResult struct {
 	keptRuns, outside               uint64
 	witnessItems, witnessBytes      float64
 	commands                        map[string]int64
-	lateAnswers                     int64
 	runErr                          error
 	// warmups are the earlier Slots' completions, and the errors the first
 	// few each part of the run raised.
@@ -477,7 +514,8 @@ type windowMeasureResult struct {
 // sampled every two milliseconds, the process's lifetime peak resident set
 // before and after, the most the pool held, the windows, the event batches,
 // the record-id counters, the witness cache and the Redis commands by kind.
-// One line a shape; it asserts that each run completed and nothing more.
+// One line a shape and its plan 5.2 reading; a shape whose measured Slot
+// did not complete, or did not succeed, fails.
 func TestMeasureWindowedSlotsOnAFourGiBReplica(t *testing.T) {
 	if os.Getenv("ALARMD_MEASURE_WINDOWS") == "" {
 		t.Skip("a measurement: set ALARMD_MEASURE_WINDOWS=1")
@@ -508,6 +546,17 @@ func TestMeasureWindowedSlotsOnAFourGiBReplica(t *testing.T) {
 			if !measured.completed {
 				t.Errorf("shape %s: the measured Slot did not complete (%v)", shape, measured.runErr)
 			}
+			// Plan 5.2, read off the line: success with no share refusal,
+			// the round within 40 s, the process's peak resident set within
+			// 2.5 GiB. Each is said; a Slot that did not succeed fails the
+			// shape.
+			rss := measured.maxRSSAfter <= 5<<29
+			t.Logf("shape=%s criterion success=%t share_refusals=%d round_within_40s=%t peak_rss_within_2.5GiB=%t",
+				shape, measured.result == string(observability.ResultSuccess), len(measured.refusals),
+				measured.took <= 40*time.Second, rss)
+			if measured.completed && measured.result != string(observability.ResultSuccess) {
+				t.Errorf("shape %s: the measured Slot ended %s/%s", shape, measured.result, measured.reason)
+			}
 		})
 		runtime.GC()
 		debug.FreeOSMemory()
@@ -532,7 +581,7 @@ func (measured windowMeasureResult) line(shape windowMeasureShape) string {
 		"maxrss_before=%d maxrss_after=%d reserved_peak=%d retained_peak=%d (input %d output %d state %d gap %d) share=%d "+
 		"windows=%d ceiling_windows=%d raised_windows=%d usage_series=%d state_mutations=%d events=%d "+
 		"write_batches=%d events_written=%d record_ids_kept_runs=%d record_ids_outside_window=%d "+
-		"witness_items=%.0f witness_bytes=%.0f late_answers=%d redis=[%s]",
+		"witness_items=%.0f witness_bytes=%.0f redis=[%s]",
 		shape.series, shape.points, shape.noData, measured.result, measured.reason, measured.cause, runErr,
 		measured.rejected, strings.Join(refusals, ","), measured.took.Round(time.Millisecond),
 		measured.timing.Slot, measured.timing.Input, measured.timing.Preflight, measured.timing.Evaluate,
@@ -543,7 +592,7 @@ func (measured windowMeasureResult) line(shape windowMeasureShape) string {
 		usage.RetainedShareBytes, usage.Windows, usage.WindowCeilingWindows, usage.WindowCeilingRaisedWindows,
 		usage.Series, usage.StateMutations, usage.Events, measured.batches, measured.events,
 		measured.keptRuns, measured.outside, measured.witnessItems, measured.witnessBytes,
-		measured.lateAnswers, windowMeasureCommandLine(measured.commands))
+		windowMeasureCommandLine(measured.commands))
 }
 
 // measureWindowedShape runs one shape: its own Redis, bundle and answers.
@@ -565,11 +614,9 @@ func measureWindowedShape(t *testing.T, shape windowMeasureShape) windowMeasureR
 	var clock atomic.Int64
 	clock.Store(base)
 	now := func() time.Time { return time.Unix(clock.Load(), 0) }
-	answers := &windowMeasureAnswers{dir: t.TempDir(), series: shape.series, points: shape.points, files: map[int64]string{}}
-	uqServer := httptest.NewServer(answers)
-	defer uqServer.Close()
+	uqURL := startWindowMeasureUQ(t, shape.series)
 
-	cfg := largeGroupConfig(t, address, uqServer.URL)
+	cfg := largeGroupConfig(t, address, uqURL)
 	cfg.Redis.StatePrefix = "alarmd-window-measure"
 	cfg.PhaseTwo.Worker.RegistrationTTL = config.Duration(2 * time.Hour)
 	cfg.PhaseTwo.Ownership.ControlLeaderTTL = config.Duration(2 * time.Hour)
@@ -625,7 +672,7 @@ func measureWindowedShape(t *testing.T, shape windowMeasureShape) windowMeasureR
 			return controlplane.NewLegacyRedisStrategySource(client, prefix)
 		},
 		phaseTwoProductionExternalDependencies{
-			Now: now, HTTPClient: uqServer.Client(), AdditionalObserver: observer,
+			Now: now, HTTPClient: &http.Client{}, AdditionalObserver: observer,
 			PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
 				return sink, nil
 			}),
@@ -643,18 +690,10 @@ func measureWindowedShape(t *testing.T, shape windowMeasureShape) windowMeasureR
 	// The Slot at base+60k reads the minute before it.
 	const slots = 3
 	for slot := int64(0); slot < slots-1; slot++ {
-		if _, err := answers.prepare(base + slot*60 - 60); err != nil {
-			t.Fatal(err)
-		}
 		clock.Store(base + slot*60 + 1)
 		if err := bundle.runScheduledOnce(ctx); err != nil {
 			t.Fatalf("Slot %d: %v", slot, err)
 		}
-		answers.drop(-1)
-	}
-	measuredStart := base + (slots-1)*60 - 60
-	if _, err := answers.prepare(measuredStart); err != nil {
-		t.Fatal(err)
 	}
 
 	runtime.GC()
@@ -668,7 +707,6 @@ func measureWindowedShape(t *testing.T, shape windowMeasureShape) windowMeasureR
 		t.Fatal(err)
 	}
 	_, redisCPUBefore := windowMeasureRedisCommands(ctx, redisClient)
-	answers.lateWrites.Store(0)
 
 	var objectsPeak, livePeak, heldPeak, reservedPeak atomic.Uint64
 	done := make(chan struct{})
@@ -724,8 +762,6 @@ func measureWindowedShape(t *testing.T, shape windowMeasureShape) windowMeasureR
 	var redisCPUAfter float64
 	measured.commands, redisCPUAfter = windowMeasureRedisCommands(ctx, redisClient)
 	measured.redisCPU = redisCPUAfter - redisCPUBefore
-	measured.lateAnswers = answers.lateWrites.Load()
-	answers.drop(-1)
 	return measured
 }
 
