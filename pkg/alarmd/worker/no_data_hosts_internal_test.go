@@ -125,9 +125,10 @@ func (store *rememberingNoDataStore) ApplyNoData(
 }
 
 // The hosts a history roster consults are the ones the Plan remembers, so they
-// cannot be known until the memory has been read - which is why the resolution
-// happens after the load and not before it.
-func TestNoDataHostsAreResolvedFromTheMemoryJustLoaded(t *testing.T) {
+// cannot be known until the memory has been read - and the memory is read in
+// segments as the round judges it, so each remembered host is resolved as its
+// group is read, before it is judged.
+func TestNoDataHostsAreResolvedFromTheMemoryAsItIsRead(t *testing.T) {
 	remembered := nodata.HostIdentity{IP: "192.0.2.9", CloudID: "0"}
 	// Built by the same projection the evaluation uses rather than written out
 	// here: the key's shape is the package's, and a hand-written one is a guess
@@ -163,6 +164,9 @@ func TestNoDataHostsAreResolvedFromTheMemoryJustLoaded(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if _, err := stream.noDataRoundFor(duePlans[0], nil, execution.CompletenessFull); err != nil {
+		t.Fatal(err)
+	}
 	identity := execution.PlanNoDataIdentity{Plan: duePlans[0].Identity, StateGeneration: "state-v1"}
 	resolution, resolved := stream.noDataHosts[identity]
 	if !resolved {

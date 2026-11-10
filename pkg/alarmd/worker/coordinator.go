@@ -145,6 +145,11 @@ type SlotExecutionCoordinator struct {
 	// holders is who holds the retained budget now, by Slot
 	// (RetainedHolders): the pool's figure says how much, this says whose.
 	holders retainedHolderRegistry
+	// noDataSegment is how many fields a no-data memory's scan asks for at
+	// once and how many names an absence window reads; zero is
+	// execution.NoDataRosterSegmentGroups. A test sets it to cut a small
+	// memory into many segments.
+	noDataSegment int
 }
 
 type processProvisionalReservations struct {

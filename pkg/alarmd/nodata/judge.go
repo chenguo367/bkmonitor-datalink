@@ -66,6 +66,12 @@ type GroupJudgement struct {
 	// was not, or its timestamps differ. It is what the round's delta is made
 	// of.
 	Changed bool
+	// Loaded is what the record held for the group as it was fed, before any
+	// manual close, and InMemory whether it held anything: what a round that
+	// sees one group at a time takes the group's stored change against
+	// (SegmentedRound).
+	Loaded   GroupMemory
+	InMemory bool
 }
 
 // judgeMode is which of the evaluation's paths a round takes. Each is a
@@ -100,14 +106,22 @@ type absenceJudge struct {
 	// last-seen time and is learned one group at a time.
 	roster        Roster
 	deriveHistory bool
-	present       map[string]Group
-	foreign       map[string]struct{}
-	closes        *ManualCloses
+	// present is the present set, each key with its flags: the seen bit
+	// (presentFlagSeen), which is the deduplication for present groups, and
+	// for a round whose caller keeps the set (PresentSet) the verdict the
+	// round gave the group, so the caller says it without the judgement
+	// holding one per present group.
+	present map[string]uint8
+	foreign map[string]struct{}
+	closes  *ManualCloses
 
-	// presentSeen is the present set's seen bit, and judged every other key a
-	// group was judged under; together they are the one deduplication.
-	presentSeen map[string]bool
-	judged      map[string]struct{}
+	// judged is every other key a group was judged under; with the seen bit
+	// it is the one deduplication. A round whose caller deduplicates what it
+	// feeds (callerDedupes, a segmented round, which keeps the names it
+	// judged absent itself) keeps here only the keys its roster names, which
+	// is what Finish reads, and not every name a second time.
+	judged        map[string]struct{}
+	callerDedupes bool
 	// history is the derived history roster folded into its size and
 	// version, fed through the deduplication above. It holds no key.
 	history  rosterVersionFold
@@ -136,6 +150,21 @@ type absenceSummary struct {
 // roster, derived from the groups as they are fed, and input.Roster names
 // only its source.
 func newAbsenceJudge(input AbsenceInput, deriveHistory bool, closes *ManualCloses) *absenceJudge {
+	return newAbsenceJudgeOver(input, deriveHistory, closes, nil)
+}
+
+// newAbsenceJudgeOver is newAbsenceJudge over a present set the caller keeps
+// (PresentSet.keys), in place of input.Present; nil builds it from
+// input.Present.
+func newAbsenceJudgeOver(
+	input AbsenceInput, deriveHistory bool, closes *ManualCloses, present map[string]uint8,
+) *absenceJudge {
+	if present == nil {
+		present = make(map[string]uint8, len(input.Present))
+		for key := range input.Present {
+			present[key] = 0
+		}
+	}
 	judge := &absenceJudge{
 		evaluationTime:    input.EvaluationTime,
 		horizonSeconds:    input.TrackingHorizonSeconds,
@@ -143,18 +172,14 @@ func newAbsenceJudge(input AbsenceInput, deriveHistory bool, closes *ManualClose
 		recoveryDisabled:  input.RecoveryDisabled,
 		roster:            input.Roster,
 		deriveHistory:     deriveHistory,
-		present:           input.Present,
+		present:           present,
 		foreign:           input.OutOfBusiness,
 		closes:            closes,
-		presentSeen:       make(map[string]bool, len(input.Present)),
 		judged:            map[string]struct{}{},
 		facts: AbsenceFacts{
-			Present: uint64(len(input.Present)), Dropped: input.Dropped,
+			Present: uint64(len(present)), Dropped: input.Dropped,
 			RosterSource: input.Roster.Source, RosterVersion: input.Roster.Version,
 		},
-	}
-	for key := range input.Present {
-		judge.presentSeen[key] = false
 	}
 	switch {
 	case input.Completeness != execution.CompletenessFull || input.AnswerTruncated || input.RosterUnresolved:
@@ -179,11 +204,15 @@ func (judge *absenceJudge) Feed(key string, loaded GroupMemory) (judgement Group
 	if judge.finished {
 		return GroupJudgement{}, false, errors.New("alarmd nodata: a group was fed to a finished no-data round")
 	}
-	if seen, present := judge.presentSeen[key]; present {
-		if seen {
+	if flags, present := judge.present[key]; present {
+		if flags&presentFlagSeen != 0 {
 			return GroupJudgement{}, false, nil
 		}
-		judge.presentSeen[key] = true
+		judge.present[key] = flags | presentFlagSeen
+	} else if judge.callerDedupes {
+		if _, expected := judge.roster.Groups[key]; expected {
+			judge.judged[key] = struct{}{}
+		}
 	} else {
 		if _, seen := judge.judged[key]; seen {
 			return GroupJudgement{}, false, nil
@@ -215,13 +244,13 @@ func (judge *absenceJudge) Finish() (absenceSummary, []GroupJudgement, error) {
 	judge.finished = true
 	whole := WholeItemGroup().Key()
 	var unfed []string
-	for key, seen := range judge.presentSeen {
-		if !seen && key != whole {
+	for key, flags := range judge.present {
+		if flags&presentFlagSeen == 0 && key != whole {
 			unfed = append(unfed, key)
 		}
 	}
 	for key := range judge.roster.Groups {
-		if _, present := judge.presentSeen[key]; present || key == whole {
+		if _, present := judge.present[key]; present || key == whole {
 			continue
 		}
 		if _, seen := judge.judged[key]; !seen {
@@ -377,6 +406,7 @@ func (judge *absenceJudge) judge(key string, loaded GroupMemory, inMemory bool, 
 	judgement := GroupJudgement{
 		Key: key, Verdict: group.verdict, Closing: group.closing, Memory: group.current, Kept: group.kept,
 		Changed: inMemory != stored || (inMemory && stored && loaded != group.current),
+		Loaded:  loaded, InMemory: inMemory,
 	}
 	if group.kept {
 		judge.kept++

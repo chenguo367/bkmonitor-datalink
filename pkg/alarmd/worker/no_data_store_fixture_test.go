@@ -173,3 +173,9 @@ func (store *emptyNoDataStore) ScanNoDataGroups(ctx context.Context, request exe
 func (store *emptyNoDataStore) ReadNoDataGroups(ctx context.Context, request execution.NoDataGroupsRequest) (execution.NoDataGroupsResult, error) {
 	return LoadedRoster(store.LoadNoData).Read(ctx, request)
 }
+
+// SetNoDataSegmentGroups cuts a coordinator's no-data memory reads into
+// segments of groups fields, for a case that reads a small memory in many.
+func SetNoDataSegmentGroups(coordinator *SlotExecutionCoordinator, groups int) {
+	coordinator.noDataSegment = groups
+}

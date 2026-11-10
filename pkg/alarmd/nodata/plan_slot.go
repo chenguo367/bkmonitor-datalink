@@ -40,9 +40,14 @@ type PlanSlotInput struct {
 	PeriodSeconds    int64
 	Completeness     execution.Completeness
 	Series           []map[string]string
-	KnownHosts       map[string]struct{}
-	HostsResolved    bool
-	OutOfBusiness    map[string]struct{}
+	// Present is the round's present set kept by the caller as its series
+	// landed (PresentSet), in place of Series, for a round judged one segment
+	// at a time (SegmentedRound). The round takes it over: its seen bits and
+	// the present groups' verdicts are written into it.
+	Present       *PresentSet
+	KnownHosts    map[string]struct{}
+	HostsResolved bool
+	OutOfBusiness map[string]struct{}
 	// TrackingHorizonSeconds is the limited tracking horizon in force for this
 	// Plan, in seconds, zero meaning the deployment configured none and
 	// tracking is unlimited.
@@ -114,6 +119,15 @@ type PlanJudge struct {
 	absence  *absenceJudge
 	delta    []GroupJudgement
 	verdicts []GroupJudgement
+	// changed counts the groups whose stored value moved, which is what
+	// "nothing moved" reads; delta holds them only for a round that keeps
+	// them (not streaming).
+	changed int
+	// streaming is a round over a caller's present set (PlanSlotInput.
+	// Present): it keeps no delta and no verdict, hands each judgement to the
+	// caller as it is made (feed, finish), and keeps a present group's verdict
+	// on the set.
+	streaming bool
 }
 
 // PlanJudgement is a finished PlanJudge.
@@ -162,7 +176,7 @@ func NewPlanJudge(input PlanSlotInput) (*PlanJudge, error) {
 			"alarmd nodata: no-data memory for plan %s was not read: %s (%s)",
 			input.Identity.Plan.StrategyID, input.Snapshot.Status, input.Snapshot.ReasonCode)
 	}
-	absence, outcome, err := newSlotJudge(SlotInput{
+	absence, outcome, err := newSlotJudgeWith(SlotInput{
 		Plan:             &contract.EvaluationPlanV2{NoData: input.NoData, TargetScope: input.Scope, TargetPlan: input.Plan},
 		EvaluationTime:   input.EvaluationTime,
 		PeriodSeconds:    input.PeriodSeconds,
@@ -179,51 +193,94 @@ func NewPlanJudge(input PlanSlotInput) (*PlanJudge, error) {
 		TrackingHorizonSeconds: input.TrackingHorizonSeconds,
 		TrackingExhaustedAt:    input.Snapshot.TrackingExhaustedAt,
 		ManualCloses:           input.ManualCloses,
-	})
+	}, input.Present)
 	if err != nil {
 		return nil, err
 	}
 	input.Snapshot.Groups = nil
-	return &PlanJudge{input: input, outcome: outcome, absence: absence}, nil
+	judge := &PlanJudge{input: input, outcome: outcome, absence: absence, streaming: input.Present != nil}
+	if absence != nil && judge.streaming {
+		absence.callerDedupes = true
+	}
+	return judge, nil
 }
 
 // Feed judges one stored group.
 func (judge *PlanJudge) Feed(group execution.NoDataGroupMemory) error {
+	_, _, err := judge.feed(group)
+	return err
+}
+
+// feed judges one stored group and returns the judgement, judged false for a
+// group ignored as a repeat or held to the end (the whole item).
+func (judge *PlanJudge) feed(group execution.NoDataGroupMemory) (GroupJudgement, bool, error) {
 	if judge.absence == nil {
-		return nil
+		return GroupJudgement{}, false, nil
 	}
 	judgement, judged, err := judge.absence.Feed(group.GroupKey, GroupMemory{
 		LastSeen: group.LastSeen, FirstAbsent: group.FirstAbsent, SuppressedAt: group.SuppressedAt,
 	})
-	if err != nil {
-		return err
+	if err != nil || !judged {
+		return GroupJudgement{}, false, err
 	}
-	if judged {
-		judge.record(judgement)
+	if err := judge.record(judgement); err != nil {
+		return GroupJudgement{}, false, err
 	}
-	return nil
+	return judgement, true, nil
 }
 
-func (judge *PlanJudge) record(judgement GroupJudgement) {
+func (judge *PlanJudge) record(judgement GroupJudgement) error {
 	if judgement.Changed {
-		judge.delta = append(judge.delta, judgement)
+		judge.changed++
 	}
-	if judgement.Verdict != "" && judgement.Verdict != VerdictUnavailable {
-		judge.verdicts = append(judge.verdicts, judgement)
+	said := judgement.Verdict != "" && judgement.Verdict != VerdictUnavailable
+	if !judge.streaming {
+		if judgement.Changed {
+			judge.delta = append(judge.delta, judgement)
+		}
+		if said {
+			judge.verdicts = append(judge.verdicts, judgement)
+		}
+		return nil
 	}
+	flags, present := judge.absence.present[judgement.Key]
+	if !present || !said {
+		return nil
+	}
+	// A present group is judged present: its verdict is the NORMAL of what
+	// arrived, or the closing NORMAL of a host gone to another business
+	// (closeDropped), and never an absence.
+	if judgement.Verdict != VerdictNormal {
+		return fmt.Errorf("alarmd nodata: present group %q was judged %s", judgement.Key, judgement.Verdict)
+	}
+	flags |= presentFlagNormal
+	if judgement.Closing {
+		flags |= presentFlagClosing
+	}
+	judge.absence.present[judgement.Key] = flags
+	return nil
 }
 
 // Finish judges the groups no stored entry named and settles the Plan.
 func (judge *PlanJudge) Finish() (PlanJudgement, error) {
+	judgement, _, err := judge.finish()
+	return judgement, err
+}
+
+// finish is Finish, returning as well the judgements of the groups no stored
+// entry named, for a streaming round's caller.
+func (judge *PlanJudge) finish() (PlanJudgement, []GroupJudgement, error) {
 	if judge.absence == nil {
-		return PlanJudgement{Outcome: judge.outcome}, nil
+		return PlanJudgement{Outcome: judge.outcome}, nil, nil
 	}
 	summary, rest, err := judge.absence.Finish()
 	if err != nil {
-		return PlanJudgement{}, err
+		return PlanJudgement{}, nil, err
 	}
 	for _, judgement := range rest {
-		judge.record(judgement)
+		if err := judge.record(judgement); err != nil {
+			return PlanJudgement{}, nil, err
+		}
 	}
 	judgement := PlanJudgement{Outcome: judge.outcome, Facts: summary.Facts}
 	partial := judge.outcome == OutcomeSkippedQueryNotFull || judge.outcome == OutcomeSkippedAnswerTruncated ||
@@ -233,14 +290,16 @@ func (judge *PlanJudge) Finish() (PlanJudgement, error) {
 	// NORMAL; with it disabled the last-seen is still news.
 	judgedPresent := summary.FreshPresent || summary.WholeItemPresent
 	if judge.outcome != OutcomeEvaluated && (!partial || !judgedPresent) {
-		return judgement, nil
+		return judgement, rest, nil
 	}
 	judgement.Judged = true
-	sort.Slice(judge.delta, func(left, right int) bool { return judge.delta[left].Key < judge.delta[right].Key })
-	sort.Slice(judge.verdicts, func(left, right int) bool {
-		return judge.verdicts[left].Key < judge.verdicts[right].Key
-	})
-	judgement.Delta, judgement.Verdicts = judge.delta, judge.verdicts
+	if !judge.streaming {
+		sort.Slice(judge.delta, func(left, right int) bool { return judge.delta[left].Key < judge.delta[right].Key })
+		sort.Slice(judge.verdicts, func(left, right int) bool {
+			return judge.verdicts[left].Key < judge.verdicts[right].Key
+		})
+		judgement.Delta, judgement.Verdicts = judge.delta, judge.verdicts
+	}
 
 	snapshot := judge.input.Snapshot
 	judgement.RosterVersion = summary.Roster.Version
@@ -270,9 +329,9 @@ func (judge *PlanJudge) Finish() (PlanJudgement, error) {
 	// three that left it out would read "nothing moved" on a round whose whole
 	// content was the fact, drop the write, and leave the store stating an
 	// exhaustion the evaluation had already ended.
-	judgement.Unchanged = len(judgement.Delta) == 0 && snapshot.RosterVersion == judgement.RosterVersion &&
+	judgement.Unchanged = judge.changed == 0 && snapshot.RosterVersion == judgement.RosterVersion &&
 		judgement.PresentAsOf == snapshot.PresentAsOf && judgement.TrackingExhaustedAt == snapshot.TrackingExhaustedAt
-	return judgement, nil
+	return judgement, rest, nil
 }
 
 // planSlotResult finishes the round into what EvaluatePlanSlot returns. The

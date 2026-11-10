@@ -249,6 +249,12 @@ func EvaluateSlot(input SlotInput) (AbsenceResult, SlotOutcome, error) {
 // judgement is a round that judges nothing, under the outcome returned with
 // it. input.Memory is not read.
 func newSlotJudge(input SlotInput) (*absenceJudge, SlotOutcome, error) {
+	return newSlotJudgeWith(input, nil)
+}
+
+// newSlotJudgeWith is newSlotJudge over a present set the caller kept as the
+// Slot's series landed, in place of input.Series; nil projects input.Series.
+func newSlotJudgeWith(input SlotInput, kept *PresentSet) (*absenceJudge, SlotOutcome, error) {
 	if input.Plan == nil || input.Plan.NoData == nil {
 		return nil, OutcomeNone, nil
 	}
@@ -297,7 +303,16 @@ func newSlotJudge(input SlotInput) (*absenceJudge, SlotOutcome, error) {
 		// the index is cold.
 		return nil, OutcomeSkippedHostsUnresolved, nil
 	}
-	tally := ProjectSeries(input.Series, config.AggDimension)
+	var present map[string]uint8
+	tally := ProjectionTally{}
+	if kept != nil {
+		if err := kept.claim(config.AggDimension); err != nil {
+			return nil, OutcomeNone, err
+		}
+		present, tally.Dropped = kept.keys, kept.dropped
+	} else {
+		tally = ProjectSeries(input.Series, config.AggDimension)
+	}
 	// A history roster is derived from the memory as it is fed, after the
 	// manual closes - a closed group has to be gone from it by then, and
 	// closing one never moves its last-seen time, which is what the history
@@ -329,7 +344,7 @@ func newSlotJudge(input SlotInput) (*absenceJudge, SlotOutcome, error) {
 	case input.AnswerTruncated:
 		outcome = OutcomeSkippedAnswerTruncated
 	}
-	judge := newAbsenceJudge(AbsenceInput{
+	judge := newAbsenceJudgeOver(AbsenceInput{
 		EvaluationTime:         input.EvaluationTime,
 		PeriodSeconds:          input.PeriodSeconds,
 		Completeness:           input.Completeness,
@@ -342,6 +357,6 @@ func newSlotJudge(input SlotInput) (*absenceJudge, SlotOutcome, error) {
 		RecoveryDisabled:       config.RecoveryDisabled,
 		AnswerTruncated:        input.AnswerTruncated,
 		RosterUnresolved:       targetSkip != OutcomeNone,
-	}, class.Source == RosterHistory, input.ManualCloses)
+	}, class.Source == RosterHistory, input.ManualCloses, present)
 	return judge, outcome, nil
 }

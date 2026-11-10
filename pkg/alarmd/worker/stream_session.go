@@ -98,9 +98,12 @@ type streamedExecution struct {
 	supersededGaps map[execution.PlanGapIdentity]struct{}
 	// noDataPlansSeen is how many of this Slot's Plans detect no-data,
 	// counted where they are found rather than where they are judged.
-	noDataPlansSeen      int
-	noDataStateMutations uint64
-	noDataMutations      []execution.PlanNoDataMutation
+	noDataPlansSeen int
+	noDataMutations []execution.PlanNoDataMutation
+	// noDataCarried is, for each Plan whose round starts from the memory of
+	// the generation its activation carries it from, that memory's header:
+	// the round scans that key in place of its own (carryNoDataMemory).
+	noDataCarried map[execution.PlanNoDataIdentity]execution.NoDataMemorySnapshot
 	// noDataAbsenceStarts carries each Plan's absent series to the output's
 	// manual-close check (decision-024).
 	noDataAbsenceStarts noDataAbsenceStarts
@@ -1333,7 +1336,18 @@ func (stream *streamedExecution) loadNoDataMemory(ctx context.Context) error {
 	}
 	request := execution.NoDataLoadRequest{Contract: stream.header.Contract, Items: items}
 	started := time.Now()
-	stream.noData, err = stream.coordinator.ports.NoData.LoadNoData(ctx, request)
+	// The Slot's round reads each memory in parts, and here only its header
+	// and its manual closes (decision-020 batch 8, 2.7): the groups are
+	// scanned as the round judges them, after every present window
+	// (decideNoDataRound). A supplement reads them whole, as it always did:
+	// it asks of the memory only whether its few series' groups were
+	// recorded absent at the Slot (noDataStandingAt).
+	whole := stream.supplement != nil
+	read := stream.coordinator.ports.NoData.ReadNoDataHeaders
+	if whole {
+		read = stream.coordinator.ports.NoData.LoadNoData
+	}
+	stream.noData, err = read(ctx, request)
 	if err == nil {
 		err = execution.ValidateNoDataLoad(request, stream.noData)
 	}
@@ -1350,7 +1364,7 @@ func (stream *streamedExecution) loadNoDataMemory(ctx context.Context) error {
 	}
 	stream.observeNoDataRepresentations(ctx)
 	stream.observeNoDataRenewals(ctx)
-	stream.carryNoDataMemory(ctx, request)
+	stream.carryNoDataMemory(ctx, request, whole)
 	if stream.supplement != nil {
 		// Read for what it recorded at the Slot, not to judge absence: a
 		// supplement's series are a subset, and every group outside it would

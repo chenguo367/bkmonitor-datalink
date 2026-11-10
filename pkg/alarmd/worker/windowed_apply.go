@@ -20,6 +20,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
@@ -87,11 +88,11 @@ type slotWindows struct {
 	// before it is merged, so a window applied now holds none of the later
 	// ones. dropped is how far landed windows have let prepared go.
 	reached, dropped int
-	// presentDimensions is, by no-data Plan, the dimensions of the series a
-	// landed window let go of, in prepared order: the absence is judged after
-	// every Plan's own series, from which of them reported
-	// (presentSeriesDimensions), and that is all it reads of them.
-	presentDimensions map[execution.PlanIdentity][]map[string]string
+	// present is, by no-data Plan, the groups of the series a landed window
+	// let go of (nodata.PresentSet): the absence is judged after every Plan's
+	// own series, from which groups reported, and that is all it reads of
+	// them - one key and a few bits a group, not the series' dimensions.
+	present map[execution.PlanIdentity]*nodata.PresentSet
 	// seen is the Plans a landed window's views showed something written
 	// before the Slot, for unseenPlans in the tail: the views themselves are
 	// gone by then.
@@ -694,8 +695,9 @@ func (stream *streamedExecution) holdInput(series execution.SeriesIdentityDigest
 // bindings.
 //
 // A no-data Plan's series are judged present after every Plan's own, from
-// their PRIMARY dimensions: those are kept, copied out, and charged in place
-// of the inputs they came from.
+// the groups their PRIMARY dimensions project onto: each group's key is kept
+// in the Plan's present set (presentKeyHeldBytes), charged in place of the
+// inputs it came from.
 func (stream *streamedExecution) dropWindowInputs(ctx context.Context, through int) error {
 	windows := &stream.windows
 	through = min(through, len(windows.prepared))
@@ -707,13 +709,10 @@ func (stream *streamedExecution) dropWindowInputs(ctx context.Context, through i
 	for index := windows.dropped; index < through; index++ {
 		entry := windows.prepared[index]
 		if entry.due.CompiledPlan != nil && entry.due.CompiledPlan.NoData() != nil {
-			dimensions := seriesDimensionsFor(windows.prepared[index:index+1], entry.due.Identity)
-			if len(dimensions) != 0 {
-				if windows.presentDimensions == nil {
-					windows.presentDimensions = make(map[execution.PlanIdentity][]map[string]string)
+			for _, dimensions := range seriesDimensionsFor(windows.prepared[index:index+1], entry.due.Identity) {
+				if key, fresh := windows.presentSet(entry.due).Add(dimensions); fresh {
+					kept += presentKeyHeldBytes(key)
 				}
-				windows.presentDimensions[entry.due.Identity] = append(windows.presentDimensions[entry.due.Identity], dimensions...)
-				kept += dimensionsRetainedBytes(dimensions)
 			}
 		}
 		released += stream.dropSeriesInputs(entry.due.Identity, entry.identity)
@@ -773,30 +772,6 @@ func (stream *streamedExecution) compactStreamed() {
 		rebuilt[key] = binding
 	}
 	stream.streamed, windows.streamedPeak = rebuilt, len(rebuilt)
-}
-
-// dimensionsRetainedBytes is what the kept dimensions hold: their names and
-// values, and a map header for each, counted as host overlays are.
-func dimensionsRetainedBytes(dimensions []map[string]string) uint64 {
-	var total uint64
-	for _, dimension := range dimensions {
-		total += 48
-		for name, value := range dimension {
-			total += 48 + uint64(len(name)+len(value))
-		}
-	}
-	return total
-}
-
-// presentSeriesDimensions is the PRIMARY dimensions of every prepared series
-// of the Plan, in prepared order: the ones landed windows kept, then the ones
-// still prepared.
-func (stream *streamedExecution) presentSeriesDimensions(prepared []preparedSeries, plan execution.PlanIdentity) []map[string]string {
-	kept := stream.windows.presentDimensions[plan]
-	if len(kept) == 0 {
-		return seriesDimensionsFor(prepared, plan)
-	}
-	return append(append([]map[string]string(nil), kept...), seriesDimensionsFor(prepared, plan)...)
 }
 
 // finishWindowedSlot applies the last window and runs the tail.

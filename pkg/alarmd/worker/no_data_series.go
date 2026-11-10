@@ -47,6 +47,8 @@ type noDataRound struct {
 	// identity digest: what the output checks a manual close recorded during
 	// this round against (decision-024).
 	absenceStarts map[string]int64
+	// said is how many series the round handed on.
+	said int
 }
 
 // seriesDimensionsFor is the dimensions of every series this Slot saw for one
@@ -90,97 +92,6 @@ func dimensionText(raw map[string]json.RawMessage) map[string]string {
 		text[name] = string(value)
 	}
 	return text
-}
-
-// noDataRoundFor decides one Plan's absence and builds the synthetic series the
-// ordinary evaluation batch judges.
-//
-// The series are ordinary in every way that matters downstream: a record, a
-// dataset, a primary binding, the same batch, the same evaluator, the same
-// recovery gate, the same state writer. The one thing that marks them is the
-// kind on the input, and that is what decides they are judged against the
-// no-data level rather than the strategy's declared ones. The one exception
-// to the gate is the close of a group the roster dropped: it is the absence's
-// last word, sent once and then forgotten, so the gate is not asked about it
-// (completedSeries.closing).
-func (stream *streamedExecution) noDataRoundFor(
-	due execution.DuePlan, seen []map[string]string, completeness execution.Completeness,
-) (noDataRound, error) {
-	config := due.CompiledPlan.NoData()
-	if config == nil {
-		return noDataRound{outcome: nodata.OutcomeNone}, nil
-	}
-	identity := due.NoDataIdentity()
-	snapshot, found := stream.noData.Find(identity)
-	if !found {
-		return noDataRound{}, derivationFailed(fmt.Errorf(
-			"alarmd worker: no-data memory for strategy %s was not loaded", due.Identity.StrategyID))
-	}
-	version, err := execution.BuildApplyVersion(stream.header.Contract, due.StateApplyEpoch)
-	if err != nil {
-		return noDataRound{}, derivationFailed(err)
-	}
-	period := int64(due.CompiledPlan.EvaluationSemantics().EvaluationInterval)
-	if err := noDataPointGrid(int64(stream.header.Contract.Slot.EvaluationTime), period); err != nil {
-		return noDataRound{}, derivationFailed(err)
-	}
-	hosts := stream.noDataHosts[identity]
-	decided, err := nodata.EvaluatePlanSlot(nodata.PlanSlotInput{
-		NoData:           config,
-		Scope:            due.CompiledPlan.TargetScope(),
-		Plan:             due.CompiledPlan.TargetPlan(),
-		TargetResolution: stream.targetResolutions[identity.Plan].absenceView(),
-		AnswerTruncated:  stream.answerTruncated[due.Identity],
-		Identity:         identity,
-		Snapshot:         snapshot,
-		ApplyVersion:     version,
-		ScheduleRevision: due.ScheduleRevision,
-		EvaluationTime:   int64(stream.header.Contract.Slot.EvaluationTime),
-		PeriodSeconds:    int64(due.CompiledPlan.EvaluationSemantics().EvaluationInterval),
-		Completeness:     completeness,
-		Series:           seen,
-		KnownHosts:       hosts.Known,
-		HostsResolved:    hosts.Resolved,
-		OutOfBusiness:    hosts.OutOfBusiness,
-		// Forwarded from the Plan, not resolved here. Compilation has already
-		// settled the deployment default against the item's override and
-		// frozen the one number, so this Slot reads what was in force when the
-		// Plan was built rather than what the deployment says right now -
-		// which is what lets a retried Slot reach the same answer.
-		TrackingHorizonSeconds: config.TrackingHorizonSeconds,
-		MaxGroups:              config.MaxGroups,
-		// The strategy's manual closes, read with the memory: an absence a
-		// user closed stops being tracked before this round judges it.
-		ManualCloses: manualClosesFor(due, snapshot.ManualCloses),
-	})
-	if err != nil {
-		return noDataRound{}, derivationFailed(err)
-	}
-	round := noDataRound{
-		mutation: decided.Mutation, outcome: decided.Outcome,
-		facts: decided.Facts, horizon: config.TrackingHorizonSeconds, horizonSource: string(config.TrackingHorizonSource),
-	}
-	if len(decided.Series) == 0 {
-		return round, nil
-	}
-	view, err := execution.PlanViewFor(due, execution.SeriesKindNoData)
-	if err != nil {
-		return noDataRound{}, outputFailed(err)
-	}
-	for _, synthetic := range decided.Series {
-		entry, err := stream.noDataCompletedSeries(view, synthetic, version)
-		if err != nil {
-			return noDataRound{}, outputFailed(err)
-		}
-		round.series = append(round.series, entry)
-		if synthetic.Value == nodata.AbsentValue && synthetic.FirstAbsent > 0 {
-			if round.absenceStarts == nil {
-				round.absenceStarts = make(map[string]int64)
-			}
-			round.absenceStarts[string(entry.series)] = synthetic.FirstAbsent
-		}
-	}
-	return round, nil
 }
 
 // noDataCompletedSeries turns one synthetic series into a completed series the
@@ -276,7 +187,19 @@ func (stream *streamedExecution) noDataCompletedSeries(
 // After the Slot's own series and in the same batches: which groups reported is
 // the evidence absence is decided from, so it cannot run earlier, and the
 // series it produces are ordinary from here on, so there is no reason to give
-// them a path of their own.
+// them a path of their own. Each Plan's memory is read in parts and its series
+// handed on as they are said (decideNoDataRound), so they are cut into
+// windows like any other: the per-Slot caps bound a window, and a Plan whose
+// synthetic series outgrow one is written in several rather than skipped.
+//
+// The series are ordinary in every way that matters downstream: a record, a
+// dataset, a primary binding, the same batch, the same evaluator, the same
+// recovery gate, the same state writer. The one thing that marks them is the
+// kind on the input, and that is what decides they are judged against the
+// no-data level rather than the strategy's declared ones. The one exception
+// to the gate is the close of a group the roster dropped: it is the absence's
+// last word, sent once and then forgotten, so the gate is not asked about it
+// (completedSeries.closing).
 func (stream *streamedExecution) evaluateNoData(
 	ctx context.Context, prepared []preparedSeries, batchLimit int,
 ) error {
@@ -289,20 +212,24 @@ func (stream *streamedExecution) evaluateNoData(
 		pending = pending[:0]
 		return err
 	}
-	// What the Slot's own series have already spent. They are all evaluated
-	// and merged by now, so the no-data Plans share only what is left of each
-	// per-Slot cap their series spend from: one State write per series, and
-	// at most one event per series, since a no-data Plan has one Level.
-	// Checked against the whole cap instead, a Plan whose series fit alone
-	// and not beside the threshold ones passes here and is refused by the
-	// Slot-wide check, which replaces every Plan's results with a budget gap -
-	// the threshold detection this round already decided included.
-	budget := stream.coordinator.slotBudget()
-	// The Slot's spend across the windows already written as well: a no-data
-	// Plan is still judged against what the whole Slot spent, until its
-	// synthetic series are cut into windows of their own.
-	spentStates := stream.effectsSpent.states + stream.effects.states
-	spentEvents := stream.effectsSpent.events + stream.effects.events
+	emit := func(entry completedSeries) error {
+		// After every prepared series: a window landed before it lets all of
+		// their inputs go.
+		entry.position = len(prepared)
+		// The synthetic series go through the same batch the real ones do,
+		// preflight read included, and they are written like any other. They
+		// count in the same census, on both sides: counted on the written side
+		// only -- which is where a write is a write -- they put written above
+		// read on a live deployment by exactly their number, and the census
+		// read as a renewal covering a negative population.
+		stream.seriesCensus.Due++
+		stream.seriesCensus.Read++
+		pending = append(pending, entry)
+		if len(pending) >= batchLimit {
+			return flush()
+		}
+		return nil
+	}
 	for _, due := range stream.header.DuePlans {
 		if due.CompiledPlan.NoData() == nil {
 			continue
@@ -319,8 +246,7 @@ func (stream *streamedExecution) evaluateNoData(
 			continue
 		}
 		started := time.Now()
-		round, err := stream.noDataRoundFor(due, stream.presentSeriesDimensions(prepared, due.Identity),
-			stream.noDataCompleteness(due))
+		round, err := stream.noDataRoundOf(ctx, due, prepared, emit)
 		if err != nil {
 			outcome, local := noDataLocalOutcome(err)
 			if !local || ctx.Err() != nil {
@@ -336,56 +262,32 @@ func (stream *streamedExecution) evaluateNoData(
 			// has nothing to write, and a round whose verdicts could not be
 			// said must not record that it said them: the next round would
 			// count the absence from a checkpoint no alert was ever raised
-			// against.
+			// against. An absence window the round said before it failed is
+			// out, as an output that went before a failure always is, and the
+			// next round, deciding from the memory before this one, says it
+			// again.
 			stream.observeNoDataLocalFailure(ctx, started, due, outcome, err)
 			stream.recordNoDataOutcome(ctx, due, outcome)
 			continue
 		}
-		// A synthetic series writes state like any other, so it spends from the
-		// same per-Slot budget. A Plan whose series do not fit is skipped by
-		// name rather than silently trimmed: a history roster only grows, so it
-		// will not fit next round either, and a partial set of synthetic series
-		// would report the groups that fitted as absent and say nothing about
-		// the rest.
-		adding := uint64(len(round.series))
-		if !noDataFitsSlotBudget(spentStates+stream.noDataStateMutations, adding, budget.MaxStateMutations) ||
-			!noDataFitsSlotBudget(spentEvents+stream.noDataStateMutations, adding, budget.MaxEvents) {
-			stream.recordNoDataOutcome(ctx, due, nodata.OutcomeSkippedSlotBudget)
-			continue
-		}
-		stream.noDataStateMutations += uint64(len(round.series))
 		stream.recordNoDataOutcome(ctx, due, round.outcome)
 		stream.noDataJudged = append(stream.noDataJudged, noDataJudgment{due: due, round: round})
-		if len(round.absenceStarts) > 0 {
-			if stream.noDataAbsenceStarts == nil {
-				stream.noDataAbsenceStarts = make(noDataAbsenceStarts)
-			}
-			stream.noDataAbsenceStarts[due.Identity] = round.absenceStarts
-		}
 		if round.mutation != nil {
 			stream.noDataMutations = append(stream.noDataMutations, *round.mutation)
 		}
-		// The synthetic series go through the same batch the real ones do,
-		// preflight read included, and they are written like any other. They
-		// count in the same census, on both sides: counted on the written side
-		// only -- which is where a write is a write -- they put written above
-		// read on a live deployment by exactly their number, and the census
-		// read as a renewal covering a negative population.
-		stream.seriesCensus.Due += len(round.series)
-		stream.seriesCensus.Read += len(round.series)
-		for _, entry := range round.series {
-			// After every prepared series: a window landed before it lets
-			// all of their inputs go.
-			entry.position = len(prepared)
-			pending = append(pending, entry)
-			if len(pending) >= batchLimit {
-				if err := flush(); err != nil {
-					return err
-				}
-			}
-		}
 	}
 	return flush()
+}
+
+// noDataRoundOf is one Plan's round over the present set its series make.
+func (stream *streamedExecution) noDataRoundOf(
+	ctx context.Context, due execution.DuePlan, prepared []preparedSeries, emit func(completedSeries) error,
+) (noDataRound, error) {
+	present, err := stream.presentSetFor(ctx, due, prepared)
+	if err != nil {
+		return noDataRound{}, err
+	}
+	return stream.decideNoDataRound(ctx, due, present, stream.noDataCompleteness(due), emit)
 }
 
 // noteAnswerTruncation marks the binding's Plan when the binding is a
@@ -755,18 +657,4 @@ func noDataPointGrid(evaluationTime, period int64) error {
 				"would fall between the positions its own history is kept on", evaluationTime, period)
 	}
 	return nil
-}
-
-// noDataFitsSlotBudget says whether one Plan's synthetic series fit what is
-// left of the Slot's state mutation budget.
-//
-// A zero budget is no room, which is the reading checkEffectCounts already
-// uses for the same number. It reads as harsh and it is unreachable: the
-// coordinator refuses a zero budget at construction and the configuration
-// refuses one before that, so no Slot ever gets here with nothing allowed. An
-// earlier version of this read zero as "no bound", which sounds like a safer
-// default and is really a second meaning for one number - the kind that agrees
-// with the first one until the day it does not.
-func noDataFitsSlotBudget(spent, adding, budget uint64) bool {
-	return spent+adding <= budget
 }

@@ -249,10 +249,10 @@ func TestAPlanWhoseMemoryWasRefusedSkipsItsNoDataRound(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(stream.noDataOutcomes) != 1 || stream.noDataOutcomes[0] != nodata.OutcomeSkippedSlotBudget ||
-		stream.noDataStateMutations != 0 || len(stream.noDataMutations) != 0 || len(refusals) != 1 ||
+		stream.seriesCensus.Due != 0 || len(stream.noDataMutations) != 0 || len(refusals) != 1 ||
 		refusals[0].NoDataMemoryRefusal == nil || refusals[0].NoDataMemoryRefusal.Record != string(execution.NoDataRecordBytes) {
-		t.Fatalf("outcomes %v, %d state writes, %d memories queued, refusals %+v; want SKIPPED_SLOT_BUDGET, nothing judged "+
-			"or queued, and one BYTES refusal", stream.noDataOutcomes, stream.noDataStateMutations, len(stream.noDataMutations), refusals)
+		t.Fatalf("outcomes %v, %d series sent, %d memories queued, refusals %+v; want SKIPPED_SLOT_BUDGET, nothing judged "+
+			"or queued, and one BYTES refusal", stream.noDataOutcomes, stream.seriesCensus.Due, len(stream.noDataMutations), refusals)
 	}
 }
 
