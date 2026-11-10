@@ -26,6 +26,7 @@ type slowPorts struct {
 	preflight time.Duration
 	evaluate  time.Duration
 	input     time.Duration
+	apply     time.Duration
 }
 
 // slowConsumer is the Slot's own consumer with a wait between Begin and the
@@ -56,14 +57,19 @@ func (ports *slowPorts) LoadRuntime(ctx context.Context, request execution.State
 	return ports.recordingPorts.LoadRuntime(ctx, request)
 }
 
+func (ports *slowPorts) ApplyRuntime(ctx context.Context, request execution.StateApplyRequest) (execution.StateApplyResult, error) {
+	time.Sleep(ports.apply) // fixed-wait: the stub State write's delay, which the case sets
+	return ports.recordingPorts.ApplyRuntime(ctx, request)
+}
+
 func (ports *slowPorts) Evaluate(ctx context.Context, request execution.EvaluationRequest) (execution.EvaluationResult, error) {
 	time.Sleep(ports.evaluate) // fixed-wait: the stub evaluation's delay, which the case sets
 	return ports.recordingPorts.Evaluate(ctx, request)
 }
 
-func runSlowSlot(t *testing.T, input, preflight, evaluate time.Duration) execution.SlotTiming {
+func runSlowSlot(t *testing.T, input, preflight, evaluate, apply time.Duration) execution.SlotTiming {
 	t.Helper()
-	result, err := executeSlowSlot(t, "", input, preflight, evaluate)
+	result, err := executeSlowSlotApplying(t, "", input, preflight, evaluate, apply)
 	if err != nil || !result.Completed {
 		t.Fatalf("Execute() result=%+v error=%v", result, err)
 	}
@@ -72,9 +78,14 @@ func runSlowSlot(t *testing.T, input, preflight, evaluate time.Duration) executi
 
 func executeSlowSlot(t *testing.T, failStage string, input, preflight, evaluate time.Duration) (execution.SlotExecutionResult, error) {
 	t.Helper()
+	return executeSlowSlotApplying(t, failStage, input, preflight, evaluate, 0)
+}
+
+func executeSlowSlotApplying(t *testing.T, failStage string, input, preflight, evaluate, apply time.Duration) (execution.SlotExecutionResult, error) {
+	t.Helper()
 	trace := make([]string, 0, len(fullTrace))
 	ports := &slowPorts{recordingPorts: &recordingPorts{trace: &trace, ready: true, failStage: failStage},
-		input: input, preflight: preflight, evaluate: evaluate}
+		input: input, preflight: preflight, evaluate: evaluate, apply: apply}
 	coordinator, err := worker.NewSlotExecutionCoordinator(worker.Ports{OpenAlerts: ports,
 		Finalization: ports, Activation: ports,
 		Query: ports, Sequencer: ports, Evaluator: ports, Admission: ports, GapGuard: ports,
@@ -113,8 +124,8 @@ func TestACompletedSlotSaysWhichPhaseSpentItsTime(t *testing.T) {
 	const moved = uint64(slow/time.Millisecond) / 2
 
 	for name, testCase := range map[string]struct {
-		input, preflight, evaluate time.Duration
-		phase                      func(execution.SlotTiming) (string, uint64)
+		input, preflight, evaluate, apply time.Duration
+		phase                             func(execution.SlotTiming) (string, uint64)
 	}{
 		"records that take their time": {input: slow, phase: func(timing execution.SlotTiming) (string, uint64) {
 			return "input", timing.Input
@@ -125,19 +136,22 @@ func TestACompletedSlotSaysWhichPhaseSpentItsTime(t *testing.T) {
 		"a slow evaluator": {evaluate: slow, phase: func(timing execution.SlotTiming) (string, uint64) {
 			return "evaluate", timing.Evaluate
 		}},
+		"a slow State write": {apply: slow, phase: func(timing execution.SlotTiming) (string, uint64) {
+			return "apply", timing.Apply
+		}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			timing := runSlowSlot(t, testCase.input, testCase.preflight, testCase.evaluate)
+			timing := runSlowSlot(t, testCase.input, testCase.preflight, testCase.evaluate, testCase.apply)
 			delayed, delayedMillis := testCase.phase(timing)
-			t.Logf("slot=%d input=%d preflight=%d evaluate=%d",
-				timing.Slot, timing.Input, timing.Preflight, timing.Evaluate)
+			t.Logf("slot=%d input=%d preflight=%d evaluate=%d apply=%d",
+				timing.Slot, timing.Input, timing.Preflight, timing.Evaluate, timing.Apply)
 
 			if delayedMillis < moved {
 				t.Fatalf("%s_millis = %d after %v was spent there, want at least %d: the phase did not charge its "+
 					"own work", delayed, delayedMillis, slow, moved)
 			}
 			for other, otherMillis := range map[string]uint64{
-				"input": timing.Input, "preflight": timing.Preflight, "evaluate": timing.Evaluate,
+				"input": timing.Input, "preflight": timing.Preflight, "evaluate": timing.Evaluate, "apply": timing.Apply,
 			} {
 				if other == delayed || otherMillis < delayedMillis {
 					continue
@@ -147,10 +161,12 @@ func TestACompletedSlotSaysWhichPhaseSpentItsTime(t *testing.T) {
 					other, otherMillis, delayed, delayedMillis, delayed)
 			}
 			// The total holds the parts. They do not sum to it -- the
-			// completion does more than these three -- so this is the only
+			// completion does more than these four, and a Slot cut into
+			// windows writes some while it evaluates, which this one is
+			// not -- so this is the only
 			// relation between them that always holds, and it is the one that
 			// catches a phase measured against a different clock.
-			if sum := timing.Input + timing.Preflight + timing.Evaluate; timing.Slot < sum {
+			if sum := timing.Input + timing.Preflight + timing.Evaluate + timing.Apply; timing.Slot < sum {
 				t.Fatalf("slot_millis = %d under its own phases' %d: the parts are being measured against a clock "+
 					"the total is not", timing.Slot, sum)
 			}

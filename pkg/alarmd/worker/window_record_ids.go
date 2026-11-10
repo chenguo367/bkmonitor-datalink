@@ -12,6 +12,7 @@ package worker
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
@@ -57,7 +58,9 @@ func (stream *streamedExecution) materializeRecordIDs(ctx context.Context, posit
 			if err := stream.reserveRetainedInput(ctx, bytes); err != nil {
 				return err
 			}
+			derived := time.Now()
 			added, err := dataset.MaterializeRecordIDs()
+			stream.spend(slotPhaseRecordIDs, derived)
 			if added < bytes {
 				stream.unretainInput(bytes - added)
 			}

@@ -23,9 +23,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"runtime/metrics"
+	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
@@ -410,6 +412,71 @@ func windowMeasureMetricSum(recorder *metric.Recorder, name string, labels map[s
 	return sum
 }
 
+// windowMeasureHistogramSums is one histogram family's sums, by the value of
+// one of its labels, the others added together.
+func windowMeasureHistogramSums(recorder *metric.Recorder, name, label string) map[string]float64 {
+	sums := map[string]float64{}
+	families, err := recorder.Gatherer().Gather()
+	if err != nil {
+		return sums
+	}
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, series := range family.GetMetric() {
+			if series.GetHistogram() == nil {
+				continue
+			}
+			value := ""
+			for _, pair := range series.GetLabel() {
+				if pair.GetName() == label {
+					value = pair.GetValue()
+				}
+			}
+			sums[value] += series.GetHistogram().GetSampleSum()
+		}
+	}
+	return sums
+}
+
+// windowMeasureSecondsLine is a set of durations, largest first.
+func windowMeasureSecondsLine(seconds map[string]float64) string {
+	names := make([]string, 0, len(seconds))
+	for name := range seconds {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool { return seconds[names[i]] > seconds[names[j]] })
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		parts = append(parts, fmt.Sprintf("%s:%.2fs", name, seconds[name]))
+	}
+	return strings.Join(parts, ",")
+}
+
+// windowMeasureMemoryClasses is what the runtime holds from the system, by
+// class: the heap's objects, its unused and free spans and what it gave
+// back, the goroutine stacks, the runtime's own metadata and the rest - the
+// split the resident set beyond the memory limit is read by (HeapSys is
+// objects, unused, free and released together).
+func windowMeasureMemoryClasses() string {
+	names := []string{"total", "heap/objects", "heap/unused", "heap/free", "heap/released", "heap/stacks",
+		"os-stacks", "metadata/mspan/inuse", "metadata/mspan/free", "metadata/mcache/inuse", "metadata/mcache/free",
+		"metadata/other", "profiling/buckets", "other"}
+	samples := make([]metrics.Sample, len(names))
+	for index, name := range names {
+		samples[index].Name = "/memory/classes/" + name + ":bytes"
+	}
+	metrics.Read(samples)
+	parts := make([]string, 0, len(names))
+	for index, name := range names {
+		if samples[index].Value.Kind() == metrics.KindUint64 {
+			parts = append(parts, fmt.Sprintf("%s:%d", name, samples[index].Value.Uint64()))
+		}
+	}
+	return strings.Join(parts, ",")
+}
+
 // windowMeasureRedisCommands is the server's calls by command since its
 // counters were last reset, and its CPU seconds so far.
 func windowMeasureRedisCommands(ctx context.Context, client *redis.Client) (map[string]int64, float64) {
@@ -500,7 +567,13 @@ type windowMeasureResult struct {
 	keptRuns, outside               uint64
 	witnessItems, witnessBytes      float64
 	commands                        map[string]int64
-	runErr                          error
+	// redisCallers is the Redis round trips' wall time by the job that
+	// made them, summed over calls that may overlap.
+	redisCallers map[string]float64
+	// classesAtPeak is the runtime's memory classes at the moment it held
+	// the most from the system, and classesAfter at the Slot's end.
+	classesAtPeak, classesAfter string
+	runErr                      error
 	// warmups are the earlier Slots' completions, and the errors the first
 	// few each part of the run raised.
 	warmups, warmupErrors, errors []string
@@ -586,7 +659,8 @@ func (measured windowMeasureResult) line(shape windowMeasureShape) string {
 		"maxrss_before=%d maxrss_after=%d reserved_peak=%d retained_peak=%d (input %d output %d state %d gap %d) share=%d "+
 		"windows=%d ceiling_windows=%d raised_windows=%d usage_series=%d state_mutations=%d events=%d "+
 		"write_batches=%d events_written=%d record_ids_kept_runs=%d record_ids_outside_window=%d "+
-		"witness_items=%.0f witness_bytes=%.0f redis=[%s]",
+		"witness_items=%.0f witness_bytes=%.0f redis=[%s] "+
+		"apply_ms=%d record_ids_ms=%d redis_wall_by_caller=[%s] memory_at_held_peak=[%s] memory_after=[%s]",
 		shape.series, shape.points, shape.noData, measured.result, measured.reason, measured.cause, runErr,
 		measured.rejected, strings.Join(refusals, ","), measured.took.Round(time.Millisecond),
 		measured.timing.Slot, measured.timing.Input, measured.timing.Preflight, measured.timing.Evaluate,
@@ -597,7 +671,9 @@ func (measured windowMeasureResult) line(shape windowMeasureShape) string {
 		usage.RetainedShareBytes, usage.Windows, usage.WindowCeilingWindows, usage.WindowCeilingRaisedWindows,
 		usage.Series, usage.StateMutations, usage.Events, measured.batches, measured.events,
 		measured.keptRuns, measured.outside, measured.witnessItems, measured.witnessBytes,
-		windowMeasureCommandLine(measured.commands))
+		windowMeasureCommandLine(measured.commands),
+		measured.timing.Apply, measured.timing.RecordIDs, windowMeasureSecondsLine(measured.redisCallers),
+		measured.classesAtPeak, measured.classesAfter)
 }
 
 // measureWindowedShape runs one shape: its own Redis, bundle and answers.
@@ -712,8 +788,23 @@ func measureWindowedShape(t *testing.T, shape windowMeasureShape) windowMeasureR
 		t.Fatal(err)
 	}
 	_, redisCPUBefore := windowMeasureRedisCommands(ctx, redisClient)
+	callersBefore := windowMeasureHistogramSums(recorder, "alarmd_redis_caller_duration_seconds", "caller")
+	// The measured Slot's CPU by function, for decode, record-id derivation
+	// and apply apart, when a directory to keep it in is named.
+	if dir := os.Getenv("ALARMD_MEASURE_PROFILE_DIR"); dir != "" {
+		profile, err := os.Create(filepath.Join(dir, "cpu-"+strings.ReplaceAll(shape.String(), "/", "_")+".pprof"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer profile.Close()
+		if err := pprof.StartCPUProfile(profile); err != nil {
+			t.Fatal(err)
+		}
+		defer pprof.StopCPUProfile()
+	}
 
 	var objectsPeak, livePeak, heldPeak, reservedPeak atomic.Uint64
+	var classesAtPeak atomic.Pointer[string]
 	done := make(chan struct{})
 	sampled := make(chan struct{})
 	go func() {
@@ -725,7 +816,11 @@ func measureWindowedShape(t *testing.T, shape windowMeasureShape) windowMeasureR
 			objects, live, held := windowMeasureRuntimeSample(local)
 			objectsPeak.Store(max(objectsPeak.Load(), objects))
 			livePeak.Store(max(livePeak.Load(), live))
-			heldPeak.Store(max(heldPeak.Load(), held))
+			if held > heldPeak.Load() {
+				heldPeak.Store(held)
+				classes := windowMeasureMemoryClasses()
+				classesAtPeak.Store(&classes)
+			}
 			// The pool every 50 ms: a gather of every family is not free.
 			if tick%25 == 0 {
 				if reserved, ok := retainedReservedOf(recorder); ok {
@@ -756,6 +851,16 @@ func measureWindowedShape(t *testing.T, shape windowMeasureShape) windowMeasureR
 	measured.cpu, measured.gcCPU = cpuAfter-cpuBefore, gcAfter-gcBefore
 	measured.objectsPeak, measured.livePeak, measured.heldPeak = objectsPeak.Load(), livePeak.Load(), heldPeak.Load()
 	measured.reservedPeak = reservedPeak.Load()
+	if classes := classesAtPeak.Load(); classes != nil {
+		measured.classesAtPeak = *classes
+	}
+	measured.classesAfter = windowMeasureMemoryClasses()
+	measured.redisCallers = map[string]float64{}
+	for caller, seconds := range windowMeasureHistogramSums(recorder, "alarmd_redis_caller_duration_seconds", "caller") {
+		if spent := seconds - callersBefore[caller]; spent > 0 {
+			measured.redisCallers[caller] = spent
+		}
+	}
 	measured.maxRSSAfter = windowMeasureMaxRSS()
 	measured.rejected = windowMeasureMetricSum(recorder, "alarmd_capacity_transition_total",
 		map[string]string{"result": "rejected"}) - rejectedBefore

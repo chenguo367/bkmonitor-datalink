@@ -65,8 +65,12 @@ type datasetRun struct {
 	// outside one.
 	derived bool
 	window  atomic.Pointer[string]
-	times   []int64
-	values  []float64
+	// times is each point's source time, nil when they are first, first +
+	// step, ... one a step: the regular run a query at one step answers,
+	// which then keeps the two and no time a point.
+	times       []int64
+	first, step int64
+	values      []float64
 	// sideMarks marks the points whose value is in side, one bit each; nil
 	// when every value is a number.
 	sideMarks []uint64
@@ -221,7 +225,17 @@ func (run *datasetRun) fillColumnar(records []contract.CanonicalRecordV2, derive
 	first := &records[0]
 	run.business, run.identity = first.BusinessID, RecordView{record: first}.DimensionIdentity()
 	run.dimensions, run.received, run.idWidth = cloneRawMap(first.Dimensions), first.ReceivedTime, int32(len(first.RecordID))
-	run.times, run.values = make([]int64, len(records)), make([]float64, len(records))
+	run.values = make([]float64, len(records))
+	run.first = records[0].SourceTime
+	if len(records) > 1 {
+		run.step = records[1].SourceTime - records[0].SourceTime
+	}
+	for index := range records {
+		if records[index].SourceTime != run.first+int64(index)*run.step {
+			run.times = make([]int64, len(records))
+			break
+		}
+	}
 	// An identity field is a dimension of the same name and bytes: it is kept
 	// as those bytes once, the run handing either out only as a copy.
 	for index, field := range run.identity.Fields {
@@ -234,7 +248,9 @@ func (run *datasetRun) fillColumnar(records []contract.CanonicalRecordV2, derive
 	}
 	for index := range records {
 		record := &records[index]
-		run.times[index] = record.SourceTime
+		if run.times != nil {
+			run.times[index] = record.SourceTime
+		}
 		raw := record.Values[run.valueField]
 		if value, ok := numberOf(raw); ok {
 			run.values[index] = value
@@ -261,6 +277,17 @@ func (run *datasetRun) fillColumnar(records []contract.CanonicalRecordV2, derive
 	run.ids = string(ids)
 }
 
+// points is how many points a columnar run holds.
+func (run *datasetRun) points() int { return len(run.values) }
+
+// time is the source time of the run's point at offset.
+func (run *datasetRun) time(offset int) int64 {
+	if run.times != nil {
+		return run.times[offset]
+	}
+	return run.first + int64(offset)*run.step
+}
+
 func (dataset *Dataset) Len() int {
 	if dataset == nil {
 		return 0
@@ -285,7 +312,7 @@ func (dataset *Dataset) Records() []contract.CanonicalRecordV2 {
 			continue
 		}
 		ids, width := run.allRecordIDs()
-		for offset := range run.times {
+		for offset := range run.points() {
 			records = append(records, RecordView{run: run, offset: offset}.canonical(ids[offset*width:(offset+1)*width]))
 		}
 	}
@@ -340,7 +367,7 @@ func (view RecordView) SourceTime() int64 {
 	case view.record != nil:
 		return view.record.SourceTime
 	case view.run != nil:
-		return view.run.times[view.offset]
+		return view.run.time(view.offset)
 	}
 	return 0
 }

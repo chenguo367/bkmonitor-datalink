@@ -13,7 +13,6 @@ import (
 	"context"
 	"fmt"
 	"testing"
-	"unsafe"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -91,7 +90,6 @@ func TestASlotOverItsShareIsAppliedInWindowsThatEachGiveTheirBytesBack(t *testin
 		fixture.streamInput(t, names[index], inputBytes)
 	}
 	inputsOnly := RetainedReserved(coordinator)
-	compact := uint64(unsafe.Sizeof(execution.NamedInputBinding{}))
 
 	var peak uint64
 	firstCut := -1
@@ -117,8 +115,10 @@ func TestASlotOverItsShareIsAppliedInWindowsThatEachGiveTheirBytesBack(t *testin
 			t.Fatalf("state phase holds %d after the window landed, want this series' view and its keys only", state)
 		}
 		remaining := uint64(series - index)
-		if want := remaining*inputBytes + uint64(index)*compact; stream.retainedByPhase[retainPhaseInput] != want {
-			t.Fatalf("input phase = %d, want %d: the unlanded series' inputs and a compact binding per landed one",
+		// A landed series keeps nothing of its input: the part its bindings
+		// share with the query's other series stays with them, held once.
+		if want := remaining * inputBytes; stream.retainedByPhase[retainPhaseInput] != want {
+			t.Fatalf("input phase = %d, want %d: the unlanded series' inputs and nothing of a landed one",
 				stream.retainedByPhase[retainPhaseInput], want)
 		}
 		// Nothing of the landed series is reachable from the stream.

@@ -551,6 +551,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	}
 
 	var result execution.SlotExecutionResult
+	applyStarted := time.Now()
 	if stream.windows.started {
 		// Cut into windows while it was evaluated: the earlier windows and
 		// the head are written, the last window and the tail are left.
@@ -566,6 +567,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 			return executeErr
 		})
 	}
+	stream.spend(slotPhaseApply, applyStarted)
 	if err != nil {
 		var protection *activationProtectionRequiredError
 		if errors.As(err, &protection) {
@@ -620,6 +622,8 @@ func (stream *streamedExecution) timing() execution.SlotTiming {
 		Input:     stream.spentMillis(slotPhaseInput),
 		Preflight: stream.spentMillis(slotPhasePreflight),
 		Evaluate:  stream.spentMillis(slotPhaseEvaluate),
+		Apply:     stream.spentMillis(slotPhaseApply),
+		RecordIDs: stream.spentMillis(slotPhaseRecordIDs),
 	}
 }
 
@@ -639,11 +643,12 @@ func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 		StateMutations: stream.effectsSpent.states + stream.effects.states, GapMutations: stream.effectsSpent.gaps + stream.effects.gaps,
 		Events: stream.effectsSpent.events + stream.effects.events, EventsWithoutMessage: stream.summary.withoutMessage,
 		RetainedBytes: stream.peakRetained, Series: stream.series,
-		RetainedInputBytes:  stream.peakByPhase[retainPhaseInput],
-		RetainedGapBytes:    stream.peakByPhase[retainPhaseGap],
-		RetainedOutputBytes: stream.peakByPhase[retainPhaseOutput],
-		RetainedStateBytes:  stream.peakByPhase[retainPhaseState],
-		StateMutationsLimit: budget.MaxStateMutations, GapMutationsLimit: budget.MaxGapMutations,
+		DependencySeriesDiscarded: stream.dependencyDiscarded,
+		RetainedInputBytes:        stream.peakByPhase[retainPhaseInput],
+		RetainedGapBytes:          stream.peakByPhase[retainPhaseGap],
+		RetainedOutputBytes:       stream.peakByPhase[retainPhaseOutput],
+		RetainedStateBytes:        stream.peakByPhase[retainPhaseState],
+		StateMutationsLimit:       budget.MaxStateMutations, GapMutationsLimit: budget.MaxGapMutations,
 		EventsLimit: budget.MaxEvents, RetainedBytesLimit: budget.MaxRetainedBytes, SeriesLimit: budget.MaxSeries,
 		RetainedShareBytes: stream.coordinator.qgShareBytes(),
 		Windows:            uint64(stream.windows.count), WindowCeilingWindows: stream.windows.ceilingWindows,

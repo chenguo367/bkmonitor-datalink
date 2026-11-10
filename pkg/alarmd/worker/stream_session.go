@@ -36,6 +36,9 @@ type streamedExecution struct {
 	// holds.
 	completionInputs completionInputs
 	primaryRecords   uint64
+	// dependencyDiscarded is the dependency series no PRIMARY of their Plan
+	// named, let go at the completion (discardDependenciesWithoutPrimary).
+	dependencyDiscarded uint64
 	// inputHolds is, by series, what the batches of that series were charged
 	// to the input phase and how many streamed bindings still point at them,
 	// so a window that lets its series' bindings go gives their bytes back
@@ -219,6 +222,14 @@ const (
 	slotPhaseInput slotPhase = iota
 	slotPhasePreflight
 	slotPhaseEvaluate
+	// slotPhaseApply is the writes: every window's events, State and gaps,
+	// the head and the tail, or the one apply of a Slot not cut into
+	// windows, the wait for its Sequence included. A window cut while the
+	// Slot is evaluated is inside Evaluate as well.
+	slotPhaseApply
+	// slotPhaseRecordIDs is deriving the record ids of the series a window
+	// reads, inside Evaluate.
+	slotPhaseRecordIDs
 	slotPhaseCount
 )
 
@@ -349,13 +360,7 @@ func (stream *streamedExecution) reserveRetained(ctx context.Context, retained r
 	if bytes == 0 {
 		return nil
 	}
-	phase := stream.reservationPhase(label)
-	if share := stream.coordinator.qgShareBytes(); share > 0 && stream.retainedTotal()+bytes > share {
-		err := shareRejection(phase, stream.retainedTotal(), bytes, share, stream.ownBudgetUsage(stream.coordinator.budget))
-		stream.coordinator.observeCapacityRejection(ctx, stream.request.Operation, observability.CapacityBudgetRetainedBytes, err)
-		return err
-	}
-	if err := stream.reserveProvisionalAt(ctx, 0, bytes, phase); err != nil {
+	if err := stream.reserveProvisionalAt(ctx, 0, bytes, stream.reservationPhase(label)); err != nil {
 		return err
 	}
 	stream.retainBytes(retained, bytes)
@@ -564,11 +569,52 @@ func (stream *streamedExecution) ConsumeSeries(ctx context.Context, batch execut
 	return nil
 }
 
+// discardDependenciesWithoutPrimary lets go, at the completion, of every
+// dependency series no PRIMARY input of its Plan named: no series of the Plan
+// reads it, so it is held to no end until the Slot's. Each such series is
+// counted once (DependencySeriesDiscarded), and its hold given back when it
+// was the series' last binding.
+func (stream *streamedExecution) discardDependenciesWithoutPrimary() {
+	var released uint64
+	discarded := make(map[execution.SeriesIdentityDigest]struct{})
+	for key, entry := range stream.streamed {
+		if entry.shared.Role == execution.InputRolePrimary {
+			continue
+		}
+		if _, named := stream.planSeries[key.consumer.Plan][key.series]; named {
+			continue
+		}
+		delete(stream.streamed, key)
+		discarded[key.series] = struct{}{}
+		hold := stream.inputHolds[key.series]
+		if hold == nil {
+			continue
+		}
+		if hold.bindings--; hold.bindings == 0 {
+			delete(stream.inputHolds, key.series)
+			released += hold.bytes
+		}
+	}
+	stream.dependencyDiscarded += uint64(len(discarded))
+	stream.unretainInput(released)
+}
+
 func (stream *streamedExecution) reserveProvisional(ctx context.Context, series, retainedBytes uint64) error {
 	return stream.reserveProvisionalAt(ctx, series, retainedBytes, stream.reservationPhase("normal_input"))
 }
 
+// reserveProvisionalAt reserves what this execution will hold: judged first
+// by its Query Group's share, against its own total, and then by the pool.
+// Every reservation a Slot holds goes through it - a series as it streams
+// in, its record ids, its gap targets and its no-data memory alike - so a
+// Slot over its share is refused by name for its share and never runs the
+// pool, shared with the other Query Groups, out.
 func (stream *streamedExecution) reserveProvisionalAt(ctx context.Context, series, retainedBytes uint64, phase string) error {
+	if share := stream.coordinator.qgShareBytes(); share > 0 && retainedBytes > 0 && stream.retainedTotal()+retainedBytes > share {
+		err := shareRejection(phase, stream.retainedTotal(), retainedBytes, share, stream.ownBudgetUsage(stream.coordinator.budget))
+		stream.coordinator.observeCapacityRejection(ctx, stream.request.Operation, observability.CapacityBudgetRetainedBytes, err)
+		return err
+	}
 	err := stream.coordinator.acquireProvisional(series, retainedBytes, stream, phase)
 	if err == nil {
 		return nil
@@ -591,6 +637,7 @@ func (stream *streamedExecution) releaseProvisional() {
 	stream.bindings, stream.stateItems, stream.gapItems, stream.delivered = nil, nil, nil, nil
 	stream.state, stream.gaps = execution.StatePreflightResult{}, execution.GapLoadResult{}
 	stream.shared, stream.completionInputs, stream.primaryRecords = sharedBindings{}, completionInputs{}, 0
+	stream.dependencyDiscarded = 0
 	stream.noDataRefused = nil
 	stream.evaluated = execution.EvaluationResult{}
 	stream.summary = slotEvaluationSummary{}
@@ -1140,6 +1187,9 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 		listed[entry.shared] = struct{}{}
 		stream.bindings = append(stream.bindings, *entry.shared)
 	}
+	// Listed with its query's: what the completion said of the query stays
+	// with the Plan whatever series it answered.
+	stream.discardDependenciesWithoutPrimary()
 	for _, binding := range completion.CompletionBindings {
 		stream.bindings = append(stream.bindings, compactNamedInputBinding(binding))
 	}

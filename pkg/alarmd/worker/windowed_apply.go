@@ -259,6 +259,7 @@ func (stream *streamedExecution) windowBeforeMerge(ctx context.Context, next exe
 // cutWindow applies the window being filled, every series before
 // windows.reached, running the head first if no window has been applied.
 func (stream *streamedExecution) cutWindow(ctx context.Context) error {
+	defer stream.spend(slotPhaseApply, time.Now())
 	windows := &stream.windows
 	if !windows.started {
 		started, err := stream.coordinator.applyWindowHead(ctx, stream)

@@ -971,6 +971,12 @@ Series a run produced Level outcomes for without summarising a detection window,
 
 Host states the access path treats as not monitored; zero means the filter is not installed.
 
+## alarmd_input_series_discarded_total
+
+Labels: `reason`
+
+Series a Slot was answered and let go of before evaluating them, by why. dependency_without_primary is a series a dependency query (a Plan's history or other non-PRIMARY input) answered that no PRIMARY input of the same Plan named: nothing evaluates a dependency without its series, so it is let go at the completion rather than held to the Slot's end. Steadily non-zero says the dependency query reads wider than the PRIMARY one - a filter or a window that differs - not that data was lost. Added from each completed Slot's dependency_series_discarded.
+
 ## alarmd_last_progress_timestamp_seconds
 
 Labels: `kind`

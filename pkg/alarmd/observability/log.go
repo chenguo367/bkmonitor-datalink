@@ -560,7 +560,9 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.Uint64("slot_millis", f.Slot),
 			slog.Uint64("input_millis", f.Input),
 			slog.Uint64("preflight_millis", f.Preflight),
-			slog.Uint64("evaluate_millis", f.Evaluate))
+			slog.Uint64("evaluate_millis", f.Evaluate),
+			slog.Uint64("apply_millis", f.Apply),
+			slog.Uint64("record_ids_millis", f.RecordIDs))
 	}
 	if observation.CapacityBudget != "" {
 		attributes = append(attributes, slog.String("capacity_budget", string(observation.CapacityBudget)))

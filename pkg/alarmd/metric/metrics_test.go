@@ -1020,6 +1020,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// all read identically otherwise, which is the reading this family was
 	// added to end.
 	bounds[fqName("worker_frozen_state_census_total")] = 3
+	// One per reason a Slot lets an answered series go, created at startup.
+	bounds[fqName("input_series_discarded_total")] = 1
 	// Every held status against every reason this build can put on a scope
 	// plus the catch-all, against every place the count can stand. All three
 	// come from published lists, so a value added to any of them moves this

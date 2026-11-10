@@ -45,42 +45,58 @@ func retainedSeries(t *testing.T, points int, wireBytes uint64) execution.Series
 		Inputs: []execution.NamedInputBinding{{RequirementID: "a", Dataset: dataset, View: view}}}
 }
 
-// What a batch holds is its Dataset at its RetainedBytes and each binding
-// beside it: the bytes the answer encoded the series in are no part of it,
-// a second binding of the same Dataset adds the binding and its view but not
-// the Dataset again, and one of another Dataset adds that Dataset too.
+// What a batch holds is its Dataset at its RetainedBytes, each view once and
+// an entry per binding beside them: the bytes the answer encoded the series
+// in are no part of it, a second binding of the same Dataset and view adds
+// only its entry in the streamed map, and one of another Dataset adds that
+// Dataset and its view too. The part a binding shares with its query's other
+// series is charged once, when it is first kept (keepStreamed), not here.
 func TestARetainedSizeIsTheDatasetOnceAndEachBindingBesideIt(t *testing.T) {
 	batch := retainedSeries(t, 15, 4096)
 	size := streamedRetainedSize(batch)
-	if size <= batch.Dataset.RetainedBytes() {
-		t.Fatalf("a batch of one binding holds %d, its Dataset alone %d; want the binding beside it", size, batch.Dataset.RetainedBytes())
+	view := uint64(unsafe.Sizeof(execution.DatasetView{})) + 4*15
+	entry := (uint64(unsafe.Sizeof(streamedInputKey{})+unsafe.Sizeof(streamedInput{})) + 1) * 8 / 7
+	if want := batch.Dataset.RetainedBytes() + view + entry; size != want {
+		t.Fatalf("a batch of one binding holds %d, want its Dataset %d, its view %d and one entry %d", size, batch.Dataset.RetainedBytes(), view, entry)
 	}
 	if wider := retainedSeries(t, 15, 1<<20); streamedRetainedSize(wider) != size {
 		t.Fatalf("the same series encoded in 1 MiB holds %d, in 4 KiB %d; want the wire bytes no part of it", streamedRetainedSize(wider), size)
 	}
 	again := batch
 	again.Inputs = append([]execution.NamedInputBinding{batch.Inputs[0]}, batch.Inputs[0])
-	binding := streamedRetainedSize(again) - size
-	if binding >= batch.Dataset.RetainedBytes() || binding < uint64(unsafe.Sizeof(execution.NamedInputBinding{})) {
-		t.Fatalf("a second binding of the same Dataset added %d; want the binding, not the Dataset's %d again", binding, batch.Dataset.RetainedBytes())
+	if got := streamedRetainedSize(again) - size; got != entry {
+		t.Fatalf("a second binding of the same Dataset and view added %d; want its entry, %d", got, entry)
 	}
 	other := retainedSeries(t, 30, 4096)
 	apart := batch
 	apart.Inputs = append([]execution.NamedInputBinding{batch.Inputs[0]}, other.Inputs[0])
-	if got, want := streamedRetainedSize(apart)-size, other.Dataset.RetainedBytes()+(streamedRetainedSize(other)-other.Dataset.RetainedBytes()); got != want {
-		t.Fatalf("a binding of another Dataset added %d, want that Dataset and its binding, %d", got, want)
+	if got, want := streamedRetainedSize(apart)-size, other.Dataset.RetainedBytes()+uint64(unsafe.Sizeof(execution.DatasetView{}))+4*30+entry; got != want {
+		t.Fatalf("a binding of another Dataset added %d, want that Dataset, its view and an entry, %d", got, want)
 	}
 }
 
-// A binding's facts are held with it: the room its quality facts and
-// terminals keep is counted at their size.
+// A binding's facts are held with the part it shares: the room its quality
+// facts and terminals keep is counted at their size, once for every series
+// of the query that shares them, and a series' own charge carries none of it.
 func TestABindingsFactsAreCountedWithIt(t *testing.T) {
 	batch := retainedSeries(t, 1, 0)
 	size := streamedRetainedSize(batch)
+	plain := sharedBindingHeldBytes(&batch.Inputs[0])
 	batch.Inputs[0].QualityFacts = make([]execution.InputQualityFact, 0, 10)
 	batch.Inputs[0].Terminals = make([]execution.InputTerminal, 3)
 	want := 10*uint64(unsafe.Sizeof(execution.InputQualityFact{})) + 3*uint64(unsafe.Sizeof(execution.InputTerminal{}))
-	if got := streamedRetainedSize(batch) - size; got != want {
-		t.Fatalf("ten quality facts and three terminals added %d, want %d", got, want)
+	if got := sharedBindingHeldBytes(&batch.Inputs[0]) - plain; got != want {
+		t.Fatalf("ten quality facts and three terminals added %d to the shared binding, want %d", got, want)
+	}
+	if got := streamedRetainedSize(batch); got != size {
+		t.Fatalf("the facts added %d to the series' own charge, want none", got-size)
+	}
+	var shared sharedBindings
+	first, fresh := shared.share(batch.Inputs[0])
+	second := retainedSeries(t, 1, 0).Inputs[0]
+	second.QualityFacts, second.Terminals = make([]execution.InputQualityFact, 0, 10), make([]execution.InputTerminal, 3)
+	again, freshAgain := shared.share(second)
+	if !fresh || freshAgain || first != again || len(shared.all) != 1 {
+		t.Fatalf("two series with the same facts kept %d shared bindings (fresh %v, %v), want one, kept once", len(shared.all), fresh, freshAgain)
 	}
 }

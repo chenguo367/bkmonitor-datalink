@@ -4743,11 +4743,18 @@ func applyVersionFacts(version ApplyVersion) observability.ApplyVersionFacts {
 // single calls. Each call is already on its own line; what no line could
 // answer is what the Slot spent in each in total, which is the question asked
 // of a Slot that overran its period.
+//
+// Apply is the Slot's writes - its windows' events, State and gaps, the head
+// and the tail, the waits for their Sequences included - and RecordIDs the
+// record ids its windows derived. Both overlap Evaluate: a window cut while
+// the Slot is evaluated, and the ids it reads, are spent inside it.
 type SlotTiming struct {
 	Slot      uint64
 	Input     uint64
 	Preflight uint64
 	Evaluate  uint64
+	Apply     uint64
+	RecordIDs uint64
 }
 
 // SlotBudgetUsage is one Slot's own consumption of the budgets it was admitted
@@ -4765,6 +4772,10 @@ type SlotBudgetUsage struct {
 	EventsWithoutMessage uint64
 	RetainedBytes        uint64
 	Series               uint64
+	// DependencySeriesDiscarded is the series a dependency query answered
+	// that no PRIMARY input of the same Plan named, let go at the
+	// completion: nothing evaluates a dependency without its series.
+	DependencySeriesDiscarded uint64
 
 	// RetainedBytes split by what the memory was held for. They sum to
 	// RetainedBytes.

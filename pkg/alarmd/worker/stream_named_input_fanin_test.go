@@ -290,6 +290,20 @@ func workerG4CoordinatorWith(
 	shapes ...func(*worker.Ports),
 ) (*recordingPorts, *recordingEvaluator, *worker.SlotExecutionCoordinator) {
 	t.Helper()
+	return workerG4CoordinatorWithBudget(t, observer, evidence, worker.ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20,
+		MaxStateMutations: 100, MaxEvents: 100, MaxGapMutations: 10}, shapes...)
+}
+
+// workerG4CoordinatorWithBudget is the fixture under a budget of the
+// caller's, for a Slot of more series or bytes than the default lets in.
+func workerG4CoordinatorWithBudget(
+	t *testing.T,
+	observer observability.Observer,
+	evidence *memoryEvidenceStore,
+	budget worker.ProvisionalBudget,
+	shapes ...func(*worker.Ports),
+) (*recordingPorts, *recordingEvaluator, *worker.SlotExecutionCoordinator) {
+	t.Helper()
 	detector, err := detect.NewEvaluator(detect.NewDefaultRegistry())
 	if err != nil {
 		t.Fatal(err)
@@ -315,8 +329,7 @@ func workerG4CoordinatorWith(
 	for _, shape := range shapes {
 		shape(&workerPorts)
 	}
-	coordinator, err := worker.NewSlotExecutionCoordinator(workerPorts, worker.ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20,
-		MaxStateMutations: 100, MaxEvents: 100, MaxGapMutations: 10})
+	coordinator, err := worker.NewSlotExecutionCoordinator(workerPorts, budget)
 	if err != nil {
 		t.Fatal(err)
 	}

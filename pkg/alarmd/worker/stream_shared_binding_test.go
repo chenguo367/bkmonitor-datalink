@@ -72,9 +72,12 @@ func TestEachSeriesIsHandedItsOwnRecordsAndItsQuerysCompletion(t *testing.T) {
 			ports, evaluator, coordinator := workerG4Coordinator(t)
 			ports.gapMissing = true
 			ports.executeOverride = streamExecution(header, streamed, completion)
-			_, err := coordinator.Execute(context.Background(), workerSlotRequest(header.Contract))
+			result, err := coordinator.Execute(context.Background(), workerSlotRequest(header.Contract))
 			if len(evaluator.requests) != 2 {
 				t.Fatalf("evaluation requests = %d (error %v), want each of the two series evaluated", len(evaluator.requests), err)
+			}
+			if result.Usage.DependencySeriesDiscarded != 0 {
+				t.Fatalf("dependency series discarded = %d, want none: each has its PRIMARY", result.Usage.DependencySeriesDiscarded)
 			}
 			own := map[execution.SeriesIdentityDigest]map[execution.InputRole]*execution.Dataset{
 				execution.SeriesIdentityDigest(strings.Repeat("c", 64)): {

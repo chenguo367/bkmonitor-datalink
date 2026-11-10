@@ -88,6 +88,7 @@ type phaseTwoMetrics struct {
 	outputRejectedStrategies       *boundedLabels
 	frozenStateRenewals            *prometheus.CounterVec
 	frozenStateCensus              *prometheus.CounterVec
+	inputSeriesDiscarded           *prometheus.CounterVec
 	segmentContent                 *prometheus.CounterVec
 	inPlaceWaits                   *prometheus.CounterVec
 	inPlaceHeldInputBytes          prometheus.Histogram
@@ -799,6 +800,17 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"independently as state_load minus state_apply -- the two disagreeing is the reading " +
 			"that says the candidate set is wrong rather than that nothing is frozen.",
 	}, []string{"result"})
+	metrics.inputSeriesDiscarded = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: metricSubsystem, Name: "input_series_discarded_total",
+		Help: "Series a Slot was answered and let go of before evaluating them, by why. " +
+			"dependency_without_primary is a series a dependency query (a Plan's history or other non-PRIMARY " +
+			"input) answered that no PRIMARY input of the same Plan named: nothing evaluates a dependency " +
+			"without its series, so it is let go at the completion rather than held to the Slot's end. " +
+			"Steadily non-zero says the dependency query reads wider than the PRIMARY one - a filter or a " +
+			"window that differs - not that data was lost. Added from each completed Slot's " +
+			"dependency_series_discarded.",
+	}, []string{"reason"})
+	metrics.inputSeriesDiscarded.WithLabelValues(inputSeriesDiscardedDependencyWithoutPrimary)
 	metrics.frozenStateCensus = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: metricSubsystem, Name: "worker_frozen_state_census_total",
 		Help: "Where a Slot's series went, counted at the three places the decisions are made, over one " +
@@ -2162,8 +2174,12 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.fleetSnapshotBytes, m.fleetViewSnapshotLoads, m.fleetViewSnapshotBytes,
 		m.fleetSummaryBytes, m.fleetViewSummaryLoads, m.fleetViewSummaryBytes, m.fleetViewOwnedLoads, m.fleetViewOwnedBytes, m.retainedPeakCensusGroups, m.retainedPeakCensusOverflow,
 		m.cmdbIndexDegraded, m.cmdbIndexReads, m.catalogComposition, m.noDataMemoryReads, m.noDataMemoryRenewals,
-		m.queryFreeCompletions, m.executionEvidenceWrites, m.outputEventsByWireFormat, m.outputEventsWithoutMessage, m.outputEventsByKind, m.outputEventsRejected, m.outputRejectedStrategyOverflow, m.frozenStateRenewals, m.frozenStateCensus)...)
+		m.queryFreeCompletions, m.executionEvidenceWrites, m.outputEventsByWireFormat, m.outputEventsWithoutMessage, m.outputEventsByKind, m.outputEventsRejected, m.outputRejectedStrategyOverflow, m.frozenStateRenewals, m.frozenStateCensus, m.inputSeriesDiscarded)...)
 }
+
+// inputSeriesDiscardedDependencyWithoutPrimary is input_series_discarded_total's
+// one reason.
+const inputSeriesDiscardedDependencyWithoutPrimary = "dependency_without_primary"
 
 func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	m.workflow.observe(observation)
@@ -2612,6 +2628,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	}
 	if usage := observation.SlotBudgetUsage; observation.Stage == observability.StageSlotCompleted && observation.Err == nil &&
 		usage != nil {
+		if usage.DependencySeriesDiscarded > 0 {
+			m.inputSeriesDiscarded.WithLabelValues(inputSeriesDiscardedDependencyWithoutPrimary).Add(float64(usage.DependencySeriesDiscarded))
+		}
 		for budget, held := range map[observability.CapacityBudget]uint64{
 			observability.CapacityBudgetSeries: usage.Series, observability.CapacityBudgetRetainedBytes: usage.RetainedBytes,
 			observability.CapacityBudgetStateMutations: usage.StateMutations, observability.CapacityBudgetEvents: usage.Events,

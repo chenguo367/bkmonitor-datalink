@@ -20,6 +20,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/worker"
 )
@@ -34,21 +35,26 @@ var errMeasured = errors.New("measured")
 // source binds them, handed to the Slot one batch a series, the charge read
 // once every series is kept and the heap measured as the HeapAlloc the batches
 // and what the Slot keeps of them add once the garbage is collected. Their
-// ratio must fall within [0.8, 1.25] at 1 and at 30 points. A measurement of
+// ratio must fall within [0.8, 1.25] at 1, 5, 15 and 30 points; the charge
+// at each, a series and its Dataset's part, gives what a point costs. A measurement of
 // hundreds of MiB, run on demand with ALARMD_MEASURE_INPUT_HEAP=1.
 func TestMeasureTheStreamedInputChargeAgainstTheHeap(t *testing.T) {
 	if os.Getenv("ALARMD_MEASURE_INPUT_HEAP") == "" {
 		t.Skip("a measurement: set ALARMD_MEASURE_INPUT_HEAP=1")
 	}
 	const series = 100_000
-	for _, points := range []int{1, 30} {
+	for _, points := range []int{1, 5, 15, 30} {
 		header, batches := workerG4StreamFixture(t, strategy.DetectorKindSimpleRingRatio)
 		primary, _ := shareFixtureQueries(t, header)
 		template := batches[primary.index].Inputs[0]
 		window := template.QueryWindow
 		step := (window.End - window.Start) / int64(points)
-		var charged, heap uint64
-		ports, _, coordinator := workerG4Coordinator(t)
+		var charged, heap, datasets uint64
+		// A budget the series fit whole: the measurement is of the charge,
+		// not of a refusal.
+		ports, _, coordinator := workerG4CoordinatorWithBudget(t, observability.ObserverFunc(func(context.Context, observability.Observation) {}),
+			nil, worker.ProvisionalBudget{MaxSeries: 2 * series, MaxRetainedBytes: 8 << 30,
+				MaxStateMutations: 100, MaxEvents: 100, MaxGapMutations: 10})
 		ports.gapMissing = true
 		ports.executeOverride = func(ctx context.Context, _ execution.QueryExecutionRequest, consumer execution.QueryExecutionConsumer) (execution.QueryExecutionCompletion, error) {
 			if err := consumer.Begin(ctx, header); err != nil {
@@ -63,6 +69,7 @@ func TestMeasureTheStreamedInputChargeAgainstTheHeap(t *testing.T) {
 				if err != nil {
 					return execution.QueryExecutionCompletion{}, err
 				}
+				datasets += batch.Dataset.RetainedBytes()
 				if err := consumer.ConsumeSeries(ctx, batch); err != nil {
 					return execution.QueryExecutionCompletion{}, err
 				}
@@ -77,8 +84,8 @@ func TestMeasureTheStreamedInputChargeAgainstTheHeap(t *testing.T) {
 			t.Fatalf("points=%d: the Slot ended %v before its series were measured", points, err)
 		}
 		ratio := float64(charged) / float64(heap)
-		t.Logf("series=%d points=%d charged=%d (%d a series) heap=%d (%d a series) ratio=%.3f",
-			series, points, charged, charged/series, heap, heap/series, ratio)
+		t.Logf("series=%d points=%d charged=%d (%d a series, its Dataset %d) heap=%d (%d a series) ratio=%.3f",
+			series, points, charged, charged/series, datasets/series, heap, heap/series, ratio)
 		if ratio < 0.8 || ratio > 1.25 {
 			t.Errorf("points=%d: charged %d for a heap of %d (ratio %.3f), want within [0.8, 1.25]", points, charged, heap, ratio)
 		}

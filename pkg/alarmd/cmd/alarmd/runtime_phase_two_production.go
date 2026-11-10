@@ -3574,7 +3574,8 @@ func slotBudgetUsageFacts(usage execution.SlotBudgetUsage) *observability.SlotBu
 		StateMutations: usage.StateMutations, GapMutations: usage.GapMutations, Events: usage.Events,
 		EventsWithoutMessage: usage.EventsWithoutMessage,
 		RetainedBytes:        usage.RetainedBytes, Series: usage.Series,
-		RetainedInputBytes: usage.RetainedInputBytes, RetainedGapBytes: usage.RetainedGapBytes,
+		DependencySeriesDiscarded: usage.DependencySeriesDiscarded,
+		RetainedInputBytes:        usage.RetainedInputBytes, RetainedGapBytes: usage.RetainedGapBytes,
 		RetainedOutputBytes: usage.RetainedOutputBytes,
 		RetainedStateBytes:  usage.RetainedStateBytes,
 		StateMutationsLimit: usage.StateMutationsLimit, GapMutationsLimit: usage.GapMutationsLimit,
@@ -3589,6 +3590,7 @@ func slotBudgetUsageFacts(usage execution.SlotBudgetUsage) *observability.SlotBu
 func slotTimingFacts(timing execution.SlotTiming) *observability.SlotTimingFacts {
 	return &observability.SlotTimingFacts{
 		Slot: timing.Slot, Input: timing.Input, Preflight: timing.Preflight, Evaluate: timing.Evaluate,
+		Apply: timing.Apply, RecordIDs: timing.RecordIDs,
 	}
 }
 

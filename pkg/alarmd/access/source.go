@@ -1212,6 +1212,13 @@ func (adapter *seriesAdapter) ConsumeProviderSeries(ctx context.Context, batch e
 	// Kept before the target filter returns: a recheck reads the whole
 	// dimension set, and a series every Plan turned away is still data.
 	adapter.lookback.Series(batch.Dataset, batch.Delivery.Bytes)
+	// A query that feeds no PRIMARY input hands its series on without their
+	// dimensions, once the target filter and the recheck above have read
+	// them: its readers read the series' digest, times and values, and the
+	// Slot holds it, beside its PRIMARY's, from now until it is evaluated.
+	if !feedsPrimary(adapter.query) {
+		batch.Dataset = batch.Dataset.WithoutDimensions()
+	}
 	bindings, err := dataBindings(adapter.query, batch, adapter.attemptNo, admitted)
 	if err != nil {
 		return err
@@ -1252,6 +1259,16 @@ func (adapter *seriesAdapter) ConsumeProviderSeries(ctx context.Context, batch e
 	}
 	adapter.forwarded = forwarded
 	return nil
+}
+
+// feedsPrimary is whether any requirement query answers is a PRIMARY input.
+func feedsPrimary(query PlannedQuery) bool {
+	for _, requirement := range query.Requirements {
+		if requirement.Role == execution.InputRolePrimary {
+			return true
+		}
+	}
+	return false
 }
 
 // reconcileCompletion restates a provider completion in terms of what the

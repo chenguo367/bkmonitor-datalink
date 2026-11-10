@@ -87,6 +87,10 @@ type SlotBudgetUsageFacts struct {
 	EventsWithoutMessage uint64 `json:"events_without_message"`
 	RetainedBytes        uint64 `json:"retained_bytes"`
 	Series               uint64 `json:"series"`
+	// DependencySeriesDiscarded is the series a dependency query answered
+	// that no PRIMARY input of the same Plan named, let go at the completion
+	// (input_series_discarded_total{reason="dependency_without_primary"}).
+	DependencySeriesDiscarded uint64 `json:"dependency_series_discarded"`
 
 	// RetainedBytes split by what the memory was held for, summing to it.
 	//
@@ -149,9 +153,15 @@ type SlotBudgetUsageFacts struct {
 // Reported at every value including zero, for the same reason the retained
 // phases are: a phase that is usually nothing and occasionally the whole Slot
 // is the one worth finding, and its zeros are its denominator.
+//
+// Apply is the Slot's writes, the waits for their Sequences included, and
+// RecordIDs the record ids its windows derived; both overlap Evaluate (see
+// execution.SlotTiming).
 type SlotTimingFacts struct {
 	Slot      uint64 `json:"slot_millis"`
 	Input     uint64 `json:"input_millis"`
 	Preflight uint64 `json:"preflight_millis"`
 	Evaluate  uint64 `json:"evaluate_millis"`
+	Apply     uint64 `json:"apply_millis"`
+	RecordIDs uint64 `json:"record_ids_millis"`
 }

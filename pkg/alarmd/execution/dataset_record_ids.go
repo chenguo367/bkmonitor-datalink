@@ -82,7 +82,7 @@ func (run *datasetRun) recordID(offset int) string {
 		return (*window)[offset*recordIDLength : (offset+1)*recordIDLength]
 	}
 	recordIDsDerivedOutside.Add(1)
-	id, err := contract.DeriveRecordIDV2(run.identity.Digest, run.times[offset])
+	id, err := contract.DeriveRecordIDV2(run.identity.Digest, run.time(offset))
 	if err != nil {
 		// A derived run's digest and times are the ones its ids were
 		// derived from, so there is no error to meet here.
@@ -101,7 +101,7 @@ func (run *datasetRun) allRecordIDs() (string, int) {
 	if window := run.window.Load(); window != nil {
 		return *window, recordIDLength
 	}
-	recordIDsDerivedOutside.Add(uint64(len(run.times)))
+	recordIDsDerivedOutside.Add(uint64(run.points()))
 	ids, err := run.deriveRecordIDs()
 	if err != nil {
 		// Unreachable for a derived run, as for recordID: every point then
@@ -118,9 +118,9 @@ func (run *datasetRun) deriveRecordIDs() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	buffer := make([]byte, 0, len(run.times)*recordIDLength)
-	for _, at := range run.times {
-		if buffer, err = deriver.AppendDerive(buffer, at); err != nil {
+	buffer := make([]byte, 0, run.points()*recordIDLength)
+	for offset := range run.points() {
+		if buffer, err = deriver.AppendDerive(buffer, run.time(offset)); err != nil {
 			return "", err
 		}
 	}
@@ -144,7 +144,7 @@ func (dataset *Dataset) RecordIDWindowBytes() uint64 {
 	for index := range dataset.runs {
 		run := &dataset.runs[index]
 		if run.derived && run.window.Load() == nil {
-			total += recordIDWindowBytes(len(run.times))
+			total += recordIDWindowBytes(run.points())
 		}
 	}
 	return total
@@ -175,9 +175,9 @@ func (dataset *Dataset) MaterializeRecordIDs() (uint64, error) {
 		if err != nil {
 			return added, err
 		}
-		recordIDsDerivedInWindow.Add(uint64(len(run.times)))
+		recordIDsDerivedInWindow.Add(uint64(run.points()))
 		if run.window.CompareAndSwap(nil, &ids) {
-			added += recordIDWindowBytes(len(run.times))
+			added += recordIDWindowBytes(run.points())
 		}
 	}
 	return added, nil
@@ -194,7 +194,7 @@ func (dataset *Dataset) DropRecordIDs() uint64 {
 	for index := range dataset.runs {
 		run := &dataset.runs[index]
 		if run.window.Swap(nil) != nil {
-			dropped += recordIDWindowBytes(len(run.times))
+			dropped += recordIDWindowBytes(run.points())
 		}
 	}
 	return dropped

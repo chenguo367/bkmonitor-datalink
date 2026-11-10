@@ -18,7 +18,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unsafe"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -257,8 +256,8 @@ func TestSlotExecutionCoordinatorRejectsCumulativeUQPayloadBeforeSideEffectsAndR
 	// Group did is part of why this one was refused, and reporting a pool
 	// figure here would point the reader at a neighbour that is not involved.
 	// Limit is three quarters of the 2 MiB budget. The reservation that
-	// crosses it is the second series' record ids, charged as input before
-	// its merge (materializeRecordIDs), so the refusal names the input phase.
+	// crosses it is the second series itself, as it streams in
+	// (ConsumeSeries), so the refusal names the input phase.
 	if rejection == nil || rejection.Phase != "normal_input" || rejection.OwnUsed == nil ||
 		*rejection.OwnUsed < 900<<10 || rejection.SharedUsed != 0 || rejection.Limit != 3<<19 {
 		t.Fatalf("missing exact failed-reservation facts: %+v", rejection)
@@ -1709,15 +1708,21 @@ func (ports *recordingPorts) Execute(ctx context.Context, request execution.Quer
 			DimensionIdentity: record.DimensionIdentity(), Values: record.Values(), Dimensions: record.Dimensions(),
 			ReceivedTime: record.ReceivedTime(),
 		}
+		if index < len(ports.querySeriesBytes) {
+			// The series holds that many bytes more in a dimension of its
+			// own, outside its identity: its Dataset's retained size counts
+			// it, and nothing reads it.
+			dimensions := make(map[string]json.RawMessage, len(canonical.Dimensions)+1)
+			for name, value := range canonical.Dimensions {
+				dimensions[name] = value
+			}
+			dimensions["padding"] = json.RawMessage(`"` + strings.Repeat("p", int(ports.querySeriesBytes[index])) + `"`)
+			canonical.Dimensions = dimensions
+		}
 		seriesDataset := execution.NewDataset([]contract.CanonicalRecordV2{canonical})
 		view, _ := execution.NewDatasetView(seriesDataset, []uint32{0})
 		binding := input.Inputs[0]
 		binding.Dataset, binding.View = seriesDataset, view
-		if index < len(ports.querySeriesBytes) {
-			// The series holds that many bytes more as spare capacity of its
-			// quality facts: the retained size counts it, and nothing reads it.
-			binding.QualityFacts = make([]execution.InputQualityFact, 0, ports.querySeriesBytes[index]/uint64(unsafe.Sizeof(execution.InputQualityFact{})))
-		}
 		batchDelivery := execution.SeriesDelivery{
 			PhysicalQuery: "physical-query-1", QueryRevision: queryRevision,
 			Series: 1, Records: 1, Digest: fmt.Sprintf("delivery-%d", index+1),
