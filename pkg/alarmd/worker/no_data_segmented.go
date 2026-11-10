@@ -296,6 +296,9 @@ func (stream *streamedExecution) decideNoDataRound(
 		if err := reading.scan(ctx); err != nil {
 			return noDataRound{}, err
 		}
+		// The absences are counted now and said after every prepared
+		// series: the watchdog's ceiling gets their windows.
+		stream.raiseWindowCeiling(len(reading.absent))
 		round.Settle()
 		if err := reading.readAbsent(ctx); err != nil {
 			return noDataRound{}, err

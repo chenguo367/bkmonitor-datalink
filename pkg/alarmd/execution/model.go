@@ -4800,6 +4800,16 @@ type SlotBudgetUsage struct {
 	// because the share's rule belongs to the producer that refuses by it,
 	// and a second copy of that rule elsewhere is one that can drift.
 	RetainedShareBytes uint64
+
+	// Windows is how many windows the Slot was applied in, zero for one
+	// applied whole. WindowCeilingWindows is how many windows the watchdog's
+	// ceiling allows it (ceil(S / s_min), and the absences' own), and
+	// WindowCeilingRaisedWindows how many of those a no-data round's absences
+	// added after its scan: a Slot near its ceiling, and whether its absences
+	// put it there, read off its own row.
+	Windows                    uint64
+	WindowCeilingWindows       uint64
+	WindowCeilingRaisedWindows uint64
 }
 
 // PrimaryBindingAttribution is the reason and the scope a completion names

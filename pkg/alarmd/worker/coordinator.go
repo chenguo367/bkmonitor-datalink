@@ -646,6 +646,8 @@ func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 		StateMutationsLimit: budget.MaxStateMutations, GapMutationsLimit: budget.MaxGapMutations,
 		EventsLimit: budget.MaxEvents, RetainedBytesLimit: budget.MaxRetainedBytes, SeriesLimit: budget.MaxSeries,
 		RetainedShareBytes: stream.coordinator.qgShareBytes(),
+		Windows:            uint64(stream.windows.count), WindowCeilingWindows: stream.windows.ceilingWindows,
+		WindowCeilingRaisedWindows: stream.windows.raisedWindows,
 	}
 }
 

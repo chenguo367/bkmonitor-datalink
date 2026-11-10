@@ -117,6 +117,15 @@ type SlotBudgetUsageFacts struct {
 	// RetainedShareBytes is the one Query Group's share of the retained pool
 	// this Slot was admitted against, from the producer that refuses by it.
 	RetainedShareBytes uint64 `json:"-"`
+
+	// Windows is how many windows the Slot was applied in, zero for one
+	// applied whole; WindowCeilingWindows how many the watchdog's ceiling
+	// allows it, and WindowCeilingRaisedWindows how many of those a no-data
+	// round's absences added after its scan (decision-020 batch 8, 2.2 step
+	// 6 b). A Slot claimed past its ceiling is read against these.
+	Windows                    uint64 `json:"windows"`
+	WindowCeilingWindows       uint64 `json:"window_ceiling_windows"`
+	WindowCeilingRaisedWindows uint64 `json:"window_ceiling_raised_windows"`
 }
 
 // SlotTimingFacts is where one Slot's wall clock went, in milliseconds, on its

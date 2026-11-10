@@ -169,16 +169,8 @@ func (apply *slotApply) planGapsBefore(
 	// whose evaluation writes a marker of its own this Slot has its
 	// record in that one: a second write at the same version would be a
 	// conflict.
-	if fact, first := apply.firstSeen[due.Key()]; first && len(planResult.GuardBeforeEvents) == 0 && len(planResult.GuardAfterState) == 0 {
-		marker, err := satisfiedMarker(request.Contract, fact)
-		if err != nil {
-			return execution.GenerationRetention{}, err
-		}
-		retention, err := generationRetentionOf(due)
-		if err != nil {
-			return execution.GenerationRetention{}, err
-		}
-		if err := coordinator.applyGap(ctx, request.Operation, request.Contract, []execution.PlanGapMutation{marker}, retention, GapSiteBeforeEvents); err != nil {
+	if len(planResult.GuardBeforeEvents) == 0 && len(planResult.GuardAfterState) == 0 {
+		if err := apply.firstSeenMarker(ctx, due, GapSiteBeforeEvents); err != nil {
 			return execution.GenerationRetention{}, err
 		}
 	}
@@ -207,6 +199,27 @@ func (apply *slotApply) planGapsBefore(
 		return execution.GenerationRetention{}, err
 	}
 	return gapRetention, nil
+}
+
+// firstSeenMarker writes, for a Plan this Slot judged first-seen, the marker
+// recording that it ran (satisfiedMarker); nothing for any other Plan. The
+// caller has made sure the Plan writes no other marker this Slot: a second
+// write at the same version is a conflict.
+func (apply *slotApply) firstSeenMarker(ctx context.Context, due execution.DuePlan, site string) error {
+	fact, first := apply.firstSeen[due.Key()]
+	if !first {
+		return nil
+	}
+	marker, err := satisfiedMarker(apply.request.Contract, fact)
+	if err != nil {
+		return err
+	}
+	retention, err := generationRetentionOf(due)
+	if err != nil {
+		return err
+	}
+	return apply.coordinator.applyGap(ctx, apply.request.Operation, apply.request.Contract,
+		[]execution.PlanGapMutation{marker}, retention, site)
 }
 
 // planGapAfter writes a Plan's clear, once its State is written.

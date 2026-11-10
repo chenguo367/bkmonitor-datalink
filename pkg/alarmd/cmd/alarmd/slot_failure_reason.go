@@ -104,6 +104,12 @@ func slotFailureReason(err error) (observability.ReasonCode, string) {
 	// were internal_unknown, so a Query Group conflicting on every other Slot
 	// for half an hour arrived as an unclassified defect that the same-Slot
 	// retry then cleared.
+	// A no-data memory read in parts that moved under the read, or a part
+	// the store could not answer: retried, and named rather than
+	// internal_unknown (worker.NoDataRosterMovedError).
+	if refusal, named := worker.NoDataRosterReadReason(err); named {
+		reason = observability.ReasonCode(refusal)
+	}
 	if refusal, named := worker.GapApplyReason(err); named {
 		reason = observability.ReasonCode(refusal)
 		// The site goes on the line as its own field, not only inside the

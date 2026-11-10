@@ -144,6 +144,12 @@ type slotWindows struct {
 	// execution has no deadline to move.
 	largestSeries uint64
 	ceiling       time.Time
+	// perWindow is s_min, the fewest series a window holds, fixed with the
+	// ceiling; ceilingWindows is how many windows the ceiling allows, and
+	// raisedWindows how many of them a no-data round's absences added after
+	// its scan (raiseWindowCeiling). Both are on the completion row.
+	perWindow                     uint64
+	ceilingWindows, raisedWindows uint64
 	// evaluating is the Plan whose result the evaluation is producing, and
 	// passed the Plans whose series it has moved past.
 	evaluating    execution.PlanIdentity
@@ -305,17 +311,30 @@ func (stream *streamedExecution) headOpenStatements() (map[execution.PlanIdentit
 }
 
 // applyWindowHead runs the head: the activations read, the first-seen
-// judgement made, and every Plan's open statement - or, for a first-seen Plan
-// without one, the marker recording it ran - written before the first
+// judgement made, and every Plan's open statement written before the first
 // window's events. It returns false, having written nothing, when the Slot
 // cannot be cut.
 //
 // A Plan that could be first-seen is judged here from every one of its
-// series' State, read ahead of the windows (firstSeenPrepass), so the head
-// decides it on "no open statement" alone: a first-seen Plan's marker is
-// missing, and a recovery clear needs one found (gap_recovery.go), so no
-// clear of its can come after. The reads hold the head's gap keys, which a
-// supplement of the same Plans waits on as it waits on the head's writes.
+// series' State, read ahead of the windows (firstSeenPrepass). The marker
+// recording that a first-seen Plan ran is not written here but in the tail,
+// and only when no other statement of the Plan is written this Slot
+// (windowedTail): a Plan the budget cuts after some of its windows gets its
+// budget statement in the tail, and a marker the head had written at the same
+// version would refuse it as another statement, on every retry. A retry of
+// the Slot judges the Plan again as this attempt did, since State written at
+// the Slot's own version is not something from before it (viewsSeenBefore).
+//
+// A first-seen Plan whose Slot lands windows and never reaches its tail -
+// its retries run out, or the Slot is skipped and Progress moves past it -
+// leaves State at that Slot's version and no marker. The next Slot reads that
+// State as written before it (firstSeenPrepass), so the Plan is not
+// first-seen there: it is still forced to warm up and has no marker, so it
+// joins the changed Plans, writes nothing that Slot, and the protection path
+// writes its WARMING marker - it warms up rather than being taken for a Plan
+// that ran, which is the direction first_seen.go errs in. The reads hold the
+// head's gap keys, which a supplement of the same Plans waits on as it waits
+// on the head's writes.
 func (coordinator *SlotExecutionCoordinator) applyWindowHead(ctx context.Context, stream *streamedExecution) (bool, error) {
 	opens, err := stream.headOpenStatements()
 	if err != nil {
@@ -345,18 +364,15 @@ func (coordinator *SlotExecutionCoordinator) applyWindowHead(ctx context.Context
 				continue
 			}
 			open, found := opens[due.Identity]
-			_, first := apply.firstSeen[due.Key()]
-			if !found && !first {
+			if !found {
 				continue
 			}
 			if err := coordinator.admit(sequenceCtx, stream.request, due); err != nil {
 				return err
 			}
-			statement := execution.PlanEvaluationResult{Plan: due.Identity}
-			if found {
-				headOpened[due.Identity] = struct{}{}
-				statement.GuardBeforeEvents = []execution.PlanGapMutation{open}
-			}
+			headOpened[due.Identity] = struct{}{}
+			statement := execution.PlanEvaluationResult{Plan: due.Identity,
+				GuardBeforeEvents: []execution.PlanGapMutation{open}}
 			if _, err := apply.planGapsBefore(sequenceCtx, due, &statement); err != nil {
 				return err
 			}
@@ -518,11 +534,14 @@ const windowStepBound = time.Minute
 // Slot can need, ceil(S / s_min). S is the series the completion handed the
 // evaluation; s_min the fewest series a window holds - the window bound now
 // over the most input one series was charged, at least one, and no more than
-// the per-Slot State or event cap a window is also cut at, since each series
-// writes one key. However the Slot is cut, its windows are no more than that,
-// so moving the deadline at each boundary never lets a Slot that really is
-// stuck out-wait the watchdog: the latest it can be claimed is the deadline,
-// the grace and ceil(S / s_min) T_w (decision-020 batch 8, 2.2 step 6 b).
+// the per-Slot State cap, since each series writes one key, nor the event cap
+// over the most events one series can send in this Slot (eventsPerSeries).
+// However the Slot is cut, its windows are no more than that, so moving the
+// deadline at each boundary never lets a Slot that really is stuck out-wait
+// the watchdog: the latest it can be claimed is the deadline, the grace and
+// ceil(S / s_min) T_w (decision-020 batch 8, 2.2 step 6 b). A no-data round's
+// absences add their own windows once its scan has counted them
+// (raiseWindowCeiling).
 func (stream *streamedExecution) fixWindowCeiling(ctx context.Context, series int) {
 	deadline := execution.ExecutionDeadline(ctx)
 	if deadline.IsZero() || series == 0 || stream.supplement != nil {
@@ -533,14 +552,53 @@ func (stream *streamedExecution) fixWindowCeiling(ctx context.Context, series in
 		perWindow = stream.windowBound() / largest
 	}
 	budget := stream.coordinator.slotBudget()
-	for _, limit := range []uint64{budget.MaxStateMutations, budget.MaxEvents} {
-		if limit > 0 {
-			perWindow = min(perWindow, limit)
-		}
+	if limit := budget.MaxStateMutations; limit > 0 {
+		perWindow = min(perWindow, limit)
+	}
+	if limit := budget.MaxEvents; limit > 0 {
+		perWindow = min(perWindow, limit/stream.eventsPerSeries())
 	}
 	perWindow = max(perWindow, 1)
 	windows := (uint64(series) + perWindow - 1) / perWindow
+	stream.windows.perWindow, stream.windows.ceilingWindows = perWindow, windows
 	stream.windows.ceiling = deadline.Add(time.Duration(windows) * windowStepBound)
+}
+
+// eventsPerSeries is the most events one prepared series can send in this
+// Slot: one per PRIMARY record it holds, at least one. The trigger decides one
+// event at most per record, whatever its Levels (evaluation/evaluator.go:672,
+// keptEvents, one TriggerEvent or none), and a series' events are its records'
+// put together (evaluation/evaluator.go:861, appendKept over the series'
+// PRIMARY records): so the bound is per record, not per Level, and the
+// records are what the completion handed it. A synthetic no-data series holds
+// one record.
+func (stream *streamedExecution) eventsPerSeries() uint64 {
+	most := uint64(1)
+	for _, prepared := range stream.windows.prepared {
+		for _, input := range prepared.inputs {
+			for _, binding := range input.Inputs {
+				if binding.Role == execution.InputRolePrimary && binding.View != nil {
+					most = max(most, uint64(binding.View.Len()))
+				}
+			}
+		}
+	}
+	return most
+}
+
+// raiseWindowCeiling moves the ceiling once for a no-data round whose scan
+// found absent absent names: their series are said after every prepared one
+// and were not in S, so they get their own ceil(absent / s_min) windows. Still
+// bounded: a memory holds at most its Plan's max_groups groups.
+func (stream *streamedExecution) raiseWindowCeiling(absent int) {
+	windows := &stream.windows
+	if windows.ceiling.IsZero() || absent == 0 || windows.perWindow == 0 {
+		return
+	}
+	more := (uint64(absent) + windows.perWindow - 1) / windows.perWindow
+	windows.ceiling = windows.ceiling.Add(time.Duration(more) * windowStepBound)
+	windows.ceilingWindows += more
+	windows.raisedWindows += more
 }
 
 // windowBoundary is a window landed: the Slot's deadline moved to T_w past
@@ -811,8 +869,19 @@ func (apply *slotApply) windowedTail(ctx context.Context, stream *streamedExecut
 			continue
 		}
 		if _, opened := windows.headOpened[planResult.Plan]; !opened {
-			if err := apply.tailStatements(ctx, due, planResult); err != nil {
+			wrote, err := apply.tailStatements(ctx, due, planResult)
+			if err != nil {
 				return execution.SlotExecutionResult{}, err
+			}
+			// A first-seen Plan's marker, when nothing else of it is written
+			// this Slot: see applyWindowHead.
+			if _, first := apply.firstSeen[due.Key()]; first && !wrote {
+				if err := apply.coordinator.admit(ctx, apply.request, due); err != nil {
+					return execution.SlotExecutionResult{}, err
+				}
+				if err := apply.firstSeenMarker(ctx, due, GapSiteAfterState); err != nil {
+					return execution.SlotExecutionResult{}, err
+				}
 			}
 		}
 		apply.noteRetryPending(planResult)
@@ -829,33 +898,34 @@ func (apply *slotApply) windowedTail(ctx context.Context, stream *streamedExecut
 // a Plan the budget answered UNAVAILABLE, the open statement that came with
 // it. Nothing of such a Plan was written past what its earlier windows
 // carried, so an open written here precedes no event it guards that the
-// head could have preceded.
-func (apply *slotApply) tailStatements(ctx context.Context, due execution.DuePlan, planResult execution.PlanEvaluationResult) error {
+// head could have preceded. It reports whether the Plan has a statement of
+// its own this Slot, written here or by an earlier attempt.
+func (apply *slotApply) tailStatements(ctx context.Context, due execution.DuePlan, planResult execution.PlanEvaluationResult) (bool, error) {
 	before, after := planResult.GuardBeforeEvents, planResult.GuardAfterState
 	if len(before) != 0 {
 		after = nil
 	}
 	if len(before)+len(after) == 0 {
-		return nil
+		return false, nil
 	}
 	gapRetention, err := generationRetentionOf(due)
 	if err != nil {
-		return err
+		return true, err
 	}
 	before = uncommittedGapMutations(apply.loadedGaps, before)
 	after = uncommittedGapMutations(apply.loadedGaps, after)
 	apply.coordinator.observeDuplicatedGapStatements(ctx, apply.request,
 		execution.PlanEvaluationResult{Plan: planResult.Plan, GuardBeforeEvents: before, GuardAfterState: after})
 	if len(before)+len(after) == 0 {
-		return nil
+		return true, nil
 	}
 	if err := apply.coordinator.admit(ctx, apply.request, due); err != nil {
-		return err
+		return true, err
 	}
 	if err := apply.coordinator.applyGap(ctx, apply.request.Operation, apply.request.Contract, before, gapRetention, GapSiteBeforeEvents); err != nil {
-		return err
+		return true, err
 	}
-	return apply.planGapAfter(ctx, after, gapRetention)
+	return true, apply.planGapAfter(ctx, after, gapRetention)
 }
 
 // completeWindowsBeyondSlotBudget answers a Slot over a per-Slot cap once

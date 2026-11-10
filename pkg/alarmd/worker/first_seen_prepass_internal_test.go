@@ -107,9 +107,9 @@ func (fixture *windowedFixture) candidate() execution.PlanActivationFact {
 
 // A Plan new to its activation, of more series than one window holds, is read
 // whole before the head (2.3), found to hold nothing from before the Slot,
-// judged first-seen, and written window by window: the marker that records it
-// ran goes out in the head, before the first window's events, and every
-// series is written once. Its reads witness nothing.
+// judged first-seen, and written window by window, every series once. The
+// marker that records it ran waits for the tail (TestAFirstSeenPlanWritesItsMarkerInTheTail):
+// nothing of it is written in the head. Its reads witness nothing.
 func TestABrandNewPlanOfManyWindowsIsJudgedFirstSeenAndWrittenInWindows(t *testing.T) {
 	const series = 6
 	fixture, ports := newPrepassFixture(t, series)
@@ -136,13 +136,8 @@ func TestABrandNewPlanOfManyWindowsIsJudgedFirstSeenAndWrittenInWindows(t *testi
 	if _, first := apply.firstSeen[fixture.due.Key()]; !first || apply.changed(fixture.due) {
 		t.Fatalf("first-seen=%v changed=%v, want the Plan judged first-seen and written", first, apply.changed(fixture.due))
 	}
-	guards := fixture.ports.guards
-	if len(guards) != 1 || len(guards[0].Scopes) != 1 || guards[0].Scopes[0].Kind != execution.GapClear ||
-		guards[0].Scopes[0].Scope != (execution.GapScope{}) {
-		t.Fatalf("head statements = %+v, want the one satisfied marker of a first-seen Plan", guards)
-	}
-	if gap, event := fixture.traceIndex(t, "gap"), fixture.traceIndex(t, "event:event-series-00"); gap > event {
-		t.Fatalf("the first-seen marker went out after the first window's events: %v", fixture.ports.trace)
+	if guards := fixture.ports.guards; len(guards) != 0 {
+		t.Fatalf("statements before the tail = %+v, want none: the first-seen marker is the tail's", guards)
 	}
 	if stream.windows.count != 3 || len(fixture.ports.stateApplied) != series {
 		t.Fatalf("windows=%d State written=%d, want 3 windows writing all %d series", stream.windows.count,
