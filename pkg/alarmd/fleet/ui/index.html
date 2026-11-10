@@ -1333,7 +1333,7 @@ var SKIP_REASON = {
 
 function skipReasonWords(code) {
   if (SKIP_REASON[code]) return SKIP_REASON[code];
-  if (/BUDGET|RESOURCE_HARD_STOP|RECORD_TOO_LARGE/.test(code)) return '资源预算拒绝（' + code + '）';
+  if (/BUDGET|RESOURCE_HARD_STOP|RESOURCE_POOL_HELD_BY_OTHERS|RECORD_TOO_LARGE/.test(code)) return '资源预算拒绝（' + code + '）';
   return code;
 }
 
@@ -1583,7 +1583,7 @@ function lossClause(report, count) {
     if (group.key === 'ONGOING') ongoing += group.objects || 0;
     else if (group.key === 'AFTER_RESTART') restart += group.objects || 0;
     else if (group.key === 'HISTORICAL') stopped += group.objects || 0;
-    else if (/BUDGET|RESOURCE_HARD_STOP|RECORD_TOO_LARGE/.test(group.key)) budget += group.objects || 0;
+    else if (/BUDGET|RESOURCE_HARD_STOP|RESOURCE_POOL_HELD_BY_OTHERS|RECORD_TOO_LARGE/.test(group.key)) budget += group.objects || 0;
   });
   var parts = [];
   if (count === (report.current || 0)) {
@@ -2050,7 +2050,7 @@ function groupKeyLabel(report, key, group) {
   if (report.group_by === 'blocked') return blockedKeyLabel(key, group);
   if (report.group_by === 'loss') {
     if (LOSS[key]) return key + '（' + lossWords(key) + '）';
-    if (/BUDGET|RESOURCE_HARD_STOP|RECORD_TOO_LARGE/.test(key)) return key + '（资源预算拒绝——这一组才是容量限制）';
+    if (/BUDGET|RESOURCE_HARD_STOP|RESOURCE_POOL_HELD_BY_OTHERS|RECORD_TOO_LARGE/.test(key)) return key + '（资源预算拒绝——这一组才是容量限制）';
   }
   return key;
 }

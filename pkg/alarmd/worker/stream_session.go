@@ -391,6 +391,55 @@ func (stream *streamedExecution) unretain(phase retainPhase, bytes uint64) {
 	stream.coordinator.releaseProvisional(0, bytes)
 }
 
+type retainedOwnerKey struct{}
+
+// withRetainedOwner names the execution whose share the bytes held further
+// down ctx count against: the frames a State write keeps and the segments a
+// no-data first write holds are the Slot's, and judged with the rest of what
+// it holds (judgeRetainedLocked).
+func withRetainedOwner(ctx context.Context, stream *streamedExecution) context.Context {
+	return context.WithValue(ctx, retainedOwnerKey{}, stream)
+}
+
+func retainedOwnerFrom(ctx context.Context) *streamedExecution {
+	stream, _ := ctx.Value(retainedOwnerKey{}).(*streamedExecution)
+	return stream
+}
+
+// holdRetained reserves bytes the owner holds outside its phases' own
+// bookkeeping - kept frames, first-write segments - judged against its share
+// and the pool, and counted in its State phase so its total is all it holds.
+// Without an owner that has begun, the pool alone judges them.
+func (coordinator *SlotExecutionCoordinator) holdRetained(owner *streamedExecution, bytes uint64, phase string) error {
+	if bytes == 0 {
+		return nil
+	}
+	coordinator.reservations.mu.Lock()
+	err := coordinator.judgeRetainedLocked(owner, bytes, phase)
+	if err == nil {
+		coordinator.reservations.retainedBytes += bytes
+	}
+	coordinator.reservations.mu.Unlock()
+	if err == nil && owner != nil && owner.began {
+		owner.retainBytes(retainPhaseState, bytes)
+	}
+	return err
+}
+
+// letGoRetained gives back what holdRetained reserved.
+func (coordinator *SlotExecutionCoordinator) letGoRetained(owner *streamedExecution, bytes uint64) {
+	if bytes == 0 {
+		return
+	}
+	if owner != nil && owner.began {
+		// From the owner's State phase and the pool together; a stream
+		// already released has given the pool its bytes back.
+		owner.unretain(retainPhaseState, bytes)
+		return
+	}
+	coordinator.releaseProvisional(0, bytes)
+}
+
 // retainedTotal is what this execution holds across all phases.
 func (stream *streamedExecution) retainedTotal() uint64 {
 	if stream == nil {
@@ -610,11 +659,6 @@ func (stream *streamedExecution) reserveProvisional(ctx context.Context, series,
 // Slot over its share is refused by name for its share and never runs the
 // pool, shared with the other Query Groups, out.
 func (stream *streamedExecution) reserveProvisionalAt(ctx context.Context, series, retainedBytes uint64, phase string) error {
-	if share := stream.coordinator.qgShareBytes(); share > 0 && retainedBytes > 0 && stream.retainedTotal()+retainedBytes > share {
-		err := shareRejection(phase, stream.retainedTotal(), retainedBytes, share, stream.ownBudgetUsage(stream.coordinator.budget))
-		stream.coordinator.observeCapacityRejection(ctx, stream.request.Operation, observability.CapacityBudgetRetainedBytes, err)
-		return err
-	}
 	err := stream.coordinator.acquireProvisional(series, retainedBytes, stream, phase)
 	if err == nil {
 		return nil
@@ -984,6 +1028,10 @@ type provisionalBudgetExceededError struct {
 	// capacity makes this object fit - but the action differs: the strategy has
 	// to be sharded rather than the process resized.
 	share bool
+	// others marks this Query Group's Slot within its share refused by the
+	// pool for what other Query Groups and the worker hold: a pause, as the
+	// pool frees when they let go, and not this object's size.
+	others bool
 }
 
 func (err *provisionalBudgetExceededError) Error() string {

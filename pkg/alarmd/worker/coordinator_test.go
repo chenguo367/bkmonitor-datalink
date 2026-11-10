@@ -191,23 +191,33 @@ func TestSlotExecutionCoordinatorWritesASlotBeyondItsCapInWindows(t *testing.T) 
 	}
 }
 
+// The series budget refuses a Slot with more series than it allows, the pool's
+// pause (RESOURCE_HARD_STOP); retained bytes refuse a Slot whose own series
+// take it past its Query Group's share - a 1 MiB pool's share is 768 KiB and
+// the series is 900 KiB - by the share's word, QG_BUDGET_SHARE_EXCEEDED. The
+// pool refusing a Slot within its share is the internal
+// TestEveryHolderOfASlotIsJudgedAgainstItsShareThenThePool.
 func TestSlotExecutionCoordinatorBudgetsRetainedSeriesAndBytes(t *testing.T) {
 	tests := []struct {
-		name       string
-		budget     worker.ProvisionalBudget
-		wantBudget observability.CapacityBudget
+		name        string
+		budget      worker.ProvisionalBudget
+		seriesBytes []uint64
+		wantBudget  observability.CapacityBudget
+		wantReason  string
 	}{
 		{name: "series", budget: worker.ProvisionalBudget{
 			MaxSeries: 1, MaxRetainedBytes: 1 << 20, MaxStateMutations: 100, MaxEvents: 100, MaxGapMutations: 10,
-		}, wantBudget: observability.CapacityBudgetSeries},
+		}, wantBudget: observability.CapacityBudgetSeries, wantReason: contract.ReasonResourceHardStop},
 		{name: "retained bytes", budget: worker.ProvisionalBudget{
-			MaxSeries: 100, MaxRetainedBytes: 1, MaxStateMutations: 100, MaxEvents: 100, MaxGapMutations: 10,
-		}, wantBudget: observability.CapacityBudgetRetainedBytes},
+			MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxStateMutations: 100, MaxEvents: 100, MaxGapMutations: 10,
+		}, seriesBytes: []uint64{900 << 10}, wantBudget: observability.CapacityBudgetRetainedBytes,
+			wantReason: contract.ReasonQGBudgetShareExceeded},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newFixtureWithBudget(t, test.budget)
 			fixture.ports.reverseStateReceipts = true
+			fixture.ports.querySeriesBytes = test.seriesBytes
 			result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
 			if err == nil || result.Completed {
 				t.Fatalf("Execute() result=%+v error=%v", result, err)
@@ -215,7 +225,7 @@ func TestSlotExecutionCoordinatorBudgetsRetainedSeriesAndBytes(t *testing.T) {
 			if fixture.ports.eventCount != 0 || fixture.ports.stateApplyCalls != 0 || !isZeroProgressCommit(fixture.ports.lastProgress) {
 				t.Fatal("series/byte budget rejection reached side effects")
 			}
-			assertCapacityRejection(t, fixture.observations, test.wantBudget)
+			assertCapacityRejectionReason(t, fixture.observations, test.wantBudget, test.wantReason)
 		})
 	}
 }
@@ -308,11 +318,6 @@ func TestSlotExecutionCoordinatorReleasesProcessReservationAfterQueryExit(t *tes
 			}
 		})
 	}
-}
-
-func assertCapacityRejection(t *testing.T, observations *[]observability.Observation, want observability.CapacityBudget) {
-	t.Helper()
-	assertCapacityRejectionReason(t, observations, want, contract.ReasonResourceHardStop)
 }
 
 func assertCapacityRejectionReason(

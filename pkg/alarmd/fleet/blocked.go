@@ -320,14 +320,15 @@ var failureFacets = map[string]facets{
 	"PROGRESS_BEGIN_REJECTED": {StageSchedule, ClassRefused, DependencyNone},
 
 	// Budgets this deployment allocates itself.
-	"EXECUTION_BUDGET_EXHAUSTED": {StageEvaluate, ClassCapacity, DependencyNone},
-	"SLOT_BUDGET_EXCEEDED":       {StageEvaluate, ClassCapacity, DependencyNone},
-	"STATE_BUDGET_EXCEEDED":      {StageEvaluate, ClassCapacity, DependencyNone},
-	"VALIDATION_BUDGET_EXCEEDED": {StageEvaluate, ClassCapacity, DependencyNone},
-	"MESSAGE_BUDGET_EXCEEDED":    {StageCommit, ClassCapacity, DependencyNone},
-	"READINESS_BUDGET_INVALID":   {StageSchedule, ClassCapacity, DependencyNone},
-	"RECORD_TOO_LARGE":           {StageEvaluate, ClassCapacity, DependencyNone},
-	"RESOURCE_HARD_STOP":         {StageEvaluate, ClassCapacity, DependencyNone},
+	"EXECUTION_BUDGET_EXHAUSTED":   {StageEvaluate, ClassCapacity, DependencyNone},
+	"SLOT_BUDGET_EXCEEDED":         {StageEvaluate, ClassCapacity, DependencyNone},
+	"STATE_BUDGET_EXCEEDED":        {StageEvaluate, ClassCapacity, DependencyNone},
+	"VALIDATION_BUDGET_EXCEEDED":   {StageEvaluate, ClassCapacity, DependencyNone},
+	"MESSAGE_BUDGET_EXCEEDED":      {StageCommit, ClassCapacity, DependencyNone},
+	"READINESS_BUDGET_INVALID":     {StageSchedule, ClassCapacity, DependencyNone},
+	"RECORD_TOO_LARGE":             {StageEvaluate, ClassCapacity, DependencyNone},
+	"RESOURCE_HARD_STOP":           {StageEvaluate, ClassCapacity, DependencyNone},
+	"RESOURCE_POOL_HELD_BY_OTHERS": {StageEvaluate, ClassCapacity, DependencyNone},
 	// The budget's own word for the same rejection (finding.go has the why).
 	// Series and retained bytes are bounds on what the query returns, hit on
 	// the stream; the other three on what evaluating it would write.

@@ -117,6 +117,9 @@ func (coordinator *SlotExecutionCoordinator) observeQueryFailure(ctx context.Con
 		if exceeded.slot {
 			reason = observability.ReasonCode(contract.ReasonSlotBudgetExceeded)
 		}
+		if exceeded.others {
+			reason = observability.ReasonCode(contract.ReasonResourcePoolHeldByOthers)
+		}
 	} else if errors.As(err, &diagnostic) {
 		facts.Category, facts.Code = diagnostic.QueryFailure()
 		// A provider that stopped answering partway is the provider's

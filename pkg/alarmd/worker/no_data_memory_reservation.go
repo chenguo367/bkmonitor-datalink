@@ -11,11 +11,11 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"unsafe"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // noDataReservationPhase is the phase a pool refusal of a no-data memory
@@ -118,34 +118,51 @@ func noDataBytesRefusal(identity execution.PlanNoDataIdentity, groups int, bytes
 			LimitSource: execution.NoDataLimitShare, Bytes: bytes}}
 }
 
-// holdNoDataFirstWrites reserves what the writes of whole memories hold
-// against the retained pool, for the length of the write. The store writes
-// the Slot's memories one after another and each a segment at a time, so the
-// most any of them holds at once is its heaviest segment, and that is what is
-// held: a whole memory past the share one Query Group's Slot may hold is
-// written like any other, and none is refused for its size. A segment the
-// pool has no room for is the Slot's RESOURCE_HARD_STOP, and the Slot is
-// retried. The caller gives back what was held. A coordinator with no
-// retained budget - only a test builds one - holds nothing.
+// holdNoDataFirstWrites reserves what the writes of whole memories hold, for
+// the length of the write, against the Slot's share and the pool with the
+// rest of what the Slot holds. The store writes the Slot's memories one after
+// another and each a segment at a time, so the most any of them holds at once
+// is its heaviest segment, and that is what is held. A first write whose
+// heaviest segment would take the Slot past its share is refused for this
+// Slot as a memory too large to hold is at its load (noDataBytesRefusal): its
+// memory is not written this round and its threshold detection goes on. A
+// segment within the share that the pool has no room for refuses the Slot
+// (RESOURCE_POOL_HELD_BY_OTHERS, or RESOURCE_HARD_STOP with no Slot to own
+// it), and the Slot is retried. It returns what it held, for the caller to
+// give back, the writes it kept and the ones it refused. A coordinator with
+// no retained budget - only a test builds one - holds nothing.
 func (coordinator *SlotExecutionCoordinator) holdNoDataFirstWrites(
 	ctx context.Context, request execution.SlotExecutionRequest, mutations []execution.PlanNoDataMutation,
-) (uint64, error) {
+) (uint64, []execution.PlanNoDataMutation, []execution.NoDataApplyItemResult, error) {
 	if coordinator.budget.MaxRetainedBytes == 0 {
-		return 0, nil
+		return 0, mutations, nil, nil
 	}
+	owner := retainedOwnerFrom(ctx)
+	share := coordinator.qgShareBytes()
 	var held uint64
+	var refused []execution.NoDataApplyItemResult
+	kept := mutations[:0:0]
 	for _, mutation := range mutations {
-		if mutation.ReplacesWholeRecord() {
-			held = max(held, noDataFirstWriteSegmentBytes(mutation))
+		if !mutation.ReplacesWholeRecord() {
+			kept = append(kept, mutation)
+			continue
 		}
+		segment := noDataFirstWriteSegmentBytes(mutation)
+		if owner != nil && owner.began && share > 0 && owner.retainedTotal()+segment > share {
+			refused = append(refused, noDataBytesRefusal(mutation.Identity, len(mutation.Set), segment, share))
+			continue
+		}
+		kept = append(kept, mutation)
+		held = max(held, segment)
 	}
-	if held > 0 && !coordinator.tryAcquireRetained(held) {
-		err := budgetRejection(observability.CapacityBudgetRetainedBytes, noDataReservationPhase, RetainedReserved(coordinator), held,
-			coordinator.budget.MaxRetainedBytes, nil, nil)
-		coordinator.observeCapacityRejection(ctx, request.Operation, observability.CapacityBudgetRetainedBytes, err)
-		return 0, err
+	if err := coordinator.holdRetained(owner, held, noDataReservationPhase); err != nil {
+		var exceeded *provisionalBudgetExceededError
+		if errors.As(err, &exceeded) {
+			coordinator.observeCapacityRejection(ctx, request.Operation, exceeded.budget, err)
+		}
+		return 0, nil, nil, err
 	}
-	return held, nil
+	return held, kept, refused, nil
 }
 
 // reserveNoDataMemory reserves what the Slot's loaded no-data memories hold,

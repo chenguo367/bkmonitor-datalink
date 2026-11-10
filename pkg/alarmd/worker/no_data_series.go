@@ -383,11 +383,17 @@ func (coordinator *SlotExecutionCoordinator) applyNoDataMemory(
 	if len(mutations) == 0 {
 		return nil
 	}
-	held, err := coordinator.holdNoDataFirstWrites(ctx, request, mutations)
+	held, mutations, refused, err := coordinator.holdNoDataFirstWrites(ctx, request, mutations)
 	if err != nil {
 		return err
 	}
-	defer coordinator.releaseProvisional(0, held)
+	defer coordinator.letGoRetained(retainedOwnerFrom(ctx), held)
+	for _, item := range refused {
+		coordinator.observeNoDataMemoryRefusal(ctx, request, item)
+	}
+	if len(mutations) == 0 {
+		return nil
+	}
 	// What each memory lives for: its own Plan's retention, the one the load
 	// renews it to.
 	written := make([]execution.DuePlan, 0, len(mutations))

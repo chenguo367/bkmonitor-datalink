@@ -26,8 +26,9 @@ import (
 // An answer's values reach the Dataset as the bytes UQ wrote them, whatever
 // they are - numbers the encoder writes, numbers written another way, a
 // string, null - and a series is kept as one run of columns: its points
-// cost their time and value, not a record each, and not their id, which
-// the decoder derived and the window derives again.
+// cost their value, and their time when they are not one a step, not a
+// record each, and not their id, which the decoder derived and the window
+// derives again.
 func TestAnAnswersValuesReadBackAsUQWroteThem(t *testing.T) {
 	values := []string{`12.5`, `0`, `1e21`, `12.50`, `"1.5"`, `null`, `9007199254740993`, `-3`}
 	points := make([]string, len(values))
@@ -51,17 +52,41 @@ func TestAnAnswersValuesReadBackAsUQWroteThem(t *testing.T) {
 			t.Fatalf("point %d read back as %q, want %s", index, got, want)
 		}
 	}
-	// One point fewer - a number - costs its time and its value less: the
-	// decoder's ids are derived, so the run keeps none.
-	shorter := `{"name":"_result0","columns":["_time","_result"],"types":["int64","float64"],"group_keys":["bk_target_ip"],` +
-		`"group_values":["192.0.2.10"],"values":[` + strings.Join(points[:len(points)-1], ",") + `]}`
-	fewer := &collectingSink{}
-	if _, err := fixtureClient(t, http.StatusOK, `{"series":[`+shorter+`],"is_partial":false}`, DefaultLimits()).
-		Execute(context.Background(), validAttempt(t), fewer); err != nil {
-		t.Fatal(err)
+	// One point fewer - a number - costs its value less: the points are one
+	// a step, so the run keeps their first time and step, and the decoder's
+	// ids are derived, so it keeps none. Out of step, the point costs its
+	// time too.
+	answered := func(t *testing.T, times []int64, count int) *execution.Dataset {
+		t.Helper()
+		body := make([]string, count)
+		for index := range body {
+			body[index] = fmt.Sprintf("[%d,%s]", times[index], values[index])
+		}
+		answer := `{"name":"_result0","columns":["_time","_result"],"types":["int64","float64"],"group_keys":["bk_target_ip"],` +
+			`"group_values":["192.0.2.10"],"values":[` + strings.Join(body, ",") + `]}`
+		got := &collectingSink{}
+		if _, err := fixtureClient(t, http.StatusOK, `{"series":[`+answer+`],"is_partial":false}`, DefaultLimits()).
+			Execute(context.Background(), validAttempt(t), got); err != nil {
+			t.Fatal(err)
+		}
+		return got.batches[0].Dataset
 	}
-	if step, want := dataset.RetainedBytes()-fewer.batches[0].Dataset.RetainedBytes(), uint64(16); step != want {
-		t.Fatalf("one point more costs %d bytes, want %d", step, want)
+	inStep := make([]int64, len(values))
+	outOfStep := make([]int64, len(values))
+	for index := range inStep {
+		inStep[index] = 1700123460000 + int64(index)*60000
+		outOfStep[index] = inStep[index]
+	}
+	outOfStep[1] += 7000
+	for _, test := range []struct {
+		name  string
+		times []int64
+		want  uint64
+	}{{"one a step", inStep, 8}, {"one out of step", outOfStep, 16}} {
+		whole, fewer := answered(t, test.times, len(values)), answered(t, test.times, len(values)-1)
+		if step := whole.RetainedBytes() - fewer.RetainedBytes(); step != test.want {
+			t.Fatalf("%s: one point more costs %d bytes, want %d", test.name, step, test.want)
+		}
 	}
 }
 

@@ -227,11 +227,8 @@ func (coordinator *SlotExecutionCoordinator) acquireEffects(delta effectCounts, 
 	// than remaining, because a share measured against what happens to be free
 	// means a different thing every round - the same object would fit or not by
 	// the luck of who else is running, and nobody could act on the answer.
-	if share := coordinator.qgShareBytes(); share > 0 && stream.retainedTotal()+retained > share {
-		return shareRejection(phase, stream.retainedTotal(), retained, share, stream.ownBudgetUsage(coordinator.budget))
-	}
-	if !coordinator.fitsLocked(retained) {
-		return budgetRejection(observability.CapacityBudgetRetainedBytes, phase, reservation.retainedBytes, retained, coordinator.budget.MaxRetainedBytes, stream.ownBudget(observability.CapacityBudgetRetainedBytes), stream.ownBudgetUsage(coordinator.budget))
+	if err := coordinator.judgeRetainedLocked(stream, retained, phase); err != nil {
+		return err
 	}
 	reservation.states += delta.states
 	reservation.events += delta.events

@@ -290,6 +290,14 @@ const (
 	// large objects across replicas; nothing stops one from filling the replica
 	// it lands on.
 	ReasonQGBudgetShareExceeded = "QG_BUDGET_SHARE_EXCEEDED"
+	// ReasonResourcePoolHeldByOthers names one Query Group's Slot within its
+	// share and refused by the process pool all the same: the rest of the pool
+	// is held by other Query Groups or by the worker itself. Every byte a Query
+	// Group's Slot holds is judged against its share first, so a Slot refused
+	// here is not too large; the next attempt fits once the others let go.
+	// RESOURCE_HARD_STOP stays the pool's refusal of what belongs to no Query
+	// Group.
+	ReasonResourcePoolHeldByOthers = "RESOURCE_POOL_HELD_BY_OTHERS"
 	// ReasonSupplementKeptReadAbsent names a supplement of a Slot whose
 	// queries, planned again from the Slot's frozen plan, are not all the
 	// query the lookback kept the late read of. Nothing is run and nothing

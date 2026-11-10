@@ -103,6 +103,7 @@ var reasonSourcesV2 = map[string]ReasonSourceV2{
 	ReasonExecutionBudgetExhausted: ReasonSourceMet,
 	ReasonQGBudgetShareExceeded:    ReasonSourceMet,
 	ReasonResourceHardStop:         ReasonSourceMet,
+	ReasonResourcePoolHeldByOthers: ReasonSourceMet,
 	ReasonSlotBudgetExceeded:       ReasonSourceMet,
 	ReasonStateBudgetExceeded:      ReasonSourceMet,
 	ReasonRecordTooLarge:           ReasonSourceMet,

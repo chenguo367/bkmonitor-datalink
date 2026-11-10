@@ -70,6 +70,7 @@ type TargetFlowFacts struct {
 	CapacityPhase      string  `json:"capacity_phase,omitempty"`
 	CapacityOwnUsed    *uint64 `json:"capacity_own_used,omitempty"`
 	CapacitySharedUsed uint64  `json:"capacity_shared_used,omitempty"`
+	CapacityOthersUsed *uint64 `json:"capacity_others_used,omitempty"`
 	CapacityRequested  uint64  `json:"capacity_requested,omitempty"`
 	CapacityLimit      uint64  `json:"capacity_limit,omitempty"`
 	Decision           string  `json:"decision,omitempty"`
@@ -402,6 +403,7 @@ func (f *TargetFlow) Observe(ctx context.Context, o Observation) {
 	if r := o.CapacityRejection; r != nil {
 		facts.CapacityBudget, facts.CapacityPhase = string(o.CapacityBudget), r.Phase
 		facts.CapacityOwnUsed, facts.CapacitySharedUsed, facts.CapacityRequested, facts.CapacityLimit = r.OwnUsed, r.SharedUsed, r.Requested, r.Limit
+		facts.CapacityOthersUsed = r.OthersUsed
 	}
 	if ValidExecuteOutcome(o.ExecuteOutcome) {
 		facts.Decision = o.ExecuteOutcome

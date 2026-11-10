@@ -162,7 +162,8 @@ func (c *RetainedPeakCensus) Observe(ctx context.Context, o Observation) {
 		// (addRetainedStop): the pool full and this object over its share.
 		// A Slot refused for its own size is not a reading of the pool.
 		if o.Component != ComponentResource || o.CapacityBudget != CapacityBudgetRetainedBytes ||
-			(string(o.ReasonCode) != contract.ReasonResourceHardStop && string(o.ReasonCode) != contract.ReasonQGBudgetShareExceeded) {
+			(string(o.ReasonCode) != contract.ReasonResourceHardStop && string(o.ReasonCode) != contract.ReasonResourcePoolHeldByOthers &&
+				string(o.ReasonCode) != contract.ReasonQGBudgetShareExceeded) {
 			return
 		}
 	default:

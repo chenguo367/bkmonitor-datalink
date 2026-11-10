@@ -228,8 +228,8 @@ func (coordinator *SlotExecutionCoordinator) acquireProvisional(series, retained
 	// The bytes are the budget and are judged first; the series count is a
 	// guardrail at the smallest a series can encode, which binds only when
 	// the byte accounting has gone wrong.
-	if !coordinator.fitsLocked(retainedBytes) {
-		return budgetRejection(observability.CapacityBudgetRetainedBytes, phase, coordinator.reservations.retainedBytes, retainedBytes, coordinator.budget.MaxRetainedBytes, stream.ownBudget(observability.CapacityBudgetRetainedBytes), stream.ownBudgetUsage(coordinator.budget))
+	if err := coordinator.judgeRetainedLocked(stream, retainedBytes, phase); err != nil {
+		return err
 	}
 	if series > coordinator.budget.MaxSeries-coordinator.reservations.series {
 		return budgetRejection(observability.CapacityBudgetSeries, phase, coordinator.reservations.series, series, coordinator.budget.MaxSeries, stream.ownBudget(observability.CapacityBudgetSeries), stream.ownBudgetUsage(coordinator.budget))
@@ -244,6 +244,32 @@ func (coordinator *SlotExecutionCoordinator) releaseProvisional(series, retained
 	coordinator.reservations.series -= series
 	coordinator.reservations.retainedBytes -= retainedBytes
 	coordinator.reservations.mu.Unlock()
+}
+
+// judgeRetainedLocked judges retainedBytes more that stream asks to hold,
+// under reservations.mu: against the stream's share first, then against the
+// pool. Every byte a Query Group's Slot holds is judged here - its input, its
+// State and output, its gap facts, its no-data memory and first writes, the
+// frames it keeps for its writes - so a Slot within its share that the pool
+// refuses is refused for what others hold (RESOURCE_POOL_HELD_BY_OTHERS),
+// never for being too large. Share before pool and against the stream's own
+// total, not what is free: a share measured against what happens to be free
+// would mean a different thing every round. A stream that has not begun
+// (query-free finalization, the worker's own preparation) belongs to no Query
+// Group and is judged against the pool alone (RESOURCE_HARD_STOP).
+func (coordinator *SlotExecutionCoordinator) judgeRetainedLocked(stream *streamedExecution, retainedBytes uint64, phase string) error {
+	owned := stream != nil && stream.began
+	if share := coordinator.qgShareBytes(); owned && share > 0 && retainedBytes > 0 && stream.retainedTotal()+retainedBytes > share {
+		return shareRejection(phase, stream.retainedTotal(), retainedBytes, share, stream.ownBudgetUsage(coordinator.budget))
+	}
+	if coordinator.fitsLocked(retainedBytes) {
+		return nil
+	}
+	if owned {
+		return poolHeldByOthersRejection(phase, stream.retainedTotal(), coordinator.reservations.retainedBytes, retainedBytes,
+			coordinator.budget.MaxRetainedBytes, stream.ownBudgetUsage(coordinator.budget))
+	}
+	return budgetRejection(observability.CapacityBudgetRetainedBytes, phase, coordinator.reservations.retainedBytes, retainedBytes, coordinator.budget.MaxRetainedBytes, stream.ownBudget(observability.CapacityBudgetRetainedBytes), stream.ownBudgetUsage(coordinator.budget))
 }
 
 // tryAcquireRetained reserves bytes against the retained budget when they fit
@@ -331,7 +357,11 @@ func frameRetainedBytes(frame *execution.EncodedStateFrame) uint64 {
 // not counted either.
 type heldFrames struct {
 	coordinator *SlotExecutionCoordinator
-	bytes       uint64
+	// owner is the Slot whose share the frames count against; its own
+	// holder entry carries them, so the frames register as a holder of their
+	// own only without one.
+	owner *streamedExecution
+	bytes uint64
 	// slot and operation name whose frames these are, and since when they are
 	// held, for the retained-holder reading; bytesNow is bytes for it, and
 	// holding says the frames are in the coordinator's holder registry.
@@ -361,10 +391,10 @@ func (held *heldFrames) keep(chunk []admittedState) {
 	if total == 0 {
 		return
 	}
-	if !held.refused && held.coordinator.tryAcquireRetained(total) {
+	if !held.refused && held.coordinator.holdRetained(held.owner, total, "frames") == nil {
 		held.bytes += total
 		held.bytesNow.Store(held.bytes)
-		if !held.holding {
+		if !held.holding && (held.owner == nil || !held.owner.began) {
 			held.holding, held.since = true, time.Now()
 			held.coordinator.holders.add(held)
 		}
@@ -390,7 +420,7 @@ func (held *heldFrames) settle(kept []admittedState) {
 		}
 	}
 	if total < held.bytes {
-		held.coordinator.releaseProvisional(0, held.bytes-total)
+		held.coordinator.letGoRetained(held.owner, held.bytes-total)
 		held.bytes = total
 		held.bytesNow.Store(total)
 	}
@@ -404,7 +434,7 @@ func (held *heldFrames) release() {
 		return
 	}
 	held.released = true
-	held.coordinator.releaseProvisional(0, held.bytes)
+	held.coordinator.letGoRetained(held.owner, held.bytes)
 	held.bytesNow.Store(0)
 	if held.holding {
 		held.coordinator.holders.remove(held)
@@ -493,6 +523,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	started := time.Now()
 	stream := &streamedExecution{coordinator: coordinator, request: request}
 	defer stream.releaseProvisional()
+	ctx = withRetainedOwner(ctx, stream)
 	queryRequest := execution.QueryExecutionRequest{
 		Contract: request.Contract, Operation: request.Operation, AttemptNo: request.AttemptNo,
 	}
@@ -2068,7 +2099,7 @@ func (coordinator *SlotExecutionCoordinator) admitState(
 	started := time.Now()
 	deterministic := make(map[execution.StateKeyIdentity]execution.ReasonCode)
 	encodedBytes := make([]admittedState, len(mutations))
-	held := &heldFrames{coordinator: coordinator, slot: contractRef.Slot, operation: operation}
+	held := &heldFrames{coordinator: coordinator, owner: retainedOwnerFrom(ctx), slot: contractRef.Slot, operation: operation}
 	var totals applyTotals
 	err := forEachChunk(ctx, len(mutations), coordinator.applyChunkItems(coordinator.budget.MaxStateMutations), func(chunk applyChunk) error {
 		chunkItems := mutations[chunk.start:chunk.end]
@@ -2491,6 +2522,10 @@ func (coordinator *SlotExecutionCoordinator) observeCapacityRejection(
 	if errors.As(err, &exceeded) {
 		observation.CapacityRejection = exceeded.facts
 		switch {
+		case exceeded.others:
+			// Within its share; the rest of the pool is others'. The facts
+			// carry its own, the pool's and the others' bytes.
+			observation.ReasonCode = observability.ReasonCode(contract.ReasonResourcePoolHeldByOthers)
 		case exceeded.share:
 			// This object is over the share any one of them may hold. Not a
 			// pause either, and not the same action as a Slot over the

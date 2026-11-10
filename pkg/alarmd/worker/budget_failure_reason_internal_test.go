@@ -46,6 +46,11 @@ func TestABudgetRejectionNamesWhetherRetryingCanHelp(t *testing.T) {
 			err:  &provisionalBudgetExceededError{budget: observability.CapacityBudgetStateMutations},
 			want: contract.ReasonResourceHardStop,
 		},
+		{
+			name: "within its share, the pool held by others",
+			err:  poolHeldByOthersRejection("normal_input", 10, 95, 10, 100, nil),
+			want: contract.ReasonResourcePoolHeldByOthers,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var got observability.Observation

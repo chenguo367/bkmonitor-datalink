@@ -143,11 +143,12 @@ func TestAColumnarDatasetHandsOutCopies(t *testing.T) {
 }
 
 // A columnar run counts the series' parts once and eight bytes a point for
-// the time and eight for the value beside the record id: a series of 30
-// points costs less than half of the same records kept whole, and each
-// further point adds its columns and its id, not another record. These ids
-// are not the derived ones, so the run keeps them; a run whose ids are
-// derived keeps none, and a further point adds its columns alone.
+// the value beside the record id, and eight for the time when the points are
+// not one a step: a series of 30 points costs less than half of the same
+// records kept whole, and each further point adds its columns and its id,
+// not another record. These ids are not the derived ones, so the run keeps
+// them; a run whose ids are derived keeps none, and a further point adds its
+// columns alone.
 func TestAColumnarRunCountsItsSeriesOnceAndItsPointsAsColumns(t *testing.T) {
 	values := make([]string, 30)
 	for index := range values {
@@ -159,14 +160,26 @@ func TestAColumnarRunCountsItsSeriesOnceAndItsPointsAsColumns(t *testing.T) {
 	if wholeBytes := whole.RetainedBytes(); columnarBytes*2 >= wholeBytes {
 		t.Fatalf("columnar %d bytes, whole %d; want the columnar run under half", columnarBytes, wholeBytes)
 	}
+	// One point a step: the run keeps its first time and its step, so a
+	// further point is its value (8 bytes) and, kept, its id; out of step it
+	// is its time (8 bytes) too.
 	longer := NewDataset(columnarSeries(digestA, 1757462400, append(values, "30.5")...)).RetainedBytes()
-	if step, want := longer-columnarBytes, uint64(16+len(records[0].RecordID)); step != want {
-		t.Fatalf("one more point added %d bytes, want %d: its time, its value and its id", step, want)
+	if step, want := longer-columnarBytes, uint64(8+len(records[0].RecordID)); step != want {
+		t.Fatalf("one more point added %d bytes, want %d: its value and its id", step, want)
+	}
+	uneven := func(records []contract.CanonicalRecordV2) []contract.CanonicalRecordV2 {
+		records[1].SourceTime += 7
+		return records
+	}
+	unevenBytes := NewDataset(uneven(columnarSeries(digestA, 1757462400, values...))).RetainedBytes()
+	unevenLonger := NewDataset(uneven(columnarSeries(digestA, 1757462400, append(values, "30.5")...))).RetainedBytes()
+	if step, want := unevenLonger-unevenBytes, uint64(16+len(records[0].RecordID)); step != want {
+		t.Fatalf("one more point out of step added %d bytes, want %d: its time, its value and its id", step, want)
 	}
 	derivedBytes := NewDataset(derivedSeries(digestA, 1757462400, values...)).RetainedBytes()
 	derivedLonger := NewDataset(derivedSeries(digestA, 1757462400, append(values, "30.5")...)).RetainedBytes()
-	if step := derivedLonger - derivedBytes; step != 16 {
-		t.Fatalf("one more point of a derived run added %d bytes, want 16: its time and its value", step)
+	if step := derivedLonger - derivedBytes; step != 8 {
+		t.Fatalf("one more point of a derived run added %d bytes, want 8: its value", step)
 	}
 	if columnarBytes-derivedBytes != uint64(len(records)*len(records[0].RecordID)) {
 		t.Fatalf("a derived run costs %d, the run keeping its ids %d; want the ids' bytes apart", derivedBytes, columnarBytes)

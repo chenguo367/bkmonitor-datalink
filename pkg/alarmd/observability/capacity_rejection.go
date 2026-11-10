@@ -7,6 +7,10 @@ type CapacityRejectionFacts struct {
 	Phase                        string
 	OwnUsed                      *uint64
 	SharedUsed, Requested, Limit uint64
+	// OthersUsed is what others held of the pool when it refused a Query
+	// Group's Slot within its share (RESOURCE_POOL_HELD_BY_OTHERS): the pool's
+	// reserved bytes less the Slot's own. Unset on every other refusal.
+	OthersUsed *uint64
 	// Usage is what this execution had taken of every budget at the moment one
 	// of them refused, each against the limit it was measured with.
 	//

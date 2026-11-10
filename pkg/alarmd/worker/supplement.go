@@ -57,6 +57,7 @@ func (coordinator *SlotExecutionCoordinator) executeSupplement(
 ) (execution.SlotExecutionResult, error) {
 	stream := &streamedExecution{coordinator: coordinator, request: request, supplement: newSupplementRun(*request.Supplement)}
 	defer stream.releaseProvisional()
+	ctx = withRetainedOwner(ctx, stream)
 	started := time.Now()
 	completion, err := coordinator.ports.Query.Execute(ctx, execution.QueryExecutionRequest{
 		Contract: request.Contract, Operation: request.Operation, AttemptNo: request.AttemptNo,

@@ -991,7 +991,7 @@ func (c *CostSummary) Observe(ctx context.Context, o Observation) {
 	// object this summary does not track is still a refusal of this pool.
 	if o.Stage == StageResourceHard {
 		switch string(o.ReasonCode) {
-		case contract.ReasonResourceHardStop:
+		case contract.ReasonResourceHardStop, contract.ReasonResourcePoolHeldByOthers:
 			c.hardStops.add(epoch)
 		case contract.ReasonQGBudgetShareExceeded:
 			c.shareStops.add(epoch)
@@ -1180,7 +1180,7 @@ func addCost(s *CostScalars, o Observation, trace TraceFields, now time.Time) {
 // under any other word on this budget is neither, and reports so.
 func addRetainedStop(s *CostScalars, o Observation) bool {
 	switch string(o.ReasonCode) {
-	case contract.ReasonResourceHardStop:
+	case contract.ReasonResourceHardStop, contract.ReasonResourcePoolHeldByOthers:
 		s.RetainedHardStops++
 	case contract.ReasonQGBudgetShareExceeded:
 		s.RetainedShareStops++

@@ -43,9 +43,7 @@ func (stream *streamedExecution) loadGapFacts(ctx context.Context, request execu
 		var err error
 		if reservations.gapFacts >= stream.coordinator.budget.MaxGapMutations {
 			err = budgetRejection(observability.CapacityBudgetGapMutations, stream.reservationPhase("normal_gap"), reservations.gapFacts, 1, stream.coordinator.budget.MaxGapMutations, stream.ownReservation(stream.gapFacts), stream.ownBudgetUsage(stream.coordinator.budget))
-		} else if !stream.coordinator.fitsLocked(retained) {
-			err = budgetRejection(observability.CapacityBudgetRetainedBytes, stream.reservationPhase("normal_gap"), reservations.retainedBytes, retained, stream.coordinator.budget.MaxRetainedBytes, stream.ownBudget(observability.CapacityBudgetRetainedBytes), stream.ownBudgetUsage(stream.coordinator.budget))
-		} else {
+		} else if err = stream.coordinator.judgeRetainedLocked(stream, retained, stream.reservationPhase("normal_gap")); err == nil {
 			reservations.gapFacts++
 			reservations.retainedBytes += retained
 		}

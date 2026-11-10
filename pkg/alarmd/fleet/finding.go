@@ -908,14 +908,15 @@ var codeChecks = map[string]verdict{
 	// Budgets this deployment allocates itself, at run time: work it gave up on
 	// because of its own limits. The next step is capacity, the same as for a
 	// span skipped for falling behind.
-	"EXECUTION_BUDGET_EXHAUSTED": lands(CheckDetectionAbandoned),
-	"SLOT_BUDGET_EXCEEDED":       lands(CheckDetectionAbandoned),
-	"STATE_BUDGET_EXCEEDED":      lands(CheckDetectionAbandoned),
-	"VALIDATION_BUDGET_EXCEEDED": lands(CheckDetectionAbandoned),
-	"MESSAGE_BUDGET_EXCEEDED":    lands(CheckDetectionAbandoned),
-	"READINESS_BUDGET_INVALID":   lands(CheckDetectionAbandoned),
-	"RECORD_TOO_LARGE":           lands(CheckDetectionAbandoned),
-	"RESOURCE_HARD_STOP":         lands(CheckDetectionAbandoned),
+	"EXECUTION_BUDGET_EXHAUSTED":   lands(CheckDetectionAbandoned),
+	"SLOT_BUDGET_EXCEEDED":         lands(CheckDetectionAbandoned),
+	"STATE_BUDGET_EXCEEDED":        lands(CheckDetectionAbandoned),
+	"VALIDATION_BUDGET_EXCEEDED":   lands(CheckDetectionAbandoned),
+	"MESSAGE_BUDGET_EXCEEDED":      lands(CheckDetectionAbandoned),
+	"READINESS_BUDGET_INVALID":     lands(CheckDetectionAbandoned),
+	"RECORD_TOO_LARGE":             lands(CheckDetectionAbandoned),
+	"RESOURCE_HARD_STOP":           lands(CheckDetectionAbandoned),
+	"RESOURCE_POOL_HELD_BY_OTHERS": lands(CheckDetectionAbandoned),
 	// The per-Slot capacity budgets, as the query failure names the one that
 	// rejected: observability.CapacityBudgetFailureCode, one word per budget
 	// and OTHER for a budget it does not know. The round's own reason for
