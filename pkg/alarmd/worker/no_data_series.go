@@ -319,7 +319,7 @@ func (stream *streamedExecution) evaluateNoData(
 			continue
 		}
 		started := time.Now()
-		round, err := stream.noDataRoundFor(due, seriesDimensionsFor(prepared, due.Identity),
+		round, err := stream.noDataRoundFor(due, stream.presentSeriesDimensions(prepared, due.Identity),
 			stream.noDataCompleteness(due))
 		if err != nil {
 			outcome, local := noDataLocalOutcome(err)
@@ -374,6 +374,9 @@ func (stream *streamedExecution) evaluateNoData(
 		stream.seriesCensus.Due += len(round.series)
 		stream.seriesCensus.Read += len(round.series)
 		for _, entry := range round.series {
+			// After every prepared series: a window landed before it lets
+			// all of their inputs go.
+			entry.position = len(prepared)
 			pending = append(pending, entry)
 			if len(pending) >= batchLimit {
 				if err := flush(); err != nil {

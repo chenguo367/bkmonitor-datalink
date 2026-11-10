@@ -28,7 +28,12 @@ type streamedExecution struct {
 	header        execution.InternalExecutionHeader
 	prepared      preparedNamedInputIndex
 	streamed      map[streamedInputKey]execution.NamedInputBinding
-	planSeries    map[execution.PlanIdentity]map[execution.SeriesIdentityDigest]struct{}
+	// inputHolds is, by series, what the batches of that series were charged
+	// to the input phase and how many streamed bindings still point at them,
+	// so a window that lets its series' bindings go gives their bytes back
+	// once nothing of the Slot reads them (dropWindowInputs).
+	inputHolds map[execution.SeriesIdentityDigest]*seriesInputHold
+	planSeries map[execution.PlanIdentity]map[execution.SeriesIdentityDigest]struct{}
 	// hostOverlays holds, by Plan and series, the dimensions the platform's
 	// fuller writes for a host CMDB placed by id with another address
 	// (SeriesExecutionBatch.HostOverlays). Nil until a series carries one,
@@ -141,8 +146,16 @@ type streamedExecution struct {
 	// Slot's.
 	effects      effectCounts
 	effectsSpent effectCounts
-	gapFacts     uint64
-	began        bool
+	// keysHeld is what the Slot holds, under the state phase, for every State
+	// key it loaded and that no window gives back with its views
+	// (loadedKeyHeldBytes); summaryHeld is what the summary holds of its
+	// series, under the output phase (slotEvaluationSummary.addedBytes). Both
+	// are charged as each result merges, on either path, and stay to the
+	// Slot's end but for the witnesses a window's writes consumed.
+	keysHeld    uint64
+	summaryHeld uint64
+	gapFacts    uint64
+	began       bool
 	// windows is this Slot's windowed apply (windowed_apply.go); its zero
 	// value is a Slot that has not been cut.
 	windows slotWindows
@@ -319,13 +332,24 @@ func (stream *streamedExecution) reserveRetainedInput(ctx context.Context, bytes
 // unretainInput gives back input bytes this execution reserved, to the
 // pool and from its own total.
 func (stream *streamedExecution) unretainInput(bytes uint64) {
+	stream.unretain(retainPhaseInput, bytes)
+}
+
+// unretain gives back bytes this execution retained under one phase, to the
+// pool and from its own total, no more than the phase holds. The one way to
+// take from a phase before the stream releases everything, as retainBytes is
+// the one way to add: a window applied gives its views, results and inputs
+// back here, phase by phase.
+func (stream *streamedExecution) unretain(phase retainPhase, bytes uint64) {
+	bytes = min(bytes, stream.retainedByPhase[phase])
 	if bytes == 0 {
 		return
 	}
-	bytes = min(bytes, stream.retainedByPhase[retainPhaseInput])
-	stream.retainedByPhase[retainPhaseInput] -= bytes
-	stream.retainedInputNow.Add(^(bytes - 1))
-	stream.retainedNow[retainPhaseInput].Add(^(bytes - 1))
+	stream.retainedByPhase[phase] -= bytes
+	stream.retainedNow[phase].Add(^(bytes - 1))
+	if phase == retainPhaseInput {
+		stream.retainedInputNow.Add(^(bytes - 1))
+	}
 	stream.coordinator.releaseProvisional(0, bytes)
 }
 
@@ -431,10 +455,17 @@ func (stream *streamedExecution) ConsumeSeries(ctx context.Context, batch execut
 	}
 	stream.series += batch.Delivery.Series
 	stream.retainBytes(retainPhaseInput, retained)
+	hold := stream.holdInput(series, retained)
 	folded := make(map[*execution.Dataset]foldedDataset)
 	for _, binding := range batch.Inputs {
 		key := streamedInputKey{consumer: binding.Consumer, series: series, requirement: binding.RequirementID}
-		if existing, duplicate := stream.streamed[key]; duplicate {
+		existing, duplicate := stream.streamed[key]
+		if !duplicate {
+			// A key folded into is still one binding: the batch's bytes join
+			// the series' hold above, and go when its last binding does.
+			hold.bindings++
+			hold.keys++
+		} else {
 			// A second batch for one (consumer, series, requirement) key is a
 			// provider row finer than the series identity. Only a requirement
 			// whose compiled algorithm declares a fold policy may fold it; every
@@ -515,6 +546,7 @@ func (stream *streamedExecution) releaseProvisional() {
 	stream.header = execution.InternalExecutionHeader{}
 	stream.prepared = preparedNamedInputIndex{}
 	stream.streamed, stream.planSeries, stream.completionOnly, stream.effective = nil, nil, nil, nil
+	stream.inputHolds, stream.keysHeld, stream.summaryHeld = nil, 0, 0
 	stream.planSeriesCounts = nil
 	stream.bindings, stream.stateItems, stream.gapItems, stream.delivered = nil, nil, nil, nil
 	stream.state, stream.gaps = execution.StatePreflightResult{}, execution.GapLoadResult{}
@@ -1099,7 +1131,7 @@ func (stream *streamedExecution) evaluateSeries(
 	// Counted here, before the first branch that can drop a series: this is
 	// the Slot's intent, and every later count is measured against it.
 	stream.seriesCensus.Due += len(preparedSeriesEvaluations)
-	for _, prepared := range preparedSeriesEvaluations {
+	for position, prepared := range preparedSeriesEvaluations {
 		if stream.supplement != nil && !stream.supplementTakes(prepared) {
 			continue
 		}
@@ -1119,6 +1151,7 @@ func (stream *streamedExecution) evaluateSeries(
 		}
 		stream.seriesCensus.Read++
 		pending = append(pending, completedSeries{due: prepared.due, series: prepared.identity, inputs: prepared.inputs,
+			position: position,
 			item: execution.StatePreflightItem{Identity: execution.StateKeyIdentity{
 				Plan: prepared.due.Identity, StateGeneration: prepared.due.StateGeneration, SeriesIdentityDigest: prepared.identity,
 			}, ApplyVersion: version, CarryFrom: carryFrom(prepared.due), Sharded: !prepared.due.Shard.IsZero()}})
@@ -1690,6 +1723,11 @@ type completedSeries struct {
 	// the roster stopped expecting (nodata.SyntheticSeries.Closing): its
 	// recovery goes past the open-alert gate, see oneTimeClose.
 	closing bool
+	// position is where the series sits among the Slot's prepared series:
+	// every one before it has been merged by the time it is, so a window
+	// applied before its merge lets go of the inputs of exactly those. A
+	// synthetic no-data series comes after every prepared one.
+	position int
 }
 
 // kind is what this series is, read off its inputs rather than stored twice.
@@ -1834,6 +1872,10 @@ func (stream *streamedExecution) evaluateCompletedSeriesBatch(ctx context.Contex
 	outcomes := make(map[string]int)
 	defer stream.observeCarries(ctx, outcomes)
 	for index, entry := range batch {
+		// The batch stops pointing at the series' inputs as it is taken: a
+		// window applied part way through the batch lets the inputs of the
+		// series before go, and the batch is not to keep them alive past it.
+		batch[index].inputs = nil
 		stream.beginEvaluating(entry.due.Identity)
 		view, outcome := carryHistory(entry.due, loaded.Items[index])
 		if outcome != "" {
@@ -1868,7 +1910,8 @@ func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry
 		if err != nil {
 			return err
 		}
-		if err := stream.mergeProvisional(ctx, resumed, 0); err != nil {
+		// Its key was loaded, and its witness is held as any loaded key's is.
+		if err := stream.mergeMeasured(ctx, resumed, stream.measureMerge(resumed, 0, loadedKeyHeldBytes)); err != nil {
 			return err
 		}
 		stream.noteResumed(due.Identity)
@@ -1951,16 +1994,32 @@ func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry
 	if stream.supplement != nil {
 		stream.noteSupplementEvaluated(due, series, inputs, &evaluated)
 	}
-	// Before the merge, so a window this result would overfill is written
-	// without it and the result starts the next one.
-	if err := stream.windowBeforeMerge(ctx, evaluated, retained); err != nil {
+	return stream.mergeEvaluatedSeries(ctx, entry.position, evaluated, retained, loaded.Items, stateItems)
+}
+
+// mergeEvaluatedSeries merges one evaluated series' result with the views it
+// was evaluated from. Before the merge, a window the result would overfill is
+// applied without it (windowBeforeMerge), letting go of the inputs of every
+// prepared series before position, and the result starts the next window.
+// The views join the window the result is in.
+func (stream *streamedExecution) mergeEvaluatedSeries(
+	ctx context.Context,
+	position int,
+	evaluated execution.EvaluationResult,
+	retained uint64,
+	views []execution.RuntimeStateView,
+	items []execution.StatePreflightItem,
+) error {
+	measured := stream.measureMerge(evaluated, retained, uint64(len(views))*loadedKeyHeldBytes)
+	stream.windows.reached = position
+	if err := stream.windowBeforeMerge(ctx, evaluated, measured); err != nil {
 		return err
 	}
-	if err := stream.mergeProvisional(ctx, evaluated, retained); err != nil {
+	if err := stream.mergeMeasured(ctx, evaluated, measured); err != nil {
 		return err
 	}
-	stream.state.Items = append(stream.state.Items, loaded.Items...)
-	stream.stateItems = append(stream.stateItems, stateItems...)
+	stream.state.Items = append(stream.state.Items, views...)
+	stream.stateItems = append(stream.stateItems, items...)
 	return nil
 }
 

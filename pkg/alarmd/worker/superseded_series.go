@@ -38,7 +38,9 @@ import (
 // skipped is still a Plan this Slot completed, and the Slot commits rather
 // than reading as one that produced no result.
 func (stream *streamedExecution) skipSupersededSeries(ctx context.Context, entry completedSeries, view execution.RuntimeStateView) error {
-	if err := stream.mergeProvisional(ctx, supersededSeriesResult(stream.header.Contract, entry.due), 0); err != nil {
+	// Its key was loaded, and its witness is held as any loaded key's is.
+	result := supersededSeriesResult(stream.header.Contract, entry.due)
+	if err := stream.mergeMeasured(ctx, result, stream.measureMerge(result, 0, loadedKeyHeldBytes)); err != nil {
 		return err
 	}
 	sample := execution.SupersededSample{Series: entry.series, Slot: entry.item.ApplyVersion, Stored: view.PersistedApplyVersion}

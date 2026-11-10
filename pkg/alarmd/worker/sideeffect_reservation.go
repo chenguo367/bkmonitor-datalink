@@ -80,7 +80,33 @@ func addedEffectCounts(current, next execution.EvaluationResult) effectCounts {
 	return count
 }
 
+// mergeBytes is what merging one result reserves, by what it is for: the
+// loaded State the caller measured (retained) and the per-key structures
+// held beside it for the Slot (held), both under the state phase; the
+// result's own effects and what the summary keeps of it (summarized), both
+// under the output phase. retained and effects are the window's and go back
+// with it; held and summarized stay to the Slot's end.
+type mergeBytes struct {
+	retained, held, effects, summarized uint64
+}
+
+func (bytes mergeBytes) total() uint64 {
+	return bytes.retained + bytes.held + bytes.effects + bytes.summarized
+}
+
+// measureMerge is what merging next into the Slot's results would reserve.
+// It reads the results and the summary and changes neither, so the window
+// check before a merge and the merge reserve the same number.
+func (stream *streamedExecution) measureMerge(next execution.EvaluationResult, retained, held uint64) mergeBytes {
+	return mergeBytes{retained: retained, held: held, effects: newEffectBytes(stream.evaluated, next),
+		summarized: stream.summary.addedBytes(next, stream.noDataEnds)}
+}
+
 func (stream *streamedExecution) mergeProvisional(ctx context.Context, next execution.EvaluationResult, retained uint64) error {
+	return stream.mergeMeasured(ctx, next, stream.measureMerge(next, retained, 0))
+}
+
+func (stream *streamedExecution) mergeMeasured(ctx context.Context, next execution.EvaluationResult, measured mergeBytes) error {
 	if stream.evaluated.Contract != (execution.FrozenExecutionContractRef{}) && stream.evaluated.Contract != next.Contract {
 		return errors.New("alarmd worker: series evaluations changed frozen contract")
 	}
@@ -99,8 +125,7 @@ func (stream *streamedExecution) mergeProvisional(ctx context.Context, next exec
 		}
 		return err
 	}
-	effects := newEffectBytes(stream.evaluated, next)
-	if err := stream.coordinator.acquireEffects(delta, retained+effects, stream, stream.reservationPhase("normal_output")); err != nil {
+	if err := stream.coordinator.acquireEffects(delta, measured.total(), stream, stream.reservationPhase("normal_output")); err != nil {
 		var exceeded *provisionalBudgetExceededError
 		if errors.As(err, &exceeded) {
 			stream.coordinator.observeCapacityRejection(ctx, stream.request.Operation, exceeded.budget, err)
@@ -125,9 +150,13 @@ func (stream *streamedExecution) mergeProvisional(ctx context.Context, next exec
 	// Split where it was summed: the loaded State the caller measured under
 	// its own phase, the effects this call adds under the output's. One
 	// reservation, the same total, two answers instead of one.
-	stream.retainBytes(retainPhaseState, retained)
-	stream.retainBytes(retainPhaseOutput, effects)
-	stream.windows.bytes += retained + effects
+	stream.retainBytes(retainPhaseState, measured.retained+measured.held)
+	stream.retainBytes(retainPhaseOutput, measured.effects+measured.summarized)
+	stream.keysHeld += measured.held
+	stream.summaryHeld += measured.summarized
+	// The window's own share: what applying it gives back (applyWindow).
+	stream.windows.stateBytes += measured.retained
+	stream.windows.bytes += measured.retained + measured.effects
 	return nil
 }
 

@@ -9,7 +9,11 @@
 
 package worker
 
-import "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+import (
+	"unsafe"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+)
 
 // slotEvaluationSummary is what is read of a Slot's results once evaluation
 // is over by everything that reads the Slot as a whole: the completion and
@@ -110,6 +114,48 @@ func (summary *slotEvaluationSummary) addPlan(next execution.PlanEvaluationResul
 	for _, state := range next.StateResults {
 		summary.withoutMessage += uint64(len(state.WithoutMessage))
 	}
+}
+
+// summaryPresentEntryBytes is one series digest in a Plan's present set: the
+// key's string header and the empty value as a map keeps them, filled to
+// seven eighths. The digest's own bytes are counted beside it - the set keeps
+// them alive once the Level outcomes that carried them are let go.
+var summaryPresentEntryBytes = (uint64(unsafe.Sizeof(execution.SeriesIdentityDigest(""))) + 1) * 8 / 7
+
+// addedBytes is what folding next in would add to what the summary holds of
+// the Slot's series rather than of its Plans: a present digest for each
+// series new to a Plan whose no-data end index the Slot read, and the no-data
+// end updates. They grow with the series and are held across every window to
+// the Slot's end, so a share that did not see them would let a Slot cut into
+// windows hold them uncounted. It changes nothing; add does.
+func (summary *slotEvaluationSummary) addedBytes(next execution.EvaluationResult,
+	indexed map[execution.PlanIdentity]execution.NoDataEndLoaded) uint64 {
+	var total uint64
+	for _, plan := range next.Plans {
+		if len(plan.NoDataEnds) != 0 {
+			total += retainedObjectBytes(plan.NoDataEnds)
+		}
+		if _, read := indexed[plan.Plan]; !read || len(plan.LevelOutcomes) == 0 {
+			continue
+		}
+		var present map[execution.SeriesIdentityDigest]struct{}
+		if part, found := summary.planPart(plan.Plan); found {
+			present = part.present
+		}
+		counted := make(map[execution.SeriesIdentityDigest]struct{}, 1)
+		for _, outcome := range plan.LevelOutcomes {
+			digest := outcome.SeriesIdentityDigest
+			if _, held := present[digest]; held {
+				continue
+			}
+			if _, already := counted[digest]; already {
+				continue
+			}
+			counted[digest] = struct{}{}
+			total += summaryPresentEntryBytes + uint64(len(digest))
+		}
+	}
+	return total
 }
 
 func copyHistoryCoverage(coverage execution.HistoryCoverage) execution.HistoryCoverage {

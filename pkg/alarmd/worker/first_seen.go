@@ -58,15 +58,11 @@ func (stream *streamedExecution) unseenPlans() map[execution.PlanKey]struct{} {
 		before := func(persisted execution.ApplyVersion) bool {
 			return execution.CompareApplyVersion(persisted, version) != execution.ApplyVersionEqual
 		}
-		seen := false
-		for _, view := range stream.state.Items {
-			if view.Identity.Plan != due.Identity || view.Identity.StateGeneration != due.StateGeneration {
-				continue
-			}
-			if view.Carried != nil || (view.Status != execution.StateMissingWarming && before(view.PersistedApplyVersion)) {
-				seen = true
-				break
-			}
+		// The views of a Slot's landed windows are gone; what they said of
+		// the Plan was kept as they went (noteSeenViews).
+		_, seen := stream.windows.seen[due.Identity]
+		if !seen {
+			seen = viewsSeenBefore(due, version, stream.state.Items)
 		}
 		for _, memory := range stream.noData.Items {
 			if seen {
@@ -82,6 +78,22 @@ func (stream *streamedExecution) unseenPlans() map[execution.PlanKey]struct{} {
 		}
 	}
 	return unseen
+}
+
+// viewsSeenBefore reports whether the views hold anything of the Plan under
+// its generation written before the Slot at version: a record of another
+// Slot, or history carried from another generation.
+func viewsSeenBefore(due execution.DuePlan, version execution.ApplyVersion, views []execution.RuntimeStateView) bool {
+	for _, view := range views {
+		if view.Identity.Plan != due.Identity || view.Identity.StateGeneration != due.StateGeneration {
+			continue
+		}
+		if view.Carried != nil || (view.Status != execution.StateMissingWarming &&
+			execution.CompareApplyVersion(view.PersistedApplyVersion, version) != execution.ApplyVersionEqual) {
+			return true
+		}
+	}
+	return false
 }
 
 // firstSeenActivations splits the Plans this Slot forces to warm up into
