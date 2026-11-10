@@ -551,9 +551,14 @@ func TestMeasureWindowedSlotsOnAFourGiBReplica(t *testing.T) {
 			// 2.5 GiB. Each is said; a Slot that did not succeed fails the
 			// shape.
 			rss := measured.maxRSSAfter <= 5<<29
-			t.Logf("shape=%s criterion success=%t share_refusals=%d round_within_40s=%t peak_rss_within_2.5GiB=%t",
+			// The live heap the collector marked over the most the pool held:
+			// what the Slot keeps that no share charges, beside the
+			// process's fixed resident part.
+			uncharged := int64(measured.livePeak) - int64(measured.reservedPeak)
+			t.Logf("shape=%s criterion success=%t share_refusals=%d round_within_40s=%t peak_rss_within_2.5GiB=%t "+
+				"live_minus_reserved=%d gc_cpu=%.2fs",
 				shape, measured.result == string(observability.ResultSuccess), len(measured.refusals),
-				measured.took <= 40*time.Second, rss)
+				measured.took <= 40*time.Second, rss, uncharged, measured.gcCPU)
 			if measured.completed && measured.result != string(observability.ResultSuccess) {
 				t.Errorf("shape %s: the measured Slot ended %s/%s", shape, measured.result, measured.reason)
 			}
