@@ -660,8 +660,18 @@ type noDataJudgment struct {
 // EVALUATED, which counts as a skip for its streak; a skip it had already
 // filed for another reason keeps that reason. The census is the Plans the
 // Slot had, counted here because the trip can come before they were seen.
-func (stream *streamedExecution) closeNoDataBeyondSlotBudget(ctx context.Context) {
-	stream.noDataMutations = nil
+//
+// landed is, for a Slot some windows of which were written, the Plans every
+// window of which lands (completeWindowsBeyondSlotBudget): their rounds were
+// said, whole, and keep their outcome and their memory. Nil keeps none.
+func (stream *streamedExecution) closeNoDataBeyondSlotBudget(ctx context.Context, landed map[execution.PlanIdentity]struct{}) {
+	kept := stream.noDataMutations[:0:0]
+	for _, mutation := range stream.noDataMutations {
+		if _, whole := landed[mutation.Identity.Plan]; whole {
+			kept = append(kept, mutation)
+		}
+	}
+	stream.noDataMutations = kept
 	seen := 0
 	for _, due := range stream.header.DuePlans {
 		if due.CompiledPlan.NoData() == nil {
@@ -669,9 +679,11 @@ func (stream *streamedExecution) closeNoDataBeyondSlotBudget(ctx context.Context
 		}
 		seen++
 		index, filed := stream.noDataOutcomeIndex[due.Key()]
+		_, whole := landed[due.Identity]
 		switch {
 		case !filed:
 			stream.recordNoDataOutcome(ctx, due, nodata.OutcomeSkippedSlotBudget)
+		case whole:
 		case stream.noDataOutcomes[index] == nodata.OutcomeEvaluated:
 			stream.noDataOutcomes[index] = nodata.OutcomeSkippedSlotBudget
 		}

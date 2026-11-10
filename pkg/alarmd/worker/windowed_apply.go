@@ -897,9 +897,15 @@ func (apply *slotApply) tailStatements(ctx context.Context, due execution.DuePla
 //     its results past what earlier windows took is written. Its windows
 //     already written stay, and its marker records that the rest of it was
 //     not decided.
-//   - The no-data memory is applied for no Plan, as on the one-window path:
-//     a no-data Plan whose synthetic series were cut short would otherwise
-//     remember an absence it never reported.
+//   - The no-data memory is applied only for the Plans of the first kind,
+//     by the withheld rule (decision-020 batch 8, 2.4): every window of
+//     theirs lands, so what they decided was said whole. Not applying it
+//     would have the next round decide again from the memory before this
+//     one, and send again the absences a window here already sent. A Plan of
+//     the second kind writes none, nor its ends: its present series are only
+//     those its landed windows got to, and a memory written from them would
+//     record every series the evaluation never reached as absent. It is
+//     withheld as a Plan whose output did not all land is.
 //
 // The released counts are the window's, so the replacement gaps are counted
 // against an empty window; the retained bytes stay until the stream releases
@@ -910,17 +916,25 @@ func (stream *streamedExecution) completeWindowsBeyondSlotBudget(ctx context.Con
 	stream.effectsSpent.events += stream.effects.events
 	stream.effectsSpent.gaps += stream.effects.gaps
 	stream.effects = effectCounts{}
-	stream.closeNoDataBeyondSlotBudget(ctx)
 	windows := &stream.windows
-	reason := execution.ReasonCode(contract.ReasonExecutionBudgetExhausted)
+	landed := make(map[execution.PlanIdentity]struct{}, len(windows.passed))
 	for _, due := range stream.header.DuePlans {
 		if _, passed := windows.passed[due.Identity]; passed {
+			landed[due.Identity] = struct{}{}
 			continue
 		}
 		if windows.replaced == nil {
 			windows.replaced = make(map[execution.PlanIdentity]struct{})
 		}
 		windows.replaced[due.Identity] = struct{}{}
+		windows.apply.withheldNoData[due.Identity] = struct{}{}
+	}
+	stream.closeNoDataBeyondSlotBudget(ctx, landed)
+	reason := execution.ReasonCode(contract.ReasonExecutionBudgetExhausted)
+	for _, due := range stream.header.DuePlans {
+		if _, replaced := windows.replaced[due.Identity]; !replaced {
+			continue
+		}
 		mutation, err := stream.gapMutationForReasons(due, map[execution.GapScope]execution.ReasonCode{{}: reason})
 		if err != nil {
 			return err

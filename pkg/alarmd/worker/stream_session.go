@@ -1781,7 +1781,7 @@ func (stream *streamedExecution) completeBeyondSlotBudget(ctx context.Context) e
 	// may still count a series that will not be written.
 	stream.evaluated = execution.EvaluationResult{}
 	stream.summary = slotEvaluationSummary{}
-	stream.closeNoDataBeyondSlotBudget(ctx)
+	stream.closeNoDataBeyondSlotBudget(ctx, nil)
 	reason := execution.ReasonCode(contract.ReasonExecutionBudgetExhausted)
 	for _, due := range stream.header.DuePlans {
 		mutation, err := stream.gapMutationForReasons(due, map[execution.GapScope]execution.ReasonCode{{}: reason})
