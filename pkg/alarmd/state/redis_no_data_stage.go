@@ -111,7 +111,10 @@ return {'APPLIED'}
 // guards it, so a writer that landed since the read is the same CONFLICT on
 // either path. Then the staging key must be this attempt's and whole. A
 // check that fails renames nothing; a staging key that is this attempt's is
-// deleted then rather than left to its TTL, since nothing will rename it. The
+// deleted then, in this script, rather than left to its TTL, since nothing
+// will rename it - and only then: the delete compares the marker, nonce and
+// all, before it deletes, so a refused swap never takes the staging key
+// another write under the same name has started over since. The
 // marker goes before the rename - a decoder meeting a field that is neither
 // the header nor a group reads the whole record as corrupt - and the header
 // goes on with it, so the record appears with its header or not at all.

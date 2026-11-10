@@ -411,7 +411,7 @@ func (store *ExecutionStore) applyOneNoData(
 		// round.
 		outcome, applyErr = store.replaceNoDataRecord(ctx, backend, key, stageKey, mutation, header, expectedHeader,
 			lifetime, attempt)
-		if errors.Is(applyErr, errNoDataGroupEncoding) {
+		if errors.Is(applyErr, errNoDataGroupEncoding) || errors.Is(applyErr, errNoDataGroupCount) {
 			return reject(contract.ReasonStateCorrupt)
 		}
 	} else {

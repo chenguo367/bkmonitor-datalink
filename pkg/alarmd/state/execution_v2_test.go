@@ -630,3 +630,25 @@ func applyVersion() execution.ApplyVersion {
 func stateIdentityV2() execution.StateKeyIdentity {
 	return execution.StateKeyIdentity{Plan: execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "9"}, StateGeneration: "generation", SeriesIdentityDigest: seriesDigest("series")}
 }
+
+// 2.8: the swap's field count is the statement's distinct groups, len(Set),
+// and its GroupCount: a whole record that counts other groups than it carries
+// is refused before anything is staged, rather than meeting STAGE_SHORT on
+// every attempt.
+func TestAWholeNoDataRecordCountingOtherGroupsThanItCarriesStagesNothing(t *testing.T) {
+	backend := &casMemoryBackend{values: make(map[string][]byte)}
+	router, _ := NewFixedRouter("target", backend)
+	store, err := NewExecutionStore(ExecutionStoreOptions{Prefix: "alarmd", Router: router, MaxValueBytes: 4096, MaxItemsPerCall: 4, MinTTL: time.Minute, MaxTTL: time.Hour, RestartMargin: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutation := execution.PlanNoDataMutation{GroupCount: 2, Set: []execution.NoDataGroupDelta{{GroupKey: "group-1"}}}
+	_, err = store.replaceNoDataRecord(context.Background(), backend, "formal", "stage", mutation, []byte("header"), nil,
+		time.Hour, execution.NoDataWriteAttempt{OwnerEpoch: 1, AttemptNo: 1})
+	if !errors.Is(err, errNoDataGroupCount) {
+		t.Fatalf("err = %v, want the count refused", err)
+	}
+	if len(backend.hashes) != 0 {
+		t.Fatalf("a refused statement staged %v", backend.hashes)
+	}
+}

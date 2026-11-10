@@ -295,6 +295,20 @@ func TestTwoAttemptsNeverMixTheirStagedFieldsOnARealServer(t *testing.T) {
 		if exists := server.client.Exists(ctx, formal).Val(); exists != 0 {
 			t.Fatal("a write whose staging was lost put a record in place")
 		}
+		// 2.8: a refused swap deletes the staging key only when the marker,
+		// nonce and all, is its own. The earlier write's refusals - its
+		// staging lost, or the formal header not what it expected - leave the
+		// later write's key under the same name as it was.
+		if staged := server.client.HGetAll(ctx, key).Val(); !reflect.DeepEqual(staged, want) {
+			t.Fatalf("after the earlier write's refused swap the staging key holds %v, want the later write's %v", staged, want)
+		}
+		server.client.HSet(ctx, formal, noDataHeaderField, "another writer")
+		if got := swap(t, server.backend, key, earlier, 1); got != HashDeltaConflict {
+			t.Fatalf("earlier swap over a record in place = %s, want a conflict", got)
+		}
+		if staged := server.client.HGetAll(ctx, key).Val(); !reflect.DeepEqual(staged, want) {
+			t.Fatalf("after the earlier write's conflict the staging key holds %v, want the later write's %v", staged, want)
+		}
 	})
 }
 

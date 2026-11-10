@@ -43,6 +43,11 @@ const (
 // statement's fault and not the server's.
 var errNoDataGroupEncoding = errors.New("state: no-data group is not encodable")
 
+// errNoDataGroupCount is a whole-record statement whose group count is not
+// the number of groups it carries, the statement's fault as well: the swap
+// would find the staging key short or long on every attempt.
+var errNoDataGroupCount = errors.New("state: no-data whole record counts other groups than it carries")
+
 func noDataStageTTL(ctx context.Context, now time.Time) time.Duration {
 	deadline, bounded := ctx.Deadline()
 	if !bounded {
@@ -80,6 +85,14 @@ func (store *ExecutionStore) replaceNoDataRecord(
 	header, expectedHeader []byte, lifetime time.Duration,
 	attempt execution.NoDataWriteAttempt,
 ) (HashDeltaOutcome, error) {
+	// The swap's HLEN is the distinct groups and the marker. Set is strictly
+	// ordered (execution.ValidatePlanNoDataMutation), so its length is its
+	// distinct groups, and a statement derived from no record carries every
+	// group, so that is GroupCount: the two are one number, bound here before
+	// anything is staged.
+	if int(mutation.GroupCount) != len(mutation.Set) {
+		return HashDeltaOutcome{}, errNoDataGroupCount
+	}
 	marker, err := noDataStageMarker(attempt)
 	if err != nil {
 		return HashDeltaOutcome{}, err
@@ -105,7 +118,7 @@ func (store *ExecutionStore) replaceNoDataRecord(
 		MarkerField: noDataStageMarkerField, Marker: marker,
 		// The groups the memory holds, as its writer counted them, which is
 		// a count of distinct groups and not of fields sent: a group two
-		// segments both carry is one field.
+		// segments both carry is one field. len(Set), as bound above.
 		Fields: int(mutation.GroupCount) + 1,
 		TTL:    lifetime,
 	}
