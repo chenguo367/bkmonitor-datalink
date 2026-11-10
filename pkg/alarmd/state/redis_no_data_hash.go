@@ -46,6 +46,14 @@ type NoDataHashBackend interface {
 	// ApplyHashDelta applies one delta atomically, proving it was derived from
 	// the header the caller read.
 	ApplyHashDelta(context.Context, HashDeltaWrite) (HashDeltaOutcome, error)
+	// StageHashSegment writes one segment of a whole record into the
+	// attempt's own staging key: HashDeltaApplied, or HashStageLost when a
+	// segment after the first finds the key is not this attempt's any more.
+	StageHashSegment(context.Context, HashStageSegment) (HashDeltaOutcome, error)
+	// SwapStagedHash puts a fully staged record in place of the formal key,
+	// proving the formal header is the one the caller read as ApplyHashDelta
+	// does, and that the staging key is this attempt's and whole.
+	SwapStagedHash(context.Context, HashStageSwap) (HashDeltaOutcome, error)
 }
 
 // HashDeltaWrite is one atomic change to a hash record.
@@ -93,6 +101,14 @@ const (
 	// including the two directions of existence. Current carries the header
 	// Redis holds so the caller can classify it exactly as a fresh read.
 	HashDeltaConflict HashDeltaStatus = "CONFLICT"
+	// HashStageLost is a staging key that is no longer this attempt's: it
+	// expired between two segments, or a later attempt sharing its name
+	// started over. Nothing was put in place, and the write is retried.
+	HashStageLost HashDeltaStatus = "STAGE_LOST"
+	// HashStageShort is a staging key holding a different number of fields
+	// than the memory has groups. It is not renamed: what it holds is not
+	// the memory the header names.
+	HashStageShort HashDeltaStatus = "STAGE_SHORT"
 )
 
 type HashDeltaOutcome struct {
@@ -235,9 +251,9 @@ func decodeHashDeltaReply(reply interface{}) (HashDeltaOutcome, error) {
 	if !ok {
 		return HashDeltaOutcome{}, fmt.Errorf("state: Redis hash delta status %T is not text", items[0])
 	}
-	switch HashDeltaStatus(code) {
-	case HashDeltaApplied:
-		return HashDeltaOutcome{Status: HashDeltaApplied}, nil
+	switch status := HashDeltaStatus(code); status {
+	case HashDeltaApplied, HashStageLost, HashStageShort:
+		return HashDeltaOutcome{Status: status}, nil
 	case HashDeltaConflict:
 		outcome := HashDeltaOutcome{Status: HashDeltaConflict}
 		if len(items) > 1 {

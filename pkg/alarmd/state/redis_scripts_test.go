@@ -18,6 +18,8 @@ func TestTheDigestsSentByHandReadAsTheirScripts(t *testing.T) {
 		{"state_fenced_batch_write", fencedBatchWriteSHA},
 		{"state_apply_hash_delta", applyHashDeltaSHA},
 		{"state_record_hash_field", recordHashFieldSHA},
+		{"state_stage_hash_segment", stageHashSegmentSHA},
+		{"state_swap_staged_hash", swapStagedHashSHA},
 	} {
 		if script, _, _ := redisscript.Resolve("evalsha", []interface{}{"evalsha", test.digest}); script != test.name {
 			t.Errorf("the digest of %s reads as %q", test.name, script)

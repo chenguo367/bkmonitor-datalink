@@ -67,7 +67,33 @@ type NoDataApplyRequest struct {
 	Items    []PlanNoDataMutation
 	// Retention is what the written memory lives for; see GenerationRetention.
 	Retention GenerationRetention
+	// Attempt is the Slot attempt writing, which names the staging key a
+	// whole memory is written into before it is put in place. Zero is a
+	// caller that holds no fence, which only a test is.
+	Attempt NoDataWriteAttempt
 }
+
+// NoDataWriteAttempt names one attempt at a Slot's no-data writes: the fence
+// epoch it holds and its attempt number. Two attempts of one Plan's memory -
+// a retry, or a second owner after the lease moved - differ in one of the two,
+// so each stages a whole memory under a key of its own and neither can mix
+// fields into the other's.
+type NoDataWriteAttempt struct {
+	OwnerEpoch uint64
+	AttemptNo  uint32
+}
+
+// NoDataFirstWriteSegmentGroups is how many groups one script of a staged
+// whole-memory write carries.
+//
+// It bounds how long one script holds the server. A whole memory written in
+// one script blocked it about 1.2-1.8 µs a group (contract.
+// NoDataGroupFirstWriteCost: 117-180 ms at 100,000 groups), so a segment of a
+// thousand is one to two milliseconds - far under decision-018's 100 ms for
+// blocking that recurs - and 500 scripts at 500,000 groups, once per Plan
+// generation. The worker holds one segment's bytes against the pool while the store writes,
+// which is why the number lives here and not in the store alone.
+const NoDataFirstWriteSegmentGroups = 1000
 
 type NoDataApplyItemResult struct {
 	Identity   PlanNoDataIdentity

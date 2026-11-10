@@ -19,4 +19,6 @@ var (
 	_ = redisscript.Register("state_renew_if_below", renewIfBelowScript)
 	_ = redisscript.Register("state_apply_hash_delta", applyHashDeltaScript)
 	_ = redisscript.Register("state_record_hash_field", recordHashFieldScript)
+	_ = redisscript.Register("state_stage_hash_segment", stageHashSegmentScript)
+	_ = redisscript.Register("state_swap_staged_hash", swapStagedHashScript)
 )

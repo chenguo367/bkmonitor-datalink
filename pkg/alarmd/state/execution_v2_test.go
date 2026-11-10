@@ -229,6 +229,62 @@ func (backend *casMemoryBackend) ApplyHashDelta(
 	backend.writeTTLs[write.Key] = write.TTL
 	return HashDeltaOutcome{Status: HashDeltaApplied}, nil
 }
+
+// StageHashSegment and SwapStagedHash restate the staged write's two scripts:
+// the first segment starts its key over, a later one proves the marker, and
+// the swap guards the formal header, proves the marker and the field count,
+// and moves the staging key into place with the formal lifetime.
+func (backend *casMemoryBackend) StageHashSegment(_ context.Context, segment HashStageSegment) (HashDeltaOutcome, error) {
+	if backend.hashes == nil {
+		backend.hashes = make(map[string]map[string][]byte)
+	}
+	if segment.First {
+		backend.hashes[segment.Key] = map[string][]byte{segment.MarkerField: append([]byte(nil), segment.Marker...)}
+	} else if marker, found := backend.hashes[segment.Key][segment.MarkerField]; !found || string(marker) != string(segment.Marker) {
+		return HashDeltaOutcome{Status: HashStageLost}, nil
+	}
+	for _, field := range segment.Set {
+		backend.hashes[segment.Key][field.Name] = append([]byte(nil), field.Value...)
+	}
+	return HashDeltaOutcome{Status: HashDeltaApplied}, nil
+}
+
+func (backend *casMemoryBackend) SwapStagedHash(_ context.Context, swap HashStageSwap) (HashDeltaOutcome, error) {
+	staged := backend.hashes[swap.StageKey]
+	marker, found := staged[swap.MarkerField]
+	own := found && string(marker) == string(swap.Marker)
+	refuse := func(outcome HashDeltaOutcome) (HashDeltaOutcome, error) {
+		if own {
+			delete(backend.hashes, swap.StageKey)
+		}
+		return outcome, nil
+	}
+	if backend.conflict {
+		return refuse(HashDeltaOutcome{Status: HashDeltaConflict})
+	}
+	header, present := backend.hashes[swap.Key][swap.HeaderField]
+	switch {
+	case swap.ExpectedMissing && present:
+		return refuse(HashDeltaOutcome{Status: HashDeltaConflict, Current: header})
+	case !swap.ExpectedMissing && !present:
+		return refuse(HashDeltaOutcome{Status: HashDeltaConflict})
+	case !swap.ExpectedMissing && HeaderDigest(header) != swap.ExpectedDigest:
+		return refuse(HashDeltaOutcome{Status: HashDeltaConflict, Current: header})
+	case !own:
+		return refuse(HashDeltaOutcome{Status: HashStageLost})
+	case len(staged) != swap.Fields:
+		return refuse(HashDeltaOutcome{Status: HashStageShort})
+	}
+	delete(staged, swap.MarkerField)
+	staged[swap.HeaderField] = append([]byte(nil), swap.Header...)
+	backend.hashes[swap.Key] = staged
+	delete(backend.hashes, swap.StageKey)
+	if backend.writeTTLs == nil {
+		backend.writeTTLs = make(map[string]time.Duration)
+	}
+	backend.writeTTLs[swap.Key] = swap.TTL
+	return HashDeltaOutcome{Status: HashDeltaApplied}, nil
+}
 func (backend *casMemoryBackend) CompareAndSet(_ context.Context, key string, expected []byte, missing bool, value []byte, ttl time.Duration) (bool, error) {
 	if backend.conflict {
 		return false, nil

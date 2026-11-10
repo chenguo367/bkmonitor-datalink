@@ -289,6 +289,14 @@ func (*unreadableBackend) ApplyHashDelta(context.Context, HashDeltaWrite) (HashD
 	return HashDeltaOutcome{}, errors.New("state: the store did not answer")
 }
 
+func (*unreadableBackend) StageHashSegment(context.Context, HashStageSegment) (HashDeltaOutcome, error) {
+	return HashDeltaOutcome{}, errors.New("state: the store did not answer")
+}
+
+func (*unreadableBackend) SwapStagedHash(context.Context, HashStageSwap) (HashDeltaOutcome, error) {
+	return HashDeltaOutcome{}, errors.New("state: the store did not answer")
+}
+
 // Every status the store can return is in the list the two observation
 // families are built from.
 //

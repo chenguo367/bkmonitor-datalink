@@ -38,7 +38,10 @@ const (
 	// parts above, measured rather than named: the statement's build and the
 	// client's command. TestMeasureTheFirstNoDataWriteAgainstTheHeap read a
 	// live peak of 495-498 bytes a group at 64-byte keys against 302 counted
-	// by the parts, at 100,000 and 500,000 groups (11-10).
+	// by the parts, at 100,000 and 500,000 groups (11-10), when the write was
+	// one script and built every group at once. A staged write builds one
+	// segment at a time, and the cost a group is counted at is kept as the
+	// bound of what a segment's group adds.
 	noDataGroupBuildBytes = 196
 	// A map of string to int64: a header and groups of eight 24-byte slots
 	// and their control bytes, filled to seven eighths.
@@ -54,24 +57,39 @@ var (
 	noDataGroupMemoryBytes  = uint64(unsafe.Sizeof(execution.NoDataGroupMemory{}))
 )
 
-// noDataFirstWriteBytes is what a write of a whole memory holds in the worker
-// while it is written: the statement's groups, and per group the field the
-// store builds and the arguments that carry it. A statement that changes
-// some groups is the size of those, held by the round that built them; one
-// that replaces the record carries every group the Plan remembers, which is
-// what this counts it for.
-func noDataFirstWriteBytes(mutation execution.PlanNoDataMutation) uint64 {
-	total := uint64(cap(mutation.Set)) * noDataGroupDeltaBytes
-	for _, group := range mutation.Set {
-		key := uint64(len(group.GroupKey))
-		total += 2*key + noDataFieldBytes + noDataFieldPrefixBytes + noDataScriptArgBytes + noDataGroupBuildBytes
-		if group.Absent != nil {
-			total += noDataGroupAbsenceBytes + noDataAbsentValueBytes
-		} else {
-			total += noDataPresentValueBytes
-		}
+// noDataGroupWriteBytes is what writing one group of a whole memory holds
+// in the worker: its key in the statement, the store's field - the key again
+// behind its prefix, and the value - and the pair as the script's arguments.
+func noDataGroupWriteBytes(group execution.NoDataGroupDelta) uint64 {
+	total := noDataGroupDeltaBytes + 2*uint64(len(group.GroupKey)) + noDataFieldBytes + noDataFieldPrefixBytes +
+		noDataScriptArgBytes + noDataGroupBuildBytes
+	if group.Absent != nil {
+		return total + noDataGroupAbsenceBytes + noDataAbsentValueBytes
 	}
-	return total
+	return total + noDataPresentValueBytes
+}
+
+// noDataFirstWriteSegmentBytes is what a write of a whole memory holds in the
+// worker at once beyond the statement: its heaviest segment's groups.
+//
+// The store writes a whole memory into a staging key a segment of
+// execution.NoDataFirstWriteSegmentGroups groups at a time and builds the
+// fields and arguments of one segment before it sends them, so what the write
+// holds at its peak is one segment's, whatever the memory's size. A segment
+// is counted at the whole per-group cost, the statement's own share of each
+// group with it: the statement is the round's, built before the write is
+// asked for, and counting a segment of it here keeps the hold an upper bound
+// of what the write adds rather than an estimate of it.
+func noDataFirstWriteSegmentBytes(mutation execution.PlanNoDataMutation) uint64 {
+	var heaviest uint64
+	for start := 0; start < len(mutation.Set); start += execution.NoDataFirstWriteSegmentGroups {
+		var segment uint64
+		for _, group := range mutation.Set[start:min(start+execution.NoDataFirstWriteSegmentGroups, len(mutation.Set))] {
+			segment += noDataGroupWriteBytes(group)
+		}
+		heaviest = max(heaviest, segment)
+	}
+	return heaviest
 }
 
 // noDataMemoryBytes is what one Plan's loaded memory holds for the Slot: the
@@ -101,46 +119,33 @@ func noDataBytesRefusal(identity execution.PlanNoDataIdentity, groups int, bytes
 }
 
 // holdNoDataFirstWrites reserves what the writes of whole memories hold
-// against the retained pool, for the length of the write, and says which
-// mutations go on to the store. A whole memory that would take the Slot past
-// the share one Query Group's Slot may hold - beside what the Slot still holds
-// when it writes, as a loaded memory is judged (reserveNoDataMemory) - never
-// fits, whatever else is running: that Plan's memory alone is refused, named
-// and counted, and nothing else about the Slot changes - its threshold
-// results were already sent. What is within the
-// share but finds no room in the pool is the Slot's RESOURCE_HARD_STOP, and
-// the Slot is retried. The caller gives back what was held. A coordinator
-// with no retained budget - only a test builds one - holds nothing.
+// against the retained pool, for the length of the write. The store writes
+// the Slot's memories one after another and each a segment at a time, so the
+// most any of them holds at once is its heaviest segment, and that is what is
+// held: a whole memory past the share one Query Group's Slot may hold is
+// written like any other, and none is refused for its size. A segment the
+// pool has no room for is the Slot's RESOURCE_HARD_STOP, and the Slot is
+// retried. The caller gives back what was held. A coordinator with no
+// retained budget - only a test builds one - holds nothing.
 func (coordinator *SlotExecutionCoordinator) holdNoDataFirstWrites(
 	ctx context.Context, request execution.SlotExecutionRequest, mutations []execution.PlanNoDataMutation,
-) ([]execution.PlanNoDataMutation, uint64, error) {
+) (uint64, error) {
 	if coordinator.budget.MaxRetainedBytes == 0 {
-		return mutations, 0, nil
+		return 0, nil
 	}
-	share := coordinator.qgShareBytes()
-	slotHeld := coordinator.holders.heldBy(request.Contract.Slot, request.Operation)
-	kept := make([]execution.PlanNoDataMutation, 0, len(mutations))
 	var held uint64
 	for _, mutation := range mutations {
-		if !mutation.ReplacesWholeRecord() {
-			kept = append(kept, mutation)
-			continue
+		if mutation.ReplacesWholeRecord() {
+			held = max(held, noDataFirstWriteSegmentBytes(mutation))
 		}
-		bytes := noDataFirstWriteBytes(mutation)
-		if share > 0 && slotHeld+held+bytes > share {
-			coordinator.observeNoDataMemoryRefusal(ctx, request, noDataBytesRefusal(mutation.Identity, len(mutation.Set), bytes, share))
-			continue
-		}
-		held += bytes
-		kept = append(kept, mutation)
 	}
 	if held > 0 && !coordinator.tryAcquireRetained(held) {
 		err := budgetRejection(observability.CapacityBudgetRetainedBytes, noDataReservationPhase, RetainedReserved(coordinator), held,
 			coordinator.budget.MaxRetainedBytes, nil, nil)
 		coordinator.observeCapacityRejection(ctx, request.Operation, observability.CapacityBudgetRetainedBytes, err)
-		return nil, 0, err
+		return 0, err
 	}
-	return kept, held, nil
+	return held, nil
 }
 
 // reserveNoDataMemory reserves what the Slot's loaded no-data memories hold,

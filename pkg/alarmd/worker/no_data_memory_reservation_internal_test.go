@@ -102,30 +102,36 @@ func TestAFirstNoDataWriteIsHeldAgainstThePoolWhileItIsWritten(t *testing.T) {
 	}
 }
 
-// B3, the refused side: a first write past the share is refused for that
-// Plan's memory alone - STATE_BUDGET_EXCEEDED, record BYTES, with what it
-// would hold and the share - and the Slot goes on: no error, so the
-// threshold results it already sent stand, and the store is not asked.
-func TestAFirstNoDataWritePastTheShareIsRefusedAndTheSlotGoesOn(t *testing.T) {
-	coordinator, store, observed := pooledNoDataFixture(256 << 10)
+// B3 since decision-020 batch 8: a first write whose whole memory is past
+// the share is no longer refused. The store writes it a segment at a time, so
+// the pool holds one segment while it is written - at least that segment's
+// keys twice, and less than the whole memory's - the store is asked once,
+// nothing is refused, and all of it is given back.
+//
+// The pool is scaled down from a 4 GiB worker's with the same share of it,
+// so that a memory past the share is a few tens of thousands of groups; the
+// memory is sized from the share so its keys alone are past it.
+func TestAFirstNoDataWritePastTheShareIsWrittenASegmentAtATime(t *testing.T) {
+	coordinator, store, observed := pooledNoDataFixture(4 << 20)
 	share := coordinator.qgShareBytes()
+	groups := int(share/(2*noDataGroupKeyLength)) + execution.NoDataFirstWriteSegmentGroups
 	err := coordinator.applyNoDataMemory(context.Background(), execution.SlotExecutionRequest{Operation: execution.OperationNormal},
-		refusedMemoryDue(t), []execution.PlanNoDataMutation{wholeMemory(t, 2000)})
-	if err != nil || store.writes != 0 {
-		t.Fatalf("a memory past the share ended %v after %d writes; want it refused alone and the Slot on", err, store.writes)
+		refusedMemoryDue(t), []execution.PlanNoDataMutation{wholeMemory(t, groups)})
+	if err != nil || store.writes != 1 {
+		t.Fatalf("a memory past the share ended %v after %d writes; want it written", err, store.writes)
 	}
-	var facts *observability.NoDataMemoryRefusalFacts
+	segmentKeys := uint64(execution.NoDataFirstWriteSegmentGroups * 2 * noDataGroupKeyLength)
+	if store.heldAtWrite < segmentKeys || store.heldAtWrite >= uint64(groups*2*noDataGroupKeyLength) {
+		t.Fatalf("the pool held %d while %d groups were written; want at least a segment's keys twice, %d, "+
+			"and less than the whole memory's keys twice, %d", store.heldAtWrite, groups, segmentKeys, groups*2*noDataGroupKeyLength)
+	}
 	for _, observation := range *observed {
 		if observation.Stage == observability.StageNoDataMemoryRefused {
-			facts = observation.NoDataMemoryRefusal
+			t.Fatalf("a memory past the share was refused: %+v", observation.NoDataMemoryRefusal)
 		}
 	}
-	if facts == nil || facts.Reason != contract.ReasonStateBudgetExceeded || facts.Record != string(execution.NoDataRecordBytes) ||
-		facts.Groups != 2000 || facts.Bytes <= share || facts.Limit != int(share) || facts.LimitSource != execution.NoDataLimitShare {
-		t.Fatalf("refusal %+v; want STATE_BUDGET_EXCEEDED/BYTES for 2000 groups, over the share %d, against it", facts, share)
-	}
 	if held := RetainedReserved(coordinator); held != 0 {
-		t.Fatalf("the pool holds %d after the refusal, want nothing", held)
+		t.Fatalf("the pool holds %d after the write, want it all given back", held)
 	}
 }
 

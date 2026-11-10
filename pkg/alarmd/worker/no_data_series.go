@@ -458,14 +458,11 @@ func (coordinator *SlotExecutionCoordinator) applyNoDataMemory(
 	if len(mutations) == 0 {
 		return nil
 	}
-	mutations, held, err := coordinator.holdNoDataFirstWrites(ctx, request, mutations)
+	held, err := coordinator.holdNoDataFirstWrites(ctx, request, mutations)
 	if err != nil {
 		return err
 	}
 	defer coordinator.releaseProvisional(0, held)
-	if len(mutations) == 0 {
-		return nil
-	}
 	// What each memory lives for: its own Plan's retention, the one the load
 	// renews it to.
 	written := make([]execution.DuePlan, 0, len(mutations))
@@ -485,6 +482,7 @@ func (coordinator *SlotExecutionCoordinator) applyNoDataMemory(
 	}
 	result, err := coordinator.ports.NoData.ApplyNoData(ctx, execution.NoDataApplyRequest{
 		Contract: request.Contract, Items: mutations, Retention: retention,
+		Attempt: execution.NoDataWriteAttempt{OwnerEpoch: request.OwnerFence.OwnerEpoch, AttemptNo: request.AttemptNo},
 	})
 	if err != nil {
 		return fmt.Errorf("alarmd worker: store no-data memory: %w", err)

@@ -29,31 +29,29 @@ func (holding fixedHolding) retainedHolding() retainedHolding {
 		bytes: map[string]uint64{RetainedKindInput: holding.bytes}}
 }
 
-// A first write is judged against the share beside what its Slot still
-// holds when it writes, as a loaded memory is: one that fits the share alone
-// and not beside the Slot's own holds is refused for its Plan, while a hold
-// of another Slot's leaves it to the pool.
-func TestAFirstNoDataWriteIsJudgedBesideWhatItsSlotHolds(t *testing.T) {
+// A first write is not judged against the share beside what its Slot still
+// holds when it writes, as it was before decision-020 batch 8: it holds one
+// segment for the length of the write, and the pool, not the share, is what
+// that segment has to fit. Beside a hold of its own Slot that leaves less of
+// the share than the whole memory takes, and beside another Slot's, it is
+// written and nothing is refused.
+func TestAFirstNoDataWriteIsNotRefusedBesideWhatItsSlotHolds(t *testing.T) {
 	writing := execution.SlotIdentity{QueryGroup: "query-group", EvaluationTime: 60}
 	other := execution.SlotIdentity{QueryGroup: "other-group", EvaluationTime: 60}
 	request := execution.SlotExecutionRequest{Operation: execution.OperationNormal,
 		Contract: execution.FrozenExecutionContractRef{Slot: writing}}
 	const groups = 1000
 	for _, c := range []struct {
-		name    string
-		holder  execution.SlotIdentity
-		refused bool
+		name   string
+		holder execution.SlotIdentity
 	}{
-		{"beside its own Slot's holds", writing, true},
-		{"beside another Slot's", other, false},
+		{"beside its own Slot's holds", writing},
+		{"beside another Slot's", other},
 	} {
 		coordinator, store, observed := pooledNoDataFixture(1 << 20)
 		share := coordinator.qgShareBytes()
-		bytes := noDataFirstWriteBytes(wholeMemory(t, groups))
-		if bytes >= share {
-			t.Fatalf("%d groups take %d, want them within the share %d alone", groups, bytes, share)
-		}
-		coordinator.holders.add(fixedHolding{slot: c.holder, bytes: share - bytes + 1})
+		// Less of the share left than the memory's keys alone take twice.
+		coordinator.holders.add(fixedHolding{slot: c.holder, bytes: share - groups*noDataGroupKeyLength})
 		err := coordinator.applyNoDataMemory(context.Background(), request, refusedMemoryDue(t),
 			[]execution.PlanNoDataMutation{wholeMemory(t, groups)})
 		refusals := 0
@@ -62,9 +60,9 @@ func TestAFirstNoDataWriteIsJudgedBesideWhatItsSlotHolds(t *testing.T) {
 				refusals++
 			}
 		}
-		if err != nil || (refusals == 1) != c.refused || (store.writes == 0) != c.refused {
-			t.Fatalf("%s: ended %v with %d refusals and %d writes; want refused %v and the Slot on", c.name, err, refusals,
-				store.writes, c.refused)
+		if err != nil || refusals != 0 || store.writes != 1 {
+			t.Fatalf("%s: ended %v with %d refusals and %d writes; want it written and nothing refused", c.name, err,
+				refusals, store.writes)
 		}
 	}
 }
