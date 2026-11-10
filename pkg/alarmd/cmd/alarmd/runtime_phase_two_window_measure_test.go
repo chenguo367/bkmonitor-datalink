@@ -351,19 +351,49 @@ func windowMeasureRuntimeSamples() []metrics.Sample {
 		{Name: "/memory/classes/total:bytes"}, {Name: "/memory/classes/heap/released:bytes"}}
 }
 
-// windowMeasureCPU is the process's CPU time so far: user and system from the
-// kernel, and the collector's share from the runtime.
-func windowMeasureCPU() (process, collector float64) {
+// windowMeasureCPU is this process's CPU time so far - alarmd's alone, the
+// fake UQ answering from a process of its own: user and system from the
+// kernel, apart, and the collector's share from the runtime.
+func windowMeasureCPU() (user, system, collector float64) {
 	var usage syscall.Rusage
 	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err == nil {
-		process = float64(usage.Utime.Sec+usage.Stime.Sec) + float64(usage.Utime.Usec+usage.Stime.Usec)/1e6
+		user = float64(usage.Utime.Sec) + float64(usage.Utime.Usec)/1e6
+		system = float64(usage.Stime.Sec) + float64(usage.Stime.Usec)/1e6
 	}
 	sample := []metrics.Sample{{Name: "/cpu/classes/gc/total:cpu-seconds"}}
 	metrics.Read(sample)
 	if sample[0].Value.Kind() == metrics.KindFloat64 {
 		collector = sample[0].Value.Float64()
 	}
-	return process, collector
+	return user, system, collector
+}
+
+// windowMeasureResetPeakRSS clears the kernel's peak resident set for this
+// process, so the next read is the measured round's own and not the warm-up
+// rounds' (Linux: 5 written to /proc/self/clear_refs resets VmHWM). It reports
+// whether the platform has the reset; without it the peak read after the
+// round is the process's lifetime peak and is said so on the line.
+func windowMeasureResetPeakRSS() bool {
+	return os.WriteFile("/proc/self/clear_refs", []byte("5"), 0) == nil
+}
+
+// windowMeasureRoundPeakRSS is VmHWM in bytes, the peak resident set since
+// the last reset, or zero where /proc/self/status has none.
+func windowMeasureRoundPeakRSS() uint64 {
+	status, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(status), "\n") {
+		if value, found := strings.CutPrefix(line, "VmHWM:"); found {
+			kib, err := strconv.ParseUint(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(value), "kB")), 10, 64)
+			if err != nil {
+				return 0
+			}
+			return kib * 1024
+		}
+	}
+	return 0
 }
 
 // windowMeasureMaxRSS is the process's peak resident set over its lifetime,
@@ -557,6 +587,9 @@ type windowMeasureResult struct {
 	timing                          observability.SlotTimingFacts
 	took                            time.Duration
 	cpu, gcCPU, redisCPU            float64
+	cpuUser, cpuSystem              float64
+	roundPeakRSS                    uint64
+	roundPeakReset                  bool
 	objectsPeak, livePeak, heldPeak uint64
 	objectsBefore, liveBefore       uint64
 	maxRSSBefore, maxRSSAfter       uint64
@@ -623,7 +656,13 @@ func TestMeasureWindowedSlotsOnAFourGiBReplica(t *testing.T) {
 			// the round within 40 s, the process's peak resident set within
 			// 2.5 GiB. Each is said; a Slot that did not succeed fails the
 			// shape.
-			rss := measured.maxRSSAfter <= 5<<29
+			// The round's own peak where the kernel can reset it; elsewhere
+			// the lifetime peak, which the warm-up rounds may have set.
+			peak := measured.maxRSSAfter
+			if measured.roundPeakReset && measured.roundPeakRSS > 0 {
+				peak = measured.roundPeakRSS
+			}
+			rss := peak <= 5<<29
 			// The live heap the collector marked over the most the pool held:
 			// what the Slot keeps that no share charges, beside the
 			// process's fixed resident part.
@@ -654,17 +693,19 @@ func (measured windowMeasureResult) line(shape windowMeasureShape) string {
 	}
 	return fmt.Sprintf("series=%d points=%d no_data=%t result=%s reason=%s cause=%s run_err=%q "+
 		"share_rejected=%.0f refusals=[%s] took=%s slot_ms=%d input_ms=%d preflight_ms=%d evaluate_ms=%d "+
-		"cpu=%.2fs gc_cpu=%.2fs redis_cpu=%.2fs "+
+		"cpu=%.2fs cpu_user=%.2fs cpu_sys=%.2fs gc_cpu=%.2fs redis_cpu=%.2fs round_peak_rss=%d (reset %t) "+
 		"heap_objects_peak=%d (before %d) live_marked_peak=%d (before %d) runtime_held_peak=%d "+
 		"maxrss_before=%d maxrss_after=%d reserved_peak=%d retained_peak=%d (input %d output %d state %d gap %d) share=%d "+
 		"windows=%d ceiling_windows=%d raised_windows=%d usage_series=%d state_mutations=%d events=%d "+
 		"write_batches=%d events_written=%d record_ids_kept_runs=%d record_ids_outside_window=%d "+
 		"witness_items=%.0f witness_bytes=%.0f redis=[%s] "+
-		"apply_ms=%d record_ids_ms=%d redis_wall_by_caller=[%s] memory_at_held_peak=[%s] memory_after=[%s]",
+		"apply_ms=%d record_ids_ms=%d cut_ms=%d merge_ms=%d series_ms=%d no_data_read_ms=%d no_data_write_ms=%d "+
+		"unattributed_ms=%d redis_wall_by_caller=[%s] memory_at_held_peak=[%s] memory_after=[%s]",
 		shape.series, shape.points, shape.noData, measured.result, measured.reason, measured.cause, runErr,
 		measured.rejected, strings.Join(refusals, ","), measured.took.Round(time.Millisecond),
 		measured.timing.Slot, measured.timing.Input, measured.timing.Preflight, measured.timing.Evaluate,
-		measured.cpu, measured.gcCPU, measured.redisCPU,
+		measured.cpu, measured.cpuUser, measured.cpuSystem, measured.gcCPU, measured.redisCPU,
+		measured.roundPeakRSS, measured.roundPeakReset,
 		measured.objectsPeak, measured.objectsBefore, measured.livePeak, measured.liveBefore, measured.heldPeak,
 		measured.maxRSSBefore, measured.maxRSSAfter, measured.reservedPeak, usage.RetainedBytes,
 		usage.RetainedInputBytes, usage.RetainedOutputBytes, usage.RetainedStateBytes, usage.RetainedGapBytes,
@@ -672,7 +713,9 @@ func (measured windowMeasureResult) line(shape windowMeasureShape) string {
 		usage.Series, usage.StateMutations, usage.Events, measured.batches, measured.events,
 		measured.keptRuns, measured.outside, measured.witnessItems, measured.witnessBytes,
 		windowMeasureCommandLine(measured.commands),
-		measured.timing.Apply, measured.timing.RecordIDs, windowMeasureSecondsLine(measured.redisCallers),
+		measured.timing.Apply, measured.timing.RecordIDs, measured.timing.Cut, measured.timing.Merge, measured.timing.Series,
+		measured.timing.NoDataRead, measured.timing.NoDataWrite, measured.timing.Unattributed,
+		windowMeasureSecondsLine(measured.redisCallers),
 		measured.classesAtPeak, measured.classesAfter)
 }
 
@@ -834,21 +877,24 @@ func measureWindowedShape(t *testing.T, shape windowMeasureShape) windowMeasureR
 			}
 		}
 	}()
-	cpuBefore, gcBefore := windowMeasureCPU()
+	measured.roundPeakReset = windowMeasureResetPeakRSS()
+	userBefore, systemBefore, gcBefore := windowMeasureCPU()
 	measuring.Store(true)
 	clock.Store(base + (slots-1)*60 + 1)
 	started := time.Now()
 	runErr := bundle.runScheduledOnce(ctx)
 	took := time.Since(started)
 	measuring.Store(false)
-	cpuAfter, gcAfter := windowMeasureCPU()
+	userAfter, systemAfter, gcAfter := windowMeasureCPU()
+	measured.roundPeakRSS = windowMeasureRoundPeakRSS()
 	close(done)
 	<-sampled
 
 	mu.Lock()
 	defer mu.Unlock()
 	measured.runErr, measured.took = runErr, took
-	measured.cpu, measured.gcCPU = cpuAfter-cpuBefore, gcAfter-gcBefore
+	measured.cpuUser, measured.cpuSystem, measured.gcCPU = userAfter-userBefore, systemAfter-systemBefore, gcAfter-gcBefore
+	measured.cpu = measured.cpuUser + measured.cpuSystem
 	measured.objectsPeak, measured.livePeak, measured.heldPeak = objectsPeak.Load(), livePeak.Load(), heldPeak.Load()
 	measured.reservedPeak = reservedPeak.Load()
 	if classes := classesAtPeak.Load(); classes != nil {
