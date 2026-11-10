@@ -298,7 +298,11 @@ func (stream *streamedExecution) evaluateNoData(
 	// Slot-wide check, which replaces every Plan's results with a budget gap -
 	// the threshold detection this round already decided included.
 	budget := stream.coordinator.slotBudget()
-	spentStates, spentEvents := stream.effects.states, stream.effects.events
+	// The Slot's spend across the windows already written as well: a no-data
+	// Plan is still judged against what the whole Slot spent, until its
+	// synthetic series are cut into windows of their own.
+	spentStates := stream.effectsSpent.states + stream.effects.states
+	spentEvents := stream.effectsSpent.events + stream.effects.events
 	for _, due := range stream.header.DuePlans {
 		if due.CompiledPlan.NoData() == nil {
 			continue

@@ -134,10 +134,18 @@ type streamedExecution struct {
 	// beganAt is when this execution started, for the total the phases are
 	// read against. Zero on an execution that never began, which reports no
 	// duration rather than the time since the epoch.
-	beganAt  time.Time
-	effects  effectCounts
-	gapFacts uint64
-	began    bool
+	beganAt time.Time
+	// effects is the State, event and gap counts this execution holds of
+	// the pool and of the per-Slot caps; effectsSpent is what windows
+	// already applied held and gave back, so the two together are the
+	// Slot's.
+	effects      effectCounts
+	effectsSpent effectCounts
+	gapFacts     uint64
+	began        bool
+	// windows is this Slot's windowed apply (windowed_apply.go); its zero
+	// value is a Slot that has not been cut.
+	windows slotWindows
 	// namedOutputs is the tables of named outputs the Slot's queries aligned,
 	// by physical query, kept from the completion for the detection
 	// snapshots of their Plans' events. Nil for a Slot whose queries asked
@@ -519,7 +527,8 @@ func (stream *streamedExecution) releaseProvisional() {
 	stream.coordinator.reservations.mu.Unlock()
 	stream.gapFacts = 0
 	stream.coordinator.releaseEffects(stream.effects)
-	stream.effects = effectCounts{}
+	stream.effects, stream.effectsSpent = effectCounts{}, effectCounts{}
+	stream.windows = slotWindows{}
 	stream.coordinator.releaseProvisional(stream.series, stream.retainedTotal())
 	stream.namedOutputs = nil
 	stream.series, stream.retainedByPhase, stream.namedReserved = 0, [retainPhaseCount]uint64{}, 0
@@ -1037,6 +1046,7 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 	if err := stream.loadNoDataEnds(ctx); err != nil {
 		return err
 	}
+	stream.windows.prepared = preparedSeriesEvaluations
 	if err := stream.evaluateSeries(ctx, completion, preparedSeriesEvaluations); err != nil {
 		var exceeded *provisionalBudgetExceededError
 		// A supplement over its budget fails as it is: the replacement opens
@@ -1097,6 +1107,7 @@ func (stream *streamedExecution) evaluateSeries(
 			if err := flush(); err != nil {
 				return err
 			}
+			stream.beginEvaluating(prepared.due.Identity)
 			if err := stream.mergePrimaryIncompleteSeries(ctx, prepared.due, incomplete); err != nil {
 				return err
 			}
@@ -1138,6 +1149,7 @@ func (stream *streamedExecution) evaluateSeries(
 			continue
 		}
 		started := time.Now()
+		stream.beginEvaluating(due.Identity)
 		result, err := stream.noSeriesPlanResult(due)
 		if err != nil {
 			return err
@@ -1705,7 +1717,14 @@ func (stream *streamedExecution) statePreflightBatchLimit() int {
 // Plan, each opening a Plan-wide gap. Nothing evaluated so far reaches Events
 // or State; Progress records the coverage completion so the Slot is not
 // retried into the same deterministic rejection.
+//
+// That is a Slot none of whose windows was written yet. Once one was, only
+// the Plans the evaluation had not got past are answered that way, and the
+// windows written stay (completeWindowsBeyondSlotBudget).
 func (stream *streamedExecution) completeBeyondSlotBudget(ctx context.Context) error {
+	if stream.windows.started {
+		return stream.completeWindowsBeyondSlotBudget(ctx)
+	}
 	// The discarded results give back their State, Event and Gap shares so
 	// the replacement gaps are counted against an empty Slot; the retained
 	// bytes stay reserved until the stream releases everything.
@@ -1815,6 +1834,7 @@ func (stream *streamedExecution) evaluateCompletedSeriesBatch(ctx context.Contex
 	outcomes := make(map[string]int)
 	defer stream.observeCarries(ctx, outcomes)
 	for index, entry := range batch {
+		stream.beginEvaluating(entry.due.Identity)
 		view, outcome := carryHistory(entry.due, loaded.Items[index])
 		if outcome != "" {
 			outcomes[outcome]++
@@ -1851,6 +1871,7 @@ func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry
 		if err := stream.mergeProvisional(ctx, resumed, 0); err != nil {
 			return err
 		}
+		stream.noteResumed(due.Identity)
 		if gapSuperseded {
 			stream.noteSupersededGap(ctx, due.GapIdentity())
 		}
@@ -1929,6 +1950,11 @@ func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry
 	}
 	if stream.supplement != nil {
 		stream.noteSupplementEvaluated(due, series, inputs, &evaluated)
+	}
+	// Before the merge, so a window this result would overfill is written
+	// without it and the result starts the next one.
+	if err := stream.windowBeforeMerge(ctx, evaluated, retained); err != nil {
+		return err
 	}
 	if err := stream.mergeProvisional(ctx, evaluated, retained); err != nil {
 		return err

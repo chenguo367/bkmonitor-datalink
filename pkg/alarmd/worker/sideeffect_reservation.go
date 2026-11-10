@@ -127,6 +127,7 @@ func (stream *streamedExecution) mergeProvisional(ctx context.Context, next exec
 	// reservation, the same total, two answers instead of one.
 	stream.retainBytes(retainPhaseState, retained)
 	stream.retainBytes(retainPhaseOutput, effects)
+	stream.windows.bytes += retained + effects
 	return nil
 }
 

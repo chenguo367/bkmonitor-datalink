@@ -157,58 +157,38 @@ func TestSlotExecutionCoordinatorBindsAlwaysEffectiveTimeToRealSeries(t *testing
 	}
 }
 
-// A Slot whose own State output exceeds the per-Slot cap can never be applied
-// by this process, so it completes UNAVAILABLE with a Plan-wide gap instead of
-// being retried into the same rejection. Nothing reaches Events or State.
-func TestSlotExecutionCoordinatorCompletesSlotBeyondItsOwnBudgetAsUnavailable(t *testing.T) {
+// A Slot whose own State output exceeds the per-Slot cap used to be refused
+// whole: it completed UNAVAILABLE with a Plan-wide gap and nothing reached
+// Events or State. The cap now bounds a window (decision-020 batch 8), so the
+// same Slot is written in two windows - each one's events acknowledged
+// before its State - and completes; only a series that alone exceeds a cap
+// is still refused by name.
+func TestSlotExecutionCoordinatorWritesASlotBeyondItsCapInWindows(t *testing.T) {
 	fixture := newFixtureWithBudget(t, worker.ProvisionalBudget{
 		MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxStateMutations: 1, MaxEvents: 1, MaxGapMutations: 1, StoreMaxItems: 8192,
 	})
 	fixture.ports.reverseStateReceipts = true
 	result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
-	if err != nil || !result.Completed || result.CompletionKind != execution.CompletionUnavailable ||
-		result.Result != observability.ResultDegraded ||
-		result.ReasonCode != execution.ReasonCode(contract.ReasonExecutionBudgetExhausted) {
-		t.Fatalf("Execute() result=%+v error=%v, want a deterministic UNAVAILABLE completion", result, err)
+	if err != nil || !result.Completed || result.ReasonCode == execution.ReasonCode(contract.ReasonExecutionBudgetExhausted) {
+		t.Fatalf("Execute() result=%+v error=%v, want the Slot written in windows and completed", result, err)
 	}
-	if fixture.ports.eventCount != 0 || fixture.ports.stateApplyCalls != 0 {
-		t.Fatal("over-budget Slot reached Events or State")
+	if fixture.ports.eventCount != 2 || fixture.ports.stateApplyCalls != 2 || len(fixture.ports.eventBatches) != 2 {
+		t.Fatalf("events=%d in %d batches, State writes=%d; want one window per series", fixture.ports.eventCount,
+			len(fixture.ports.eventBatches), fixture.ports.stateApplyCalls)
 	}
-	completion := fixture.ports.lastProgress.Completion
-	if completion.Kind != execution.CompletionUnavailable || completion.Result != observability.ResultDegraded ||
-		completion.ReasonCode != execution.ReasonCode(contract.ReasonExecutionBudgetExhausted) || completion.Primary == nil {
-		t.Fatalf("Progress completion = %+v", completion)
-	}
-	gaps := fixture.ports.gapMutations
-	if len(gaps) != 1 || len(gaps[0].Scopes) != 1 || gaps[0].Scopes[0].Scope != (execution.GapScope{}) ||
-		gaps[0].Scopes[0].ReasonCode != execution.ReasonCode(contract.ReasonExecutionBudgetExhausted) {
-		t.Fatalf("gap mutations = %+v, want one Plan-wide gap with the completion reason", gaps)
-	}
-	var rejection *observability.Observation
-	for index := range *fixture.observations {
-		if (*fixture.observations)[index].Stage == observability.StageResourceHard {
-			rejection = &(*fixture.observations)[index]
+	var order []string
+	for _, stage := range *fixture.trace {
+		if stage == "event_ack" || stage == "state_apply" || stage == "progress_commit" {
+			order = append(order, stage)
 		}
 	}
-	// The Slot still reports its no-data census, on this path as on the
-	// ordinary one, so a replaced Slot is not silent about its Plans.
-	census := false
+	if want := []string{"event_ack", "state_apply", "event_ack", "state_apply", "progress_commit"}; !reflect.DeepEqual(order, want) {
+		t.Fatalf("write order = %v, want %v", order, want)
+	}
 	for _, observation := range *fixture.observations {
-		if observation.NoDataCensus != nil {
-			census = true
+		if observation.Stage == observability.StageResourceHard {
+			t.Fatalf("a Slot cut into windows reported a capacity rejection: %+v", observation)
 		}
-	}
-	if !census {
-		t.Fatal("the over-budget Slot reported no no-data census")
-	}
-	if rejection == nil || rejection.CapacityBudget != observability.CapacityBudgetStateMutations ||
-		rejection.ReasonCode != execution.ReasonCode(contract.ReasonSlotBudgetExceeded) {
-		t.Fatalf("capacity rejection = %+v, want the per-Slot budget reason", rejection)
-	}
-	facts := rejection.CapacityRejection
-	if facts == nil || facts.Phase != "slot_output" || facts.OwnUsed == nil || *facts.OwnUsed != 2 ||
-		facts.Requested != 1 || facts.Limit != 1 || facts.SharedUsed != 0 {
-		t.Fatalf("capacity rejection facts = %+v, want own_used=2 requested=1 limit=1", facts)
 	}
 }
 
@@ -1531,6 +1511,20 @@ type recordingPorts struct {
 	// stateAdmissionRule and stateAdmissionText go on the refused admission
 	// item, as the store names its rule and says its sentence.
 	stateAdmissionRule, stateAdmissionText string
+
+	// extraSeries streams one more series per digest beside the fixture's
+	// own, each with its bound EffectiveTime fact, so a Slot can hold more
+	// series than one window takes.
+	extraSeries []string
+	// failEventAckAt and failStateApplyAt fail only that call of the event
+	// write or of the State apply, counted from one: one window of a Slot
+	// written window by window.
+	failEventAckAt, failStateApplyAt int
+	eventAckCalls                    int
+	// eventBatches is the series of every event batch the sink took, and
+	// appliedKeys every State key a write sent, in the order they came.
+	eventBatches [][]string
+	appliedKeys  []execution.StateKeyIdentity
 }
 
 func (ports *recordingPorts) Execute(ctx context.Context, request execution.QueryExecutionRequest, consumer execution.QueryExecutionConsumer) (execution.QueryExecutionCompletion, error) {
@@ -1577,6 +1571,33 @@ func (ports *recordingPorts) Execute(ctx context.Context, request execution.Quer
 			Consumer:       execution.ConsumerRef{Plan: planIdentity(), LevelID: 5, HasLevel: true},
 			SeriesIdentity: second.Identity.SeriesIdentityDigest, Fact: effectiveTimeFactForTest(input.DuePlans[0].CompiledPlan),
 		})
+	}
+	if len(ports.extraSeries) > 0 {
+		records := input.Inputs[0].Dataset.Records()
+		for _, digest := range ports.extraSeries {
+			// The record the fake evaluator anchors the series' outcome and
+			// event to (Evaluate).
+			recordID := derivedTestRecordID()
+			if digest == strings.Repeat("d", 64) {
+				recordID = strings.Repeat("f", 64)
+			}
+			records = append(records, contract.CanonicalRecordV2{
+				RecordID: recordID, SourceTime: 1_788_000_000, BusinessID: "2",
+				DimensionIdentity: contract.DimensionIdentityV2{Digest: digest},
+				Values:            map[string]json.RawMessage{"value": json.RawMessage(`50.1`)}, Dimensions: map[string]json.RawMessage{},
+				ReceivedTime: 1_788_000_000,
+			})
+			input.EffectiveTimeFacts = append(input.EffectiveTimeFacts, execution.BoundEffectiveTimeFact{
+				Consumer:       execution.ConsumerRef{Plan: planIdentity(), LevelID: 5, HasLevel: true},
+				SeriesIdentity: execution.SeriesIdentityDigest(digest), Fact: effectiveTimeFactForTest(input.DuePlans[0].CompiledPlan),
+			})
+		}
+		indexes := make([]uint32, len(records))
+		for index := range indexes {
+			indexes[index] = uint32(index)
+		}
+		input.Inputs[0].Dataset = execution.NewDataset(records)
+		input.Inputs[0].View, _ = execution.NewDatasetView(input.Inputs[0].Dataset, indexes)
 	}
 	if ports.contractDrift {
 		input.Contract.QueryRevision = "query-v2"
@@ -2078,8 +2099,17 @@ func (ports *recordingPorts) lastTrace() string {
 
 func (ports *recordingPorts) WriteBatch(ctx context.Context, events []contract.TriggerEventV1) error {
 	ports.record("event_ack")
+	ports.eventAckCalls++
 	ports.eventCount += len(events)
 	ports.lastEvents = append([]contract.TriggerEventV1(nil), events...)
+	batch := make([]string, 0, len(events))
+	for _, event := range events {
+		batch = append(batch, event.RecordRef.DimensionIdentityDigest)
+	}
+	ports.eventBatches = append(ports.eventBatches, batch)
+	if ports.failEventAckAt != 0 && ports.eventAckCalls == ports.failEventAckAt {
+		return &retryableOutputTestError{err: errors.New("injected event_ack"), kind: ports.eventFailureKind}
+	}
 	if ports.outputWrite != nil {
 		observability.ReportOutputWrite(ctx, int(ports.outputWrite.Published), int(ports.outputWrite.WithoutMessage), ports.outputWrite.WithoutMessageBy)
 	}
@@ -2173,6 +2203,12 @@ func (ports *recordingPorts) ApplyRuntime(_ context.Context, request execution.S
 	ports.record("state_apply")
 	ports.stateApplyCalls++
 	ports.lastStateApply = request
+	if ports.failStateApplyAt != 0 && ports.stateApplyCalls == ports.failStateApplyAt {
+		return execution.StateApplyResult{}, errors.New("injected state_apply")
+	}
+	for _, item := range request.Items {
+		ports.appliedKeys = append(ports.appliedKeys, item.Identity)
+	}
 	items := make([]execution.StateApplyItemResult, len(request.Items))
 	deterministicIndex := 0
 	if ports.stateApplyDeterministicLast {

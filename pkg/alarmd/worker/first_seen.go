@@ -110,6 +110,24 @@ func firstSeenActivations(
 	return stillForced, firstSeen
 }
 
+// firstSeenUndecided reports whether any Plan this Slot forces to warm up
+// could still be judged first-seen: new to its activation and without a
+// marker, the two facts firstSeenActivations reads that the Slot has before
+// its State is read. The third - nothing of the Plan read from before the
+// Slot - is known only once every series of the Plan has been read, so a
+// Slot holding such a Plan cannot write any window before its evaluation is
+// over (windowed_apply.go): the judgement decides whether the Plan writes at
+// all, and a window written first would have decided it.
+func firstSeenUndecided(forced execution.PlanActivationResult, loadedGaps execution.GapLoadResult) bool {
+	for _, fact := range forced.Facts {
+		marker, found := loadedGaps.Find(fact.GapIdentity())
+		if fact.Selected.Arrived && (!found || marker.Status == execution.GapMissing) {
+			return true
+		}
+	}
+	return false
+}
+
 // satisfiedMarker is the marker that records a first-seen Plan as one that
 // has run: a clear at this Slot's ApplyVersion on a key that holds nothing,
 // which the store writes as a marker with no scope - a cleared tombstone at
