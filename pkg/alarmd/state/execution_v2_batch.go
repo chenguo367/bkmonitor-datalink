@@ -85,6 +85,38 @@ type runtimeSlotWitnesses struct {
 	slot     execution.SlotIdentity
 	sequence uint64
 	items    map[execution.StateKeyIdentity]runtimeWitness
+	bytes    int64
+}
+
+// runtimeWitnessEntryBytes is one remembered witness's fixed heap: its key
+// (five string headers, 80 B) and value (120 B) as they sit in the group's
+// map, scaled by about 1.6 for the slots a bucketed map keeps empty between
+// its load factor and its last growth. An estimate from the layout, not a
+// probe; nothing charges it to a budget, so it only has to read the right
+// order of magnitude against the heap.
+const runtimeWitnessEntryBytes = 320
+
+// runtimeWitnessBytes is what one witness is counted at: the fixed entry plus
+// the strings it alone keeps alive - the series digest of its key and the
+// digests it decoded from the record, each rounded to its allocation. The
+// Plan identity and State generation of the key are left out: every series
+// of a Plan carries the same ones, so they cost per Plan, not per witness.
+// digest is counted only when it is not framedDigest, which is what LoadRuntime
+// assigns it from.
+func runtimeWitnessBytes(identity execution.StateKeyIdentity, witness runtimeWitness) int64 {
+	bytes := runtimeWitnessEntryBytes + sizeClass(len(identity.SeriesIdentityDigest)) +
+		sizeClass(len(witness.framedDigest)) + sizeClass(len(witness.mutationDigest)) +
+		sizeClass(len(witness.applyVersion.SlotDigest))
+	if witness.digest != witness.framedDigest {
+		bytes += sizeClass(len(witness.digest))
+	}
+	return bytes
+}
+
+// RuntimeWitnessStats is the witness cache as its gauges read it.
+type RuntimeWitnessStats struct {
+	Items int
+	Bytes int64
 }
 
 // runtimeWitnessCache keeps preflight witnesses per query group for the Slot
@@ -95,6 +127,7 @@ type runtimeWitnessCache struct {
 	mu       sync.Mutex
 	groups   map[execution.QueryGroupIdentity]*runtimeSlotWitnesses
 	total    int
+	bytes    int64
 	sequence uint64
 }
 
@@ -108,15 +141,18 @@ func (cache *runtimeWitnessCache) remember(slot execution.SlotIdentity, identity
 	group := cache.groups[slot.QueryGroup]
 	if group == nil || group.slot != slot {
 		if group != nil {
-			cache.total -= len(group.items)
+			cache.dropLocked(group)
 		}
 		group = &runtimeSlotWitnesses{slot: slot, items: make(map[execution.StateKeyIdentity]runtimeWitness)}
 		cache.groups[slot.QueryGroup] = group
 	}
-	if _, exists := group.items[identity]; !exists {
+	if previous, exists := group.items[identity]; exists {
+		cache.adjustLocked(group, -runtimeWitnessBytes(identity, previous))
+	} else {
 		cache.total++
 	}
 	group.items[identity] = witness
+	cache.adjustLocked(group, runtimeWitnessBytes(identity, witness))
 	cache.sequence++
 	group.sequence = cache.sequence
 	cache.evictLocked(slot.QueryGroup)
@@ -147,10 +183,50 @@ func (cache *runtimeWitnessCache) take(slot execution.SlotIdentity, identity exe
 	}
 	delete(group.items, identity)
 	cache.total--
+	cache.adjustLocked(group, -runtimeWitnessBytes(identity, witness))
 	if len(group.items) == 0 {
 		delete(cache.groups, slot.QueryGroup)
 	}
 	return witness, true
+}
+
+// forget drops a Query Group's witnesses when this worker lets it go. Nothing
+// else would: the group is replaced only by a later Slot of its own and evicted
+// only under the bounds, so a Query Group handed elsewhere kept its last Slot's
+// witnesses here until the bounds pushed it out - up to 2^18 of them, which no
+// budget charges.
+//
+// upTo is the last Slot the releasing session ran. A group of a later Slot is
+// left alone: it is a newer session's of the same Query Group in this process,
+// opened before the old one's release got here, and dropping it would send that
+// Slot's pending writes down the zero-witness path as conflicts.
+func (cache *runtimeWitnessCache) forget(queryGroup execution.QueryGroupIdentity, upTo execution.EvaluationTime) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	group := cache.groups[queryGroup]
+	if group == nil || group.slot.EvaluationTime > upTo {
+		return
+	}
+	cache.dropLocked(group)
+	delete(cache.groups, queryGroup)
+}
+
+func (cache *runtimeWitnessCache) stats() RuntimeWitnessStats {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	return RuntimeWitnessStats{Items: cache.total, Bytes: cache.bytes}
+}
+
+// dropLocked takes a group's items and bytes off the totals; the caller
+// removes or replaces the group.
+func (cache *runtimeWitnessCache) dropLocked(group *runtimeSlotWitnesses) {
+	cache.total -= len(group.items)
+	cache.bytes -= group.bytes
+}
+
+func (cache *runtimeWitnessCache) adjustLocked(group *runtimeSlotWitnesses, bytes int64) {
+	group.bytes += bytes
+	cache.bytes += bytes
 }
 
 // evictLocked drops the least recently touched groups other than the one being
@@ -172,7 +248,7 @@ func (cache *runtimeWitnessCache) evictLocked(current execution.QueryGroupIdenti
 		if !found {
 			return
 		}
-		cache.total -= len(cache.groups[victim].items)
+		cache.dropLocked(cache.groups[victim])
 		delete(cache.groups, victim)
 	}
 }

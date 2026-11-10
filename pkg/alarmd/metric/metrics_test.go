@@ -876,6 +876,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("state_cache_bytes")] = 1
 	bounds[fqName("state_cache_budget_bytes")] = 1
 	bounds[fqName("state_cache_query_groups")] = 1
+	bounds[fqName("state_witness_items")] = 1
+	bounds[fqName("state_witness_bytes")] = 1
 	bounds[fqName("container_memory_cgroup_info")] = 1
 	bounds[fqName("container_memory_v1_bytes")] = 5
 	// cmd/alarmd noDataCloseOutcomes: eight words.

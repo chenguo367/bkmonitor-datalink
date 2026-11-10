@@ -347,6 +347,7 @@ func openPhaseTwoCoreResources(ctx context.Context, cfg config.Config, recorder 
 		// says so: the Slots keep passing and the keys keep being renewed.
 		recorder.SetRenewalGateSource(executionStore.RenewalGateResets)
 		recorder.SetStateCacheSource(executionStore.StateCacheStats)
+		recorder.SetStateWitnessSource(executionStore.RuntimeWitnessStats)
 	}
 	// The control role records manual closes in the runtime-state store the
 	// owning worker reads them from. A process that is also a worker reuses

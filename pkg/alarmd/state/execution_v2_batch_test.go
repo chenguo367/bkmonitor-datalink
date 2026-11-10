@@ -606,6 +606,45 @@ func TestRuntimeWitnessCacheScopesBySlotAndEvictsOldGroups(t *testing.T) {
 	}
 }
 
+// A released Query Group's witnesses leave with it, and the counts with them;
+// a later Slot's, remembered by a newer session of the same Query Group before
+// the old one's release ran, stay for that Slot's writes.
+func TestRuntimeWitnessCacheForgetDropsReleasedGroupOnly(t *testing.T) {
+	cache := newRuntimeWitnessCache()
+	released := execution.SlotIdentity{QueryGroup: "q", EvaluationTime: 60}
+	other := execution.SlotIdentity{QueryGroup: "other", EvaluationTime: 60}
+	cache.remember(released, seriesIdentity(0), runtimeWitness{framedDigest: "framed", digest: "framed"})
+	cache.remember(released, seriesIdentity(1), runtimeWitness{missing: true})
+	cache.remember(other, seriesIdentity(0), runtimeWitness{missing: true})
+	// Two witnesses of an empty record and one with a 6-byte digest, which
+	// counts once although digest and framedDigest both name it.
+	series := sizeClass(len(seriesIdentity(0).SeriesIdentityDigest))
+	if got, want := cache.stats(), (RuntimeWitnessStats{Items: 3, Bytes: 3*(runtimeWitnessEntryBytes+series) + 8}); got != want {
+		t.Fatalf("stats = %+v, want %+v", got, want)
+	}
+
+	cache.forget("q", 60)
+	if _, ok := cache.take(released, seriesIdentity(1)); ok {
+		t.Fatal("a released Query Group's witness survived forget")
+	}
+	if got, want := cache.stats(), (RuntimeWitnessStats{Items: 1, Bytes: runtimeWitnessEntryBytes + series}); got != want {
+		t.Fatalf("stats after forget = %+v, want %+v: only the other Query Group's witness", got, want)
+	}
+
+	newer := execution.SlotIdentity{QueryGroup: "q", EvaluationTime: 120}
+	cache.remember(newer, seriesIdentity(0), runtimeWitness{missing: true})
+	cache.forget("q", 60)
+	if _, ok := cache.take(newer, seriesIdentity(0)); !ok {
+		t.Fatal("releasing the session that ran up to Slot 60 dropped a newer session's Slot 120 witnesses")
+	}
+	if _, ok := cache.take(other, seriesIdentity(0)); !ok {
+		t.Fatal("forgetting one Query Group dropped another's witnesses")
+	}
+	if got := cache.stats(); got != (RuntimeWitnessStats{}) {
+		t.Fatalf("stats after every witness was taken = %+v, want zero", got)
+	}
+}
+
 // The same write sent a second time, unchanged, is the statement already on
 // disk and must read ALREADY_APPLIED with kind revision_skew, without a write.
 //

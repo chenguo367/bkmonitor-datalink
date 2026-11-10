@@ -2179,6 +2179,14 @@ Labels: `site`, `kind`
 
 Runtime State mutations refused STATE_VERSION_CONFLICT, by where that was decided and which comparison refused them. site: preflight is the view the Slot loaded before evaluating, apply is the bytes the write met. kind: missing is a key the mutation expected at a revision and did not find, which is what a TTL that ran out between the Slot's read and its write leaves -- the retry then reads missing, expects nothing and succeeds, so this kind rising alone is the key's lifetime against the Slot's duration and not a competing writer; revision_moved is a key another write advanced after the read; revision_reset is a key found below the revision expected, gone and written fresh since the read; same_version_other_statement is the expected revision holding this window's ApplyVersion with a different digest, two evaluations of one window that disagree; version_incomparable is a view that reached the comparison without an ordering; other is a store that refused without saying which. The status alone reads the same for all of them and each points at a different fix. Every pair is published at zero so absent and zero read apart. Population is mutations, not Redis commands.
 
+## alarmd_state_witness_bytes
+
+The runtime witness cache's estimated heap, a fixed 320 B per witness for its map entry plus the digests it alone keeps alive, each rounded to its allocation. No budget charges the cache. It is bounded at 2^18 witnesses, and a Query Group's witnesses leave when this worker releases its lease. Read it against the resident heap term in the sizing table. It is an estimate from the layout, not a measurement, and leaves out the Plan identity every series of a Plan shares.
+
+## alarmd_state_witness_items
+
+Preflight witnesses held in the runtime witness cache, kept from a Slot's load of Runtime State to its apply so the write compares without reading the value again. No budget charges the cache. It is bounded at 2^18 witnesses and 4096 Query Groups, the least recently filled Query Group evicted first, and a Query Group's witnesses leave when this worker releases its lease. Read with state_witness_bytes against the resident heap term in the sizing table.
+
 ## alarmd_state_write_reuse_total
 
 Labels: `class`, `stored`

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access"
@@ -1280,6 +1281,10 @@ type productionPhaseTwoOwnershipDependencies struct {
 	// alone, which is what every runtime did before.
 	QueryCooldowns scheduler.QueryCooldownStore
 	ReadHolds      *productionReadHolds
+	// DropRuntimeWitnesses lets go of the preflight witnesses a released
+	// Query Group left in the execution store, up to the last Slot the
+	// releasing session ran. Nil drops none: they leave by the cache's bounds.
+	DropRuntimeWitnesses func(execution.QueryGroupIdentity, execution.EvaluationTime)
 	// Traces exports the spans of the Slots it samples; nil exports none.
 	Traces *tracing.Exporter
 	// DecisionLag hears each decided Slot's lag (the flow's evaluate
@@ -2688,6 +2693,11 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 	// carries (scheduler.WithRetirementReader).
 	retirement := runtime.dependencies.Catalog
 	var executor scheduler.Executor = runtime.dependencies.Executor
+	var ran *sessionSlots
+	if runtime.dependencies.DropRuntimeWitnesses != nil {
+		ran = &sessionSlots{next: executor}
+		executor = ran
+	}
 	release := func() {}
 	if holds := runtime.dependencies.ReadHolds; holds != nil {
 		holds.bind(queryGroup, session)
@@ -2704,6 +2714,14 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 		executor = &viewGatedExecutor{next: executor, gate: runtime.viewGate, queryGroup: queryGroup, session: session, renew: renew}
 		previousRelease := release
 		release = func() { previousRelease(); runtime.viewGate.forget(queryGroup, session) }
+	}
+	if ran != nil {
+		// Here rather than with the State cache's drop, which comes before the
+		// Slot drain: Release runs after it on every path, so no Slot of this
+		// session is still between its load and its apply.
+		drop := runtime.dependencies.DropRuntimeWitnesses
+		previousRelease := release
+		release = func() { previousRelease(); drop(queryGroup, ran.last()) }
 	}
 	executor = &observedProductionSlotExecutor{next: executor, observer: runtime.dependencies.Observer, readHolds: runtime.dependencies.ReadHolds,
 		decisionLag: runtime.dependencies.DecisionLag, traces: runtime.dependencies.Traces}
@@ -2935,6 +2953,31 @@ func (source observedProductionSlotSource) Next(
 		})
 	}
 	return slot, due, facts, err
+}
+
+// sessionSlots remembers the latest Slot one session of a Query Group took to
+// execution, which is how far its release may drop the store's witnesses. The
+// Runner keeps no such figure, and the session's start Slot is not it: the
+// session runs on past it. Taken at entry rather than completion, because a
+// Slot that failed after its load left witnesses all the same.
+type sessionSlots struct {
+	next   scheduler.Executor
+	latest atomic.Int64
+}
+
+func (slots *sessionSlots) Execute(ctx context.Context, request execution.SlotExecutionRequest) (execution.SlotExecutionResult, error) {
+	at := int64(request.Contract.Slot.EvaluationTime)
+	for {
+		seen := slots.latest.Load()
+		if at <= seen || slots.latest.CompareAndSwap(seen, at) {
+			break
+		}
+	}
+	return slots.next.Execute(ctx, request)
+}
+
+func (slots *sessionSlots) last() execution.EvaluationTime {
+	return execution.EvaluationTime(slots.latest.Load())
 }
 
 type observedProductionSlotExecutor struct {

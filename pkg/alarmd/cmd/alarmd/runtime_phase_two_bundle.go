@@ -893,15 +893,20 @@ func openProductionPhaseTwoBundleAssembly(
 	// from the catalog; a record that already says it is not asked about.
 	assignmentReconciler.WithTimelineRevisions(repository)
 	var executor scheduler.Executor = coordinator
+	var dropWitnesses func(execution.QueryGroupIdentity, execution.EvaluationTime)
+	if executionStore != nil {
+		dropWitnesses = executionStore.DropRuntimeWitnesses
+	}
 	productionOwnership, err := newProductionPhaseTwoOwnership(productionPhaseTwoOwnershipDependencies{
-		Roles:               cfg.EffectiveRoles(),
-		ControlCandidate:    phaseTwoControlCandidacy(cfg) == ownership.ControlCandidacyFallback,
-		SteppedDownAsLeader: controlLeaderSteppedDown(reconciler, recorder),
-		QueryCooldowns:      newProductionQueryCooldownStore(cfg, redisForCaller(runtimeClient, redisfailure.CallerQueryCooldown), recorder, observer),
-		ReadHolds:           readHolds,
-		Traces:              traces,
-		DecisionLag:         recorder.RecordDecisionLag,
-		Store:               ownershipStore, WorkerID: cfg.PhaseTwo.Worker.ID, Catalog: catalog, Progress: progressStore,
+		Roles:                cfg.EffectiveRoles(),
+		ControlCandidate:     phaseTwoControlCandidacy(cfg) == ownership.ControlCandidacyFallback,
+		SteppedDownAsLeader:  controlLeaderSteppedDown(reconciler, recorder),
+		QueryCooldowns:       newProductionQueryCooldownStore(cfg, redisForCaller(runtimeClient, redisfailure.CallerQueryCooldown), recorder, observer),
+		ReadHolds:            readHolds,
+		DropRuntimeWitnesses: dropWitnesses,
+		Traces:               traces,
+		DecisionLag:          recorder.RecordDecisionLag,
+		Store:                ownershipStore, WorkerID: cfg.PhaseTwo.Worker.ID, Catalog: catalog, Progress: progressStore,
 		Executor: executor, Now: external.Now, ControlLeaderTTL: cfg.PhaseTwo.Ownership.ControlLeaderTTL.Duration(),
 		Observer: observer, Reconcile: assignmentReconciler, Activations: repository, Flights: flights, RecoveryLimits: recoveryLimits,
 		QueryLatency:              lookbackQueryLatency(lookbackEngine),

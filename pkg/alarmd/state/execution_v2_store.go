@@ -169,6 +169,19 @@ func NewExecutionStore(options ExecutionStoreOptions) (*ExecutionStore, error) {
 		cache: newStateCache(options.StateCacheBudgetBytes, options.StateCacheReplayAge, options.Now)}, nil
 }
 
+// DropRuntimeWitnesses lets go of the preflight witnesses a released Query
+// Group left, unless they are a Slot after upTo - the last Slot the releasing
+// session ran. Called once that session's Slots have drained: under a Slot
+// still applying, its writes would find no witness and be judged conflicts.
+func (store *ExecutionStore) DropRuntimeWitnesses(queryGroup execution.QueryGroupIdentity, upTo execution.EvaluationTime) {
+	store.witnesses.forget(queryGroup, upTo)
+}
+
+// RuntimeWitnessStats reports the witness cache's items and estimated bytes.
+func (store *ExecutionStore) RuntimeWitnessStats() RuntimeWitnessStats {
+	return store.witnesses.stats()
+}
+
 // runtimeTTL derives how long the keys of one apply request have to survive
 // from that request's Plan retention. StateTTL owns the formula so the two
 // stores cannot drift; the execution store only supplies the deployment bounds.

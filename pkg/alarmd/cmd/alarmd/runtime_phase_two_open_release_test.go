@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -76,5 +77,96 @@ func TestAnOpenThatFailsAfterTakingTheLeaseSaysWhenItCouldNotLetItGo(t *testing.
 		if releaseErr != nil && !errors.Is(err, releaseErr) {
 			t.Fatalf("OpenQueryGroup() error = %v, want the failed release in it", err)
 		}
+	}
+}
+
+// A released session drops its Query Group's witnesses from Release, which
+// every release path reaches after its Slot drain, and not before: opening
+// drops nothing, and the drop names the Query Group and how far the session
+// ran - here no Slot, so the store keeps any Slot's witnesses but none.
+// That the drain comes first is the bundle's order (handover and decline drop
+// the State cache, then wait, then call Release); this holds the drop to
+// Release, the one place that order puts it after the wait.
+func TestReleasingAQueryGroupDropsItsWitnessesFromReleaseOnly(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	limits := validGoAccessRuntimeConfig().PhaseTwo.Scheduler.RecoveryLimits()
+	flights, err := scheduler.NewFlightCoordinatorWithRecovery(limits, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &fakePhaseTwoOwnershipStore{now: now, renewed: make(chan struct{})}
+	eligibility, err := scheduler.NewStaticWorkerEligibility(ownership.WorkerCompatibility{DeploymentProfile: "shadow", CapabilitiesDigest: "capabilities"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler, err := scheduler.NewReconciler(scheduler.NewRouter(eligibility), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type drop struct {
+		queryGroup    execution.QueryGroupIdentity
+		upTo          execution.EvaluationTime
+		leaseReleased int
+	}
+	var drops []drop
+	production, err := newProductionPhaseTwoOwnership(productionPhaseTwoOwnershipDependencies{
+		QueryCooldowns: &countingCooldownStore{},
+		DropRuntimeWitnesses: func(queryGroup execution.QueryGroupIdentity, upTo execution.EvaluationTime) {
+			drops = append(drops, drop{queryGroup, upTo, store.releaseCalls})
+		},
+		Store: store, WorkerID: "worker-1", Catalog: unavailableSlotCatalog{},
+		Progress: unavailableScheduleProgress{}, Executor: rejectingSlotExecutor{}, Now: func() time.Time { return now },
+		ControlLeaderTTL: time.Minute, Observer: observability.ObserverFunc(func(context.Context, observability.Observation) {}),
+		Reconcile: reconciler, Flights: flights, RecoveryLimits: limits, PostRecoveryTerminalDelay: time.Minute, QueryDeadlineReserve: 5 * time.Second,
+		SnapshotRetention: time.Hour, PublicationDelayAllowance: time.Minute, SettlingWait: 30 * time.Second, LeaseTTL: 30 * time.Second, ReconcileInterval: 5 * time.Second, ContentScopes: noContentScopes,
+	})
+	if err != nil {
+		t.Fatalf("newProductionPhaseTwoOwnership() error = %v", err)
+	}
+	if err := production.RegisterWorker(context.Background(), ownership.WorkerRegistration{
+		WorkerID: "worker-1", AssignmentReadiness: ownership.WorkerReady,
+		DependencyStatus: ownership.DependencyHealthy, DeploymentProfile: "shadow",
+		CapabilitiesDigest: "capabilities", ExpiresAt: now.Add(time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if leader, err := production.TryAcquireControlLeader(context.Background(), now, time.Minute); err != nil || !leader {
+		t.Fatalf("TryAcquireControlLeader() leader=%v error=%v", leader, err)
+	}
+	if err := production.PublishAssignments(context.Background(), []execution.QueryGroupIdentity{"query-group-1"}, now); err != nil {
+		t.Fatal(err)
+	}
+	runner, err := production.OpenQueryGroup(context.Background(), "query-group-1", now, time.Minute)
+	if err != nil {
+		t.Fatalf("OpenQueryGroup() error = %v", err)
+	}
+	if len(drops) != 0 {
+		t.Fatalf("opening dropped witnesses: %+v", drops)
+	}
+	if err := runner.Release(context.Background()); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+	if want := []drop{{"query-group-1", 0, 0}}; !reflect.DeepEqual(drops, want) {
+		t.Fatalf("drops = %+v, want %+v: once, for this Query Group, before the lease went", drops, want)
+	}
+}
+
+// How far a session ran is the latest Slot it took to execution, failed ones
+// included - their load left witnesses too - and an earlier Slot run after it,
+// a replay or a supplement, does not pull it back.
+func TestSessionSlotsRemembersTheLatestSlotTakenToExecution(t *testing.T) {
+	slots := &sessionSlots{next: rejectingSlotExecutor{}}
+	if got := slots.last(); got != 0 {
+		t.Fatalf("last() before any Slot = %d, want 0", got)
+	}
+	for _, at := range []execution.EvaluationTime{120, 180, 60} {
+		request := execution.SlotExecutionRequest{Contract: execution.FrozenExecutionContractRef{
+			Slot: execution.SlotIdentity{QueryGroup: "query-group-1", EvaluationTime: at}}}
+		if _, err := slots.Execute(context.Background(), request); !errors.Is(err, errRejectingExecutorReached) {
+			t.Fatalf("Execute(%d) error = %v, want the wrapped executor's", at, err)
+		}
+	}
+	if got := slots.last(); got != 180 {
+		t.Fatalf("last() = %d, want 180", got)
 	}
 }
