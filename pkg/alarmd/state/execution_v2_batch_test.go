@@ -31,7 +31,10 @@ type pipelineMemoryBackend struct {
 	failPipeline error
 	// failKey ends that one key's write with an error of its own, the
 	// rest of the pipeline exchanged.
-	failKey  string
+	failKey string
+	// staleKey answers that one key's write as from a stale owner, the
+	// rest of the pipeline written: the request then ends in an error.
+	staleKey string
 	failMGet error
 	guards   []*FenceGuard
 	// recordKeyCounts keeps how many keys each MGET carried, for the tests
@@ -109,7 +112,7 @@ func (backend *pipelineMemoryBackend) CompareAndSetManyByDigest(_ context.Contex
 			outcomes[index] = FencedWriteOutcome{Err: errors.New("connection reset")}
 			continue
 		}
-		if guard != nil && backend.staleOwner {
+		if guard != nil && (backend.staleOwner || write.Key == backend.staleKey) {
 			outcomes[index] = FencedWriteOutcome{Status: FencedWriteStaleOwner}
 			continue
 		}

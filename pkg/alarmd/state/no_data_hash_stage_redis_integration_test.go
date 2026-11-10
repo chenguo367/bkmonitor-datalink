@@ -312,6 +312,65 @@ func TestTwoAttemptsNeverMixTheirStagedFieldsOnARealServer(t *testing.T) {
 	})
 }
 
+// Two whole writes of one Plan under one attempt's name - a caller with no
+// fence writes as attempt 0 of epoch 0 - each carry a marker of their own,
+// made by the store: the later write starts the staging key over, and the
+// earlier one's next segment, sent between the later one's last segment and
+// its swap, is STAGE_LOST rather than adding its groups to the later write's
+// key. The later write then puts exactly its own memory in place.
+func TestTwoWritesUnderOneNameEachStageUnderAMarkerOfTheirOwnOnARealServer(t *testing.T) {
+	server := startNoDataServer(t)
+	ctx := context.Background()
+	unfenced := execution.NoDataWriteAttempt{}
+	earlierMemory := make([]execution.NoDataGroupMemory, execution.NoDataFirstWriteSegmentGroups+10)
+	for index := range earlierMemory {
+		earlierMemory[index] = absentGroup(fmt.Sprintf("earlier-%05d", index))
+	}
+	laterMemory := stagedMemory(execution.NoDataFirstWriteSegmentGroups + 10)
+
+	later := &stagingHookBackend{RedisBackend: server.backend}
+	laterStore := noDataStoreOver(t, later)
+	earlier := &stagingHookBackend{RedisBackend: server.backend}
+	earlierStore := noDataStoreOver(t, earlier)
+	var interleaved HashDeltaStatus
+	ran := false
+	earlier.beforeSegment = func(index int, segment HashStageSegment) {
+		if index != 1 || ran {
+			return
+		}
+		ran = true
+		// The later write runs whole here; just before its swap the earlier
+		// write's second segment, as the store built it, is sent.
+		later.beforeSwap = func(HashStageSwap) {
+			outcome, err := server.backend.StageHashSegment(ctx, segment)
+			if err != nil {
+				t.Fatal(err)
+			}
+			interleaved = outcome.Status
+		}
+		if got := storeNoDataAs(t, laterStore, firstNoDataWrite(t, 0, laterMemory...), unfenced); got.Status != execution.NoDataApplied {
+			t.Fatalf("the later write = %+v, want it applied", got)
+		}
+	}
+	stagedWriteRetried(t, storeNoDataAs(t, earlierStore, firstNoDataWrite(t, 0, earlierMemory...), unfenced))
+	if !ran {
+		t.Fatal("fixture: the earlier write never reached its second segment")
+	}
+	if interleaved != HashStageLost {
+		t.Fatalf("the earlier write's segment on the later write's key = %s, want STAGE_LOST: "+
+			"the two markers are the same", interleaved)
+	}
+	record := server.record(t)
+	if len(record) != len(laterMemory)+1 {
+		t.Fatalf("the record holds %d fields, want the later write's %d groups and its header", len(record), len(laterMemory))
+	}
+	for name := range record {
+		if strings.Contains(name, "earlier-") {
+			t.Fatalf("the record holds the earlier write's group %q", name)
+		}
+	}
+}
+
 // K1: a staging key that expires between two segments ends the write as
 // RETRYABLE and puts nothing in place - the next segment does not recreate
 // the key with only the later segments and no lifetime. Expiry is the key's

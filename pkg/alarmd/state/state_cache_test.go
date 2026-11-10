@@ -10,6 +10,7 @@
 package state
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -315,6 +316,57 @@ func TestAWriteInDoubtTakesOutTheKeysWrittenBesideIt(t *testing.T) {
 	hits := rig.lookups(StateCacheHit)
 	if reads, _ := rig.round(third, 2, 2); reads == 0 || rig.lookups(StateCacheHit) != hits {
 		t.Fatalf("reads %d, %d served from the cache; want the written key read back too", reads, rig.lookups(StateCacheHit)-hits)
+	}
+}
+
+// A request that ends in an error after some of its writes landed - one key
+// refused as from a stale owner, the other written - leaves none of its keys
+// in the cache: the written key's entry is the bytes of the round before, so
+// serving it would hand the next Slot a State older than the store's.
+func TestARequestEndingInAnErrorTakesItsLandedKeysOutOfTheCache(t *testing.T) {
+	rig := newCacheRig(t, 1<<20)
+	rig.round(first, 2, 0)
+	refused, err := RuntimeStateKeyV3("alarmd", seriesIdentity(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	landed, err := RuntimeStateKeyV3("alarmd", seriesIdentity(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := append([]byte(nil), rig.backend.values[landed]...)
+	rig.now = rig.now.Add(time.Minute)
+	mutations := make([]execution.StateMutation, 2)
+	items := make([]execution.StatePreflightItem, 2)
+	for index := range mutations {
+		mutations[index] = seriesMutation(t, seriesIdentity(index), second.version(), 1, "")
+		items[index] = execution.StatePreflightItem{Identity: mutations[index].Identity, ApplyVersion: second.version()}
+	}
+	if _, err := rig.store.LoadRuntime(context.Background(), execution.StatePreflightRequest{
+		Contract: second.contract(), Items: items, OwnerFence: second.fence}); err != nil {
+		t.Fatal(err)
+	}
+	fence := testApplyFence()
+	fence.Fence = second.fence
+	rig.backend.staleKey = refused
+	_, err = rig.store.ApplyRuntimeFenced(context.Background(),
+		execution.StateApplyRequest{Contract: second.contract(), Retention: testRetention(), Items: mutations}, fence)
+	rig.backend.staleKey = ""
+	if err == nil {
+		t.Fatal("fixture: the request with a stale-owner key ended without an error")
+	}
+	if bytes.Equal(rig.backend.values[landed], before) {
+		t.Fatal("fixture: the other key's write did not land")
+	}
+	if departures := rig.store.StateCacheStats().Departures; departures[StateCacheDepartUnknown] != 2 {
+		t.Fatalf("departures %v, want both keys of the request out under unknown", departures)
+	}
+	rig.now = rig.now.Add(time.Minute)
+	third := slot{at: 180, epoch: 1, segmentStart: 60, fence: fenceOf(3)}
+	hits := rig.lookups(StateCacheHit)
+	if reads := rig.load(third, 2); reads == 0 || rig.lookups(StateCacheHit) != hits {
+		t.Fatalf("reads %d, %d served from the cache; want the landed key read back from the store",
+			reads, rig.lookups(StateCacheHit)-hits)
 	}
 }
 
