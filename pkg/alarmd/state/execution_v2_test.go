@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -39,6 +40,12 @@ type casMemoryBackend struct {
 	// writeTTLs is the lifetime each write asked for, so a test can tell a key
 	// written with one from a key written to live forever.
 	writeTTLs map[string]time.Duration
+	// replyFields is how many fields each hash read returned, in the order of
+	// commands' reads, so a test can bound what one command carried.
+	replyFields []int
+	// scanRepeat makes every page a scan returns repeat its first field, as
+	// HSCAN may return one field twice.
+	scanRepeat bool
 }
 
 type renewalCall struct {
@@ -156,6 +163,45 @@ func (backend *casMemoryBackend) ReadHash(_ context.Context, key string) (map[st
 		copied[name] = append([]byte(nil), value...)
 	}
 	return copied, nil
+}
+
+// ScanHashPage pages the hash in field-name order, count fields a page, the
+// cursor being the index of the next field; with scanRepeat each page returns
+// its first field twice.
+func (backend *casMemoryBackend) ScanHashPage(_ context.Context, key string, cursor uint64, count int64) ([]HashField, uint64, error) {
+	backend.commands = append(backend.commands, "HSCAN")
+	names := make([]string, 0, len(backend.hashes[key]))
+	for name := range backend.hashes[key] {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	start := min(int(cursor), len(names))
+	end := min(start+int(count), len(names))
+	page := make([]HashField, 0, end-start+1)
+	for _, name := range names[start:end] {
+		page = append(page, HashField{Name: name, Value: append([]byte(nil), backend.hashes[key][name]...)})
+	}
+	if backend.scanRepeat && len(page) != 0 {
+		page = append(page, page[0])
+	}
+	backend.replyFields = append(backend.replyFields, len(page))
+	next := uint64(end)
+	if end >= len(names) {
+		next = 0
+	}
+	return page, next, nil
+}
+
+func (backend *casMemoryBackend) ReadHashFields(_ context.Context, key string, fields []string) ([][]byte, error) {
+	backend.commands = append(backend.commands, "HMGET")
+	backend.replyFields = append(backend.replyFields, len(fields))
+	values := make([][]byte, len(fields))
+	for index, field := range fields {
+		if value, found := backend.hashes[key][field]; found {
+			values[index] = append([]byte(nil), value...)
+		}
+	}
+	return values, nil
 }
 
 func (backend *casMemoryBackend) ScanHash(ctx context.Context, key string, _ int64) (map[string][]byte, error) {

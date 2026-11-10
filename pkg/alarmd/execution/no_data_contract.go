@@ -600,6 +600,11 @@ type NoDataMemoryDigestAccumulator struct {
 	// version, which folds its keys alike.
 	sum    contract.DigestSum256
 	groups uint64
+	// lastSeen is the newest last-seen time folded and lastSeenKey its group,
+	// for the one per-group check of BuildPlanNoDataMutation a statement
+	// built from the fold still has to make (BuildPlanNoDataSegmentedMutation).
+	lastSeen    int64
+	lastSeenKey string
 }
 
 // noDataGroupDigestDomain separates a group's digest from every other SHA-256
@@ -630,6 +635,9 @@ func (accumulator *NoDataMemoryDigestAccumulator) Add(group NoDataGroupMemory) e
 	encoded = binary.BigEndian.AppendUint64(encoded, uint64(group.SuppressedAt))
 	accumulator.sum.Add(sha256.Sum256(encoded))
 	accumulator.groups++
+	if group.LastSeen > accumulator.lastSeen {
+		accumulator.lastSeen, accumulator.lastSeenKey = group.LastSeen, group.GroupKey
+	}
 	return nil
 }
 

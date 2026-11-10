@@ -109,7 +109,10 @@ func HostBusinessFor(hosts HostBusiness, tenant string) HostBusiness {
 }
 
 // PlanNoDataStore holds what each Plan remembers about absence between Slots.
+// A Slot's round reads it in parts (PlanNoDataRosterReader); LoadNoData reads
+// a record whole, for the readers that want one whole and small.
 type PlanNoDataStore interface {
+	PlanNoDataRosterReader
 	LoadNoData(context.Context, NoDataLoadRequest) (NoDataLoadResult, error)
 	ApplyNoData(context.Context, NoDataApplyRequest) (NoDataApplyResult, error)
 }

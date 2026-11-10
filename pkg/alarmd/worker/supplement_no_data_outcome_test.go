@@ -248,3 +248,19 @@ func TestASupplementJudgesNoAbsenceAndFilesNoOutcome(t *testing.T) {
 		}
 	}
 }
+
+func (store *supplementNoDataStore) ReadNoDataHeaders(ctx context.Context, request execution.NoDataLoadRequest) (execution.NoDataLoadResult, error) {
+	return worker.LoadedRoster(store.LoadNoData).Headers(ctx, request)
+}
+
+func (store *supplementNoDataStore) RecheckNoDataHeader(ctx context.Context, identity execution.PlanNoDataIdentity) (execution.NoDataMemorySnapshot, error) {
+	return worker.LoadedRoster(store.LoadNoData).Recheck(ctx, identity)
+}
+
+func (store *supplementNoDataStore) ScanNoDataGroups(ctx context.Context, request execution.NoDataScanRequest) (execution.NoDataScanPage, error) {
+	return worker.LoadedRoster(store.LoadNoData).Scan(ctx, request)
+}
+
+func (store *supplementNoDataStore) ReadNoDataGroups(ctx context.Context, request execution.NoDataGroupsRequest) (execution.NoDataGroupsResult, error) {
+	return worker.LoadedRoster(store.LoadNoData).Read(ctx, request)
+}
