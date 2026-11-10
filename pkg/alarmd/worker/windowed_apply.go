@@ -116,11 +116,18 @@ type slotWindows struct {
 	// the marker takes.
 	headOpened map[execution.PlanIdentity]struct{}
 	// bytes is what the output and state phases have retained for the
-	// window's results and views since the last window landed: the window's
-	// own share of the Slot. stateBytes is the state phase's part of it, the
-	// views, which go back whole; the output phase gives back all it holds
-	// but what the Plan results and the summary keep (releaseWindow).
+	// window's results and views since the last window landed, and the input
+	// phase for its record id buffers: the window's own share of the Slot.
+	// stateBytes is the state phase's part of it, the views, which go back
+	// whole; the output phase gives back all it holds but what the Plan
+	// results and the summary keep (releaseWindow).
 	bytes, stateBytes uint64
+	// recordIDs is the record id buffers the window's series were read
+	// through (materializeRecordIDs), by Dataset: the last prepared position
+	// that read each, and what it holds. A buffer goes when the window of
+	// that position lands (dropWindowRecordIDs); one a later series of the
+	// next window also reads stays, and moves to that window.
+	recordIDs map[*execution.Dataset]*windowRecordIDs
 	// blocked is the Plans whose output was not written in a window -
 	// deferred, its ACK unknown, or refused whole (planOutputWithheld). None
 	// of their later windows is written and their tail writes nothing, as a
@@ -245,6 +252,13 @@ func (stream *streamedExecution) windowBeforeMerge(ctx context.Context, next exe
 	if !full {
 		return nil
 	}
+	return stream.cutWindow(ctx)
+}
+
+// cutWindow applies the window being filled, every series before
+// windows.reached, running the head first if no window has been applied.
+func (stream *streamedExecution) cutWindow(ctx context.Context) error {
+	windows := &stream.windows
 	if !windows.started {
 		started, err := stream.coordinator.applyWindowHead(ctx, stream)
 		if err != nil {
@@ -663,7 +677,8 @@ var compactBindingBytes = uint64(unsafe.Sizeof(execution.NamedInputBinding{}))
 //     the summary are counted at and gives back the rest.
 //   - Input: the bindings of every prepared series before reached (all of
 //     them on the last window), from stream.streamed and prepared, with their
-//     host overlays (dropWindowInputs).
+//     host overlays (dropWindowInputs); and the record id buffers those
+//     series were read through (dropWindowRecordIDs).
 //
 // Effect counts went back already, by applyWindow.
 func (stream *streamedExecution) releaseWindow(ctx context.Context, final bool, written int) error {
@@ -691,6 +706,7 @@ func (stream *streamedExecution) releaseWindow(ctx context.Context, final bool, 
 	if final {
 		through = len(windows.prepared)
 	}
+	stream.dropWindowRecordIDs(through, final)
 	return stream.dropWindowInputs(ctx, through)
 }
 

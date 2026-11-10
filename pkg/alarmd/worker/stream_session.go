@@ -585,6 +585,7 @@ func (stream *streamedExecution) releaseProvisional() {
 	stream.gapFacts = 0
 	stream.coordinator.releaseEffects(stream.effects)
 	stream.effects, stream.effectsSpent = effectCounts{}, effectCounts{}
+	stream.dropAllRecordIDs()
 	stream.windows = slotWindows{}
 	stream.coordinator.releaseProvisional(stream.series, stream.retainedTotal())
 	stream.namedOutputs = nil
@@ -1985,6 +1986,11 @@ func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry
 		return fmt.Errorf("alarmd worker: bind series EffectiveTime facts: %w", err)
 	}
 	evaluationHeader.DecisionTime = decision
+	// The window that evaluates the series is the one that reads its ids:
+	// derived here, once a point, and gone when the window lands.
+	if err := stream.materializeRecordIDs(ctx, entry.position, inputs); err != nil {
+		return err
+	}
 	request := execution.EvaluationRequest{Header: evaluationHeader, Inputs: inputs, State: loaded, Gaps: stream.gaps,
 		HostOverlay: stream.hostOverlays[due.Identity][series], NamedOutputs: stream.primaryNamedOutputs(inputs)}
 	// Told before the evaluation, so the strategy is in the copy's next read
