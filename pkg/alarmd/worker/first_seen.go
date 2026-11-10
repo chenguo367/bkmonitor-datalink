@@ -201,7 +201,7 @@ func (stream *streamedExecution) firstSeenPrepass(ctx context.Context, candidate
 		items := make([]execution.StatePreflightItem, 0, batchLimit)
 		for index := 0; index < len(stream.windows.prepared) && !seen; index++ {
 			prepared := stream.windows.prepared[index]
-			if prepared.due.Key() != due.Key() || len(primaryIncompleteBindings(prepared.inputs)) != 0 {
+			if prepared.due == nil || prepared.due.Key() != due.Key() || len(primaryIncompleteIn(stream.preparedBindings(prepared))) != 0 {
 				continue
 			}
 			items = append(items, execution.StatePreflightItem{Identity: execution.StateKeyIdentity{

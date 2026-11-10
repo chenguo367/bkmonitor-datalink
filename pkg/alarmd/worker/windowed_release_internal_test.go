@@ -32,7 +32,7 @@ func (fixture *windowedFixture) streamInput(t *testing.T, series string, bytes u
 	if stream.prepared.consumersByPlan == nil {
 		stream.prepared.consumersByPlan = map[execution.PlanIdentity][]execution.ConsumerRef{fixture.due.Identity: {consumer}}
 		stream.prepared.requirementsByConsumer = map[execution.ConsumerRef][]execution.DataRequirement{consumer: {requirement}}
-		stream.streamed = make(map[streamedInputKey]execution.NamedInputBinding)
+		stream.streamed = make(map[streamedInputKey]streamedInput)
 	}
 	digest := execution.SeriesIdentityDigest(series)
 	dataset := execution.NewDataset(nil)
@@ -43,10 +43,11 @@ func (fixture *windowedFixture) streamInput(t *testing.T, series string, bytes u
 	}
 	hold := stream.holdInput(digest, bytes)
 	hold.bindings++
-	hold.keys++
-	stream.streamed[streamedInputKey{consumer: consumer, series: digest, requirement: requirement.RequirementID}] = binding
+	shared, _ := stream.shared.share(binding)
+	stream.streamed[streamedInputKey{consumer: consumer, series: digest, requirement: requirement.RequirementID}] =
+		streamedInput{shared: shared, dataset: binding.Dataset, view: binding.View}
 	stream.planSeries[fixture.due.Identity][digest] = struct{}{}
-	stream.windows.prepared = append(stream.windows.prepared, preparedSeries{due: fixture.due, identity: digest,
+	stream.windows.prepared = append(stream.windows.prepared, preparedSeries{due: &fixture.due, identity: digest,
 		inputs: []execution.SeriesEvaluationInputRequest{{Inputs: []execution.NamedInputBinding{binding}}}})
 }
 

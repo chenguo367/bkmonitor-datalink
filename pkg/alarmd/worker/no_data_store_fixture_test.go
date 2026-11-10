@@ -179,3 +179,9 @@ func (store *emptyNoDataStore) ReadNoDataGroups(ctx context.Context, request exe
 func SetNoDataSegmentGroups(coordinator *SlotExecutionCoordinator, groups int) {
 	coordinator.noDataSegment = groups
 }
+
+// RetainedInputOf is what a Slot's consumer has charged to its input phase,
+// for a black-box measurement to hold against the heap.
+func RetainedInputOf(consumer execution.QueryExecutionConsumer) uint64 {
+	return consumer.(*streamedExecution).retainedByPhase[retainPhaseInput]
+}

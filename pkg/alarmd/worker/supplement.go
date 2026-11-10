@@ -101,7 +101,7 @@ func (stream *streamedExecution) supplementTakes(prepared preparedSeries) bool {
 		return false
 	}
 	run.facts.Candidates++
-	if len(primaryIncompleteBindings(prepared.inputs)) != 0 {
+	if len(primaryIncompleteIn(stream.preparedBindings(prepared))) != 0 {
 		run.facts.InputIncomplete++
 		return false
 	}
@@ -192,7 +192,7 @@ func (stream *streamedExecution) noDataStandingAt(prepared preparedSeries) noDat
 	default:
 		return noDataUnknown
 	}
-	own, whole, found := supplementNoDataGroupKeys(prepared, config.AggDimension)
+	own, whole, found := stream.supplementNoDataGroupKeys(prepared, config.AggDimension)
 	if !found {
 		return noDataUnknown
 	}
@@ -211,8 +211,12 @@ func (stream *streamedExecution) noDataStandingAt(prepared preparedSeries) noDat
 // no-data tracks; the whole item still answers for it, and both are the
 // whole item's then. Not found when the series has no PRIMARY record to
 // project.
-func supplementNoDataGroupKeys(prepared preparedSeries, aggDimension []string) (string, string, bool) {
-	dimensions, found := primaryDimensions(prepared.inputs)
+func (stream *streamedExecution) supplementNoDataGroupKeys(prepared preparedSeries, aggDimension []string) (string, string, bool) {
+	inputs, err := stream.preparedInputs(prepared)
+	if err != nil {
+		return "", "", false
+	}
+	dimensions, found := primaryDimensions(inputs)
 	if !found {
 		return "", "", false
 	}
@@ -249,7 +253,7 @@ func (stream *streamedExecution) readSupplementNoDataGroups(ctx context.Context,
 		if _, inScope := stream.supplement.series[series.identity]; !inScope || config == nil {
 			continue
 		}
-		own, whole, found := supplementNoDataGroupKeys(series, config.AggDimension)
+		own, whole, found := stream.supplementNoDataGroupKeys(series, config.AggDimension)
 		if !found {
 			continue
 		}

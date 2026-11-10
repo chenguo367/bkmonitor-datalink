@@ -194,7 +194,7 @@ func TestAnIncompleteInputOnlyInTheLastWindowOpensTheMarkerBeforeTheFirstWindows
 		digest  string
 		binding execution.NamedInputBinding
 	}{{"series-1", whole}, {"series-2", whole}, {"series-3", partial}} {
-		fixture.stream.windows.prepared = append(fixture.stream.windows.prepared, preparedSeries{due: fixture.due,
+		fixture.stream.windows.prepared = append(fixture.stream.windows.prepared, preparedSeries{due: &fixture.due,
 			identity: execution.SeriesIdentityDigest(series.digest),
 			inputs:   []execution.SeriesEvaluationInputRequest{{Inputs: []execution.NamedInputBinding{series.binding}}}})
 	}

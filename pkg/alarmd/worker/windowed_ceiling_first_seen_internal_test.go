@@ -171,7 +171,7 @@ func TestAWindowHoldsTheEventCapOverTheMostRecordsOneSeriesHolds(t *testing.T) {
 		t.Fatal(err)
 	}
 	for index := range 5 {
-		stream.windows.prepared = append(stream.windows.prepared, preparedSeries{due: fixture.due,
+		stream.windows.prepared = append(stream.windows.prepared, preparedSeries{due: &fixture.due,
 			identity: execution.SeriesIdentityDigest(fmt.Sprintf("series-%d", index)),
 			inputs: []execution.SeriesEvaluationInputRequest{{Inputs: []execution.NamedInputBinding{{
 				Role: execution.InputRolePrimary, Dataset: dataset, View: view}}}}})

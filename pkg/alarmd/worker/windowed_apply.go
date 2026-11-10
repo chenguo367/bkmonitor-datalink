@@ -288,16 +288,18 @@ func (stream *streamedExecution) cutWindow(ctx context.Context) error {
 func (stream *streamedExecution) headOpenStatements() (map[execution.PlanIdentity]execution.PlanGapMutation, error) {
 	incomplete := make(map[execution.PlanIdentity][]execution.NamedInputBinding)
 	for _, prepared := range stream.windows.prepared {
+		if prepared.due == nil {
+			continue
+		}
 		plan := prepared.due.Identity
-		if primary := primaryIncompleteBindings(prepared.inputs); len(primary) != 0 {
+		bindings := stream.preparedBindings(prepared)
+		if primary := primaryIncompleteIn(bindings); len(primary) != 0 {
 			incomplete[plan] = append(incomplete[plan], primary...)
 			continue
 		}
-		for _, input := range prepared.inputs {
-			for _, binding := range input.Inputs {
-				if execution.InputIncompleteForGuard(binding) {
-					incomplete[plan] = append(incomplete[plan], binding)
-				}
+		for _, binding := range bindings {
+			if execution.InputIncompleteForGuard(binding) {
+				incomplete[plan] = append(incomplete[plan], binding)
 			}
 		}
 	}
@@ -589,7 +591,7 @@ func (stream *streamedExecution) fixWindowCeiling(ctx context.Context, series in
 // records are what the completion handed it. A synthetic no-data series holds
 // one record.
 func (stream *streamedExecution) eventsPerSeries() uint64 {
-	most := uint64(1)
+	most := max(stream.primaryRecords, 1)
 	for _, prepared := range stream.windows.prepared {
 		for _, input := range prepared.inputs {
 			for _, binding := range input.Inputs {
@@ -659,12 +661,6 @@ var loadedKeyHeldBytes = stateWitnessHeldBytes +
 	(uint64(unsafe.Sizeof(execution.StateKeyIdentity{})+unsafe.Sizeof(""))+1)*8/7
 
 const stateWitnessHeldBytes = 320 + 64
-
-// compactBindingBytes is the copy of a streamed binding the Slot keeps to its
-// completion without its Dataset (stream.bindings, compactNamedInputBinding):
-// what the completion and its derivations read of every series' inputs. A
-// series whose bindings go keeps that much of its input charge.
-var compactBindingBytes = uint64(unsafe.Sizeof(execution.NamedInputBinding{}))
 
 // releaseWindow lets go of what a landed window held and gives its bytes
 // back, phase by phase (decision-020 batch 8, 2.2 step 4, 2.6):
@@ -742,10 +738,8 @@ func (stream *streamedExecution) noteSeenViews(views []execution.RuntimeStateVie
 // phase, and how many of their streamed bindings are still held.
 type seriesInputHold struct {
 	bytes uint64
-	// bindings is the series' streamed bindings still in stream.streamed;
-	// keys every one it ever had, each kept as a compact copy to the
-	// completion.
-	bindings, keys int
+	// bindings is the series' streamed bindings still in stream.streamed.
+	bindings int
 }
 
 // holdInput adds a batch's charge to its series' hold.
@@ -767,8 +761,7 @@ func (stream *streamedExecution) holdInput(series execution.SeriesIdentityDigest
 // up to through, every one merged into a window that landed, and gives back
 // what they were charged: a series' batches once none of its streamed
 // bindings is held - one series digest can feed several Plans, and a binding
-// no Plan's series consumes stays to the Slot's end - less the compact
-// copies the completion keeps. Named outputs stay to the Slot's end (the
+// no Plan's series consumes stays to the Slot's end. Named outputs stay to the Slot's end (the
 // events' detection snapshots read them), as do the completion-only
 // bindings.
 //
@@ -787,8 +780,8 @@ func (stream *streamedExecution) dropWindowInputs(ctx context.Context, through i
 	for index := windows.dropped; index < through; index++ {
 		entry := windows.prepared[index]
 		if entry.due.CompiledPlan != nil && entry.due.CompiledPlan.NoData() != nil {
-			for _, dimensions := range seriesDimensionsFor(windows.prepared[index:index+1], entry.due.Identity) {
-				if key, fresh := windows.presentSet(entry.due).Add(dimensions); fresh {
+			for _, dimensions := range stream.seriesDimensionsFor(windows.prepared[index:index+1], entry.due.Identity) {
+				if key, fresh := windows.presentSet(*entry.due).Add(dimensions); fresh {
 					kept += presentKeyHeldBytes(key)
 				}
 			}
@@ -826,7 +819,7 @@ func (stream *streamedExecution) dropSeriesInputs(plan execution.PlanIdentity, s
 				continue
 			}
 			delete(stream.inputHolds, series)
-			released += hold.bytes - min(hold.bytes, uint64(hold.keys)*compactBindingBytes)
+			released += hold.bytes
 		}
 	}
 	if overlays := stream.hostOverlays[plan]; overlays != nil {
@@ -845,9 +838,9 @@ func (stream *streamedExecution) compactStreamed() {
 	if stream.streamed == nil || len(stream.streamed)*2 > windows.streamedPeak {
 		return
 	}
-	rebuilt := make(map[streamedInputKey]execution.NamedInputBinding, len(stream.streamed))
-	for key, binding := range stream.streamed {
-		rebuilt[key] = binding
+	rebuilt := make(map[streamedInputKey]streamedInput, len(stream.streamed))
+	for key, entry := range stream.streamed {
+		rebuilt[key] = entry
 	}
 	stream.streamed, windows.streamedPeak = rebuilt, len(rebuilt)
 }

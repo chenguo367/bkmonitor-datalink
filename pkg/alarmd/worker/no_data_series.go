@@ -58,28 +58,48 @@ type noDataRound struct {
 // its no-data groups by dimension strings, and a JSON string and the text
 // inside it are the same dimension. A dimension that is not a string keeps its
 // JSON form, which is the only rendering that does not invent one.
-func seriesDimensionsFor(prepared []preparedSeries, plan execution.PlanIdentity) []map[string]string {
+func (stream *streamedExecution) seriesDimensionsFor(prepared []preparedSeries, plan execution.PlanIdentity) []map[string]string {
 	seen := make([]map[string]string, 0, len(prepared))
 	for _, entry := range prepared {
-		if entry.due.Identity != plan {
+		if entry.due == nil || entry.due.Identity != plan {
 			continue
 		}
-		for _, input := range entry.inputs {
-			for _, binding := range input.Inputs {
-				if binding.Role != execution.InputRolePrimary || binding.View == nil {
-					continue
-				}
-				record, ok := binding.View.Record(0)
-				if !ok {
-					continue
-				}
-				seen = append(seen, dimensionText(record.Dimensions()))
-				break
-			}
-			break
+		if dimensions, found := stream.primaryDimensionsOf(entry); found {
+			seen = append(seen, dimensions)
 		}
 	}
 	return seen
+}
+
+// primaryDimensionsOf is the dimensions of a prepared series' first record,
+// read off the PRIMARY binding of its first input.
+func (stream *streamedExecution) primaryDimensionsOf(entry preparedSeries) (map[string]string, bool) {
+	var first []execution.NamedInputBinding
+	if entry.inputs != nil {
+		if len(entry.inputs) == 0 {
+			return nil, false
+		}
+		first = entry.inputs[0].Inputs
+	} else if consumers := stream.prepared.consumersByPlan[entry.due.Identity]; len(consumers) != 0 {
+		inputs := stream.completionInputs
+		for _, requirement := range stream.prepared.requirementsByConsumer[consumers[0]] {
+			binding, err := stream.completedBinding(consumers[0], entry.identity, requirement, inputs.physical, inputs.bindings)
+			if err == nil {
+				first = append(first, binding)
+			}
+		}
+	}
+	for _, binding := range first {
+		if binding.Role != execution.InputRolePrimary || binding.View == nil {
+			continue
+		}
+		record, ok := binding.View.Record(0)
+		if !ok {
+			continue
+		}
+		return dimensionText(record.Dimensions()), true
+	}
+	return nil, false
 }
 
 func dimensionText(raw map[string]json.RawMessage) map[string]string {

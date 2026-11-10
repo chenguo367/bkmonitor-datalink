@@ -392,7 +392,7 @@ func preparedHost(t *testing.T, due execution.DuePlan, host map[string]string, i
 	if err != nil {
 		t.Fatal(err)
 	}
-	return preparedSeries{due: due, identity: execution.SeriesIdentityDigest(digest),
+	return preparedSeries{due: &due, identity: execution.SeriesIdentityDigest(digest),
 		inputs: []execution.SeriesEvaluationInputRequest{{Inputs: []execution.NamedInputBinding{{
 			Role: execution.InputRolePrimary, Dataset: dataset, View: view}}}}}
 }

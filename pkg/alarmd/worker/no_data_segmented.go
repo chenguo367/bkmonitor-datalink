@@ -163,7 +163,7 @@ func (stream *streamedExecution) presentSetFor(
 ) (*nodata.PresentSet, error) {
 	set := stream.windows.presentSet(due)
 	var added uint64
-	for _, dimensions := range seriesDimensionsFor(prepared, due.Identity) {
+	for _, dimensions := range stream.seriesDimensionsFor(prepared, due.Identity) {
 		if key, fresh := set.Add(dimensions); fresh {
 			added += presentKeyHeldBytes(key)
 		}

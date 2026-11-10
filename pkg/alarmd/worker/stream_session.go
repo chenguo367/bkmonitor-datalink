@@ -27,7 +27,15 @@ type streamedExecution struct {
 	request       execution.SlotExecutionRequest
 	header        execution.InternalExecutionHeader
 	prepared      preparedNamedInputIndex
-	streamed      map[streamedInputKey]execution.NamedInputBinding
+	streamed      map[streamedInputKey]streamedInput
+	// shared is what the streamed bindings share with every series of their
+	// query, each kept once (streamedInput).
+	shared sharedBindings
+	// completionInputs is what each series' inputs are built from
+	// (preparedInputs), and primaryRecords the most PRIMARY records one series
+	// holds.
+	completionInputs completionInputs
+	primaryRecords   uint64
 	// inputHolds is, by series, what the batches of that series were charged
 	// to the input phase and how many streamed bindings still point at them,
 	// so a window that lets its series' bindings go gives their bytes back
@@ -447,7 +455,8 @@ func (stream *streamedExecution) Begin(ctx context.Context, header execution.Int
 	stream.beganAt = time.Now()
 	stream.header = header
 	stream.prepared = prepared
-	stream.streamed = make(map[streamedInputKey]execution.NamedInputBinding)
+	stream.streamed = make(map[streamedInputKey]streamedInput)
+	stream.shared = sharedBindings{}
 	stream.planSeries = make(map[execution.PlanIdentity]map[execution.SeriesIdentityDigest]struct{})
 	stream.completionOnly = make(map[execution.PlanIdentity][]execution.NamedInputBinding)
 	effective, err := PrepareEffectiveTimeFacts(ctx, header, stream.coordinator.ports.EffectiveTime, stream.coordinator.now().Unix())
@@ -475,6 +484,11 @@ func (stream *streamedExecution) ConsumeSeries(ctx context.Context, batch execut
 	// An overlay is kept until the series is evaluated, and charged as it is
 	// kept; a series without one is charged nothing more.
 	retained += hostOverlaysRetainedBytes(batch.HostOverlays)
+	// A series seen for the first time is also its hold and its place among
+	// its Plan's series (seriesBookkeepingBytes).
+	if _, held := stream.inputHolds[series]; !held {
+		retained += seriesBookkeepingBytes
+	}
 	if err := stream.reserveProvisional(ctx, batch.Delivery.Series, retained); err != nil {
 		return err
 	}
@@ -489,7 +503,6 @@ func (stream *streamedExecution) ConsumeSeries(ctx context.Context, batch execut
 			// A key folded into is still one binding: the batch's bytes join
 			// the series' hold above, and go when its last binding does.
 			hold.bindings++
-			hold.keys++
 		} else {
 			// A second batch for one (consumer, series, requirement) key is a
 			// provider row finer than the series identity. Only a requirement
@@ -502,18 +515,20 @@ func (stream *streamedExecution) ConsumeSeries(ctx context.Context, batch execut
 			if !declared {
 				return namedInputError(codeStreamedNamedInputDuplicate, "alarmd worker: duplicate streamed named input")
 			}
-			merged, known := folded[existing.Dataset]
+			merged, known := folded[existing.dataset]
 			if !known {
 				var foldErr error
-				merged, foldErr = foldStreamedDataset(existing.Dataset, batch.Dataset, policy)
+				merged, foldErr = foldStreamedDataset(existing.dataset, batch.Dataset, policy)
 				if foldErr != nil {
 					return wrapNamedInputError(codeStreamedNamedInputFoldInvalid, fmt.Errorf("alarmd worker: fold streamed named input: %w", foldErr))
 				}
-				folded[existing.Dataset] = merged
+				folded[existing.dataset] = merged
 			}
 			binding.Dataset, binding.View = merged.dataset, merged.view
 		}
-		stream.streamed[key] = binding
+		if err := stream.keepStreamed(ctx, key, binding); err != nil {
+			return err
+		}
 		if binding.Role == execution.InputRolePrimary {
 			if overlay := batch.HostOverlays[binding.Consumer.Plan]; overlay != nil {
 				if stream.hostOverlays == nil {
@@ -575,6 +590,7 @@ func (stream *streamedExecution) releaseProvisional() {
 	stream.planSeriesCounts = nil
 	stream.bindings, stream.stateItems, stream.gapItems, stream.delivered = nil, nil, nil, nil
 	stream.state, stream.gaps = execution.StatePreflightResult{}, execution.GapLoadResult{}
+	stream.shared, stream.completionInputs, stream.primaryRecords = sharedBindings{}, completionInputs{}, 0
 	stream.noDataRefused = nil
 	stream.evaluated = execution.EvaluationResult{}
 	stream.summary = slotEvaluationSummary{}
@@ -1021,7 +1037,12 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 		stream.noteAnswerTruncation(binding, item.RouteFacts)
 		completionBindings[key] = binding
 	}
-	for key, binding := range stream.streamed {
+	// Each series' binding is settled by its query's completion. What that
+	// changes is the same for every series of the query, so the settled
+	// shared binding is made once per shared binding and kept shared.
+	settled := make(map[*execution.NamedInputBinding]*execution.NamedInputBinding)
+	for key, entry := range stream.streamed {
+		binding := entry.binding()
 		item, ok := physical[binding.Provenance.PhysicalQuery]
 		if !ok || item.Ref != binding.ProviderResult {
 			return completionContractError(codeStreamedBindingMismatch, "alarmd worker: streamed binding differs from physical completion")
@@ -1037,41 +1058,87 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 			if binding.Completeness != execution.CompletenessFull {
 				return completionContractError(codeStreamedBindingPartialMismatch, "alarmd worker: streamed binding differs from PARTIAL physical completion")
 			}
-			binding.Completeness = execution.CompletenessPartial
-			binding.Disposition = execution.AccessDegraded
-			binding.ReasonCode = execution.ReasonCode(contract.ReasonQueryPartial)
-			binding.PartialEvidence = item.PartialEvidence
 		case execution.CompletenessUnavailable:
-			binding.Dataset, binding.View = nil, nil
-			binding.Completeness = execution.CompletenessUnavailable
-			binding.DataState = execution.DataStateUnknown
-			binding.Disposition = execution.AccessUnavailable
-			binding.ReasonCode, binding.UnavailableAttribution = physicalFailureReason(item.RouteFacts)
-			binding.PartialEvidence = nil
+			entry.dataset, entry.view = nil, nil
 		default:
 			return completionContractError(codeInvalidCompleteness, "alarmd worker: invalid physical completion completeness")
 		}
-		stream.streamed[key] = binding
+		if item.Completeness != execution.CompletenessFull {
+			next, done := settled[entry.shared]
+			if !done {
+				changed := *entry.shared
+				if item.Completeness == execution.CompletenessPartial {
+					changed.Completeness = execution.CompletenessPartial
+					changed.Disposition = execution.AccessDegraded
+					changed.ReasonCode = execution.ReasonCode(contract.ReasonQueryPartial)
+					changed.PartialEvidence = item.PartialEvidence
+				} else {
+					changed.Completeness = execution.CompletenessUnavailable
+					changed.DataState = execution.DataStateUnknown
+					changed.Disposition = execution.AccessUnavailable
+					changed.ReasonCode, changed.UnavailableAttribution = physicalFailureReason(item.RouteFacts)
+					changed.PartialEvidence = nil
+				}
+				var fresh bool
+				next, fresh = stream.shared.share(changed)
+				if fresh {
+					if err := stream.reserveRetainedInput(ctx, sharedBindingHeldBytes(next)); err != nil {
+						return err
+					}
+				}
+				settled[entry.shared] = next
+			}
+			entry.shared = next
+		}
+		stream.streamed[key] = entry
 	}
 
+	// Every series' inputs are built here, as they always were, so a series
+	// whose inputs do not make an exact set fails the Slot before anything is
+	// written; they are not kept (preparedSeries), only the most PRIMARY
+	// records one series holds, which bounds its events (eventsPerSeries).
+	stream.completionInputs = completionInputs{physical: physical, bindings: completionBindings,
+		completions: completion.PhysicalQueries}
 	preparedSeriesEvaluations := make([]preparedSeries, 0, len(stream.streamed))
-	for _, due := range stream.header.DuePlans {
+	for planIndex := range stream.header.DuePlans {
+		due := &stream.header.DuePlans[planIndex]
 		series := make([]execution.SeriesIdentityDigest, 0, len(stream.planSeries[due.Identity]))
 		for identity := range stream.planSeries[due.Identity] {
 			series = append(series, identity)
 		}
 		sort.Slice(series, func(i, j int) bool { return series[i] < series[j] })
 		for _, identity := range series {
-			inputs, err := stream.seriesInputs(due, identity, physical, completionBindings, completion.PhysicalQueries)
+			inputs, err := stream.seriesInputs(*due, identity, physical, completionBindings, completion.PhysicalQueries)
 			if err != nil {
 				return err
 			}
-			preparedSeriesEvaluations = append(preparedSeriesEvaluations,
-				preparedSeries{due: due, identity: identity, inputs: inputs})
+			for _, input := range inputs {
+				for _, binding := range input.Inputs {
+					if binding.Role == execution.InputRolePrimary && binding.View != nil {
+						stream.primaryRecords = max(stream.primaryRecords, uint64(binding.View.Len()))
+					}
+				}
+			}
+			preparedSeriesEvaluations = append(preparedSeriesEvaluations, preparedSeries{due: due, identity: identity})
 		}
 	}
-	for _, binding := range stream.streamed {
-		stream.bindings = append(stream.bindings, compactNamedInputBinding(binding))
+	// The prepared series stay to the Slot's end (windows.prepared), each
+	// its Plan and its series.
+	if err := stream.reserveRetainedInput(ctx, uint64(cap(preparedSeriesEvaluations))*preparedSeriesBytes); err != nil {
+		return err
+	}
+	// One entry per shared binding, not per series: every reader of the
+	// Slot's bindings asks whether there is one, the worst or the first of
+	// them, or folds them (completion attribution, gap reasons, the primary
+	// input fact), and a series' copy without its Dataset is its shared
+	// binding exactly.
+	listed := make(map[*execution.NamedInputBinding]struct{})
+	for _, entry := range stream.streamed {
+		if _, seen := listed[entry.shared]; seen {
+			continue
+		}
+		listed[entry.shared] = struct{}{}
+		stream.bindings = append(stream.bindings, *entry.shared)
 	}
 	for _, binding := range completion.CompletionBindings {
 		stream.bindings = append(stream.bindings, compactNamedInputBinding(binding))
@@ -1136,12 +1203,71 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 	return nil
 }
 
-// preparedSeries is one PRIMARY series of a due Plan with its complete named
-// inputs, ready for the Runtime State read and evaluation.
+// preparedSeries is one PRIMARY series of a due Plan, ready for the Runtime
+// State read and evaluation. It names its Plan (in the header's due Plans)
+// and its series and nothing more: its named inputs are built from what the
+// Slot keeps of its bindings when its evaluation batch takes it
+// (preparedInputs) and go with the batch, so half a million prepared series
+// are half a million of these and not of their inputs. A series dropped with
+// its window is the zero value, due nil. inputs is set only by a caller that
+// has them built already.
 type preparedSeries struct {
-	due      execution.DuePlan
+	due      *execution.DuePlan
 	identity execution.SeriesIdentityDigest
 	inputs   []execution.SeriesEvaluationInputRequest
+}
+
+// completionInputs is what a series' inputs are built from once the
+// completion is in (completedBinding, seriesInputs): the physical
+// completions classified, the completion bindings by consumer and
+// requirement, and the completions themselves. One per query, kept to the
+// Slot's end.
+type completionInputs struct {
+	physical map[execution.PhysicalQueryDigest]classifiedPhysicalCompletion
+	bindings map[struct {
+		consumer    execution.ConsumerRef
+		requirement execution.RequirementID
+	}]execution.NamedInputBinding
+	completions []execution.PhysicalQueryCompletion
+}
+
+// preparedInputs is a prepared series' named inputs, built as the completion
+// validated them (seriesInputs).
+func (stream *streamedExecution) preparedInputs(prepared preparedSeries) ([]execution.SeriesEvaluationInputRequest, error) {
+	if prepared.inputs != nil || prepared.due == nil {
+		return prepared.inputs, nil
+	}
+	inputs := stream.completionInputs
+	return stream.seriesInputs(*prepared.due, prepared.identity, inputs.physical, inputs.bindings, inputs.completions)
+}
+
+// preparedBindings is every binding of a prepared series' inputs, as
+// preparedInputs builds them, without building the requests: what the
+// readers that only look at the bindings of every series read. The
+// completion built every series' inputs once, so a binding it found is
+// found again.
+func (stream *streamedExecution) preparedBindings(prepared preparedSeries) []execution.NamedInputBinding {
+	if prepared.due == nil {
+		return nil
+	}
+	if prepared.inputs != nil {
+		var bindings []execution.NamedInputBinding
+		for _, input := range prepared.inputs {
+			bindings = append(bindings, input.Inputs...)
+		}
+		return bindings
+	}
+	inputs := stream.completionInputs
+	var bindings []execution.NamedInputBinding
+	for _, consumer := range stream.prepared.consumersByPlan[prepared.due.Identity] {
+		for _, requirement := range stream.prepared.requirementsByConsumer[consumer] {
+			binding, err := stream.completedBinding(consumer, prepared.identity, requirement, inputs.physical, inputs.bindings)
+			if err == nil {
+				bindings = append(bindings, binding)
+			}
+		}
+	}
+	return bindings
 }
 
 // evaluateSeries reads Runtime State and evaluates every prepared series in
@@ -1172,26 +1298,32 @@ func (stream *streamedExecution) evaluateSeries(
 		if stream.supplement != nil && !stream.supplementTakes(prepared) {
 			continue
 		}
-		if incomplete := primaryIncompleteBindings(prepared.inputs); len(incomplete) != 0 {
+		// Built as its batch takes it, and gone with the batch.
+		inputs, err := stream.preparedInputs(prepared)
+		if err != nil {
+			return err
+		}
+		due := *prepared.due
+		if incomplete := primaryIncompleteBindings(inputs); len(incomplete) != 0 {
 			if err := flush(); err != nil {
 				return err
 			}
-			stream.beginEvaluating(prepared.due.Identity)
-			if err := stream.mergePrimaryIncompleteSeries(ctx, prepared.due, incomplete); err != nil {
+			stream.beginEvaluating(due.Identity)
+			if err := stream.mergePrimaryIncompleteSeries(ctx, due, incomplete); err != nil {
 				return err
 			}
 			continue
 		}
-		version, err := execution.BuildApplyVersion(stream.header.Contract, prepared.due.StateApplyEpoch)
+		version, err := execution.BuildApplyVersion(stream.header.Contract, due.StateApplyEpoch)
 		if err != nil {
 			return err
 		}
 		stream.seriesCensus.Read++
-		pending = append(pending, completedSeries{due: prepared.due, series: prepared.identity, inputs: prepared.inputs,
+		pending = append(pending, completedSeries{due: due, series: prepared.identity, inputs: inputs,
 			position: position,
 			item: execution.StatePreflightItem{Identity: execution.StateKeyIdentity{
-				Plan: prepared.due.Identity, StateGeneration: prepared.due.StateGeneration, SeriesIdentityDigest: prepared.identity,
-			}, ApplyVersion: version, CarryFrom: carryFrom(prepared.due), Sharded: !prepared.due.Shard.IsZero()}})
+				Plan: due.Identity, StateGeneration: due.StateGeneration, SeriesIdentityDigest: prepared.identity,
+			}, ApplyVersion: version, CarryFrom: carryFrom(due), Sharded: !due.Shard.IsZero()}})
 		if len(pending) >= batchLimit {
 			if err := flush(); err != nil {
 				return err
@@ -1670,8 +1802,8 @@ func (stream *streamedExecution) completedBinding(
 	}]execution.NamedInputBinding,
 ) (execution.NamedInputBinding, error) {
 	key := streamedInputKey{consumer: consumer, series: series, requirement: requirement.RequirementID}
-	if binding, found := stream.streamed[key]; found {
-		return binding, nil
+	if entry, found := stream.streamed[key]; found {
+		return entry.binding(), nil
 	}
 	templateKey := struct {
 		consumer    execution.ConsumerRef
@@ -1725,9 +1857,9 @@ func (stream *streamedExecution) queryForRequirement(
 		requirement execution.RequirementID
 	}]execution.NamedInputBinding,
 ) (execution.PlannedPhysicalQueryRef, error) {
-	for key, binding := range stream.streamed {
+	for key, entry := range stream.streamed {
 		if key.consumer == consumer && key.requirement == requirement.RequirementID {
-			return stream.prepared.queries[binding.Provenance.PhysicalQuery], nil
+			return stream.prepared.queries[entry.shared.Provenance.PhysicalQuery], nil
 		}
 	}
 	templateKey := struct {
@@ -1837,10 +1969,17 @@ func (stream *streamedExecution) completeBeyondSlotBudget(ctx context.Context) e
 func primaryIncompleteBindings(inputs []execution.SeriesEvaluationInputRequest) []execution.NamedInputBinding {
 	primaryIncomplete := make([]execution.NamedInputBinding, 0)
 	for _, input := range inputs {
-		for _, binding := range input.Inputs {
-			if binding.Role == execution.InputRolePrimary && binding.Completeness != execution.CompletenessFull {
-				primaryIncomplete = append(primaryIncomplete, binding)
-			}
+		primaryIncomplete = append(primaryIncomplete, primaryIncompleteIn(input.Inputs)...)
+	}
+	return primaryIncomplete
+}
+
+// primaryIncompleteIn is the PRIMARY bindings of a series that are not FULL.
+func primaryIncompleteIn(bindings []execution.NamedInputBinding) []execution.NamedInputBinding {
+	var primaryIncomplete []execution.NamedInputBinding
+	for _, binding := range bindings {
+		if binding.Role == execution.InputRolePrimary && binding.Completeness != execution.CompletenessFull {
+			primaryIncomplete = append(primaryIncomplete, binding)
 		}
 	}
 	return primaryIncomplete

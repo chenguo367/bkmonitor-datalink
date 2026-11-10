@@ -15,12 +15,8 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
-// What a binding the Slot keeps holds beyond its Dataset: its slot in the
-// streamed map - the key and the binding side by side, a control byte, the
-// map filled to seven eighths - and the facts it carries. Its strings are
-// the header's and the Dataset's, held whether it is kept or not.
+// The facts a shared binding carries (sharedBindingHeldBytes) and a view.
 var (
-	streamedBindingBytes = (uint64(unsafe.Sizeof(streamedInputKey{})+unsafe.Sizeof(execution.NamedInputBinding{})) + 1) * 8 / 7
 	qualityFactBytes     = uint64(unsafe.Sizeof(execution.InputQualityFact{}))
 	inputTerminalBytes   = uint64(unsafe.Sizeof(execution.InputTerminal{}))
 	partialEvidenceBytes = uint64(unsafe.Sizeof(execution.PartialEvidence{}))
@@ -28,20 +24,20 @@ var (
 )
 
 // streamedRetainedSize is what a series batch holds while its Slot keeps it,
-// as the structure says (no encoding, no read of the runtime): each binding
-// as the Slot keeps it, each Dataset the batch and its bindings point at,
-// once, at its RetainedBytes, and each binding's view of it.
+// as the structure says (no encoding, no read of the runtime): each binding's
+// entry in the streamed map (streamedEntryBytes), each Dataset and each view
+// the batch and its bindings point at, once. What its bindings share with
+// every other series of their query is charged once, when it is first kept
+// (ConsumeSeries, sharedBindingHeldBytes).
 func streamedRetainedSize(batch execution.SeriesExecutionBatch) uint64 {
 	total := batch.Dataset.RetainedBytes()
 	counted := []*execution.Dataset{batch.Dataset}
+	var views []*execution.DatasetView
 	for index := range batch.Inputs {
 		binding := &batch.Inputs[index]
-		total += streamedBindingBytes + uint64(cap(binding.QualityFacts))*qualityFactBytes +
-			uint64(cap(binding.Terminals))*inputTerminalBytes
-		if binding.PartialEvidence != nil {
-			total += partialEvidenceBytes
-		}
-		if binding.View != nil {
+		total += streamedEntryBytes
+		if binding.View != nil && !viewAt(views, binding.View) {
+			views = append(views, binding.View)
 			total += datasetViewBytes + 4*uint64(binding.View.Len())
 		}
 		if binding.Dataset != nil && !pointsAt(counted, binding.Dataset) {
@@ -50,6 +46,15 @@ func streamedRetainedSize(batch execution.SeriesExecutionBatch) uint64 {
 		}
 	}
 	return total
+}
+
+func viewAt(views []*execution.DatasetView, view *execution.DatasetView) bool {
+	for _, counted := range views {
+		if counted == view {
+			return true
+		}
+	}
+	return false
 }
 
 func pointsAt(datasets []*execution.Dataset, dataset *execution.Dataset) bool {
