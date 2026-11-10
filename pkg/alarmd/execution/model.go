@@ -304,6 +304,9 @@ type QueryExecutionRequest struct {
 	Contract  FrozenExecutionContractRef
 	Operation Operation
 	AttemptNo uint32
+	// Slice is the slice of the Query Group's series this read is of; the
+	// zero slice is all of them (InputSlice).
+	Slice InputSlice
 }
 
 type followingSlotKey struct{}
@@ -336,7 +339,7 @@ func (request QueryExecutionRequest) Validate() error {
 	if request.AttemptNo == 0 {
 		return errors.New("alarmd execution: positive query attempt number is required")
 	}
-	return nil
+	return request.Slice.Validate()
 }
 
 type PlanIdentity struct {
