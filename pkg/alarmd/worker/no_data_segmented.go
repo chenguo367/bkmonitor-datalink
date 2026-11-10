@@ -388,13 +388,18 @@ func (reading *segmentedNoDataRound) scan(ctx context.Context) error {
 		}
 		cursor = page.Next
 	}
+	// The record read is one record when the header after the scan still
+	// names the memory the scan began on: every write moves the revision or,
+	// a whole record written over none, starts it again with the digest of
+	// what it wrote, and the digest is the fold of the groups themselves. The
+	// apply version is left out: equal revision and digest are equal groups,
+	// whichever round wrote them.
 	again, err := store.RecheckNoDataHeader(ctx, reading.source)
 	if err != nil {
 		return noDataRosterUnread(reading.identity, "", err)
 	}
-	if again.Status != reading.header.Status || again.MarkerRevision != reading.header.MarkerRevision ||
-		again.PersistedMutationDigest != reading.header.PersistedMutationDigest ||
-		again.PersistedApplyVersion != reading.header.PersistedApplyVersion {
+	if again.Status != execution.NoDataMemoryFound || again.MarkerRevision != reading.header.MarkerRevision ||
+		again.PersistedMutationDigest != reading.header.PersistedMutationDigest {
 		return &NoDataRosterMovedError{Plan: reading.identity, Reason: fmt.Sprintf(
 			"header at revision %d (%s) before the scan, revision %d (%s) after it",
 			reading.header.MarkerRevision, reading.header.Status, again.MarkerRevision, again.Status)}

@@ -28,7 +28,10 @@ type prepassPorts struct {
 	*windowedPorts
 	older     execution.ApplyVersion
 	persisted map[execution.SeriesIdentityDigest]string
-	loads     []execution.StatePreflightRequest
+	// levels are a found record's Level views, one FULL view for each Level
+	// of the Plan, as the store hands every found record.
+	levels []execution.RuntimeLevelStateView
+	loads  []execution.StatePreflightRequest
 	// during runs inside every load, before it answers.
 	during func()
 }
@@ -51,7 +54,8 @@ func (ports *prepassPorts) LoadRuntime(_ context.Context, request execution.Stat
 		view := execution.RuntimeStateView{Identity: item.Identity, Status: execution.StateMissingWarming}
 		if digest, found := ports.persisted[item.Identity.SeriesIdentityDigest]; found {
 			view = execution.RuntimeStateView{Identity: item.Identity, Status: execution.StateFoundReady, BlobRevision: 1,
-				PersistedApplyVersion: ports.older, PersistedMutationDigest: execution.MutationDigest(digest)}
+				PersistedApplyVersion: ports.older, PersistedMutationDigest: execution.MutationDigest(digest),
+				Levels: ports.levels}
 		}
 		result.Items[index] = view
 	}
@@ -66,7 +70,16 @@ func newPrepassFixture(t *testing.T, series int) (*windowedFixture, *prepassPort
 	fixture := newWindowedFixture(t)
 	older := fixture.version
 	older.EvaluationTime -= 60
+	refs, err := execution.DeriveRuntimeLevelContractRefs(fixture.due.CompiledPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ports := &prepassPorts{windowedPorts: fixture.ports, older: older, persisted: map[execution.SeriesIdentityDigest]string{}}
+	for _, ref := range refs {
+		ports.levels = append(ports.levels, execution.RuntimeLevelStateView{LevelID: ref.LevelID,
+			LevelStateCompatibility: ref.LevelStateCompatibility, WarmupRequirementRef: ref.WarmupRequirementRef,
+			HistoryCompleteness: execution.HistoryFull, LastProcessedEventTime: int64(older.EvaluationTime)})
+	}
 	coordinator := fixture.stream.coordinator
 	coordinator.ports.Activation, coordinator.ports.State = ports, ports
 	coordinator.budget.MaxStateMutations = 2

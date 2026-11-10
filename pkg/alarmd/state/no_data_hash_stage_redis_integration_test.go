@@ -13,13 +13,13 @@ import (
 	"context"
 	"fmt"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 // stagingHookBackend is a real backend with a step run before each segment
@@ -324,13 +324,7 @@ func TestAStagingKeyLostBetweenSegmentsIsRetriedAndPutsNothingInPlaceOnARealServ
 		{name: "it expired", do: func(t *testing.T, server *noDataServer, key string) {
 			ctx := context.Background()
 			server.client.PExpire(ctx, key, time.Millisecond)
-			deadline := time.Now().Add(5 * time.Second)
-			for server.client.Exists(ctx, key).Val() != 0 {
-				if time.Now().After(deadline) {
-					t.Fatal("the staging key did not expire")
-				}
-				runtime.Gosched()
-			}
+			testwait.Until(t, "the staging key to expire", func() bool { return server.client.Exists(ctx, key).Val() == 0 })
 		}},
 		{name: "it was deleted", do: func(t *testing.T, server *noDataServer, key string) {
 			server.client.Del(context.Background(), key)

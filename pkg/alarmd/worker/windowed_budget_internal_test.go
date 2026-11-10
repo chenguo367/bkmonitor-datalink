@@ -39,6 +39,11 @@ func TestABudgetHitAfterWindowsKeepsTheMemoryOfAFullyLandedPlanAndWritesNoneForA
 	}
 	landed, cut := plan("7"), plan("8")
 	stream.header.DuePlans = []execution.DuePlan{landed, cut}
+	// The Slot's gap load answered for each Plan, as it does for every due
+	// one: neither has a marker yet.
+	stream.gaps = execution.GapLoadResult{Items: []execution.GapGuardSnapshot{
+		{Identity: landed.GapIdentity(), Status: execution.GapMissing},
+		{Identity: cut.GapIdentity(), Status: execution.GapMissing}}}
 	stream.evaluated = execution.EvaluationResult{Contract: stream.header.Contract, Result: observability.ResultSuccess,
 		ReasonCode: observability.ReasonNone, Plans: []execution.PlanEvaluationResult{
 			{Plan: landed.Identity, Disposition: execution.PlanDecided}, {Plan: cut.Identity, Disposition: execution.PlanDecided}}}

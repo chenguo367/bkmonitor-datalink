@@ -567,7 +567,7 @@ type noDataJudgment struct {
 // window of which lands (completeWindowsBeyondSlotBudget): their rounds were
 // said, whole, and keep their outcome and their memory. Nil keeps none.
 func (stream *streamedExecution) closeNoDataBeyondSlotBudget(ctx context.Context, landed map[execution.PlanIdentity]struct{}) {
-	kept := stream.noDataMutations[:0:0]
+	var kept []execution.PlanNoDataMutation
 	for _, mutation := range stream.noDataMutations {
 		if _, whole := landed[mutation.Identity.Plan]; whole {
 			kept = append(kept, mutation)

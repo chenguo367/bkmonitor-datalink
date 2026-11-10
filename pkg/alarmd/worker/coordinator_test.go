@@ -256,8 +256,10 @@ func TestSlotExecutionCoordinatorRejectsCumulativeUQPayloadBeforeSideEffectsAndR
 	// and the share it crossed, and no shared usage: nothing another Query
 	// Group did is part of why this one was refused, and reporting a pool
 	// figure here would point the reader at a neighbour that is not involved.
-	// Limit is three quarters of the 2 MiB budget.
-	if rejection == nil || rejection.Phase != "normal_output" || rejection.OwnUsed == nil ||
+	// Limit is three quarters of the 2 MiB budget. The reservation that
+	// crosses it is the second series' record ids, charged as input before
+	// its merge (materializeRecordIDs), so the refusal names the input phase.
+	if rejection == nil || rejection.Phase != "normal_input" || rejection.OwnUsed == nil ||
 		*rejection.OwnUsed < 900<<10 || rejection.SharedUsed != 0 || rejection.Limit != 3<<19 {
 		t.Fatalf("missing exact failed-reservation facts: %+v", rejection)
 	}
