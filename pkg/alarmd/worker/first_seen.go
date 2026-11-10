@@ -12,6 +12,7 @@ package worker
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
@@ -55,29 +56,34 @@ func (stream *streamedExecution) unseenPlans() map[execution.PlanKey]struct{} {
 		if err != nil {
 			continue
 		}
-		before := func(persisted execution.ApplyVersion) bool {
-			return execution.CompareApplyVersion(persisted, version) != execution.ApplyVersionEqual
-		}
-		// The views of a Slot's landed windows are gone; what they said of
-		// the Plan was kept as they went (noteSeenViews).
-		_, seen := stream.windows.seen[due.Identity]
-		if !seen {
-			seen = viewsSeenBefore(due, version, stream.state.Items)
-		}
-		for _, memory := range stream.noData.Items {
-			if seen {
-				break
-			}
-			if memory.Identity.Plan == due.Identity && memory.Identity.StateGeneration == due.StateGeneration &&
-				memory.Status != execution.NoDataMemoryMissing && before(memory.PersistedApplyVersion) {
-				seen = true
-			}
-		}
-		if !seen {
+		if !stream.seenSoFar(due, version) {
 			unseen[due.Key()] = struct{}{}
 		}
 	}
 	return unseen
+}
+
+// seenSoFar reports whether what the Slot has read of the Plan so far holds
+// anything written before the Slot at version: what its landed windows' views
+// and the first-seen pre-pass said (windows.seen), the views it holds, and
+// its no-data memory.
+func (stream *streamedExecution) seenSoFar(due execution.DuePlan, version execution.ApplyVersion) bool {
+	// The views of a Slot's landed windows are gone; what they said of the
+	// Plan was kept as they went (noteSeenViews).
+	if _, seen := stream.windows.seen[due.Identity]; seen {
+		return true
+	}
+	if viewsSeenBefore(due, version, stream.state.Items) {
+		return true
+	}
+	for _, memory := range stream.noData.Items {
+		if memory.Identity.Plan == due.Identity && memory.Identity.StateGeneration == due.StateGeneration &&
+			memory.Status != execution.NoDataMemoryMissing &&
+			execution.CompareApplyVersion(memory.PersistedApplyVersion, version) != execution.ApplyVersionEqual {
+			return true
+		}
+	}
+	return false
 }
 
 // viewsSeenBefore reports whether the views hold anything of the Plan under
@@ -122,22 +128,133 @@ func firstSeenActivations(
 	return stillForced, firstSeen
 }
 
-// firstSeenUndecided reports whether any Plan this Slot forces to warm up
-// could still be judged first-seen: new to its activation and without a
-// marker, the two facts firstSeenActivations reads that the Slot has before
-// its State is read. The third - nothing of the Plan read from before the
-// Slot - is known only once every series of the Plan has been read, so a
-// Slot holding such a Plan cannot write any window before its evaluation is
-// over (windowed_apply.go): the judgement decides whether the Plan writes at
-// all, and a window written first would have decided it.
-func firstSeenUndecided(forced execution.PlanActivationResult, loadedGaps execution.GapLoadResult) bool {
+// firstSeenCandidates is the Plans this Slot forces to warm up that could
+// still be judged first-seen: new to their activation and without a marker,
+// the two facts firstSeenActivations reads that the Slot has before its State
+// is read. The third - nothing of the Plan read from before the Slot - is
+// known only once every series of the Plan has been read. A Slot applied
+// whole has read them all by its one Sequence; a Slot applied window by
+// window writes its first window long before, and the judgement decides
+// whether the Plan writes at all, so it reads them first (firstSeenPrepass).
+func firstSeenCandidates(forced execution.PlanActivationResult, loadedGaps execution.GapLoadResult) []execution.PlanActivationFact {
+	var candidates []execution.PlanActivationFact
 	for _, fact := range forced.Facts {
 		marker, found := loadedGaps.Find(fact.GapIdentity())
 		if fact.Selected.Arrived && (!found || marker.Status == execution.GapMissing) {
-			return true
+			candidates = append(candidates, fact)
 		}
 	}
-	return false
+	return candidates
+}
+
+// firstSeenUndecided reports whether any Plan this Slot forces to warm up
+// could still be judged first-seen (firstSeenCandidates).
+func firstSeenUndecided(forced execution.PlanActivationResult, loadedGaps execution.GapLoadResult) bool {
+	return len(firstSeenCandidates(forced, loadedGaps)) != 0
+}
+
+// firstSeenPrepass reads, before the head of a Slot applied window by window
+// writes anything, the State of every series of each candidate Plan the Slot
+// reads, and keeps of it one fact per Plan: whether any view holds something
+// written before the Slot, by the rule unseenPlans reads views by
+// (viewsSeenBefore, after the carry the evaluation reads them through). A
+// Plan seen is noted in windows.seen, where unseenPlans finds it; the views go
+// as each batch is judged (decision-020 batch 8, 2.3).
+//
+// It reads in the preflight's batches and stops a Plan at the first batch
+// that shows something from before the Slot: a Plan that ran stops early,
+// and only a Plan that is really new reads every series. A Plan the Slot
+// already holds something of from before it is not read at all. The series
+// whose PRIMARY did not complete are left out, as the evaluation reads no
+// State for them.
+//
+// Each batch's views are charged to the state phase, under the share, while
+// it is judged and given back after it: the pre-pass holds one batch at a
+// time. Its reads witness nothing (StatePreflightRequest.Unwitnessed): the
+// Slot's own preflight of the same keys remembers them again, which for the
+// same Slot and key replaces what was there (runtimeWitnessCache.remember),
+// so a witness left here would not mislead an apply; it would only sit in the
+// store, uncharged, for every series of the Plan until the window reading it
+// came round.
+func (stream *streamedExecution) firstSeenPrepass(ctx context.Context, candidates []execution.PlanActivationFact) error {
+	batchLimit := stream.statePreflightBatchLimit()
+	for _, fact := range candidates {
+		var due execution.DuePlan
+		found := false
+		for _, candidate := range stream.header.DuePlans {
+			if candidate.Key() == fact.Key() {
+				due, found = candidate, true
+				break
+			}
+		}
+		if !found {
+			continue
+		}
+		version, err := execution.BuildApplyVersion(stream.header.Contract, due.StateApplyEpoch)
+		if err != nil {
+			return err
+		}
+		if stream.seenSoFar(due, version) {
+			continue
+		}
+		seen := false
+		items := make([]execution.StatePreflightItem, 0, batchLimit)
+		for index := 0; index < len(stream.windows.prepared) && !seen; index++ {
+			prepared := stream.windows.prepared[index]
+			if prepared.due.Key() != due.Key() || len(primaryIncompleteBindings(prepared.inputs)) != 0 {
+				continue
+			}
+			items = append(items, execution.StatePreflightItem{Identity: execution.StateKeyIdentity{
+				Plan: due.Identity, StateGeneration: due.StateGeneration, SeriesIdentityDigest: prepared.identity,
+			}, ApplyVersion: version, CarryFrom: carryFrom(due), Sharded: !due.Shard.IsZero()})
+			if len(items) < batchLimit {
+				continue
+			}
+			if seen, err = stream.prepassBatch(ctx, due, version, items); err != nil {
+				return err
+			}
+			items = items[:0]
+		}
+		if !seen && len(items) != 0 {
+			if seen, err = stream.prepassBatch(ctx, due, version, items); err != nil {
+				return err
+			}
+		}
+		if seen {
+			if stream.windows.seen == nil {
+				stream.windows.seen = make(map[execution.PlanIdentity]struct{})
+			}
+			stream.windows.seen[due.Identity] = struct{}{}
+		}
+	}
+	return nil
+}
+
+// prepassBatch reads one batch of a candidate Plan's State and reports
+// whether it holds anything written before the Slot.
+func (stream *streamedExecution) prepassBatch(
+	ctx context.Context, due execution.DuePlan, version execution.ApplyVersion, items []execution.StatePreflightItem,
+) (bool, error) {
+	request := execution.StatePreflightRequest{Contract: stream.request.Contract, Items: items,
+		OwnerFence: stream.request.OwnerFence, Unwitnessed: true}
+	started := time.Now()
+	loaded, err := stream.coordinator.ports.State.LoadRuntime(ctx, request)
+	if err == nil {
+		loaded, err = execution.ClassifyStatePreflight(request, loaded)
+	}
+	stream.spend(slotPhasePreflight, started)
+	if err != nil {
+		return false, fmt.Errorf("alarmd worker: first-seen State pre-pass: %w", err)
+	}
+	held := retainedObjectBytes(loaded)
+	if err := stream.reserveRetained(ctx, retainPhaseState, "normal_output", held); err != nil {
+		return false, err
+	}
+	defer stream.unretain(retainPhaseState, held)
+	for index := range loaded.Items {
+		loaded.Items[index], _ = carryHistory(due, loaded.Items[index])
+	}
+	return viewsSeenBefore(due, version, loaded.Items), nil
 }
 
 // satisfiedMarker is the marker that records a first-seen Plan as one that

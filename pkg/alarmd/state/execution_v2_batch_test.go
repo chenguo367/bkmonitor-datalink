@@ -261,6 +261,38 @@ func TestLoadRuntimeBatchesReadsAndIsolatesInvalidItems(t *testing.T) {
 	}
 }
 
+// A read no apply follows from (the worker's first-seen pre-pass) leaves no
+// witness, found or missing; and a read of the same Slot that does witness,
+// repeated, replaces its witness rather than adding one, so the pre-pass could
+// not have misled the apply either way.
+func TestAnUnwitnessedLoadLeavesNoWitnessAndAWitnessedOneReplacesItsOwn(t *testing.T) {
+	backend := newPipelineMemoryBackend()
+	store := newBatchStore(t, backend, nil)
+	mutations := seriesMutations(t, 4, applyVersion(), 0)
+	foundKey, _ := RuntimeStateKeyV3("alarmd", mutations[1].Identity)
+	backend.values[foundKey], _ = encodeRuntimePacked(mutations[1], 1)
+	request := execution.StatePreflightRequest{Contract: frozenRef(), Items: preflightItems(mutations), Unwitnessed: true}
+	loaded, err := store.LoadRuntime(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Items[1].Status != execution.StateFoundReady || loaded.Items[0].Status != execution.StateMissingWarming {
+		t.Fatalf("unwitnessed views = %+v, want them read as a witnessed load reads them", loaded.Items)
+	}
+	if stats := store.witnesses.stats(); stats.Items != 0 || stats.Bytes != 0 {
+		t.Fatalf("an unwitnessed load left %d witnesses (%d B)", stats.Items, stats.Bytes)
+	}
+	request.Unwitnessed = false
+	for range 2 {
+		if _, err := store.LoadRuntime(context.Background(), request); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if stats := store.witnesses.stats(); stats.Items != len(mutations) {
+		t.Fatalf("two witnessed loads of one Slot hold %d witnesses, want one per key (%d)", stats.Items, len(mutations))
+	}
+}
+
 func TestLoadRuntimeFailedBatchIsRetryableAndLeavesNoWitness(t *testing.T) {
 	backend := newFakeBackend()
 	backend.readErr = errors.New("connection reset")

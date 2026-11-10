@@ -313,10 +313,17 @@ func (stream *streamedExecution) ReleaseRetainedBytes(bytes uint64) {
 // reservation a series takes; refused the way either refuses, observed as
 // a capacity rejection.
 func (stream *streamedExecution) reserveRetainedInput(ctx context.Context, bytes uint64) error {
+	return stream.reserveRetained(ctx, retainPhaseInput, "normal_input", bytes)
+}
+
+// reserveRetained reserves bytes under one phase, judged as
+// reserveRetainedInput judges input: the share by this execution's total,
+// then the pool. label is the phase a refusal names.
+func (stream *streamedExecution) reserveRetained(ctx context.Context, retained retainPhase, label string, bytes uint64) error {
 	if bytes == 0 {
 		return nil
 	}
-	phase := stream.reservationPhase("normal_input")
+	phase := stream.reservationPhase(label)
 	if share := stream.coordinator.qgShareBytes(); share > 0 && stream.retainedTotal()+bytes > share {
 		err := shareRejection(phase, stream.retainedTotal(), bytes, share, stream.ownBudgetUsage(stream.coordinator.budget))
 		stream.coordinator.observeCapacityRejection(ctx, stream.request.Operation, observability.CapacityBudgetRetainedBytes, err)
@@ -325,7 +332,7 @@ func (stream *streamedExecution) reserveRetainedInput(ctx context.Context, bytes
 	if err := stream.reserveProvisionalAt(ctx, 0, bytes, phase); err != nil {
 		return err
 	}
-	stream.retainBytes(retainPhaseInput, bytes)
+	stream.retainBytes(retained, bytes)
 	return nil
 }
 

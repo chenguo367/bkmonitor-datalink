@@ -1035,7 +1035,8 @@ func (store *ExecutionStore) readFramedRecord(
 }
 
 // readStoredRecord turns the framed value one series holds into the view the
-// evaluator reads, and remembers what the apply path will need. framedDecoded
+// evaluator reads, and remembers what the apply path will need unless the
+// request is Unwitnessed (a read no apply follows from). framedDecoded
 // is framedRaw already decoded for the same request and item, or nil to
 // decode it here; decoding is a function of those inputs alone, so the view is
 // the one a second decode would give.
@@ -1054,8 +1055,13 @@ func (store *ExecutionStore) readStoredRecord(
 			ReasonCode: execution.ReasonCode(contract.ReasonStateBudgetExceeded)}
 	}
 	witness := runtimeWitness{missing: true, framedMissing: framedRaw == nil}
+	remember := func() {
+		if !request.Unwitnessed {
+			store.witnesses.remember(request.Contract.Slot, item.Identity, witness)
+		}
+	}
 	if framedRaw == nil {
-		store.witnesses.remember(request.Contract.Slot, item.Identity, witness)
+		remember()
 		return execution.RuntimeStateView{Identity: item.Identity, Status: execution.StateMissingWarming}
 	}
 	witness.framedDigest = ExpectedValueDigest(framedRaw)
@@ -1072,7 +1078,7 @@ func (store *ExecutionStore) readStoredRecord(
 	witness.missing = false
 	witness.blobRevision, witness.applyVersion, witness.mutationDigest = decoded.BlobRevision, decoded.PersistedApplyVersion, decoded.PersistedMutationDigest
 	witness.digest = witness.framedDigest
-	store.witnesses.remember(request.Contract.Slot, item.Identity, witness)
+	remember()
 	return decoded
 }
 

@@ -320,7 +320,9 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 			// store holds while every rule of §4.3 holds, decoded and
 			// witnessed exactly as bytes read back are.
 			result.Items[index] = store.readFramedRecord(request, item, entry.raw)
-			store.witnesses.markCached(request.Contract.Slot, item.Identity)
+			if !request.Unwitnessed {
+				store.witnesses.markCached(request.Contract.Slot, item.Identity)
+			}
 			continue
 		}
 		if len(batch.indexes) > 0 && (batch.target.Name != target.Name || len(batch.indexes) >= store.runtimeLoadBatchLimit(request.Contract.Slot.QueryGroup, roundLargest, anyRead)) {

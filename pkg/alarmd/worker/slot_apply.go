@@ -44,10 +44,9 @@ type slotApply struct {
 	changedPlans       map[execution.PlanKey]struct{}
 	changedActivations execution.PlanActivationResult
 	firstSeen          map[execution.PlanKey]execution.PlanActivationFact
-	// firstSeenUndecided says a Plan this Slot forces to warm up could still
-	// turn out first-seen, which only every one of its series' State can
-	// tell (firstSeenUndecided).
-	firstSeenUndecided bool
+	// forced is the Plans this Slot forces to warm up, as read before
+	// judgeForced splits off the first-seen ones.
+	forced execution.PlanActivationResult
 
 	retryPendingReason execution.ReasonCode
 	// deterministicTerminalReason is the first deterministic refusal that
@@ -79,9 +78,10 @@ type slotApply struct {
 	keys slotStateKeys
 }
 
-// beginSlotApply reads the activation facts the Slot's writes are guarded by.
-// It returns false when they could not be read, which the caller answers
-// with an activation retry before anything is written.
+// beginSlotApply reads the activation facts the Slot's writes are guarded by
+// and judges its forced Plans with unseen. It returns false when the facts
+// could not be read, which the caller answers with an activation retry before
+// anything is written.
 func (coordinator *SlotExecutionCoordinator) beginSlotApply(
 	ctx context.Context,
 	request execution.SlotExecutionRequest,
@@ -89,41 +89,64 @@ func (coordinator *SlotExecutionCoordinator) beginSlotApply(
 	loadedGaps execution.GapLoadResult,
 	unseen map[execution.PlanKey]struct{},
 ) (*slotApply, bool) {
+	apply, read := coordinator.readSlotActivations(ctx, request, header, loadedGaps)
+	if !read {
+		return nil, false
+	}
+	apply.judgeForced(unseen)
+	return apply, true
+}
+
+// readSlotActivations reads the activation facts and the Plans the Slot
+// forces to warm up, leaving them unjudged: whether a forced Plan is
+// first-seen waits on unseen (judgeForced), which a Slot applied window by
+// window learns between the two (firstSeenPrepass).
+func (coordinator *SlotExecutionCoordinator) readSlotActivations(
+	ctx context.Context,
+	request execution.SlotExecutionRequest,
+	header execution.InternalExecutionHeader,
+	loadedGaps execution.GapLoadResult,
+) (*slotApply, bool) {
 	activationRequest := duePlanActivationRequest(request.Contract, header.DuePlans)
 	guardActivations, err := coordinator.loadActivations(ctx, activationRequest)
 	if err != nil {
 		return nil, false
 	}
 	changedPlans, changedActivations := changedDuePlanActivations(header.DuePlans, guardActivations)
-	// A Plan forced to warm up is one Plan of this Slot, not the Slot. Its
-	// WARMING marker is written at this Slot's ApplyVersion, and the Gap
-	// store takes one write per version: evaluating under the marker would
-	// advance it with a second write at the same version, which the store
-	// refuses as a conflict on every retry until the Slot ages out. So the
-	// Plan writes nothing else here and warms from the next Slot, whose
-	// version is newer than the marker's. The other Plans write as they
-	// would: the forced one joins the changed Plans, skipped in the loop
-	// below, and its marker is written by the protection path after their
-	// writes, as a changed Plan's is. A retry of the Slot finds the marker at
-	// the Slot's own version and still skips the Plan
-	// (unsatisfiedForcedWarmingActivations), under the word the marker was
-	// written with (classifyActivationChange).
-	forced := unsatisfiedForcedWarmingActivations(guardActivations, loadedGaps, changedPlans)
-	undecided := firstSeenUndecided(forced, loadedGaps)
-	// A forced Plan the Slot found nothing of from before it never ran under
-	// its generation: it is not warmed up (first_seen.go).
-	forced, firstSeen := firstSeenActivations(forced, loadedGaps, unseen)
-	for _, fact := range forced.Facts {
-		changedPlans[fact.Key()] = struct{}{}
-		changedActivations.Facts = append(changedActivations.Facts, fact)
-	}
 	return &slotApply{
 		coordinator: coordinator, request: request, header: header, loadedGaps: loadedGaps,
 		activationRequest: activationRequest, guardActivations: guardActivations,
 		changedPlans: changedPlans, changedActivations: changedActivations,
-		firstSeen: firstSeen, firstSeenUndecided: undecided,
+		forced:         unsatisfiedForcedWarmingActivations(guardActivations, loadedGaps, changedPlans),
 		withheldNoData: make(map[execution.PlanIdentity]struct{}),
 	}, true
+}
+
+// judgeForced splits the forced Plans into the first-seen ones and the ones
+// still warmed up, which join the changed Plans.
+//
+// A Plan forced to warm up is one Plan of this Slot, not the Slot. Its
+// WARMING marker is written at this Slot's ApplyVersion, and the Gap store
+// takes one write per version: evaluating under the marker would advance it
+// with a second write at the same version, which the store refuses as a
+// conflict on every retry until the Slot ages out. So the Plan writes nothing
+// else here and warms from the next Slot, whose version is newer than the
+// marker's. The other Plans write as they would: the forced one joins the
+// changed Plans, skipped by every write, and its marker is written by the
+// protection path after their writes, as a changed Plan's is. A retry of the
+// Slot finds the marker at the Slot's own version and still skips the Plan
+// (unsatisfiedForcedWarmingActivations), under the word the marker was
+// written with (classifyActivationChange).
+//
+// A forced Plan the Slot found nothing of from before it never ran under its
+// generation: it is not warmed up (first_seen.go).
+func (apply *slotApply) judgeForced(unseen map[execution.PlanKey]struct{}) {
+	forced, firstSeen := firstSeenActivations(apply.forced, apply.loadedGaps, unseen)
+	for _, fact := range forced.Facts {
+		apply.changedPlans[fact.Key()] = struct{}{}
+		apply.changedActivations.Facts = append(apply.changedActivations.Facts, fact)
+	}
+	apply.firstSeen = firstSeen
 }
 
 // changed reports whether the Plan writes nothing this attempt because its

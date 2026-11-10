@@ -918,6 +918,14 @@ type StatePreflightRequest struct {
 	// what it last wrote only under the fence it wrote with; zero serves
 	// nothing from there.
 	OwnerFence OwnerFence
+	// Unwitnessed reads without remembering, for an apply, what was read: a
+	// read no write of this Slot follows from, such as the first-seen
+	// pre-pass (worker/first_seen.go). The Slot's own preflight of the same
+	// keys would remember them again and replace what such a read left - a
+	// witness is kept per Slot and key - so leaving them would not mislead an
+	// apply; but until then they would sit in the store across every series
+	// of the Plan, charged to no budget.
+	Unwitnessed bool
 }
 
 type StatePreflightResult struct {

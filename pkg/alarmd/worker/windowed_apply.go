@@ -103,10 +103,9 @@ type slotWindows struct {
 	// the one Sequence a Slot that fits a window runs.
 	started bool
 	// single is set when the head found the Slot cannot be cut - its
-	// activations could not be read, or a Plan's first-seen judgement waits
-	// on every one of its series (firstSeenUndecided) - and nothing was
-	// written: no window is cut from then on, and the Slot is applied whole,
-	// as it was before windows.
+	// activations could not be read - and nothing was written: no window is
+	// cut from then on, and the Slot is applied whole, as it was before
+	// windows.
 	single bool
 	apply  *slotApply
 	// headOpened is the Plans the head opened a statement for. Their tail
@@ -297,9 +296,18 @@ func (stream *streamedExecution) headOpenStatements() (map[execution.PlanIdentit
 	return opens, nil
 }
 
-// applyWindowHead runs the head: the activations read, and every Plan's open
-// statement written, before the first window's events. It returns false,
-// having written nothing, when the Slot cannot be cut.
+// applyWindowHead runs the head: the activations read, the first-seen
+// judgement made, and every Plan's open statement - or, for a first-seen Plan
+// without one, the marker recording it ran - written before the first
+// window's events. It returns false, having written nothing, when the Slot
+// cannot be cut.
+//
+// A Plan that could be first-seen is judged here from every one of its
+// series' State, read ahead of the windows (firstSeenPrepass), so the head
+// decides it on "no open statement" alone: a first-seen Plan's marker is
+// missing, and a recovery clear needs one found (gap_recovery.go), so no
+// clear of its can come after. The reads hold the head's gap keys, which a
+// supplement of the same Plans waits on as it waits on the head's writes.
 func (coordinator *SlotExecutionCoordinator) applyWindowHead(ctx context.Context, stream *streamedExecution) (bool, error) {
 	opens, err := stream.headOpenStatements()
 	if err != nil {
@@ -307,13 +315,20 @@ func (coordinator *SlotExecutionCoordinator) applyWindowHead(ctx context.Context
 	}
 	started := false
 	err = coordinator.ports.Sequencer.Sequence(ctx, sequencingScope(stream.header, nil, stream.gapItems), func(sequenceCtx context.Context) error {
-		// No unseen Plans are handed over: a Plan that could be first-seen
-		// stops the head below, and for every other forced Plan the answer
-		// does not depend on them.
-		apply, read := coordinator.beginSlotApply(sequenceCtx, stream.request, stream.header, stream.gaps, nil)
-		if !read || apply.firstSeenUndecided {
+		apply, read := coordinator.readSlotActivations(sequenceCtx, stream.request, stream.header, stream.gaps)
+		if !read {
 			return nil
 		}
+		// Only the candidates' answer depends on unseen; every other forced
+		// Plan is warmed up whatever it is.
+		var unseen map[execution.PlanKey]struct{}
+		if candidates := firstSeenCandidates(apply.forced, stream.gaps); len(candidates) != 0 {
+			if err := stream.firstSeenPrepass(sequenceCtx, candidates); err != nil {
+				return err
+			}
+			unseen = stream.unseenPlans()
+		}
+		apply.judgeForced(unseen)
 		apply.keys = make(slotStateKeys)
 		headOpened := make(map[execution.PlanIdentity]struct{}, len(opens))
 		for _, due := range sortedDuePlans(stream.header.DuePlans) {
@@ -322,14 +337,18 @@ func (coordinator *SlotExecutionCoordinator) applyWindowHead(ctx context.Context
 				continue
 			}
 			open, found := opens[due.Identity]
-			if !found {
+			_, first := apply.firstSeen[due.Key()]
+			if !found && !first {
 				continue
 			}
-			headOpened[due.Identity] = struct{}{}
 			if err := coordinator.admit(sequenceCtx, stream.request, due); err != nil {
 				return err
 			}
-			statement := execution.PlanEvaluationResult{Plan: due.Identity, GuardBeforeEvents: []execution.PlanGapMutation{open}}
+			statement := execution.PlanEvaluationResult{Plan: due.Identity}
+			if found {
+				headOpened[due.Identity] = struct{}{}
+				statement.GuardBeforeEvents = []execution.PlanGapMutation{open}
+			}
 			if _, err := apply.planGapsBefore(sequenceCtx, due, &statement); err != nil {
 				return err
 			}
