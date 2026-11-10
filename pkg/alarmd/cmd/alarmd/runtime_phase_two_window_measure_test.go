@@ -98,7 +98,20 @@ func windowMeasureShapes() []windowMeasureShape {
 	for _, shape := range shapes {
 		if wanted[shape.String()] {
 			chosen = append(chosen, shape)
+			delete(wanted, shape.String())
 		}
+	}
+	// Any other shape named as series x points / on|off, smaller ones for
+	// reading a failure at a size that runs in seconds.
+	for name := range wanted {
+		var shape windowMeasureShape
+		var state string
+		if _, err := fmt.Sscanf(strings.ReplaceAll(name, "/", " "), "%dx%d %s", &shape.series, &shape.points, &state); err != nil ||
+			shape.series <= 0 || shape.points <= 0 || (state != "on" && state != "off") {
+			continue
+		}
+		shape.noData = state == "on"
+		chosen = append(chosen, shape)
 	}
 	return chosen
 }
@@ -451,6 +464,9 @@ type windowMeasureResult struct {
 	commands                        map[string]int64
 	lateAnswers                     int64
 	runErr                          error
+	// warmups are the earlier Slots' completions, and the errors the first
+	// few each part of the run raised.
+	warmups, warmupErrors, errors []string
 }
 
 // TestMeasureWindowedSlotsOnAFourGiBReplica runs three Slots of each shape a
@@ -488,6 +504,7 @@ func TestMeasureWindowedSlotsOnAFourGiBReplica(t *testing.T) {
 		t.Run(strings.ReplaceAll(shape.String(), "/", "_"), func(t *testing.T) {
 			measured := measureWindowedShape(t, shape)
 			t.Logf("shape=%s %s", shape, measured.line(shape))
+			t.Logf("shape=%s warmups=%v warmup_errors=%q errors=%q", shape, measured.warmups, measured.warmupErrors, measured.errors)
 			if !measured.completed {
 				t.Errorf("shape %s: the measured Slot did not complete (%v)", shape, measured.runErr)
 			}
@@ -568,10 +585,24 @@ func measureWindowedShape(t *testing.T, shape windowMeasureShape) windowMeasureR
 	measured := windowMeasureResult{refusals: map[string]int{}}
 	observer := observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
 		if !measuring.Load() {
+			// The warm-up Slots: each completion and the first error each
+			// stage raised, so a shape whose earlier Slots failed says how.
+			mu.Lock()
+			defer mu.Unlock()
+			if observation.Stage == observability.StageSlotCompleted {
+				measured.warmups = append(measured.warmups, fmt.Sprintf("%s/%s/%s",
+					observation.Result, observation.ReasonCode, observation.SlotCompletionCause))
+			}
+			if observation.Err != nil && len(measured.warmupErrors) < 4 {
+				measured.warmupErrors = append(measured.warmupErrors, fmt.Sprintf("%s: %v", observation.Stage, observation.Err))
+			}
 			return
 		}
 		mu.Lock()
 		defer mu.Unlock()
+		if observation.Err != nil && len(measured.errors) < 4 {
+			measured.errors = append(measured.errors, fmt.Sprintf("%s: %v", observation.Stage, observation.Err))
+		}
 		if observation.CapacityRejection != nil || observation.ReasonCode == observability.CompletionCauseResourceShareExceeded {
 			measured.refusals[string(observation.ReasonCode)]++
 		}
