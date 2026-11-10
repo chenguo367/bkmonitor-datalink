@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"time"
 	"unsafe"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
@@ -136,6 +137,12 @@ type slotWindows struct {
 	// (completeWindowsBeyondSlotBudget): their results past the cursors are
 	// not written, and their tail writes the budget's open statement.
 	replaced map[execution.PlanIdentity]struct{}
+	// largestSeries is the most input one series was charged while the
+	// Slot's records arrived, and ceiling the latest its windows may move its
+	// deadline to, fixed at the completion (fixWindowCeiling); zero when the
+	// execution has no deadline to move.
+	largestSeries uint64
+	ceiling       time.Time
 	// evaluating is the Plan whose result the evaluation is producing, and
 	// passed the Plans whose series it has moved past.
 	evaluating    execution.PlanIdentity
@@ -432,6 +439,12 @@ func (coordinator *SlotExecutionCoordinator) applyWindow(ctx context.Context, st
 		stateIndex := indexStatePreflight(windowState)
 		windowCtx := withPlanLanding(withNoDataAbsenceStarts(ctx, stream.noDataAbsenceStarts), &windows.landing)
 		err = coordinator.ports.Sequencer.Sequence(windowCtx, sequencingScope(stream.header, items, nil), func(sequenceCtx context.Context) error {
+			// From open: the window before left the commit (windowBoundary),
+			// and a watchdog that claimed the Slot since stops it here,
+			// before anything of this window is written.
+			if err := execution.EnterCommit(sequenceCtx, execution.SlotStageOutput); err != nil {
+				return err
+			}
 			for _, part := range parts {
 				plan := part.due.Identity
 				if apply.changed(part.due) {
@@ -472,7 +485,88 @@ func (coordinator *SlotExecutionCoordinator) applyWindow(ctx context.Context, st
 	if err != nil {
 		return err
 	}
-	return releaseErr
+	if releaseErr != nil {
+		return releaseErr
+	}
+	stream.windowBoundary(ctx)
+	return nil
+}
+
+// windowStepBound (T_w) is how long one window of a Slot applied window by
+// window may take, from the boundary before it to the one after: the
+// evaluation of its series and its writes. At each boundary the Slot's
+// deadline is moved to that far ahead (windowBoundary), so the watchdog -
+// which claims an execution outside its commit once it is past its deadline
+// by its grace (cmd/alarmd executionPastDeadlineGrace) - lets go of a window
+// that is stuck in itself, and not of a large Slot still making progress on a
+// slow Redis or Kafka, which past its query deadline would otherwise be
+// declined at its first boundary and its Query Group moved every round.
+//
+// A minute, the grace itself: that grace is what the watchdog gives a whole
+// Slot past its deadline for what remains after its query - its evaluation -
+// and a window evaluates a part of the Slot's series, while its writes run
+// under the State, event and gap clients' own bounded timeouts. A stuck
+// window is claimed T_w and the grace after the boundary before it, two
+// minutes, inside the five the liveness probe allows every execution slot
+// stuck at once (executionsStuckBound). Not a configuration key: what it
+// bounds is the code's own pace, not the deployment's.
+const windowStepBound = time.Minute
+
+// fixWindowCeiling fixes, at the completion, the latest the Slot's windows
+// may move its deadline to: the deadline then, plus T_w for each window the
+// Slot can need, ceil(S / s_min). S is the series the completion handed the
+// evaluation; s_min the fewest series a window holds - the window bound now
+// over the most input one series was charged, at least one, and no more than
+// the per-Slot State or event cap a window is also cut at, since each series
+// writes one key. However the Slot is cut, its windows are no more than that,
+// so moving the deadline at each boundary never lets a Slot that really is
+// stuck out-wait the watchdog: the latest it can be claimed is the deadline,
+// the grace and ceil(S / s_min) T_w (decision-020 batch 8, 2.2 step 6 b).
+func (stream *streamedExecution) fixWindowCeiling(ctx context.Context, series int) {
+	deadline := execution.ExecutionDeadline(ctx)
+	if deadline.IsZero() || series == 0 || stream.supplement != nil {
+		return
+	}
+	perWindow := uint64(series)
+	if largest := stream.windows.largestSeries; largest > 0 {
+		perWindow = stream.windowBound() / largest
+	}
+	budget := stream.coordinator.slotBudget()
+	for _, limit := range []uint64{budget.MaxStateMutations, budget.MaxEvents} {
+		if limit > 0 {
+			perWindow = min(perWindow, limit)
+		}
+	}
+	perWindow = max(perWindow, 1)
+	windows := (uint64(series) + perWindow - 1) / perWindow
+	stream.windows.ceiling = deadline.Add(time.Duration(windows) * windowStepBound)
+}
+
+// windowBoundary is a window landed: the Slot's deadline moved to T_w past
+// now and no later than the ceiling, then the commit left. In that order, so
+// the watchdog never finds the Slot open under a deadline already behind it.
+//
+// Only here, after the window's applies returned - its State applied, its
+// frozen series renewed and its held frames released - and never after its
+// output alone: between two windows nothing the Slot acknowledged waits on a
+// write it has yet to make, which is the shape a crash between them leaves
+// and a retry resumes series by series. The next window and the tail enter
+// the commit again from open (applyWindow, finishWindowedSlot), and once the
+// watchdog claimed the Slot they write nothing and return
+// execution.ErrExecutionDeclined. A Slot past its ceiling is not moved: it
+// stays as late as it is, and the next tick between two windows claims it.
+func (stream *streamedExecution) windowBoundary(ctx context.Context) {
+	if ceiling := stream.windows.ceiling; !ceiling.IsZero() {
+		now := stream.coordinator.now()
+		target := now.Add(windowStepBound)
+		if ceiling.Before(target) {
+			target = ceiling
+		}
+		if target.After(now) {
+			execution.ExtendDeadline(ctx, target, now)
+		}
+	}
+	execution.LeaveCommit(ctx, execution.SlotStageEvaluate)
 }
 
 // loadedKeyHeldBytes is what a Slot holds for each State key it loaded,
@@ -586,6 +680,7 @@ func (stream *streamedExecution) holdInput(series execution.SeriesIdentityDigest
 		stream.inputHolds[series] = hold
 	}
 	hold.bytes += bytes
+	stream.windows.largestSeries = max(stream.windows.largestSeries, hold.bytes)
 	return hold
 }
 
@@ -712,6 +807,10 @@ func (coordinator *SlotExecutionCoordinator) finishWindowedSlot(ctx context.Cont
 	ctx = withUnseenPlans(withNoDataEnds(withNoDataAbsenceStarts(ctx, stream.noDataAbsenceStarts), stream.noDataEndRound()), stream.unseenPlans())
 	var result execution.SlotExecutionResult
 	err := coordinator.ports.Sequencer.Sequence(ctx, sequencingScope(stream.header, nil, stream.gapItems), func(sequenceCtx context.Context) error {
+		// From open, as each window: the last one left the commit.
+		if err := execution.EnterCommit(sequenceCtx, execution.SlotStageState); err != nil {
+			return err
+		}
 		var tailErr error
 		result, tailErr = stream.windows.apply.windowedTail(sequenceCtx, stream)
 		return tailErr

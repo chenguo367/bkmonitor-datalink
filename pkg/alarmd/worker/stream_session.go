@@ -1086,6 +1086,7 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 		return err
 	}
 	stream.windows.prepared = preparedSeriesEvaluations
+	stream.fixWindowCeiling(ctx, len(preparedSeriesEvaluations))
 	if err := stream.evaluateSeries(ctx, completion, preparedSeriesEvaluations); err != nil {
 		var exceeded *provisionalBudgetExceededError
 		// A supplement over its budget fails as it is: the replacement opens

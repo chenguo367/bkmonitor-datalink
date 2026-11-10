@@ -4049,9 +4049,14 @@ func (bundle *phaseTwoWorkerBundle) unreadableTimelinesRegistration() ([]string,
 // a taken-over Slot is minutes past by design. Only the stages before the
 // commit are judged, where past its deadline an execution has only its
 // evaluation left, which the grace (the liveness probe's minute) covers. An
-// execution that has begun to write output is never declined: its State and
-// Progress writes run under their own bounded timeouts, and releasing the
-// lease between them would leave acknowledged output unapplied.
+// execution that has begun to write output is never declined while it is
+// inside its commit: its State and Progress writes run under their own
+// bounded timeouts, and releasing the lease between them would leave
+// acknowledged output unapplied. A Slot applied window by window leaves its
+// commit between two windows, once a window's State is applied
+// (execution.StageMarker.LeaveCommit), and is judged again there, under a
+// deadline each window boundary moves a window's bound ahead, up to a ceiling
+// fixed at its completion (worker windowStepBound).
 func (bundle *phaseTwoWorkerBundle) declineHungExecutions(now time.Time) {
 	type hung struct {
 		queryGroup execution.QueryGroupIdentity

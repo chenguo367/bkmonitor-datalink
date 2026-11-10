@@ -2717,8 +2717,14 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 	}
 	if ran != nil {
 		// Here rather than with the State cache's drop, which comes before the
-		// Slot drain: Release runs after it on every path, so no Slot of this
-		// session is still between its load and its apply.
+		// Slot drain: Release runs after it on every path but one, so no Slot
+		// of this session is still between its load and its apply. The one is
+		// a decline (declineQueryGroup), which releases after ShutdownTimeout
+		// whether the hung Slot returned or not. That Slot is safe to drop
+		// under: once claimed it cannot enter its commit again
+		// (execution.EnterCommit), so nothing of it reaches the store with
+		// or without a witness, and a Slot inside a window - in its commit -
+		// is never claimed. The upTo bound plays no part in that case.
 		drop := runtime.dependencies.DropRuntimeWitnesses
 		previousRelease := release
 		release = func() { previousRelease(); drop(queryGroup, ran.last()) }
