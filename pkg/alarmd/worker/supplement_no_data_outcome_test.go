@@ -41,7 +41,7 @@ func (store *supplementNoDataStore) LoadNoData(
 	for index, item := range request.Items {
 		if store.unreadable {
 			result.Items[index] = execution.NoDataMemorySnapshot{Identity: item.Identity,
-				Status: execution.NoDataMemoryUnreadable, SchemaVersion: execution.NoDataMemorySchema(4),
+				Status: execution.NoDataMemoryUnreadable, SchemaVersion: execution.MaxSupportedNoDataMemorySchema + 1,
 				ReasonCode: execution.ReasonCode(contract.ReasonStateSchemaUnsupported)}
 			continue
 		}
