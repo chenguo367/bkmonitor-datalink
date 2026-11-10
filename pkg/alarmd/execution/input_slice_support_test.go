@@ -46,6 +46,9 @@ func TestSliceableDimensionsAreTheRawGroupByLabelsEveryQueryShares(t *testing.T)
 	// Across series: a clause's top k of every series, a metric merge's.
 	topk := groupedFacts("host")
 	topk.QueryList[0].Functions = append(topk.QueryList[0].Functions, execution.QueryFunction{Method: "topk", Arguments: []execution.QueryScalar{{Kind: execution.QueryScalarNumber, NumberValue: "1"}}})
+	topkByHost := groupedFacts("host")
+	topkByHost.QueryList[0].Functions = append(topkByHost.QueryList[0].Functions, execution.QueryFunction{Method: "topk", Dimensions: []string{"host"},
+		Arguments: []execution.QueryScalar{{Kind: execution.QueryScalarNumber, NumberValue: "1"}}})
 	merged := func(expression string) execution.QueryPlanFacts {
 		facts := groupedFacts("host")
 		facts.MetricMerge = expression
@@ -69,6 +72,8 @@ func TestSliceableDimensionsAreTheRawGroupByLabelsEveryQueryShares(t *testing.T)
 		{name: "elasticsearch", facts: []execution.QueryPlanFacts{elastic}, reason: "storage_dialect"},
 		{name: "no_queries", reason: "storage_dialect"},
 		{name: "clause_topk_of_every_series", facts: []execution.QueryPlanFacts{topk}, reason: "cross_series"},
+		{name: "clause_topk_by_host", facts: []execution.QueryPlanFacts{topkByHost}, want: []string{"host"}},
+		{name: "merge_absent", facts: []execution.QueryPlanFacts{merged("absent(a)")}, reason: "cross_series"},
 		{name: "merge_topk", facts: []execution.QueryPlanFacts{merged("topk(1, a)")}, reason: "cross_series"},
 		{name: "merge_sum", facts: []execution.QueryPlanFacts{merged("sum(a)")}, reason: "cross_series"},
 		{name: "merge_on", facts: []execution.QueryPlanFacts{merged("a / on(region) b")}, reason: "cross_series"},

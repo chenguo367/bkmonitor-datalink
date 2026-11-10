@@ -387,11 +387,19 @@ func valueConcentrated() error {
 			Reason: contract.ReasonInputSliceValueConcentrated, Detail: "single_value on host"}})
 }
 
+// queryTooLong is a Slot whose slice conditions the store refuses as too
+// long: the same phase and share as valueConcentrated, another code.
+func queryTooLong() error {
+	return fmt.Errorf("alarmd worker: query: %w", &shareRefusalError{deterministic: true,
+		refusal: execution.ShareRefusal{Phase: "input_slice", OwnUsedBytes: 300 << 20, LimitBytes: 512 << 20,
+			Reason: contract.ReasonInputSliceQueryTooLong, Detail: "conditions of 4096 bytes"}})
+}
+
 // A Slot whose slices no split separates is refused the same way every
 // time: two in a row finalize it as a share refusal does - the same
 // query-free gap, the same cause - and the slot_skipped line names its own
-// code and why. A share refusal and a concentrated one are not the same
-// decision and do not add up.
+// code and why. A share refusal and a concentrated one, or a concentrated
+// one and a too-long one, are not the same decision and do not add up.
 func TestTwoIdenticalSliceRefusalsFinalizeTheSlotUnderTheirOwnCode(t *testing.T) {
 	clock := newMutableClock(time.Unix(102, 0))
 	runner, executor, _ := newShareRunner(t, clock, valueConcentrated(), valueConcentrated())
@@ -414,18 +422,20 @@ func TestTwoIdenticalSliceRefusalsFinalizeTheSlotUnderTheirOwnCode(t *testing.T)
 		t.Fatalf("slot_skipped lines = %v", lines)
 	}
 
-	clock = newMutableClock(time.Unix(102, 0))
-	runner, executor, _ = newShareRunner(t, clock, ownTotalOverShare(), valueConcentrated())
-	for attempt := 1; attempt <= 2; attempt++ {
-		if _, _, err := runner.RunOne(context.Background()); err == nil {
-			t.Fatalf("attempt %d was not refused", attempt)
+	for name, first := range map[string]error{"a share refusal": ownTotalOverShare(), "a too-long one": queryTooLong()} {
+		clock = newMutableClock(time.Unix(102, 0))
+		runner, executor, _ = newShareRunner(t, clock, first, valueConcentrated())
+		for attempt := 1; attempt <= 2; attempt++ {
+			if _, _, err := runner.RunOne(context.Background()); err == nil {
+				t.Fatalf("%s, attempt %d was not refused", name, attempt)
+			}
+			if runner.NextReadyAt().IsZero() {
+				t.Fatalf("%s, attempt %d: it and a concentrated one added up to a decision", name, attempt)
+			}
+			clock.Advance(runner.NextReadyAt().Sub(clock.Now()))
 		}
-		if runner.NextReadyAt().IsZero() {
-			t.Fatalf("attempt %d: a share refusal and a concentrated one added up to a decision", attempt)
+		if result, _, err := runner.RunOne(context.Background()); err != nil || result.QueryFreeCause != "" || executor.queries != 3 {
+			t.Fatalf("%s, third attempt: result=%+v err=%v queries=%d, want queried", name, result, err, executor.queries)
 		}
-		clock.Advance(runner.NextReadyAt().Sub(clock.Now()))
-	}
-	if result, _, err := runner.RunOne(context.Background()); err != nil || result.QueryFreeCause != "" || executor.queries != 3 {
-		t.Fatalf("third attempt: result=%+v err=%v queries=%d, want queried", result, err, executor.queries)
 	}
 }
