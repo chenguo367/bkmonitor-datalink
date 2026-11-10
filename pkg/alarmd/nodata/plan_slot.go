@@ -86,22 +86,83 @@ type PlanSlotResult struct {
 // a record written by a newer build is not a failure of anything, it is a state
 // the system is briefly in, and routing it through the error path would take
 // the Plan's threshold detection down with it.
+//
+// It is the round judged one group at a time (PlanJudge) with every stored
+// group fed in the order the snapshot holds them.
 func EvaluatePlanSlot(input PlanSlotInput) (PlanSlotResult, error) {
+	judge, err := NewPlanJudge(input)
+	if err != nil {
+		return PlanSlotResult{}, err
+	}
+	for _, group := range input.Snapshot.Groups {
+		if err := judge.Feed(group); err != nil {
+			return PlanSlotResult{}, err
+		}
+	}
+	return judge.planSlotResult(input.Snapshot.Groups)
+}
+
+// PlanJudge is one Plan's no-data round judged one group at a time: prepared
+// from everything known before the stored memory is read, fed the stored
+// groups in any order - a group fed twice is judged once - and finished with
+// the Plan-level outcome. See judge.go for why the order does not matter.
+type PlanJudge struct {
+	input   PlanSlotInput
+	outcome SlotOutcome
+	// absence is nil for a round that judges nothing, whose outcome is then
+	// already the whole answer.
+	absence  *absenceJudge
+	delta    []GroupJudgement
+	verdicts []GroupJudgement
+}
+
+// PlanJudgement is a finished PlanJudge.
+type PlanJudgement struct {
+	Outcome SlotOutcome
+	Facts   AbsenceFacts
+	// Judged says the round's verdicts are to be said and its memory carried
+	// forward. A round that judged nothing writes nothing: the memory it would
+	// write is the memory it started with, and writing it back would burn a
+	// state mutation to store what is already there - but more importantly,
+	// the absence clocks must not move on evidence the round did not have.
+	//
+	// A partial round that judged groups present (A1) is judged: their
+	// NORMAL and their last-seen are evidence it had. Its unavailable groups
+	// produce no series and keep their memory as loaded.
+	//
+	// The fields below are set only on a judged round.
+	Judged bool
+	// Unchanged says the memory the round produced is the memory it loaded,
+	// so nothing is to be written. See planSlotResult.
+	Unchanged           bool
+	RosterVersion       string
+	PresentAsOf         int64
+	TrackingExhaustedAt int64
+	// Delta is every group whose stored value moved, in key order: groups the
+	// round changed or forgot, and groups seen for the first time.
+	Delta []GroupJudgement
+	// Verdicts is every group the round says something about, in key order -
+	// the series to synthesize. An UNAVAILABLE group is not here: it produces
+	// no series.
+	Verdicts []GroupJudgement
+}
+
+// NewPlanJudge prepares one Plan's round. input.Snapshot.Groups is not read:
+// the caller feeds the stored groups.
+func NewPlanJudge(input PlanSlotInput) (*PlanJudge, error) {
 	if input.NoData == nil {
-		return PlanSlotResult{Outcome: OutcomeNone}, nil
+		return &PlanJudge{outcome: OutcomeNone}, nil
 	}
 	switch input.Snapshot.Status {
 	case execution.NoDataMemoryUnreadable:
-		return PlanSlotResult{Outcome: OutcomeSkippedMemoryUnreadable}, nil
+		return &PlanJudge{outcome: OutcomeSkippedMemoryUnreadable}, nil
 	case execution.NoDataMemoryMissing, execution.NoDataMemoryFound:
 	default:
-		return PlanSlotResult{}, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"alarmd nodata: no-data memory for plan %s was not read: %s (%s)",
 			input.Identity.Plan.StrategyID, input.Snapshot.Status, input.Snapshot.ReasonCode)
 	}
-
-	memory := loadedMemory(input.Snapshot)
-	result, outcome, err := EvaluateSlot(SlotInput{
+	absence, outcome, err := newSlotJudge(SlotInput{
 		Plan:             &contract.EvaluationPlanV2{NoData: input.NoData, TargetScope: input.Scope, TargetPlan: input.Plan},
 		EvaluationTime:   input.EvaluationTime,
 		PeriodSeconds:    input.PeriodSeconds,
@@ -112,7 +173,6 @@ func EvaluatePlanSlot(input PlanSlotInput) (PlanSlotResult, error) {
 		OutOfBusiness:    input.OutOfBusiness,
 		TargetResolution: input.TargetResolution,
 		AnswerTruncated:  input.AnswerTruncated,
-		Memory:           memory,
 		// The Plan-level fact comes out of the record, never out of the groups:
 		// the round it describes is one where there are no groups left to
 		// derive it from.
@@ -121,63 +181,131 @@ func EvaluatePlanSlot(input PlanSlotInput) (PlanSlotResult, error) {
 		ManualCloses:           input.ManualCloses,
 	})
 	if err != nil {
-		return PlanSlotResult{}, err
+		return nil, err
 	}
+	input.Snapshot.Groups = nil
+	return &PlanJudge{input: input, outcome: outcome, absence: absence}, nil
+}
 
-	slot := PlanSlotResult{Outcome: outcome, Facts: result.Facts}
-	partial := outcome == OutcomeSkippedQueryNotFull || outcome == OutcomeSkippedAnswerTruncated ||
-		outcome == OutcomeSkippedTargetSelectorUnavailable || outcome == OutcomeSkippedTargetMembersDropped
-	if outcome != OutcomeEvaluated && (!partial || !judgedPresent(result, input.EvaluationTime)) {
-		// A round that judged nothing writes nothing. The memory it would write
-		// is the memory it started with, and writing it back would burn a state
-		// mutation to store what is already there - but more importantly, the
-		// absence clocks must not move on evidence the round did not have.
-		//
-		// A partial round that judged groups present (A1) goes on: their
-		// NORMAL and their last-seen are evidence it had. Its unavailable
-		// groups produce no series and keep their memory as loaded.
-		return slot, nil
+// Feed judges one stored group.
+func (judge *PlanJudge) Feed(group execution.NoDataGroupMemory) error {
+	if judge.absence == nil {
+		return nil
 	}
-	slot.Series, err = SyntheticSeriesFor(SyntheticInput{
-		EvaluationTime: input.EvaluationTime,
-		PeriodSeconds:  input.PeriodSeconds,
-		Result:         result,
-		Memory:         result.Memory,
-		Roster:         result.Roster,
+	judgement, judged, err := judge.absence.Feed(group.GroupKey, GroupMemory{
+		LastSeen: group.LastSeen, FirstAbsent: group.FirstAbsent, SuppressedAt: group.SuppressedAt,
 	})
+	if err != nil {
+		return err
+	}
+	if judged {
+		judge.record(judgement)
+	}
+	return nil
+}
+
+func (judge *PlanJudge) record(judgement GroupJudgement) {
+	if judgement.Changed {
+		judge.delta = append(judge.delta, judgement)
+	}
+	if judgement.Verdict != "" && judgement.Verdict != VerdictUnavailable {
+		judge.verdicts = append(judge.verdicts, judgement)
+	}
+}
+
+// Finish judges the groups no stored entry named and settles the Plan.
+func (judge *PlanJudge) Finish() (PlanJudgement, error) {
+	if judge.absence == nil {
+		return PlanJudgement{Outcome: judge.outcome}, nil
+	}
+	summary, rest, err := judge.absence.Finish()
+	if err != nil {
+		return PlanJudgement{}, err
+	}
+	for _, judgement := range rest {
+		judge.record(judgement)
+	}
+	judgement := PlanJudgement{Outcome: judge.outcome, Facts: summary.Facts}
+	partial := judge.outcome == OutcomeSkippedQueryNotFull || judge.outcome == OutcomeSkippedAnswerTruncated ||
+		judge.outcome == OutcomeSkippedTargetSelectorUnavailable || judge.outcome == OutcomeSkippedTargetMembersDropped
+	// judgedPresent: a last-seen the round wrote now, or the whole item
+	// present. With recovery enabled each such group also carries its
+	// NORMAL; with it disabled the last-seen is still news.
+	judgedPresent := summary.FreshPresent || summary.WholeItemPresent
+	if judge.outcome != OutcomeEvaluated && (!partial || !judgedPresent) {
+		return judgement, nil
+	}
+	judgement.Judged = true
+	sort.Slice(judge.delta, func(left, right int) bool { return judge.delta[left].Key < judge.delta[right].Key })
+	sort.Slice(judge.verdicts, func(left, right int) bool {
+		return judge.verdicts[left].Key < judge.verdicts[right].Key
+	})
+	judgement.Delta, judgement.Verdicts = judge.delta, judge.verdicts
+
+	snapshot := judge.input.Snapshot
+	judgement.RosterVersion = summary.Roster.Version
+	if partial && snapshot.RosterVersion != "" {
+		// A partial round decided nothing about the expected set, so it does
+		// not restate which derivation the record was judged against.
+		judgement.RosterVersion = snapshot.RosterVersion
+	}
+	judgement.PresentAsOf = presentAsOf(judgedPresent, snapshot.PresentAsOf, judge.input.EvaluationTime)
+	judgement.TrackingExhaustedAt = summary.TrackingExhaustedAt
+	// Nothing moved. Sending the mutation anyway would be correct and
+	// idempotent - the digest would match and the store would say so - but it
+	// costs a round trip per Plan per Slot for a write that changes nothing,
+	// and the Slot's mutation budget is the scarce thing here.
+	//
+	// The present-as-of is part of "nothing moved" because it is part of the
+	// memory: it is the last-seen time of every group stored without an
+	// absence, so a round where it advanced changed what those groups say even
+	// though their own entries are unchanged.
+	//
+	// The tracking fact is part of it for the same reason and one more: it is
+	// the only part of the memory that can move while the groups do not. The
+	// round that exhausts a roster empties the memory, so the groups move with
+	// it - but the round that clears the fact need not, and a comparison of
+	// three that left it out would read "nothing moved" on a round whose whole
+	// content was the fact, drop the write, and leave the store stating an
+	// exhaustion the evaluation had already ended.
+	judgement.Unchanged = len(judgement.Delta) == 0 && snapshot.RosterVersion == judgement.RosterVersion &&
+		judgement.PresentAsOf == snapshot.PresentAsOf && judgement.TrackingExhaustedAt == snapshot.TrackingExhaustedAt
+	return judgement, nil
+}
+
+// planSlotResult finishes the round into what EvaluatePlanSlot returns. The
+// memory to store is the loaded record with the delta applied, which needs
+// the loaded groups; the caller that fed them holds them.
+func (judge *PlanJudge) planSlotResult(loaded []execution.NoDataGroupMemory) (PlanSlotResult, error) {
+	judgement, err := judge.Finish()
 	if err != nil {
 		return PlanSlotResult{}, err
 	}
-
-	groups := storedGroups(result.Memory)
-	rosterVersion := result.Roster.Version
-	if partial && input.Snapshot.RosterVersion != "" {
-		// A partial round decided nothing about the expected set, so it does
-		// not restate which derivation the record was judged against.
-		rosterVersion = input.Snapshot.RosterVersion
-	}
-	presentAsOf := presentAsOf(groups, input.Snapshot.PresentAsOf, input.EvaluationTime, result.WholeItemPresent)
-	if sameStoredGroups(groups, input.Snapshot.Groups) && input.Snapshot.RosterVersion == rosterVersion &&
-		presentAsOf == input.Snapshot.PresentAsOf &&
-		result.TrackingExhaustedAt == input.Snapshot.TrackingExhaustedAt {
-		// Nothing moved. Sending the mutation anyway would be correct and
-		// idempotent - the digest would match and the store would say so - but
-		// it costs a round trip per Plan per Slot for a write that changes
-		// nothing, and the Slot's mutation budget is the scarce thing here.
-		//
-		// The present-as-of is part of "nothing moved" because it is part of
-		// the memory: it is the last-seen time of every group stored without
-		// an absence, so a round where it advanced changed what those groups
-		// say even though their own entries are unchanged.
-		//
-		// The tracking fact is part of it for the same reason and one more: it
-		// is the only part of the memory that can move while the groups do not.
-		// The round that exhausts a roster empties the memory, so the groups
-		// move with it - but the round that clears the fact need not, and a
-		// comparison of three that left it out would read "nothing moved" on a
-		// round whose whole content was the fact, drop the write, and leave the
-		// store stating an exhaustion the evaluation had already ended.
+	slot := PlanSlotResult{Outcome: judgement.Outcome, Facts: judgement.Facts}
+	if !judgement.Judged {
 		return slot, nil
+	}
+	input := judge.input
+	slot.Series, err = syntheticSeriesOf(input.EvaluationTime, input.PeriodSeconds, judgement.Verdicts,
+		judge.absence.roster.Groups)
+	if err != nil {
+		return PlanSlotResult{}, err
+	}
+	if judgement.Unchanged {
+		return slot, nil
+	}
+	memory := make(map[string]GroupMemory, len(loaded)+len(judgement.Delta))
+	for _, group := range loaded {
+		memory[group.GroupKey] = GroupMemory{
+			LastSeen: group.LastSeen, FirstAbsent: group.FirstAbsent, SuppressedAt: group.SuppressedAt,
+		}
+	}
+	for _, change := range judgement.Delta {
+		if change.Kept {
+			memory[change.Key] = change.Memory
+		} else {
+			delete(memory, change.Key)
+		}
 	}
 	mutation, err := execution.BuildPlanNoDataMutation(execution.PlanNoDataMemoryUpdate{
 		Identity:   input.Identity,
@@ -190,15 +318,15 @@ func EvaluatePlanSlot(input PlanSlotInput) (PlanSlotResult, error) {
 		ExpectedMarkerRevision: input.Snapshot.MarkerRevision,
 		ApplyVersion:           input.ApplyVersion,
 		ScheduleRevision:       input.ScheduleRevision,
-		RosterVersion:          rosterVersion,
-		PresentAsOf:            presentAsOf,
-		Memory:                 groups,
-		Loaded:                 input.Snapshot.Groups,
+		RosterVersion:          judgement.RosterVersion,
+		PresentAsOf:            judgement.PresentAsOf,
+		Memory:                 storedGroups(memory),
+		Loaded:                 loaded,
 		LoadedPresentAsOf:      input.Snapshot.PresentAsOf,
 		// Both halves, for the same reason PresentAsOf has both: the delta has
 		// to know whether the fact moved, and the contract's two invariants are
 		// stated against what was loaded rather than against this round alone.
-		TrackingExhaustedAt:       result.TrackingExhaustedAt,
+		TrackingExhaustedAt:       judgement.TrackingExhaustedAt,
 		LoadedTrackingExhaustedAt: input.Snapshot.TrackingExhaustedAt,
 	})
 	if err != nil {
@@ -208,30 +336,15 @@ func EvaluatePlanSlot(input PlanSlotInput) (PlanSlotResult, error) {
 	return slot, nil
 }
 
-// judgedPresent says a partial round (A1) saw a group of this item's own
-// this round: a last-seen it wrote now, or the whole item present. With
-// recovery enabled each such group also carries its NORMAL; with it disabled
-// the last-seen is still news.
-func judgedPresent(result AbsenceResult, evaluationTime int64) bool {
-	if result.WholeItemPresent {
-		return true
-	}
-	for _, entry := range result.Memory {
-		if entry.FirstAbsent == 0 && entry.LastSeen == evaluationTime {
-			return true
-		}
-	}
-	return false
-}
-
 // presentAsOf is the round this Plan last had data in.
 //
 // It is read off the memory the round produced rather than off the round's
-// inputs: every group the evaluation saw is written with this round's time and
-// no absence, by the two places that record presence, so a memory holding one
-// of those is a round that had data. Taking it from the inputs instead would
-// have to decide what "had data" means for a series that arrived for a group
-// the roster had already dropped, and the memory has already decided that.
+// inputs (judgedPresent is absenceSummary.FreshPresent): every group the
+// evaluation saw is written with this round's time and no absence, by the two
+// places that record presence, so a memory holding one of those is a round
+// that had data. Taking it from the inputs instead would have to decide what
+// "had data" means for a series that arrived for a group the roster had
+// already dropped, and the memory has already decided that.
 //
 // The one group the memory cannot answer for is the whole-item group. It is
 // never written - it is not a series, and a LastSeen would carry it into a
@@ -245,29 +358,11 @@ func judgedPresent(result AbsenceResult, evaluationTime int64) bool {
 // With nothing seen, the stored value is carried forward. It must never go
 // backwards: it is the last-seen time of every group stored as present, so
 // moving it back would move those groups' clocks back with it.
-func presentAsOf(groups []execution.NoDataGroupMemory, stored int64, evaluationTime int64, wholeItemPresent bool) int64 {
-	for _, group := range groups {
-		if group.FirstAbsent == 0 && group.LastSeen == evaluationTime {
-			return evaluationTime
-		}
-	}
-	if wholeItemPresent {
+func presentAsOf(judgedPresent bool, stored int64, evaluationTime int64) int64 {
+	if judgedPresent {
 		return evaluationTime
 	}
 	return stored
-}
-
-// loadedMemory is the stored record as the evaluation reads it. A record that
-// was never written and a record that remembers nothing load the same way,
-// which is right: both mean this Plan knows nothing about any group yet.
-func loadedMemory(snapshot execution.NoDataMemorySnapshot) map[string]GroupMemory {
-	memory := make(map[string]GroupMemory, len(snapshot.Groups))
-	for _, group := range snapshot.Groups {
-		memory[group.GroupKey] = GroupMemory{
-			LastSeen: group.LastSeen, FirstAbsent: group.FirstAbsent, SuppressedAt: group.SuppressedAt,
-		}
-	}
-	return memory
 }
 
 // storedGroups is the evaluation's memory as the record holds it: canonical
@@ -285,16 +380,4 @@ func storedGroups(memory map[string]GroupMemory) []execution.NoDataGroupMemory {
 	}
 	sort.Slice(groups, func(left, right int) bool { return groups[left].GroupKey < groups[right].GroupKey })
 	return groups
-}
-
-func sameStoredGroups(left, right []execution.NoDataGroupMemory) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-	return true
 }

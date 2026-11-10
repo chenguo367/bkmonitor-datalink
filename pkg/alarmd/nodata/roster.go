@@ -307,10 +307,22 @@ func rosterVersion(roster Roster) (string, error) {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
+	return rosterVersionOf(roster.Source, keys)
+}
+
+// rosterVersionOf is rosterVersion over keys already in order. A history
+// roster judged one group at a time has its keys and not its groups, and this
+// is the one derivation both read.
+func rosterVersionOf(source RosterSource, sortedKeys []string) (string, error) {
+	if sortedKeys == nil {
+		// The canonical form of no groups is an empty list, as a roster
+		// collected into a slice made for it writes it.
+		sortedKeys = []string{}
+	}
 	digest, err := contract.DeriveCanonicalDigestV2("alarmd-no-data-roster-v1", struct {
 		Source RosterSource `json:"source"`
 		Groups []string     `json:"groups"`
-	}{Source: roster.Source, Groups: keys})
+	}{Source: source, Groups: sortedKeys})
 	if err != nil {
 		return "", fmt.Errorf("alarmd nodata: derive roster version: %w", err)
 	}

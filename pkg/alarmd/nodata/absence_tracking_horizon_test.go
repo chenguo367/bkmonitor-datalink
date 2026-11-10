@@ -40,7 +40,7 @@ func wantTrackingFacts(t *testing.T, result AbsenceResult, expired, suppressed u
 // A NORMAL here is a recovery nobody observed: downstream closes the standing
 // alert and files it as resolved, which is a worse answer than leaving it open.
 // The obvious way to write this mechanism is to route the expired group through
-// the path that already forgets groups -- closeDroppedAbsences -- and that path
+// the path that already forgets groups -- closeDropped -- and that path
 // exists precisely to emit the closing NORMAL. So the two implementations differ
 // only in a verdict that one of them does not produce at all, and this states
 // which.
