@@ -370,3 +370,40 @@ func TestAPlanWrittenInWindowsIsRecordedAppliedFromEveryWindowAndItsResumedSerie
 		t.Fatalf("applied Plans = %v, want the Plan once every window landed", got)
 	}
 }
+
+// A retry that finds every series of a Plan already written at this Slot -
+// resumed, none evaluated again - sends none of its keys in any window, and
+// still records the Plan applied: each of its series is in the store at this
+// Slot, which is what the mark vouches for, so the attempt whose Progress
+// then fails leaves it for the next. A Plan that neither resumed nor sent
+// anything has nothing landed to vouch for and is not recorded. The windows
+// are cut by the Slot's other series; the fixture holds the one Plan, so its
+// last window carries nothing of it.
+func TestAPlanWhoseEverySeriesResumedIsRecordedAppliedAndOneWithNothingIsNot(t *testing.T) {
+	for _, resumed := range []int{2, 0} {
+		t.Run(fmt.Sprintf("%d resumed", resumed), func(t *testing.T) {
+			fixture := newWindowedFixture(t)
+			ctx, recorder := withAppliedPlans(context.Background())
+			for range resumed {
+				fixture.stream.noteResumed(fixture.due.Identity)
+			}
+			fixture.startWindows(t)
+			if err := fixture.stream.coordinator.applyWindow(ctx, fixture.stream, true); err != nil {
+				t.Fatal(err)
+			}
+			if len(fixture.ports.events) != 0 || len(fixture.ports.stateApplied) != 0 {
+				t.Fatalf("the window sent %d events and %d State keys, want none", len(fixture.ports.events), len(fixture.ports.stateApplied))
+			}
+			got := recorder.unrecorded()
+			if resumed == 0 {
+				if len(got) != 0 {
+					t.Fatalf("applied Plans = %v, want none for a Plan with nothing landed", got)
+				}
+				return
+			}
+			if len(got) != 1 || got[0] != fixture.due.Identity {
+				t.Fatalf("applied Plans = %v, want the Plan whose every series resumed", got)
+			}
+		})
+	}
+}

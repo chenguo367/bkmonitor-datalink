@@ -13,9 +13,12 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/worker"
@@ -153,5 +156,162 @@ func TestAProgressingWindowedSlotIsNotDeclinedAndAStuckWindowIs(t *testing.T) {
 				t.Fatalf("a progressing Slot result=%+v err=%v, want it completed", result, err)
 			}
 		})
+	}
+}
+
+// commitGapWatch is the watchdog at its quickest over one stretch of a
+// window, from its events acknowledged to its State apply starting: it
+// judges the Slot over and over on a clock a day ahead, past any deadline,
+// and claims it the moment it finds it open.
+type commitGapWatch struct {
+	marker  *execution.StageMarker
+	stop    chan struct{}
+	done    chan struct{}
+	claimed atomic.Bool
+}
+
+// begin starts the watch and returns once it has judged the Slot at least
+// once, so it is running before the stretch it watches.
+func (watch *commitGapWatch) begin() {
+	if watch.stop != nil {
+		return
+	}
+	watch.stop, watch.done = make(chan struct{}), make(chan struct{})
+	judged := make(chan struct{})
+	var once sync.Once
+	go func() {
+		defer close(watch.done)
+		far := time.Now().Add(24 * time.Hour)
+		for {
+			_, _, claimed := watch.marker.Decline(far, watchdogGrace)
+			once.Do(func() { close(judged) })
+			if claimed {
+				watch.claimed.Store(true)
+				return
+			}
+			select {
+			case <-watch.stop:
+				return
+			default:
+			}
+		}
+	}()
+	<-judged
+}
+
+// end stops the watch and waits for it, so nothing it judges lands after.
+func (watch *commitGapWatch) end() {
+	if watch.stop == nil {
+		return
+	}
+	close(watch.stop)
+	<-watch.done
+	watch.stop, watch.done = nil, nil
+}
+
+// watchedEvents begins the watch once a window's events are acknowledged.
+type watchedEvents struct {
+	*recordingPorts
+	watch *commitGapWatch
+}
+
+func (events *watchedEvents) WriteBatch(ctx context.Context, batch []contract.TriggerEventV1) error {
+	err := events.recordingPorts.WriteBatch(ctx, batch)
+	events.watch.begin()
+	return err
+}
+
+// watchedState ends the watch as a window's State apply starts, and judges
+// the Slot once more from inside the apply, noting the stage it finds.
+type watchedState struct {
+	*persistedRetryState
+	watch         *commitGapWatch
+	claimedInside bool
+	stages        []string
+}
+
+func (state *watchedState) ApplyRuntime(ctx context.Context, request execution.StateApplyRequest) (execution.StateApplyResult, error) {
+	state.watch.end()
+	if _, _, claimed := state.watch.marker.Decline(time.Now().Add(24*time.Hour), watchdogGrace); claimed {
+		state.claimedInside = true
+	}
+	state.stages = append(state.stages, state.watch.marker.Stage())
+	return state.persistedRetryState.ApplyRuntime(ctx, request)
+}
+
+// watchedWindowedSlot is hookedWindowedSlot with its events and State
+// watched for marker.
+func watchedWindowedSlot(t *testing.T, marker *execution.StageMarker) (*recordingPorts, *watchedState, *hookedEvaluator, *worker.SlotExecutionCoordinator) {
+	t.Helper()
+	trace := make([]string, 0)
+	ports := &recordingPorts{trace: &trace, ready: true, extraSeries: windowedSeries("a", "b", "d", "e", "f")}
+	watch := &commitGapWatch{marker: marker}
+	state := &watchedState{watch: watch,
+		persistedRetryState: &persistedRetryState{recordingPorts: ports, saved: map[execution.StateKeyIdentity]execution.StateMutation{}}}
+	evaluator := &hookedEvaluator{recordingPorts: ports, at: 4}
+	coordinator, err := worker.NewSlotExecutionCoordinator(worker.Ports{OpenAlerts: ports, Finalization: ports, Activation: ports,
+		Query: ports, Sequencer: ports, Evaluator: evaluator, Admission: ports, GapGuard: ports, NoData: worker.SharedNoDataStore,
+		Hosts: worker.SharedHostBusiness, Events: &watchedEvents{recordingPorts: ports, watch: watch}, State: state, Progress: ports,
+		ExecutionEvidence: newMemoryEvidenceStore(),
+		Observer:          observability.ObserverFunc(func(context.Context, observability.Observation) {})},
+		worker.ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxStateMutations: 2, MaxEvents: 100, MaxGapMutations: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ports, state, evaluator, coordinator
+}
+
+// 2.2 step 6, the other side of the boundary: a window is inside its commit
+// from its events to the return of its State apply, so the watchdog never
+// finds it open between the two. Claimed there, the window's acknowledged
+// events would wait on a State write the Slot then refuses, for the next
+// holder to send again. A watch judging the Slot as quickly as it can over
+// that stretch of each window never claims it, nor does a judgement from
+// inside the State apply, which finds the Slot in its State stage; once the
+// first window's apply has returned, between two windows, the Slot is
+// claimed.
+//
+// Nothing between the events and the State apply calls a port a fake could
+// hook, so that stretch is watched from beside it, over many windows.
+func TestAWindowStaysInsideItsCommitFromItsEventsUntilItsStateApplyReturns(t *testing.T) {
+	const attempts = 64
+	for attempt := 1; attempt <= attempts; attempt++ {
+		last := attempt == attempts
+		ctx, marker := markedContext(time.Now())
+		ports, state, evaluator, coordinator := watchedWindowedSlot(t, marker)
+		claimedBetween := false
+		if last {
+			evaluator.hook = func() {
+				_, _, claimedBetween = marker.Decline(time.Now().Add(24*time.Hour), watchdogGrace)
+			}
+		}
+		result, err := coordinator.Execute(ctx, windowedRequest())
+		state.watch.end()
+		if state.watch.claimed.Load() {
+			t.Fatalf("attempt %d: the watchdog claimed the Slot between a window's events and its State apply (err %v)", attempt, err)
+		}
+		if state.claimedInside {
+			t.Fatalf("attempt %d: the watchdog claimed the Slot inside a window's State apply", attempt)
+		}
+		if last {
+			if !claimedBetween || !errors.Is(err, execution.ErrExecutionDeclined) {
+				t.Fatalf("after the first window's apply returned: claimed=%v err=%v, want it claimed and the attempt declined",
+					claimedBetween, err)
+			}
+			if want := []string{execution.SlotStageState}; !reflect.DeepEqual(state.stages, want) {
+				t.Fatalf("stages inside the State applies = %v, want %v", state.stages, want)
+			}
+			continue
+		}
+		if err != nil || !result.Completed {
+			t.Fatalf("attempt %d: result=%+v err=%v, want it completed", attempt, result, err)
+		}
+		if len(ports.eventBatches) != 3 {
+			t.Fatalf("attempt %d: %d event batches, want one per window", attempt, len(ports.eventBatches))
+		}
+		want := []string{execution.SlotStageState, execution.SlotStageState, execution.SlotStageState}
+		if !reflect.DeepEqual(state.stages, want) {
+			t.Fatalf("attempt %d: stages inside the State applies = %v, want %v", attempt, state.stages, want)
+		}
 	}
 }
