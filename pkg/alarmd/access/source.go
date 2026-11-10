@@ -253,6 +253,9 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 		return execution.QueryExecutionCompletion{}, err
 	}
 	if request.Operation == execution.OperationSupplement {
+		if !request.Slice.IsZero() {
+			return execution.QueryExecutionCompletion{}, &execution.InputSliceUnsupportedError{Reason: execution.InputSliceReasonSupplement}
+		}
 		return source.executeSupplement(ctx, request, consumer)
 	}
 	// Read once, before anything this call does can take time. It is what "how
@@ -274,6 +277,19 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 	if err != nil {
 		return execution.QueryExecutionCompletion{}, err
 	}
+	// A slice is read of every physical query of the Slot or of none: one
+	// query it cannot go into would deliver the whole Query Group beside the
+	// others' slice, so the Slot is refused before anything is sent.
+	if err := checkInputSlice(request.Slice, prepared.Queries); err != nil {
+		return execution.QueryExecutionCompletion{}, err
+	}
+	// The lookback reads a Slot's first read as the whole Query Group: its
+	// samples, its kept read a supplement replays and its rechecks all are.
+	// A slice is a part of it, so a sliced execution takes no part in it.
+	lookbackEngine := source.config.Lookback
+	if !request.Slice.IsZero() {
+		lookbackEngine = nil
+	}
 	recoveryDeadline, budgetErr := deriveRecoveryQueryDeadline(request, frozen, recoveryStartedAt, source.config.LiveReserve)
 	source.observeQueryTiming(ctx, request, frozen, prepared, recoveryStartedAt, recoveryDeadline)
 	// The deadline this recovery runs under, from here on: its channel wait
@@ -289,12 +305,12 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 	firstRead := slotFirstRead(prepared.Queries)
 	// While the Query Group's queries are failing the lookback reserves no
 	// earlier-read trial, one more read of the same backend, and counts why.
-	if request.Operation == execution.OperationNormal && source.config.Lookback != nil {
+	if request.Operation == execution.OperationNormal && lookbackEngine != nil {
 		failing := execution.BackendFailing(ctx)
 		for index, query := range prepared.Queries {
 			seen := lookbackQuery(ctx, request, query.Spec, request.AttemptNo, query.ReadyAtUnixMilli, index != firstRead)
 			seen.BackendFailing = failing
-			source.config.Lookback.Prepare(seen)
+			lookbackEngine.Prepare(seen)
 		}
 	}
 	if readyAt, pending := slotPendingReadinessOf(prepared.Queries, request.Contract.ReadHoldMillis, source.now()); !readyAt.IsZero() {
@@ -456,13 +472,13 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 		attempt := execution.QueryAttempt{Spec: query.Spec, Slot: request.Contract.Slot, Operation: request.Operation,
 			AttemptNo: request.AttemptNo, DeadlineUnixMilli: queryDeadline.UnixMilli(), RecoveryPermit: permit.RecoveryPermit(),
 			BudgetStartUnixMilli: budgetStart, ReadyAtUnixMilli: query.ReadyAtUnixMilli,
-			Strategies: queryStrategies(query)}
+			Strategies: queryStrategies(query), Slice: request.Slice}
 		if err := attempt.Validate(); err != nil {
 			permit.Release()
 			dispatchErr = err
 			break
 		}
-		kept := source.config.Lookback.Begin(lookbackQuery(ctx, request, query.Spec, attempt.AttemptNo, query.ReadyAtUnixMilli,
+		kept := lookbackEngine.Begin(lookbackQuery(ctx, request, query.Spec, attempt.AttemptNo, query.ReadyAtUnixMilli,
 			queryIndex != firstRead))
 		// Each query raises the execution's deadline to its own as it
 		// starts, so a later query is judged by its deadline and not by an
@@ -822,6 +838,19 @@ func (source *Source) executeWithPermit(
 		observability.EmitTargetFlow(ctx, "runner_decision", observability.TraceFields{}, observability.TargetFlowFacts{Decision: "identity_field_null"})
 	}
 	return completion, err
+}
+
+// checkInputSlice is execution.CheckInputSlice over the facts of every
+// physical query the Slot plans, primary and dependency alike.
+func checkInputSlice(slice execution.InputSlice, queries []PlannedQuery) error {
+	if slice.IsZero() {
+		return nil
+	}
+	facts := make([]execution.QueryPlanFacts, 0, len(queries))
+	for _, query := range queries {
+		facts = append(facts, query.Spec.PlanFacts)
+	}
+	return execution.CheckInputSlice(slice, facts...)
 }
 
 func trustedProviderCompletion(digest execution.PhysicalQueryDigest, completion execution.ProviderCompletion) bool {

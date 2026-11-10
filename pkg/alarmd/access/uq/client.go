@@ -166,6 +166,11 @@ func (client *Client) Execute(ctx context.Context, attempt execution.QueryAttemp
 	if err := attempt.Validate(); err != nil {
 		return execution.ProviderCompletion{}, err
 	}
+	// A slice the query cannot be read in is refused before anything is
+	// sent: read anyway, it would deliver series of other slices or none.
+	if err := execution.CheckInputSlice(attempt.Slice, attempt.Spec.PlanFacts); err != nil {
+		return execution.ProviderCompletion{}, err
+	}
 	callerCtx := ctx
 	deadline := time.UnixMilli(attempt.DeadlineUnixMilli)
 	if current, ok := ctx.Deadline(); !ok || deadline.Before(current) {
@@ -182,7 +187,7 @@ func (client *Client) Execute(ctx context.Context, attempt execution.QueryAttemp
 			attempt.Spec.PlanFacts.Normalization.Version != "uq-polling-normalization-v1",
 		Budget: queryBudget{StartUnixMilli: attempt.BudgetStartUnixMilli, ReadyAtUnixMilli: attempt.ReadyAtUnixMilli,
 			DeadlineUnixMilli: attempt.DeadlineUnixMilli},
-		Strategies: attempt.Strategies, NamedOutputs: namedOutputReserver(attempt.Spec, sink)}, sink, nil)
+		Strategies: attempt.Strategies, NamedOutputs: namedOutputReserver(attempt.Spec, sink), Slice: attempt.Slice}, sink, nil)
 }
 
 // queryIdentity carries provider-local accounting only. Diagnostic reads do
@@ -202,6 +207,9 @@ type queryIdentity struct {
 	// NamedOutputs reserves what aligning the named outputs holds
 	// (namedOutputReserver); nil reserves nothing.
 	NamedOutputs execution.RetainedBytesReserver
+	// Slice is the slice of the Query Group's series the request asks for
+	// (withInputSlice); the zero slice asks for all of them.
+	Slice execution.InputSlice
 }
 
 // queryBudget is a Slot query's budget as its attempt carries it: where it
@@ -241,9 +249,29 @@ func buildWireRequest(spec execution.PhysicalQuerySpec) (string, []byte, error) 
 // buildWireRequestCarrying is buildWireRequest with the APM application
 // carried or not (carriesAPMApp), for the read that has to go without it.
 func buildWireRequestCarrying(spec execution.PhysicalQuerySpec, carryApp bool) (string, []byte, error) {
+	return buildWireRequestSliced(spec, carryApp, execution.InputSlice{})
+}
+
+// buildWireRequestSliced is buildWireRequestCarrying asking for one slice of
+// the query's series: the slice's conditions go into every query clause's
+// conditions on the wire (withInputSlice), and the spec they are built from,
+// its digest and everything keyed by it stay the unsliced query's.
+func buildWireRequestSliced(spec execution.PhysicalQuerySpec, carryApp bool, slice execution.InputSlice) (string, []byte, error) {
 	body, err := buildRequestCarrying(spec, carryApp)
 	if err != nil {
 		return "", nil, err
+	}
+	if !slice.IsZero() {
+		// The PromQL path sends one expression and no conditions; its
+		// selectors are not rewritten (decision-020 batch 8, 7.3.1).
+		if spec.PlanFacts.PromQL != nil {
+			return "", nil, &execution.InputSliceUnsupportedError{Reason: execution.InputSliceReasonPromQL}
+		}
+		for index := range body.QueryList {
+			if body.QueryList[index].Conditions, err = withInputSlice(body.QueryList[index].Conditions, slice); err != nil {
+				return "", nil, err
+			}
+		}
 	}
 	var payload any = body
 	path := "/query/ts"
@@ -283,7 +311,7 @@ func (client *Client) execute(callerCtx, ctx context.Context, attempt queryIdent
 }
 
 func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt queryIdentity, sink execution.ProviderSeriesSink, scanned *DiagnosticScan) (spanResult execution.ProviderCompletion, spanErr error) {
-	path, encoded, err := buildWireRequestCarrying(attempt.Spec, carriesAPMApp(attempt.Spec) && !attempt.NoAppCarry)
+	path, encoded, err := buildWireRequestSliced(attempt.Spec, carriesAPMApp(attempt.Spec) && !attempt.NoAppCarry, attempt.Slice)
 	if err != nil {
 		return execution.ProviderCompletion{}, err
 	}

@@ -106,7 +106,7 @@ func TestSlotExecutionRequestCarriesValidatedNonIdentityFrozenExecutionFacts(t *
 
 func TestQueryAttemptFactsStayOutsideBusinessIdentity(t *testing.T) {
 	if got, want := fieldNames(reflect.TypeOf(execution.QueryExecutionRequest{})),
-		[]string{"Contract", "Operation", "AttemptNo"}; !reflect.DeepEqual(got, want) {
+		[]string{"Contract", "Operation", "AttemptNo", "Slice"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("QueryExecutionRequest fields = %v, want %v", got, want)
 	}
 	if got, want := fieldNames(reflect.TypeOf(execution.SlotIdentity{})),
