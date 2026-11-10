@@ -608,3 +608,46 @@ func assertConcentrated(t *testing.T, err error, reason string) {
 		t.Fatalf("got %v, want reason %s", err, reason)
 	}
 }
+
+// TestAStreamPrefixSampleNeverLumpsDistinctValuesForGood is a numbered fleet
+// read in order, host-00 to host-23, each slice let go at the series that
+// passes its room, as a slice is: the sample of every split is the front of
+// the stream, never the whole slice. A class an early split took from such
+// a sample lumps characters it did not see - [^0] at the tens digit holds
+// both the 1x and the 2x hosts - and every character before it is "-tsoh"
+// for all of them, so going deeper never separates them. The tree cuts that
+// class instead, and every slice comes to fit with the series in exactly one
+// slice, instead of distinct hosts being refused as one value. Rooms from
+// four to nine series, as a slice limit shrinks while the slices before it
+// hold their share.
+func TestAStreamPrefixSampleNeverLumpsDistinctValuesForGood(t *testing.T) {
+	var population []series
+	for index := 0; index < 24; index++ {
+		population = append(population, series{"host": fmt.Sprintf("host-%02d", index)})
+	}
+	for room := 4; room <= 9; room++ {
+		t.Run(fmt.Sprint(room), func(t *testing.T) {
+			tree, err := inputslice.New([]string{"host"}, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tr := &tracker{tree: tree}
+			for reads := 0; len(tree.Pending()) > 0; reads++ {
+				if reads > 2*inputslice.MaxLeaves-1 {
+					t.Fatalf("still reading after %d slices: %s", reads, describe(tr.leaves()))
+				}
+				leaf := tree.Pending()[0]
+				in := members(t, leaf.Slice, population)
+				if len(in) <= room {
+					tr.land(t, leaf)
+					continue
+				}
+				if _, err := tree.Split(leaf.ID, sampleOf([]string{"host"}, in[:room+1])); err != nil {
+					t.Fatalf("split of %d series: %v", len(in), err)
+				}
+				assertPartition(t, tr.leaves(), population)
+			}
+			assertPartition(t, tr.leaves(), population)
+		})
+	}
+}

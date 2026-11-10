@@ -20,6 +20,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/inputslice"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // A Slot whose input does not fit its share is read in slices (decision-020
@@ -70,8 +71,9 @@ type sliceReading struct {
 	unsliceable bool
 	// leaveInput ends the input phase of a slice after the first.
 	leaveInput func()
-	// landed is how many series of each Plan the slices written so far held.
-	landed map[execution.PlanIdentity]uint64
+	// landed is how many series of each Plan the slices written so far held,
+	// and landedSlices how many of those slices held any.
+	landed, landedSlices map[execution.PlanIdentity]uint64
 	// unseenSlices and unseenSeries are the slices, and their series, a Plan
 	// judged first-seen wrote before a later slice found it had run.
 	unseenSlices, unseenSeries uint64
@@ -79,6 +81,14 @@ type sliceReading struct {
 
 // slicing reports whether this Slot is read in slices.
 func (stream *streamedExecution) slicing() bool { return stream.slices != nil }
+
+// readInSlices reports whether this Slot's input is being read as more than
+// one slice: a Slot read whole, its one read the Query Group, is not, and
+// what its completion says of a Plan without series is the completion-only
+// path's to decide.
+func (stream *streamedExecution) readInSlices() bool {
+	return stream.slicing() && stream.slices.tree != nil
+}
 
 // sliceLimit is what the slice being read may hold of the input phase: half
 // of what its share leaves beside everything else the Slot holds, the other
@@ -97,10 +107,14 @@ func (stream *streamedExecution) sliceLimit() uint64 {
 
 // admitSliceInput judges one series batch of retained bytes against the
 // slice's limit before it is reserved. A batch that takes the slice past its
-// limit lets the slice go (errSliceOverflow) - unless one series alone does
-// not fit, which no split mends: the Slot is then refused by its share as
-// any Slot past it is.
-func (stream *streamedExecution) admitSliceInput(batch execution.SeriesExecutionBatch, retained uint64) error {
+// limit lets the slice go (errSliceOverflow) - unless one series the slice
+// has seen alone does not fit the limit, which no split mends: the Slot is
+// then refused by its share there (QG_BUDGET_SHARE_EXCEEDED, 7.3), with what
+// it holds on the row, rather than split until K_max and named for its
+// values, or read on whole into the half of the share its windows need. A
+// Slot with nothing to slice on is read whole and judged by its share alone,
+// as before slicing.
+func (stream *streamedExecution) admitSliceInput(ctx context.Context, batch execution.SeriesExecutionBatch, retained uint64) error {
 	if !stream.slicing() || stream.slices.unsliceable {
 		return nil
 	}
@@ -110,14 +124,18 @@ func (stream *streamedExecution) admitSliceInput(batch execution.SeriesExecution
 	if reading.input+retained <= limit {
 		return nil
 	}
-	if reading.largest > limit {
-		return nil
-	}
 	if reading.tree == nil {
 		if _, err := stream.sliceDimensions(); err != nil {
 			reading.unsliceable = true
 			return nil
 		}
+	}
+	if reading.largest > limit {
+		coordinator := stream.coordinator
+		err := shareRejection(stream.reservationPhase("normal_input"), stream.retainedTotal(), retained,
+			coordinator.qgShareBytes(), stream.ownBudgetUsage(coordinator.budget))
+		coordinator.observeCapacityRejection(ctx, stream.request.Operation, observability.CapacityBudgetRetainedBytes, err)
+		return err
 	}
 	stream.sampleSlice(batch)
 	return errSliceOverflow
@@ -255,9 +273,15 @@ func foldSliceCompletion(slot, slice execution.QueryExecutionCompletion) (execut
 			continue
 		}
 		folded := &slot.PhysicalQueries[position]
-		delivery, err := execution.AccumulateSeriesDelivery(folded.Delivery, query.Delivery)
-		if err != nil {
-			return execution.QueryExecutionCompletion{}, fmt.Errorf("alarmd worker: fold slice delivery: %w", err)
+		// A slice that held none of the query's series delivered nothing:
+		// its zero delivery adds nothing to fold, and is not a delivery
+		// AccumulateSeriesDelivery takes.
+		delivery := folded.Delivery
+		if query.Delivery.Series != 0 {
+			var err error
+			if delivery, err = execution.AccumulateSeriesDelivery(folded.Delivery, query.Delivery); err != nil {
+				return execution.QueryExecutionCompletion{}, fmt.Errorf("alarmd worker: fold slice delivery: %w", err)
+			}
 		}
 		if completenessRank(query.Completeness) > completenessRank(folded.Completeness) {
 			*folded = query
@@ -321,11 +345,17 @@ func (stream *streamedExecution) landSlice(ctx context.Context) error {
 	reading := stream.slices
 	if reading.landed == nil {
 		reading.landed = make(map[execution.PlanIdentity]uint64)
+		reading.landedSlices = make(map[execution.PlanIdentity]uint64)
 	}
+	held := make(map[execution.PlanIdentity]struct{})
 	for _, prepared := range stream.windows.prepared {
 		if prepared.due != nil {
 			reading.landed[prepared.due.Identity]++
+			held[prepared.due.Identity] = struct{}{}
 		}
+	}
+	for plan := range held {
+		reading.landedSlices[plan]++
 	}
 	stream.windows.reached = len(stream.windows.prepared)
 	if err := stream.cutWindow(ctx); err != nil {
@@ -344,7 +374,9 @@ func (stream *streamedExecution) landSlice(ctx context.Context) error {
 // shrunk, so every event written is covered by a marker already down - and
 // the first-seen judgement is carried on: a Plan judged first-seen that this
 // slice finds had run is judged seen from this slice on, warming up, and the
-// slices it wrote before as first-seen are counted on the completion row.
+// slices it wrote before as first-seen - the ones that held series of it; a
+// slice that held none wrote nothing of it - and their series are counted on
+// the completion row.
 func (coordinator *SlotExecutionCoordinator) applySliceHead(ctx context.Context, stream *streamedExecution) error {
 	windows := &stream.windows
 	if !windows.started || windows.apply == nil {
@@ -370,7 +402,7 @@ func (coordinator *SlotExecutionCoordinator) applySliceHead(ctx context.Context,
 					}
 					for _, due := range stream.header.DuePlans {
 						if due.Key() == key && stream.slices.landed[due.Identity] > 0 {
-							stream.slices.unseenSlices += uint64(stream.slices.index)
+							stream.slices.unseenSlices += stream.slices.landedSlices[due.Identity]
 							stream.slices.unseenSeries += stream.slices.landed[due.Identity]
 						}
 					}
@@ -388,19 +420,14 @@ func (coordinator *SlotExecutionCoordinator) applySliceHead(ctx context.Context,
 				continue
 			}
 			if previous, written := windows.headStatements[due.Identity]; written {
-				union, err := unionGapOpenStatements([]execution.PlanGapMutation{previous}, []execution.PlanGapMutation{open})
+				grown, grows, err := growOpenStatement(previous, open)
 				if err != nil {
 					return err
 				}
-				if len(union) != 1 || union[0].MutationDigest == previous.MutationDigest {
+				if !grows {
 					continue
 				}
-				// The marker as the earlier head left it: one revision on.
-				grown := union[0]
-				grown.ExpectedMarkerRevision = previous.ExpectedMarkerRevision + 1
-				if open, err = execution.BuildPlanGapMutation(grown); err != nil {
-					return fmt.Errorf("alarmd worker: grow a slice's open statement: %w", err)
-				}
+				open = grown
 			} else if err := coordinator.admit(sequenceCtx, stream.request, due); err != nil {
 				return err
 			}
@@ -417,6 +444,58 @@ func (coordinator *SlotExecutionCoordinator) applySliceHead(ctx context.Context,
 		}
 		return nil
 	})
+}
+
+// growOpenStatement is the statement that grows the marker an earlier
+// slice's head left (previous) by what this slice's open adds, and whether
+// it adds anything. It is a second statement at the Slot's version, so it
+// says only what the store extends a marker with at its own version
+// (execution.ExtendSameSlotGap): a scope the marker does not hold, and more
+// FULL Slots on one it does. A scope both hold keeps the reason it was
+// opened with - the store refuses a scope's reason changed within its Slot
+// as a CONFLICT, and the scope guards this slice's events gapped either
+// way - so the marker never shrinks and every event written stays under it.
+func growOpenStatement(previous, open execution.PlanGapMutation) (execution.PlanGapMutation, bool, error) {
+	if previous.Identity != open.Identity || previous.ScheduleRevision != open.ScheduleRevision ||
+		execution.CompareApplyVersion(previous.ApplyVersion, open.ApplyVersion) != execution.ApplyVersionEqual {
+		return execution.PlanGapMutation{}, false, errors.New("alarmd worker: two slices' open statements address different markers")
+	}
+	scopes := append([]execution.GapScopeMutation(nil), previous.Scopes...)
+	grows := false
+	for _, proposed := range open.Scopes {
+		held := -1
+		for index := range scopes {
+			if scopes[index].Scope == proposed.Scope {
+				held = index
+			}
+		}
+		switch {
+		case held < 0:
+			scopes = append(scopes, proposed)
+			grows = true
+		case proposed.RequiredFullSlots > scopes[held].RequiredFullSlots:
+			scopes[held].RequiredFullSlots = proposed.RequiredFullSlots
+			grows = true
+		}
+	}
+	if !grows {
+		return previous, false, nil
+	}
+	sort.Slice(scopes, func(left, right int) bool {
+		if scopes[left].Scope.HasLevel != scopes[right].Scope.HasLevel {
+			return !scopes[left].Scope.HasLevel
+		}
+		return scopes[left].Scope.LevelID < scopes[right].Scope.LevelID
+	})
+	// The marker as the earlier head left it: one revision on.
+	grown, err := execution.BuildPlanGapMutation(execution.PlanGapMutation{
+		Identity: previous.Identity, ExpectedMarkerRevision: previous.ExpectedMarkerRevision + 1,
+		ApplyVersion: previous.ApplyVersion, ScheduleRevision: previous.ScheduleRevision, Scopes: scopes,
+	})
+	if err != nil {
+		return execution.PlanGapMutation{}, false, fmt.Errorf("alarmd worker: grow a slice's open statement: %w", err)
+	}
+	return grown, true, nil
 }
 
 // sliceReadingFor is how this Slot's input is read: slice by slice from its

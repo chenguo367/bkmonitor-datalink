@@ -649,6 +649,13 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 			result.InPlaceWait = completion.InPlaceWait
 			result.PhysicalQueryLoss = physicalLoss
 			result.Superseded = stream.superseded
+			// This attempt ran, and may have written windows and slices
+			// before a Plan turned out to need protecting - a first-seen
+			// Plan a later slice found had run (7.5) is one: the row says
+			// what it used and how it read, the slices it wrote as
+			// first-seen among it, which no later attempt sees again.
+			result.Usage = stream.budgetUsage()
+			result.Timing = stream.timing()
 			return result, nil
 		}
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: execute frozen Slot: %w", err)

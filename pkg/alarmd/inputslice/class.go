@@ -174,6 +174,38 @@ func splitClasses(histogram map[rune]int) []class {
 	return withComplement(explicit)
 }
 
+// cutClass is the parts of c that the classes of a split cut it into, empty
+// ones left out. The classes partition every rune, so the parts partition c.
+func cutClass(c class, classes []class) []class {
+	parts := make([]class, 0, len(classes))
+	for _, other := range classes {
+		if part, ok := intersect(c, other); ok {
+			parts = append(parts, part)
+		}
+	}
+	return parts
+}
+
+// intersect is the runes in both classes, and false when there are none. A
+// negated class is never empty: no set lists every rune.
+func intersect(left, right class) (class, bool) {
+	switch {
+	case left.negated && right.negated:
+		union := append(slices.Clone(left.set), right.set...)
+		slices.Sort(union)
+		return class{set: slices.Compact(union), negated: true}, true
+	case left.negated:
+		left, right = right, left
+	}
+	var set []rune
+	for _, r := range left.set {
+		if right.contains(r) {
+			set = append(set, r)
+		}
+	}
+	return class{set: set}, len(set) > 0
+}
+
 // fixedClasses divides fixedAlphabet into m equal groups, the last one left
 // to the complement.
 func fixedClasses() []class {

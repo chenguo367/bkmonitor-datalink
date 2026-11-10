@@ -308,6 +308,17 @@ func (stream *streamedExecution) headOpenStatements() (map[execution.PlanIdentit
 			}
 		}
 	}
+	if stream.readInSlices() {
+		// A slice's PRIMARY that did not complete may have left out series
+		// of a Plan this slice holds none of, and no other slice reads them:
+		// its completion proposes the Plan's statement, as its series would
+		// have had the query returned them.
+		for _, binding := range stream.completionInputs.bindings {
+			if binding.Role == execution.InputRolePrimary && binding.Completeness != execution.CompletenessFull {
+				incomplete[binding.Consumer.Plan] = append(incomplete[binding.Consumer.Plan], binding)
+			}
+		}
+	}
 	for _, due := range stream.header.DuePlans {
 		if stream.planSeriesCount(due.Identity) != 0 {
 			continue

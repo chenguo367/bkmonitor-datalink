@@ -15,7 +15,9 @@
 // A node is a path of character classes read from the end of a dimension's
 // value backwards. Its children split it by the next character from the end
 // into classes that are a partition of every rune, plus a child for the
-// values that are exactly as long as the path. Whatever the values are, the
+// values that are exactly as long as the path; or, when the next character
+// does not tell the slice's series apart, they cut one class of its own path
+// into parts that partition that class. Whatever the values are, the
 // leaves of the tree are therefore mutually exclusive and together complete:
 // every series of the Query Group is in exactly one leaf's slice. Which
 // classes a split takes only decides how many splits are needed, never which
@@ -25,6 +27,7 @@ package inputslice
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -356,13 +359,26 @@ func conditionCost(segments []segment) int {
 // childSegments is the children of target and the dimension they are cut on.
 func (tree *Tree) childSegments(target *node, sample map[string][]string) ([][]segment, int, error) {
 	last := target.segments[len(target.segments)-1]
+	kept := target.segments[:len(target.segments)-1]
+	values := sample[tree.dimensions[last.dimension]]
 	if !last.exhausted {
-		values := sample[tree.dimensions[last.dimension]]
 		histogram, progress := nextHistogram(values, len(last.path))
-		if len(values) == 0 || progress {
-			kept := target.segments[:len(target.segments)-1]
+		if len(values) == 0 || separatesAt(values, len(last.path)) {
 			return deeper(kept, last, splitClasses(histogram)), last.dimension, nil
 		}
+		// The next character does not tell the sample apart. A class an
+		// earlier split took from the part of the stream it saw may hold
+		// characters that do, and only cutting that class separates them:
+		// values that differ only within it share every character before
+		// it, and going deeper would only walk that shared prefix to its end.
+		if children, refined := refine(kept, last, values); refined {
+			return children, last.dimension, nil
+		}
+		if progress {
+			return deeper(kept, last, splitClasses(histogram)), last.dimension, nil
+		}
+	} else if children, refined := refine(kept, last, values); refined {
+		return children, last.dimension, nil
 	}
 	// An exhausted node has no next character on its dimension, and a node
 	// whose sample is one value there would only grow deeper around that
@@ -384,6 +400,73 @@ func (tree *Tree) childSegments(target *node, sample map[string][]string) ([][]s
 	return nil, last.dimension, &ValueConcentratedError{
 		Reason: ReasonSingleValue, Dimension: tree.dimensions[last.dimension], Slice: target.slice,
 	}
+}
+
+// separatesAt reports whether the sample's characters at depth+1 from the end
+// tell it apart: two different characters there, or one character beside a
+// value that has none (the exhausted child's).
+func separatesAt(values []string, depth int) bool {
+	var first rune
+	seen, short := false, false
+	for _, value := range values {
+		r, ok := nextRune(value, depth)
+		switch {
+		case !ok:
+			short = true
+		case !seen:
+			first, seen = r, true
+		case r != first:
+			return true
+		}
+	}
+	return seen && short
+}
+
+// refine is the children of parent made by cutting one class of its path
+// rather than going past it: the class split by the sample's characters at
+// that level, each part replacing it, the rest of the path and the
+// exhaustion kept. The parts partition the class, so the children partition
+// the parent as a deeper split's do. The level taken is the first one at
+// which the sample shows two characters, and failing that the first whose
+// class is wider than what the sample shows there, which separates the
+// series seen from the ones the class holds besides. It reports false when
+// no level can be cut, or a part would not fit its level's condition bytes.
+func refine(kept []segment, parent segment, values []string) ([][]segment, bool) {
+	level, parts := -1, []class(nil)
+	for index := range parent.path {
+		histogram := map[rune]int{}
+		for _, value := range values {
+			if r, ok := nextRune(value, index); ok {
+				histogram[r]++
+			}
+		}
+		if len(histogram) == 0 {
+			continue
+		}
+		cut := cutClass(parent.path[index], splitClasses(histogram))
+		if len(cut) < 2 {
+			continue
+		}
+		if level < 0 || len(histogram) > 1 {
+			level, parts = index, cut
+		}
+		if len(histogram) > 1 {
+			break
+		}
+	}
+	if level < 0 {
+		return nil, false
+	}
+	children := make([][]segment, 0, len(parts))
+	for _, part := range parts {
+		if len(part.render()) > levelBytes {
+			return nil, false
+		}
+		path := slices.Clone(parent.path)
+		path[level] = part
+		children = append(children, appendSegment(kept, segment{dimension: parent.dimension, path: path, exhausted: parent.exhausted}))
+	}
+	return children, true
 }
 
 // deeper is the children of the not-exhausted segment parent, each after

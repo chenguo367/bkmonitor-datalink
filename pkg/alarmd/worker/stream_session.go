@@ -604,7 +604,7 @@ func (stream *streamedExecution) ConsumeSeries(ctx context.Context, batch execut
 	if _, held := stream.inputHolds[series]; !held {
 		retained += seriesBookkeepingBytes
 	}
-	if err := stream.admitSliceInput(batch, retained); err != nil {
+	if err := stream.admitSliceInput(ctx, batch, retained); err != nil {
 		return err
 	}
 	if err := stream.reserveProvisional(ctx, batch.Delivery.Series, retained); err != nil {
@@ -1315,10 +1315,14 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 	// Listed with its query's: what the completion said of the query stays
 	// with the Plan whatever series it answered.
 	stream.discardDependenciesWithoutPrimary()
-	if first {
-		// A completion's bindings are the same every slice: the Slot keeps
-		// them once.
-		for _, binding := range completion.CompletionBindings {
+	// A completion's bindings name the same queries every slice, and the
+	// Slot keeps the first slice's. A later slice's that did not complete
+	// are kept beside them: its query left out series of that slice, which
+	// no other slice reads, so the Plan's round is as short as its shortest
+	// slice for the no-data judgement and the completion row, whether or
+	// not the slice held any series of the Plan.
+	for _, binding := range completion.CompletionBindings {
+		if first || binding.Completeness != execution.CompletenessFull {
 			stream.bindings = append(stream.bindings, compactNamedInputBinding(binding))
 		}
 	}
@@ -1496,6 +1500,41 @@ func (stream *streamedExecution) evaluateSeries(
 	// Counted here, before the first branch that can drop a series: this is
 	// the Slot's intent, and every later count is measured against it.
 	stream.seriesCensus.Due += len(preparedSeriesEvaluations)
+	if stream.readInSlices() {
+		// A slice that held none of a Plan's series and whose PRIMARY did
+		// not complete may have left out series of the Plan that no other
+		// slice reads: the Plan is answered as a series whose PRIMARY did
+		// not complete is, from the slice's completion, so its result says
+		// the round was short as its marker and its completion do.
+		for _, due := range stream.header.DuePlans {
+			held := false
+			for _, prepared := range preparedSeriesEvaluations {
+				held = held || prepared.due != nil && prepared.due.Identity == due.Identity
+			}
+			var incomplete []execution.NamedInputBinding
+			for _, binding := range stream.completionInputs.bindings {
+				if binding.Consumer.Plan == due.Identity && binding.Role == execution.InputRolePrimary &&
+					binding.Completeness != execution.CompletenessFull {
+					incomplete = append(incomplete, binding)
+				}
+			}
+			if held || len(incomplete) == 0 {
+				continue
+			}
+			// In the order the Slot keeps its bindings, so the reason taken
+			// is the same on every attempt.
+			sort.Slice(incomplete, func(i, j int) bool {
+				if incomplete[i].Consumer.LevelID != incomplete[j].Consumer.LevelID {
+					return incomplete[i].Consumer.LevelID < incomplete[j].Consumer.LevelID
+				}
+				return incomplete[i].RequirementID < incomplete[j].RequirementID
+			})
+			stream.beginEvaluating(due.Identity)
+			if err := stream.mergePrimaryIncompleteSeries(ctx, due, incomplete); err != nil {
+				return err
+			}
+		}
+	}
 	for position, prepared := range preparedSeriesEvaluations {
 		if stream.supplement != nil && !stream.supplementTakes(prepared) {
 			continue
