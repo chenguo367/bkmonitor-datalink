@@ -8,11 +8,9 @@ package execution
 import (
 	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
-	"math/bits"
 	"sort"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
@@ -598,8 +596,9 @@ func derivePlanNoDataMemoryDigest(
 // than a security boundary, so the generalised-birthday weakening of additive
 // set hashes against a chosen-input adversary does not apply here.
 type NoDataMemoryDigestAccumulator struct {
-	// sum is the fold, as four 64-bit limbs, most significant first.
-	sum    [4]uint64
+	// sum is the fold (contract.DigestSum256), shared with the roster
+	// version, which folds its keys alike.
+	sum    contract.DigestSum256
 	groups uint64
 }
 
@@ -629,12 +628,7 @@ func (accumulator *NoDataMemoryDigestAccumulator) Add(group NoDataGroupMemory) e
 	encoded = binary.BigEndian.AppendUint64(encoded, uint64(group.LastSeen))
 	encoded = binary.BigEndian.AppendUint64(encoded, uint64(group.FirstAbsent))
 	encoded = binary.BigEndian.AppendUint64(encoded, uint64(group.SuppressedAt))
-	digest := sha256.Sum256(encoded)
-	var carry uint64
-	for limb := len(accumulator.sum) - 1; limb >= 0; limb-- {
-		accumulator.sum[limb], carry = bits.Add64(
-			accumulator.sum[limb], binary.BigEndian.Uint64(digest[limb*8:limb*8+8]), carry)
-	}
+	accumulator.sum.Add(sha256.Sum256(encoded))
 	accumulator.groups++
 	return nil
 }
@@ -657,10 +651,6 @@ func (accumulator *NoDataMemoryDigestAccumulator) MemoryDigest(mutation PlanNoDa
 			"alarmd execution: the no-data memory digest folds %d groups and the mutation states %d",
 			accumulator.groups, mutation.GroupCount)
 	}
-	folded := make([]byte, 0, 32)
-	for _, limb := range accumulator.sum {
-		folded = binary.BigEndian.AppendUint64(folded, limb)
-	}
 	digest, err := contract.DeriveCanonicalDigestV2("alarmd-plan-no-data-memory-v4", struct {
 		Identity         PlanNoDataIdentity   `json:"identity"`
 		SchemaVersion    NoDataMemorySchema   `json:"schema_version"`
@@ -679,7 +669,7 @@ func (accumulator *NoDataMemoryDigestAccumulator) MemoryDigest(mutation PlanNoDa
 	}{
 		mutation.Identity, mutation.SchemaVersion, mutation.ScheduleRevision,
 		mutation.RosterVersion, mutation.PresentAsOf, mutation.TrackingExhaustedAt,
-		mutation.GroupCount, hex.EncodeToString(folded),
+		mutation.GroupCount, accumulator.sum.Hex(),
 	})
 	if err != nil {
 		return "", fmt.Errorf("alarmd execution: derive Plan no-data memory digest: %w", err)

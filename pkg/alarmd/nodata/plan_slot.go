@@ -246,7 +246,9 @@ func (judge *PlanJudge) Finish() (PlanJudgement, error) {
 	judgement.RosterVersion = summary.Roster.Version
 	if partial && snapshot.RosterVersion != "" {
 		// A partial round decided nothing about the expected set, so it does
-		// not restate which derivation the record was judged against.
+		// not restate which derivation the record was judged against - the
+		// stored string goes forward as it is, a v1 value as well as a v2 one
+		// (rosterVersionDomain).
 		judgement.RosterVersion = snapshot.RosterVersion
 	}
 	judgement.PresentAsOf = presentAsOf(judgedPresent, snapshot.PresentAsOf, judge.input.EvaluationTime)

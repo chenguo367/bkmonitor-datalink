@@ -24,8 +24,14 @@ import (
 // the judgement and not by it, so a rule the rewrite moved or dropped shows up
 // as a difference rather than being restated on both sides.
 //
-// It calls the production BuildRoster, copyGroupMemory and storedGroups, which
-// the rewrite did not change (rosterVersion was split, not altered).
+// It calls the production BuildRoster, copyGroupMemory and storedGroups. The
+// first is the one place the oracle is not the old code: the roster version
+// moved from v1 (a canonical digest over the sorted keys, kept below as
+// oracleRosterVersionV1) to the order-free fold of v2 (rosterVersionDomain),
+// and the oracle takes it through BuildRoster, so the version it holds is v2
+// over the roster it built. The equivalence test therefore compares the
+// version on its own, against the fold over the deduplicated key set
+// (assertRosterVersionIsTheFold), and everything else against the oracle.
 
 func oracleEvaluate(input AbsenceInput) AbsenceResult {
 	result := oracleEvaluateAbsence(input)
@@ -492,4 +498,22 @@ func oracleApplyManualCloses(
 		return memory, 0
 	}
 	return applied, stopped
+}
+
+// oracleRosterVersionV1 is the v1 roster version, verbatim: a canonical digest
+// over the sorted keys. Nothing derives it any more; it is the value a record
+// written by the old build carries, which this build compares for equality
+// and never recomputes.
+func oracleRosterVersionV1(source RosterSource, sortedKeys []string) (string, error) {
+	if sortedKeys == nil {
+		sortedKeys = []string{}
+	}
+	digest, err := contract.DeriveCanonicalDigestV2("alarmd-no-data-roster-v1", struct {
+		Source RosterSource `json:"source"`
+		Groups []string     `json:"groups"`
+	}{Source: source, Groups: sortedKeys})
+	if err != nil {
+		return "", fmt.Errorf("alarmd nodata: derive roster version: %w", err)
+	}
+	return digest, nil
 }

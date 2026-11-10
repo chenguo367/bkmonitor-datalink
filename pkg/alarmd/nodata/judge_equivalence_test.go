@@ -527,6 +527,7 @@ func assertSlotMatches(t *testing.T, name string, input PlanSlotInput, random *r
 	if wantErr != nil {
 		return want
 	}
+	assertRosterVersionIsTheFold(t, name, input, got)
 
 	// An explicitly stated roster, the other way in: the one the Slot built,
 	// and a history roster the memory did not derive.
@@ -562,6 +563,40 @@ func assertSlotMatches(t *testing.T, name string, input PlanSlotInput, random *r
 
 	assertDeltaIsWhatMoved(t, name, input, want, outcome)
 	return want
+}
+
+// assertRosterVersionIsTheFold holds the roster version to the v2 fold over
+// the deduplicated key set, which the oracle cannot state: it is the old code,
+// and its own derivation was v1 (judge_oracle_test.go). A history set is read
+// off the stored groups here - every key with a last-seen time except the
+// whole item, once however often the scan returned it - and every other set
+// is the roster the Slot built.
+func assertRosterVersionIsTheFold(t *testing.T, name string, input PlanSlotInput, got AbsenceResult) {
+	t.Helper()
+	keys := map[string]struct{}{}
+	if got.Roster.Source == RosterHistory {
+		for _, group := range input.Snapshot.Groups {
+			if group.GroupKey != WholeItemGroup().Key() && group.LastSeen != 0 {
+				keys[group.GroupKey] = struct{}{}
+			}
+		}
+	} else {
+		for key := range got.Roster.Groups {
+			keys[key] = struct{}{}
+		}
+	}
+	var fold rosterVersionFold
+	for key := range keys {
+		fold.add(key)
+	}
+	want, err := fold.version(got.Roster.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Facts.RosterVersion != want || got.Roster.Version != want {
+		t.Fatalf("%s: roster version = %q (facts %q), want the fold over the %d deduplicated keys %q",
+			name, got.Roster.Version, got.Facts.RosterVersion, len(keys), want)
+	}
 }
 
 // assertDeltaIsWhatMoved: the loaded record with the delta applied is the

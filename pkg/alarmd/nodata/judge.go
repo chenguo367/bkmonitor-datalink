@@ -42,6 +42,13 @@ import (
 // at least once, not exactly once), so every group is judged once and a second
 // entry under the same key is ignored: a present group through the seen bit on
 // the present set, every other group through the set of keys already judged.
+//
+// The history roster's size and version are folded from the same
+// deduplication (rosterVersionFold): a key the round judges is a key the fold
+// counts, once, and no key is held for the roster. The roster's groups are not
+// rebuilt either - a history roster's group is its key parsed back, which is
+// what every reader of a key outside a stated roster already does - so the
+// judgement keeps no history key beyond the one deduplication set.
 
 // GroupJudgement is what one round says about one group.
 type GroupJudgement struct {
@@ -101,10 +108,11 @@ type absenceJudge struct {
 	// group was judged under; together they are the one deduplication.
 	presentSeen map[string]bool
 	judged      map[string]struct{}
-	// historyKeys is the derived history roster, for its size and version.
-	historyKeys []string
-	whole       GroupMemory
-	wholeFed    bool
+	// history is the derived history roster folded into its size and
+	// version, fed through the deduplication above. It holds no key.
+	history  rosterVersionFold
+	whole    GroupMemory
+	wholeFed bool
 
 	facts        AbsenceFacts
 	kept         uint64
@@ -192,7 +200,7 @@ func (judge *absenceJudge) Feed(key string, loaded GroupMemory) (judgement Group
 		if _, ok := ParseGroupKey(key); !ok {
 			return GroupJudgement{}, false, unparseableGroupKey(key)
 		}
-		judge.historyKeys = append(judge.historyKeys, key)
+		judge.history.add(key)
 	}
 	return judge.judge(key, loaded, true, judge.mode), true, nil
 }
@@ -226,24 +234,24 @@ func (judge *absenceJudge) Finish() (absenceSummary, []GroupJudgement, error) {
 		judgements = append(judgements, judge.judge(key, GroupMemory{}, false, judge.mode))
 	}
 
+	// A derived history roster leaves Finish as its source and version alone:
+	// its groups were never held (see above). judgeAbsenceResult, which has
+	// the whole memory in hand, names them for its result.
 	roster := judge.roster
+	expected := uint64(len(roster.Groups))
 	if judge.deriveHistory {
-		sort.Strings(judge.historyKeys)
-		version, err := rosterVersionOf(RosterHistory, judge.historyKeys)
+		version, err := judge.history.version(RosterHistory)
 		if err != nil {
 			return absenceSummary{}, nil, err
 		}
-		roster = Roster{Version: version, Source: RosterHistory, Groups: make(map[string]Group, len(judge.historyKeys))}
-		for _, key := range judge.historyKeys {
-			group, _ := ParseGroupKey(key)
-			roster.Groups[key] = group
-		}
+		roster = Roster{Version: version, Source: RosterHistory}
+		expected = judge.history.size()
 		judge.facts.RosterVersion = version
 	}
-	judge.facts.Expected = uint64(len(roster.Groups))
+	judge.facts.Expected = expected
 
 	wholeMode := judge.mode
-	if judge.deriveHistory && judge.mode == modeExpected && len(judge.historyKeys) == 0 {
+	if judge.deriveHistory && judge.mode == modeExpected && judge.history.size() == 0 {
 		wholeMode = modeNothingExpected
 	}
 	judgements = append(judgements, judge.judge(whole, judge.whole, judge.wholeFed, wholeMode))
@@ -707,6 +715,15 @@ func judgeAbsenceResult(
 	}
 	result.Facts = summary.Facts
 	result.Roster = summary.Roster
+	if judge.deriveHistory {
+		// The whole read's result names the roster it was judged against, and
+		// the whole read has the memory to name it from; the judgement did not
+		// hold it. Every key the judgement folded parsed when it was fed, and
+		// historyGroups selects the same keys.
+		if result.Roster.Groups, err = historyGroups(memory); err != nil {
+			return AbsenceResult{}, err
+		}
+	}
 	result.TrackingExhaustedAt = summary.TrackingExhaustedAt
 	result.WholeItemPresent = summary.WholeItemPresent
 	return result, nil
