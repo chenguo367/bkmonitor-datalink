@@ -530,11 +530,11 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	// The Slot's result is the evaluation's; the query line reports the
 	// physical queries' own beside it (observeQueryCompleted).
 	queryResult, queryReason := provisionalResult(stream.evaluated)
-	coordinator.observeQueryCompleted(ctx, request.Operation, started, completion, stream.evaluated)
+	coordinator.observeQueryCompleted(ctx, request.Operation, started, completion, stream.evaluated, &stream.summary)
 	// Whether a physical query of the round answered short, by the rule the
 	// query line reports it by, for the completion line's lost-round facts.
 	physicalLoss, _ := physicalQueryFailure(completion)
-	if len(stream.evaluated.Plans) == 0 {
+	if stream.summary.planCount() == 0 {
 		// The timing travels with the usage here for the same reason it does at
 		// the other exit: this Slot ran. A round that produced no Plan result
 		// still waited for its records and still read State, and reporting the
@@ -548,9 +548,9 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	var result execution.SlotExecutionResult
 	err = coordinator.ports.Sequencer.Sequence(ctx, sequencingScope(stream.header, stream.stateItems, stream.gapItems), func(sequenceCtx context.Context) error {
 		var executeErr error
-		result, executeErr = coordinator.finalizePreparedWithGaps(
+		result, executeErr = coordinator.finalizeSummarized(
 			withUnseenPlans(withNoDataEnds(withNoDataAbsenceStarts(sequenceCtx, stream.noDataAbsenceStarts), stream.noDataEndRound()), stream.unseenPlans()),
-			request, stream.header, stream.bindings, stream.state, stream.gaps, stream.evaluated,
+			request, stream.header, stream.bindings, stream.state, stream.gaps, stream.evaluated, &stream.summary,
 			stream.noDataMutations, stream.queryEvidence, stream.seriesCensus, stream.targetSummaries(),
 		)
 		return executeErr
@@ -622,7 +622,7 @@ func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 	budget := stream.coordinator.budget
 	return execution.SlotBudgetUsage{
 		StateMutations: stream.effects.states, GapMutations: stream.effects.gaps,
-		Events: stream.effects.events, EventsWithoutMessage: eventsWithoutMessage(stream.evaluated),
+		Events: stream.effects.events, EventsWithoutMessage: stream.summary.withoutMessage,
 		RetainedBytes: stream.retainedTotal(), Series: stream.series,
 		RetainedInputBytes:  stream.retainedByPhase[retainPhaseInput],
 		RetainedGapBytes:    stream.retainedByPhase[retainPhaseGap],
@@ -632,18 +632,6 @@ func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 		EventsLimit: budget.MaxEvents, RetainedBytesLimit: budget.MaxRetainedBytes, SeriesLimit: budget.MaxSeries,
 		RetainedShareBytes: stream.coordinator.qgShareBytes(),
 	}
-}
-
-// eventsWithoutMessage counts the identities the Slot's series kept in place
-// of events their protocol has no message for.
-func eventsWithoutMessage(result execution.EvaluationResult) uint64 {
-	var count uint64
-	for _, plan := range result.Plans {
-		for _, state := range plan.StateResults {
-			count += uint64(len(state.WithoutMessage))
-		}
-	}
-	return count
 }
 
 // readinessDeferralOf is what a deferred Slot waits for, as its error names
@@ -1483,6 +1471,30 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 	census seriesCensus,
 	targets []execution.TargetResolutionSummary,
 ) (execution.SlotExecutionResult, error) {
+	summary := summarizeEvaluation(evaluated)
+	return coordinator.finalizeSummarized(ctx, request, header, bindings, loadedState, loadedGaps, evaluated, &summary,
+		noDataMemory, query, census, targets)
+}
+
+// finalizeSummarized writes a Slot's results and commits its Progress. Each
+// Plan's State and events are written from evaluated; everything read of the
+// Slot as a whole - the completion, its coverage, the no-data end updates -
+// is read from summary, which a Slot builds as its results merge and a
+// caller with the whole result in hand builds from it.
+func (coordinator *SlotExecutionCoordinator) finalizeSummarized(
+	ctx context.Context,
+	request execution.SlotExecutionRequest,
+	header execution.InternalExecutionHeader,
+	bindings []execution.NamedInputBinding,
+	loadedState execution.StatePreflightResult,
+	loadedGaps execution.GapLoadResult,
+	evaluated execution.EvaluationResult,
+	summary *slotEvaluationSummary,
+	noDataMemory []execution.PlanNoDataMutation,
+	query queryAvailabilityEvidence,
+	census seriesCensus,
+	targets []execution.TargetResolutionSummary,
+) (execution.SlotExecutionResult, error) {
 	var err error
 	activationRequest := duePlanActivationRequest(request.Contract, header.DuePlans)
 	guardActivations, err := coordinator.loadActivations(ctx, activationRequest)
@@ -1841,7 +1853,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 		withoutWithheldNoData(noDataMemory, withheldNoData)); err != nil {
 		return execution.SlotExecutionResult{}, err
 	}
-	if err := coordinator.applyNoDataEnds(ctx, request, header, evaluated, withheldNoData); err != nil {
+	if err := coordinator.applyNoDataEnds(ctx, request, header, summary, withheldNoData); err != nil {
 		return execution.SlotExecutionResult{}, err
 	}
 	coordinator.observeSourceHeldUnindexed(ctx, request, header)
@@ -1865,9 +1877,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 	// fold into a Progress gap summary; changing that is a separate decision
 	// about a durable structure.
 	var attribution execution.CompletionAttribution
-	for _, plan := range evaluated.Plans {
-		attribution.Coverage.Merge(plan.HistoryCoverage)
-	}
+	attribution.Coverage = summary.coverage()
 	if len(changedPlans) > 0 {
 		var drift execution.CompletionAttribution
 		completion, drift = activationChangeCompletion(request.Contract, &primary,
@@ -1875,7 +1885,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 		attribution.Cause, attribution.Reason, attribution.Scope = drift.Cause, drift.Reason, drift.Scope
 	} else {
 		var derived execution.CompletionAttribution
-		completion.Kind, derived, err = execution.DeriveStreamingCompletionAttribution(header, bindings, evaluated)
+		completion.Kind, derived, err = execution.DeriveStreamingFoldedCompletionAttribution(header, bindings, summary.completion)
 		attribution.Cause, attribution.Reason, attribution.Scope = derived.Cause, derived.Reason, derived.Scope
 		attribution.ReasonCarried, attribution.ReasonOrigin = derived.ReasonCarried, derived.ReasonOrigin
 		if err != nil {

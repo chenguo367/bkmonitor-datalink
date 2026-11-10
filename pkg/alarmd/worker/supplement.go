@@ -73,7 +73,7 @@ func (coordinator *SlotExecutionCoordinator) executeSupplement(
 		coordinator.observeQueryFailure(ctx, request.Operation, started, "stream_complete", err)
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: complete supplement: %w", err)
 	}
-	if len(stream.evaluated.Plans) > 0 {
+	if stream.summary.planCount() > 0 {
 		err = coordinator.ports.Sequencer.Sequence(ctx, sequencingScope(stream.header, stream.stateItems, stream.gapItems),
 			func(sequenceCtx context.Context) error {
 				return coordinator.finalizeSupplement(sequenceCtx, request, stream)

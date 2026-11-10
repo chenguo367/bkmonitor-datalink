@@ -101,8 +101,12 @@ type streamedExecution struct {
 	noDataEndCarries map[execution.PlanIdentity]noDataEndCarry
 	effective        map[execution.ConsumerRef]strategy.EffectiveTimeFact
 	evaluated        execution.EvaluationResult
-	delivered        []execution.SeriesDelivery
-	series           uint64
+	// summary is what the Slot-wide readers after evaluation read of the
+	// Slot's results, kept beside evaluated as each batch merges
+	// (slotEvaluationSummary).
+	summary   slotEvaluationSummary
+	delivered []execution.SeriesDelivery
+	series    uint64
 	// retainedByPhase is this execution's retained bytes split by what they
 	// were retained for. The total is the sum rather than a counter of its
 	// own: a sixth budget's worth of memory arriving with no phase attached
@@ -508,6 +512,7 @@ func (stream *streamedExecution) releaseProvisional() {
 	stream.state, stream.gaps = execution.StatePreflightResult{}, execution.GapLoadResult{}
 	stream.noDataRefused = nil
 	stream.evaluated = execution.EvaluationResult{}
+	stream.summary = slotEvaluationSummary{}
 	stream.seriesCensus = seriesCensus{}
 	stream.coordinator.reservations.mu.Lock()
 	stream.coordinator.reservations.gapFacts -= stream.gapFacts
@@ -817,7 +822,7 @@ func appendProvisional(target *execution.EvaluationResult, next execution.Evalua
 			continue
 		}
 		plan := &target.Plans[index]
-		if dispositionRank(nextPlan.Disposition) > dispositionRank(plan.Disposition) {
+		if execution.PlanDispositionOutranks(nextPlan.Disposition, plan.Disposition) {
 			plan.Disposition, plan.ReasonCode = nextPlan.Disposition, nextPlan.ReasonCode
 		}
 		plan.LevelOutcomes = append(plan.LevelOutcomes, nextPlan.LevelOutcomes...)
@@ -885,23 +890,6 @@ func resultRank(result observability.Result) int {
 	case observability.ResultDegraded:
 		return 2
 	case observability.ResultSuccess:
-		return 1
-	default:
-		return 0
-	}
-}
-
-func dispositionRank(disposition execution.PlanDisposition) int {
-	switch disposition {
-	case execution.PlanRetryPending:
-		return 5
-	case execution.PlanTerminal:
-		return 4
-	case execution.PlanUnavailable, execution.PlanReadinessGap:
-		return 3
-	case execution.PlanDecidedDegraded:
-		return 2
-	case execution.PlanDecided:
 		return 1
 	default:
 		return 0
@@ -1142,7 +1130,7 @@ func (stream *streamedExecution) evaluateSeries(
 	if err := stream.evaluateNoData(ctx, preparedSeriesEvaluations, batchLimit); err != nil {
 		return err
 	}
-	if len(stream.evaluated.Plans) == 0 {
+	if stream.summary.planCount() == 0 {
 		return stream.completeWithoutSeries(ctx, completion)
 	}
 	for _, due := range stream.header.DuePlans {
@@ -1159,7 +1147,7 @@ func (stream *streamedExecution) evaluateSeries(
 			return err
 		}
 	}
-	if len(stream.evaluated.Plans) != len(stream.header.DuePlans) {
+	if stream.summary.planCount() != len(stream.header.DuePlans) {
 		return completionContractError(codeDuePlanResultMissing, "alarmd worker: trustworthy completion did not produce every due Plan result")
 	}
 	return nil
@@ -1415,6 +1403,7 @@ func (stream *streamedExecution) completeWithoutSeries(
 			if binding.Completeness != execution.CompletenessFull {
 				stream.evaluated = execution.EvaluationResult{Contract: stream.header.Contract,
 					Result: observability.ResultDegraded, ReasonCode: binding.ReasonCode}
+				stream.summary = slotEvaluationSummary{}
 				stream.observeCompletionOnlyProbe(ctx)
 				return nil
 			}
@@ -1422,6 +1411,7 @@ func (stream *streamedExecution) completeWithoutSeries(
 	}
 	stream.evaluated = execution.EvaluationResult{Contract: stream.header.Contract, Result: observability.ResultSuccess,
 		ReasonCode: observability.ReasonNone}
+	stream.summary = slotEvaluationSummary{}
 	for _, due := range stream.header.DuePlans {
 		started := time.Now()
 		planResult, err := stream.noSeriesPlanResult(due)
@@ -1721,7 +1711,11 @@ func (stream *streamedExecution) completeBeyondSlotBudget(ctx context.Context) e
 	// bytes stay reserved until the stream releases everything.
 	stream.coordinator.releaseEffects(stream.effects)
 	stream.effects = effectCounts{}
+	// The summary goes with the results it summarised: the replacement
+	// Plans are the Slot's results now, and nothing read after evaluation
+	// may still count a series that will not be written.
 	stream.evaluated = execution.EvaluationResult{}
+	stream.summary = slotEvaluationSummary{}
 	stream.closeNoDataBeyondSlotBudget(ctx)
 	reason := execution.ReasonCode(contract.ReasonExecutionBudgetExhausted)
 	for _, due := range stream.header.DuePlans {

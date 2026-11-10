@@ -215,6 +215,7 @@ func (coordinator *SlotExecutionCoordinator) observeQueryCompleted(
 	started time.Time,
 	completion execution.QueryExecutionCompletion,
 	evaluated execution.EvaluationResult,
+	summary *slotEvaluationSummary,
 ) {
 	evaluationResult, evaluationReason := provisionalResult(evaluated)
 	if evaluationResult == "" {
@@ -229,7 +230,7 @@ func (coordinator *SlotExecutionCoordinator) observeQueryCompleted(
 		// An evaluation outcome that names no reason is explained here as it
 		// was: it is the evaluation's, by category, and is read from the
 		// evaluation's result, not the query's.
-		facts = unexplainedOutcomeFacts(evaluationResult, evaluationReason, evaluated)
+		facts = unexplainedOutcomeFacts(evaluationResult, evaluationReason, summary)
 	}
 	observation := observability.Observation{
 		Component: observability.ComponentAccess, Stage: observability.StageQueryCompleted, Result: result,
@@ -585,8 +586,12 @@ func timedOutSentLate(routes execution.ProviderRouteFacts) bool {
 // retried for hours with nothing to root-cause them by. It reports the Plan
 // disposition and the Level outcome mix, both already bounded enumerations,
 // and stays nil for healthy or already-explained outcomes.
+//
+// Both are read from the Slot's summary rather than its results: the line is
+// written once the Slot's evaluation is over, and the mix is of the whole
+// Slot.
 func unexplainedOutcomeFacts(
-	result observability.Result, reason execution.ReasonCode, evaluated execution.EvaluationResult,
+	result observability.Result, reason execution.ReasonCode, summary *slotEvaluationSummary,
 ) *observability.QueryFailureFacts {
 	if result == observability.ResultSuccess || result == "" {
 		return nil
@@ -594,25 +599,24 @@ func unexplainedOutcomeFacts(
 	if reason != "" && reason != observability.ReasonNone {
 		return nil
 	}
-	dispositions := make([]string, 0, len(evaluated.Plans))
-	outcomes := map[execution.LevelOutcomeKind]int{}
+	if summary == nil {
+		summary = &slotEvaluationSummary{}
+	}
+	dispositions := make([]string, 0, summary.planCount())
 	seen := map[execution.PlanDisposition]struct{}{}
-	for _, plan := range evaluated.Plans {
-		if _, ok := seen[plan.Disposition]; !ok {
-			seen[plan.Disposition] = struct{}{}
-			dispositions = append(dispositions, string(plan.Disposition))
-		}
-		for _, outcome := range plan.LevelOutcomes {
-			outcomes[outcome.Outcome]++
+	for _, disposition := range summary.completion.Dispositions() {
+		if _, ok := seen[disposition]; !ok {
+			seen[disposition] = struct{}{}
+			dispositions = append(dispositions, string(disposition))
 		}
 	}
 	sort.Strings(dispositions)
-	kinds := make([]string, 0, len(outcomes))
-	for kind, count := range outcomes {
+	kinds := make([]string, 0, len(summary.levelOutcomes))
+	for kind, count := range summary.levelOutcomes {
 		kinds = append(kinds, fmt.Sprintf("%s:%d", kind, count))
 	}
 	sort.Strings(kinds)
-	detail := "plans=" + strconv.Itoa(len(evaluated.Plans))
+	detail := "plans=" + strconv.Itoa(summary.planCount())
 	if len(dispositions) > 0 {
 		detail += " dispositions=" + strings.Join(dispositions, ",")
 	}

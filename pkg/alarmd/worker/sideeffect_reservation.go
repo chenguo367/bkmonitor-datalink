@@ -114,6 +114,11 @@ func (stream *streamedExecution) mergeProvisional(ctx context.Context, next exec
 	if err := appendProvisional(&stream.evaluated, next); err != nil {
 		return err
 	}
+	// After the append and only when it took the batch, so the summary
+	// never holds a batch the results do not: every result the Slot keeps -
+	// evaluated, resumed, superseded, no-data, a Plan without series, a
+	// budget replacement - arrives here.
+	stream.summary.add(next, stream.noDataEnds)
 	stream.effects.states += delta.states
 	stream.effects.events += delta.events
 	stream.effects.gaps += delta.gaps

@@ -3714,11 +3714,15 @@ type CompletionScope struct {
 // would be functions that must agree about the same Slot, and the first time
 // they disagreed the page would explain a completion that did not happen.
 func DeriveCompletionAttribution(input InternalExecution, result EvaluationResult) (CompletionKind, CompletionAttribution, error) {
-	return deriveCompletionAttribution(input, result)
+	return deriveCompletionAttribution(input, FoldCompletionAttribution(result))
 }
 
-func deriveCompletionAttribution(input InternalExecution, result EvaluationResult) (CompletionKind, CompletionAttribution, error) {
-	if len(result.Plans) == 0 {
+// deriveCompletionAttribution reads the Slot's results through their fold
+// (CompletionAttributionFold), which keeps of them exactly what this reads:
+// a Slot that let its series go window by window still has it, and one
+// derived from a result in hand folds the result first.
+func deriveCompletionAttribution(input InternalExecution, fold CompletionAttributionFold) (CompletionKind, CompletionAttribution, error) {
+	if len(fold.plans) == 0 {
 		return "", CompletionAttribution{}, errors.New("alarmd execution: no Plan results to complete")
 	}
 	primary, err := DerivePrimaryInputFact(input)
@@ -3777,7 +3781,7 @@ func deriveCompletionAttribution(input InternalExecution, result EvaluationResul
 	allFullEmpty := primary.Completeness == CompletenessFull && primary.DataState == DataStateEmpty
 	hasTerminal := false
 	wholeness := NewSlotInputWholeness(input.Inputs)
-	for _, plan := range result.Plans {
+	for _, plan := range fold.plans {
 		switch plan.Disposition {
 		case PlanTerminal:
 			hasTerminal = true
@@ -3801,18 +3805,18 @@ func deriveCompletionAttribution(input InternalExecution, result EvaluationResul
 				// nobody has identified yet belong.
 				hasPartial = true
 			}
-			for _, outcome := range plan.LevelOutcomes {
-				switch outcome.Outcome {
-				case LevelOutcomeTerminal:
-					hasTerminal = true
-				case LevelOutcomeUnknown:
-					hasUnavailable = true
-					levelScope := CompletionScope{Plan: outcome.Plan, HasPlan: true, LevelID: outcome.LevelID, HasLevel: true}
-					if wholeness.UnknownIsGuardTail(outcome) {
-						noteOutcome(CauseGapGuardWarming, outcome, levelScope)
-					} else {
-						noteOutcome(CauseLevelOutcomeUnknown, outcome, levelScope)
-					}
+			if plan.terminal {
+				hasTerminal = true
+			}
+			// The UNKNOWN outcomes the fold kept, in the order they arrived:
+			// the only ones of the Plan that can be noted (see the fold).
+			for _, outcome := range plan.unknown {
+				hasUnavailable = true
+				levelScope := CompletionScope{Plan: outcome.Plan, HasPlan: true, LevelID: outcome.LevelID, HasLevel: true}
+				if wholeness.UnknownIsGuardTail(outcome) {
+					noteOutcome(CauseGapGuardWarming, outcome, levelScope)
+				} else {
+					noteOutcome(CauseLevelOutcomeUnknown, outcome, levelScope)
 				}
 			}
 		default:
