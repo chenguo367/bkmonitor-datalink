@@ -41,8 +41,9 @@ const NoDataRosterSegmentGroups = 1000
 //
 // It is part of PlanNoDataStore: every store the worker writes the memory to
 // is one it reads it from this way. The whole read (LoadNoData) stays for the
-// readers that want a record whole and small - a supplement's few groups, the
-// evidence pages - and the Slot's round never uses it.
+// readers that want a record whole and small - the evidence pages - and
+// neither a Slot's round nor a supplement uses it: a supplement reads its own
+// series' groups by name (ReadNoDataGroups).
 type PlanNoDataRosterReader interface {
 	// ReadNoDataHeaders reads, per item, the memory's header and nothing of its
 	// groups: the snapshot LoadNoData returns with Groups empty. The record

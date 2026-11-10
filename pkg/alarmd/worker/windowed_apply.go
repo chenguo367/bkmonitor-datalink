@@ -153,8 +153,9 @@ type slotWindows struct {
 	ceiling       time.Time
 	// perWindow is s_min, the fewest series a window holds, fixed with the
 	// ceiling; ceilingWindows is how many windows the ceiling allows, and
-	// raisedWindows how many of them a no-data round's absences added after
-	// its scan (raiseWindowCeiling). Both are on the completion row.
+	// raisedWindows how many of them a no-data round's synthetic series
+	// added - its absences after its scan, the rest of what it says after it
+	// finished (raiseWindowCeiling). Both are on the completion row.
 	perWindow                     uint64
 	ceilingWindows, raisedWindows uint64
 	// evaluating is the Plan whose result the evaluation is producing, and
@@ -554,8 +555,9 @@ const windowStepBound = time.Minute
 // deadline at each boundary never lets a Slot that really is stuck out-wait
 // the watchdog: the latest it can be claimed is the deadline, the grace and
 // ceil(S / s_min) T_w (decision-020 batch 8, 2.2 step 6 b). A no-data round's
-// absences add their own windows once its scan has counted them
-// (raiseWindowCeiling).
+// synthetic series - its absences, the groups no stored entry named, and its
+// present groups' NORMAL - add their own windows once the round has counted
+// them (raiseWindowCeiling).
 func (stream *streamedExecution) fixWindowCeiling(ctx context.Context, series int) {
 	deadline := execution.ExecutionDeadline(ctx)
 	if deadline.IsZero() || series == 0 || stream.supplement != nil {
@@ -600,16 +602,18 @@ func (stream *streamedExecution) eventsPerSeries() uint64 {
 	return most
 }
 
-// raiseWindowCeiling moves the ceiling once for a no-data round whose scan
-// found absent absent names: their series are said after every prepared one
-// and were not in S, so they get their own ceil(absent / s_min) windows. Still
-// bounded: a memory holds at most its Plan's max_groups groups.
-func (stream *streamedExecution) raiseWindowCeiling(absent int) {
+// raiseWindowCeiling moves the ceiling for synthetic no-data series a round
+// is about to say: the absent names its scan found, then, once it finished,
+// the groups no stored entry named and the present groups' NORMAL. They are
+// said after every prepared one and were not in S, so they get their own
+// ceil(synthetic / s_min) windows. Still bounded: a round says at most one
+// series a group, and a memory holds at most its Plan's max_groups groups.
+func (stream *streamedExecution) raiseWindowCeiling(synthetic int) {
 	windows := &stream.windows
-	if windows.ceiling.IsZero() || absent == 0 || windows.perWindow == 0 {
+	if windows.ceiling.IsZero() || synthetic == 0 || windows.perWindow == 0 {
 		return
 	}
-	more := (uint64(absent) + windows.perWindow - 1) / windows.perWindow
+	more := (uint64(synthetic) + windows.perWindow - 1) / windows.perWindow
 	windows.ceiling = windows.ceiling.Add(time.Duration(more) * windowStepBound)
 	windows.ceilingWindows += more
 	windows.raisedWindows += more

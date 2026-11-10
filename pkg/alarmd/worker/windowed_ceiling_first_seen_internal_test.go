@@ -235,3 +235,47 @@ func TestAnAbsenceHeavySlotRaisesItsCeilingAndIsNotDeclinedWhileItsAbsenceWindow
 		}
 	}
 }
+
+// 4d: the present groups' NORMAL series a no-data round says are not in S
+// either - S counted the groups' real series, not their synthetic ones - so
+// a round whose groups all reported raises the ceiling by the windows those
+// series need. Without it the ceiling of a Slot whose every group reports
+// held no window for half of what it says.
+func TestAPresentNoDataRoundRaisesItsCeilingByItsNormalSeries(t *testing.T) {
+	due := noDataWiredPlan(t)
+	evaluation := int64(1_788_000_000)
+	groups, dimensions := rosterGroups(t, 30, evaluation-60)
+	store := &rosterStore{headers: map[execution.StateGeneration]execution.NoDataMemorySnapshot{due.StateGeneration: rosterHeader(evaluation - 60)},
+		groups: map[execution.StateGeneration][]execution.NoDataGroupMemory{due.StateGeneration: groups}}
+	stream := rosterStream(t, due, store, 8)
+	stream.coordinator.budget.MaxStateMutations = 5
+	deadline := time.UnixMilli(1_800_000_000_000)
+	marker := &execution.StageMarker{}
+	marker.Begin(execution.SlotStageEvaluate)
+	marker.Extend(deadline, deadline)
+	ctx := execution.WithStageMarker(context.Background(), marker)
+	stream.fixWindowCeiling(ctx, len(dimensions))
+	before := stream.windows.ceilingWindows
+
+	present := nodata.NewPresentSet(due.CompiledPlan.NoData().AggDimension)
+	for _, host := range dimensions {
+		if _, ok := present.Add(host); !ok {
+			t.Fatal("fixture: a host did not project")
+		}
+	}
+	said := 0
+	round, err := stream.decideNoDataRound(ctx, due, present, execution.CompletenessFull,
+		func(completedSeries) error { said++; return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round.facts.Absent != 0 || said == 0 {
+		t.Fatalf("facts %+v with %d series said, want every group present and its NORMAL said", round.facts, said)
+	}
+	raised := (uint64(said) + stream.windows.perWindow - 1) / stream.windows.perWindow
+	usage := stream.budgetUsage()
+	if usage.WindowCeilingRaisedWindows != raised || usage.WindowCeilingWindows != before+raised {
+		t.Fatalf("usage = %+v, want the ceiling raised by %d windows for %d NORMAL series to %d",
+			usage, raised, said, before+raised)
+	}
+}

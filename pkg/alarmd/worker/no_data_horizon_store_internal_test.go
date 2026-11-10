@@ -319,6 +319,9 @@ func TestASupplementLeavesAStoppedNoDataAbsenceStandingInTheStore(t *testing.T) 
 		if err := stream.loadNoDataMemory(context.Background()); err != nil {
 			t.Fatal(err)
 		}
+		if err := stream.readSupplementNoDataGroups(context.Background(), []preparedSeries{late}); err != nil {
+			t.Fatal(err)
+		}
 		if got := stream.noDataStandingAt(late); got != slot.want {
 			t.Fatalf("%s: standing %d, want %d", slot.name, got, slot.want)
 		}

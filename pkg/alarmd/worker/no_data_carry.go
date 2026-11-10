@@ -56,12 +56,14 @@ func (coordinator *SlotExecutionCoordinator) observeNoDataCarry(
 // one is never read. A previous record that cannot be read leaves the Plan
 // on its own state, which is what it had without the carry; it is counted.
 //
-// A Slot's round reads the previous record as it reads its own, in parts
-// (decision-020 batch 8, 2.7): only its header here, which names what the
-// round starts from, and its groups by segments as the round judges them
-// (noDataCarried, decideNoDataRound). A supplement, which reads a memory
-// whole (whole), takes the groups here as it always did.
-func (stream *streamedExecution) carryNoDataMemory(ctx context.Context, request execution.NoDataLoadRequest, whole bool) {
+// The previous record is read as the Plan's own is, in parts (decision-020
+// batch 8, 2.7): only its header here, which names what the round starts
+// from, and its groups by segments as the round judges them (noDataCarried,
+// decideNoDataRound). A supplement reads no groups of it at all: the
+// snapshot it judges by stays MISSING, which records nothing absent at the
+// Slot (noDataStandingAt), so the carried groups were never what it decided
+// on.
+func (stream *streamedExecution) carryNoDataMemory(ctx context.Context, request execution.NoDataLoadRequest) {
 	var items []execution.PlanNoDataLoadItem
 	carried := map[execution.PlanNoDataIdentity]execution.PlanNoDataIdentity{}
 	for _, due := range stream.header.DuePlans {
@@ -89,11 +91,7 @@ func (stream *streamedExecution) carryNoDataMemory(ctx context.Context, request 
 	}
 	operation := stream.request.Operation
 	previousRequest := execution.NoDataLoadRequest{Contract: request.Contract, Items: items}
-	read := stream.coordinator.ports.NoData.ReadNoDataHeaders
-	if whole {
-		read = stream.coordinator.ports.NoData.LoadNoData
-	}
-	loaded, err := read(ctx, previousRequest)
+	loaded, err := stream.coordinator.ports.NoData.ReadNoDataHeaders(ctx, previousRequest)
 	if err == nil {
 		err = execution.ValidateNoDataLoad(previousRequest, loaded)
 	}
@@ -118,14 +116,10 @@ func (stream *streamedExecution) carryNoDataMemory(ctx context.Context, request 
 			if snapshot.Identity != identity {
 				continue
 			}
-			if whole {
-				snapshot.Groups = append([]execution.NoDataGroupMemory(nil), previous.Groups...)
-			} else {
-				if stream.noDataCarried == nil {
-					stream.noDataCarried = make(map[execution.PlanNoDataIdentity]execution.NoDataMemorySnapshot)
-				}
-				stream.noDataCarried[identity] = previous
+			if stream.noDataCarried == nil {
+				stream.noDataCarried = make(map[execution.PlanNoDataIdentity]execution.NoDataMemorySnapshot)
 			}
+			stream.noDataCarried[identity] = previous
 			snapshot.PresentAsOf = previous.PresentAsOf
 			snapshot.RosterVersion = previous.RosterVersion
 			snapshot.TrackingExhaustedAt = previous.TrackingExhaustedAt

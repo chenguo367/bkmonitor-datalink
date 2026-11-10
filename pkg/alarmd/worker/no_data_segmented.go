@@ -315,6 +315,12 @@ func (stream *streamedExecution) decideNoDataRound(
 	if !finished.Judged {
 		return result, nil
 	}
+	// What Finish has the round say - the groups no stored entry named and
+	// the present groups' NORMAL - are series too, said after every prepared
+	// one and not in S either: a present group's real series was counted, its
+	// synthetic one was not. The ceiling gets their windows as it got the
+	// absences'.
+	stream.raiseWindowCeiling(len(finished.Rest) + len(finished.PresentKeys))
 	if err := reading.say(ctx, finished.Rest, nil); err != nil {
 		return noDataRound{}, err
 	}
