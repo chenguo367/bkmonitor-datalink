@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
+	"sync/atomic"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
@@ -23,12 +24,21 @@ import (
 // It keeps its records in runs. A run of consecutive records of one series -
 // one business, one dimension identity and dimensions, one received time, no
 // collection time and one value field - keeps those once and its points as
-// columns: record ids, source times and values, a value that is a JSON number
-// kept as the float64 it reads back to byte for byte, any other value (a
-// string, null, a number written another way) kept as its bytes in a side
-// table. A record of no such run is kept as it was given. RecordView builds
-// the record's maps from the run when asked, so readers see what NewDataset
-// was given either way.
+// columns: source times and values, a value that is a JSON number kept as
+// the float64 it reads back to byte for byte, any other value (a string,
+// null, a number written another way) kept as its bytes in a side table. A
+// record of no such run is kept as it was given. RecordView builds the
+// record's maps from the run when asked, so readers see what NewDataset was
+// given either way.
+//
+// A run's record ids are not kept when every one of them is the id
+// contract.DeriveRecordIDV2 derives from the series and the point's source
+// time, which is what every id the UQ decoder makes is (decision-020 batch
+// 8, trade-off two): 64 bytes a point less, held for as long as the Slot
+// holds its inputs. They are derived once a point into a buffer when the
+// window that reads the series loads (MaterializeRecordIDs) and let go with
+// the window (DropRecordIDs); RecordID reads that buffer. A run any of whose
+// ids is another keeps them all, end to end, as before.
 type Dataset struct {
 	runs []datasetRun
 	// starts is each run's first record, for Record's search.
@@ -45,9 +55,16 @@ type datasetRun struct {
 	dimensions map[string]json.RawMessage
 	received   int64
 	valueField string
-	// ids holds the run's record ids end to end, idWidth bytes each.
+	// ids holds the run's record ids end to end, idWidth bytes each, when
+	// they are kept; empty when derived is set.
 	ids     string
-	idWidth int
+	idWidth int32
+	// derived is set when every point's id is DeriveRecordIDV2(the run's
+	// identity digest, its source time), and the ids are not kept. window is
+	// then the ids derived end to end for the window reading the run, nil
+	// outside one.
+	derived bool
+	window  atomic.Pointer[string]
 	times   []int64
 	values  []float64
 	// sideMarks marks the points whose value is in side, one bit each; nil
@@ -103,7 +120,25 @@ func (view *DatasetView) Uses(dataset *Dataset) bool {
 	return view != nil && view.dataset == dataset
 }
 
+// NewDataset keeps records as given. A columnar run's ids are checked
+// against the ids derived from its series, point by point: a run whose every
+// id is the derived one keeps none, and a run with any other id keeps them
+// all (keptRecordIDRuns counts it).
 func NewDataset(records []contract.CanonicalRecordV2) *Dataset {
+	return newDataset(records, false)
+}
+
+// NewDatasetOfDerivedRecordIDs is NewDataset for records whose every id the
+// caller has just derived as contract.DeriveRecordIDV2(the record's
+// dimension identity digest, its source time) - the UQ decoder, which
+// derives them as it builds the records. Checking them again would derive
+// every id a second time to find what the caller already holds, so no
+// columnar run keeps its ids.
+func NewDatasetOfDerivedRecordIDs(records []contract.CanonicalRecordV2) *Dataset {
+	return newDataset(records, true)
+}
+
+func newDataset(records []contract.CanonicalRecordV2, derived bool) *Dataset {
 	dataset := &Dataset{len: len(records)}
 	for start := 0; start < len(records); {
 		end := start + 1
@@ -111,7 +146,11 @@ func NewDataset(records []contract.CanonicalRecordV2) *Dataset {
 			for end < len(records) && sameSeriesRun(&records[start], &records[end]) {
 				end++
 			}
-			dataset.add(start, newColumnarRun(records[start:end]))
+			// Filled in place: a run holds an atomic and is never copied
+			// once it is in use.
+			dataset.runs = append(dataset.runs, datasetRun{})
+			dataset.starts = append(dataset.starts, start)
+			dataset.runs[len(dataset.runs)-1].fillColumnar(records[start:end], derived)
 		} else {
 			for end < len(records) && !columnar(&records[end]) {
 				end++
@@ -120,16 +159,12 @@ func NewDataset(records []contract.CanonicalRecordV2) *Dataset {
 			for index := range whole {
 				whole[index] = cloneCanonicalRecord(records[start+index])
 			}
-			dataset.add(start, datasetRun{records: whole})
+			dataset.runs = append(dataset.runs, datasetRun{records: whole})
+			dataset.starts = append(dataset.starts, start)
 		}
 		start = end
 	}
 	return dataset
-}
-
-func (dataset *Dataset) add(start int, run datasetRun) {
-	dataset.runs = append(dataset.runs, run)
-	dataset.starts = append(dataset.starts, start)
 }
 
 // columnar is whether a record can be kept in a columnar run: one value
@@ -179,11 +214,14 @@ func sameRawMap(left, right map[string]json.RawMessage) bool {
 	return true
 }
 
-func newColumnarRun(records []contract.CanonicalRecordV2) datasetRun {
+// fillColumnar makes run the columnar run of records. derived is the
+// caller's statement that every id is the derived one; without it the ids
+// are checked (recordIDsDerived).
+func (run *datasetRun) fillColumnar(records []contract.CanonicalRecordV2, derived bool) {
 	first := &records[0]
-	run := datasetRun{business: first.BusinessID, identity: RecordView{record: first}.DimensionIdentity(),
-		dimensions: cloneRawMap(first.Dimensions), received: first.ReceivedTime, idWidth: len(first.RecordID),
-		times: make([]int64, len(records)), values: make([]float64, len(records))}
+	run.business, run.identity = first.BusinessID, RecordView{record: first}.DimensionIdentity()
+	run.dimensions, run.received, run.idWidth = cloneRawMap(first.Dimensions), first.ReceivedTime, int32(len(first.RecordID))
+	run.times, run.values = make([]int64, len(records)), make([]float64, len(records))
 	// An identity field is a dimension of the same name and bytes: it is kept
 	// as those bytes once, the run handing either out only as a copy.
 	for index, field := range run.identity.Fields {
@@ -194,10 +232,8 @@ func newColumnarRun(records []contract.CanonicalRecordV2) datasetRun {
 	for field := range first.Values {
 		run.valueField = field
 	}
-	ids := make([]byte, 0, len(records)*run.idWidth)
 	for index := range records {
 		record := &records[index]
-		ids = append(ids, record.RecordID...)
 		run.times[index] = record.SourceTime
 		raw := record.Values[run.valueField]
 		if value, ok := numberOf(raw); ok {
@@ -210,11 +246,19 @@ func newColumnarRun(records []contract.CanonicalRecordV2) datasetRun {
 		run.sideMarks[index/64] |= 1 << (index % 64)
 		run.side = append(run.side, datasetSideValue{offset: index, raw: string(raw)})
 	}
-	run.ids = string(ids)
 	if run.side != nil {
 		run.side = append([]datasetSideValue(nil), run.side...)
 	}
-	return run
+	run.derived = derived && run.idWidth == recordIDLength || recordIDsDerived(records, run.identity.Digest)
+	if run.derived {
+		return
+	}
+	keptRecordIDRuns.Add(1)
+	ids := make([]byte, 0, len(records)*int(run.idWidth))
+	for index := range records {
+		ids = append(ids, records[index].RecordID...)
+	}
+	run.ids = string(ids)
 }
 
 func (dataset *Dataset) Len() int {
@@ -240,8 +284,9 @@ func (dataset *Dataset) Records() []contract.CanonicalRecordV2 {
 			}
 			continue
 		}
+		ids, width := run.allRecordIDs()
 		for offset := range run.times {
-			records = append(records, RecordView{run: run, offset: offset}.canonical())
+			records = append(records, RecordView{run: run, offset: offset}.canonical(ids[offset*width:(offset+1)*width]))
 		}
 	}
 	return records
@@ -268,19 +313,24 @@ type RecordView struct {
 	offset int
 }
 
-// canonical is a columnar point as an independent record.
-func (view RecordView) canonical() contract.CanonicalRecordV2 {
-	return contract.CanonicalRecordV2{RecordID: view.RecordID(), SourceTime: view.SourceTime(), BusinessID: view.BusinessID(),
+// canonical is a columnar point with its id as an independent record.
+func (view RecordView) canonical(recordID string) contract.CanonicalRecordV2 {
+	return contract.CanonicalRecordV2{RecordID: recordID, SourceTime: view.SourceTime(), BusinessID: view.BusinessID(),
 		DimensionIdentity: view.DimensionIdentity(), Values: view.Values(), Dimensions: view.Dimensions(),
 		ReceivedTime: view.ReceivedTime()}
 }
 
+// RecordID is the record's id: as kept, or, for a run whose ids are derived,
+// from the buffer of the window reading it (MaterializeRecordIDs). Outside a
+// window it is derived for the call and counted (recordIDsDerivedOutside): a
+// reader there pays a hash per call, which a sort's comparator would pay
+// O(n log n) times.
 func (view RecordView) RecordID() string {
 	switch {
 	case view.record != nil:
 		return view.record.RecordID
 	case view.run != nil:
-		return view.run.ids[view.offset*view.run.idWidth : (view.offset+1)*view.run.idWidth]
+		return view.run.recordID(view.offset)
 	}
 	return ""
 }

@@ -26,7 +26,8 @@ import (
 // An answer's values reach the Dataset as the bytes UQ wrote them, whatever
 // they are - numbers the encoder writes, numbers written another way, a
 // string, null - and a series is kept as one run of columns: its points
-// cost their time, value and id, not a record each.
+// cost their time and value, not a record each, and not their id, which
+// the decoder derived and the window derives again.
 func TestAnAnswersValuesReadBackAsUQWroteThem(t *testing.T) {
 	values := []string{`12.5`, `0`, `1e21`, `12.50`, `"1.5"`, `null`, `9007199254740993`, `-3`}
 	points := make([]string, len(values))
@@ -50,8 +51,8 @@ func TestAnAnswersValuesReadBackAsUQWroteThem(t *testing.T) {
 			t.Fatalf("point %d read back as %q, want %s", index, got, want)
 		}
 	}
-	// One point fewer - a number - costs its time, its value and its record
-	// id less.
+	// One point fewer - a number - costs its time and its value less: the
+	// decoder's ids are derived, so the run keeps none.
 	shorter := `{"name":"_result0","columns":["_time","_result"],"types":["int64","float64"],"group_keys":["bk_target_ip"],` +
 		`"group_values":["192.0.2.10"],"values":[` + strings.Join(points[:len(points)-1], ",") + `]}`
 	fewer := &collectingSink{}
@@ -59,8 +60,7 @@ func TestAnAnswersValuesReadBackAsUQWroteThem(t *testing.T) {
 		Execute(context.Background(), validAttempt(t), fewer); err != nil {
 		t.Fatal(err)
 	}
-	last, _ := dataset.Record(len(values) - 1)
-	if step, want := dataset.RetainedBytes()-fewer.batches[0].Dataset.RetainedBytes(), uint64(16+len(last.RecordID())); step != want {
+	if step, want := dataset.RetainedBytes()-fewer.batches[0].Dataset.RetainedBytes(), uint64(16); step != want {
 		t.Fatalf("one point more costs %d bytes, want %d", step, want)
 	}
 }

@@ -37,10 +37,14 @@ var (
 // says: the runs and their starts; per columnar run its header, its series
 // parts once - identity, dimensions, an identity field's value counted once
 // where it is a dimension's - and its columns, eight bytes a point
-// for the time and eight for the value, the record ids end to end, and the
-// side table and its marks; per record kept whole the record and its maps.
-// It is computed, not read from the runtime, so the same Dataset always
-// counts the same; the calibration test holds it to the heap it takes.
+// for the time and eight for the value, the record ids end to end where the
+// run keeps them, and the side table and its marks; per record kept whole
+// the record and its maps. A run whose ids are derived keeps none and counts
+// none: its window buffer (MaterializeRecordIDs) is the window's, charged
+// to the window that loads it, so the input a Slot holds to its end is
+// counted without it. It is computed, not read from the runtime, so the same
+// Dataset always counts the same; the calibration test holds it to the heap
+// it takes.
 func (dataset *Dataset) RetainedBytes() uint64 {
 	if dataset == nil {
 		return 0

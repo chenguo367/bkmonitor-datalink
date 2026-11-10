@@ -1024,8 +1024,17 @@ var nullDimension = json.RawMessage("null")
 // where None is the value in both cases. Series that carry the field keep
 // their previous identity unchanged.
 func normalizeSeries(spec execution.PhysicalQuerySpec, ref execution.ProviderResultRef, source responseSeries, receivedAt int64) (execution.ProviderSeriesBatch, uint64, error) {
+	batch, nullFields, _, err := normalizeSeriesKeeping(spec, ref, source, receivedAt, false)
+	return batch, nullFields, err
+}
+
+// normalizeSeriesKeeping is normalizeSeries, and with keepIDs the record ids
+// it derived, in the Dataset's order: a named-outputs query keeps them for
+// its legacy points (noteDelivered) from this derivation, as the Dataset
+// keeps none.
+func normalizeSeriesKeeping(spec execution.PhysicalQuerySpec, ref execution.ProviderResultRef, source responseSeries, receivedAt int64, keepIDs bool) (execution.ProviderSeriesBatch, uint64, []string, error) {
 	if len(source.Columns) == 0 || len(source.Columns) != len(source.Types) || (spec.PlanFacts.Normalization.Version != "uq-polling-normalization-v1" && len(source.GroupKeys) != len(source.GroupValues)) {
-		return execution.ProviderSeriesBatch{}, 0, errors.New("alarmd access uq: invalid series schema")
+		return execution.ProviderSeriesBatch{}, 0, nil, errors.New("alarmd access uq: invalid series schema")
 	}
 	dimensions := make(map[string]json.RawMessage, len(source.GroupKeys))
 	for index, key := range source.GroupKeys {
@@ -1034,7 +1043,7 @@ func normalizeSeries(spec execution.PhysicalQuerySpec, ref execution.ProviderRes
 			key = alias
 		}
 		if _, exists := dimensions[key]; exists {
-			return execution.ProviderSeriesBatch{}, 0, errors.New("alarmd access uq: duplicate normalized group key")
+			return execution.ProviderSeriesBatch{}, 0, nil, errors.New("alarmd access uq: duplicate normalized group key")
 		}
 		encoded := nullDimension
 		if index < len(source.GroupValues) {
@@ -1042,12 +1051,12 @@ func normalizeSeries(spec execution.PhysicalQuerySpec, ref execution.ProviderRes
 		}
 		var scalar any
 		if err := json.Unmarshal(encoded, &scalar); err != nil {
-			return execution.ProviderSeriesBatch{}, 0, err
+			return execution.ProviderSeriesBatch{}, 0, nil, err
 		}
 		switch scalar.(type) {
 		case nil, string, float64, bool:
 		default:
-			return execution.ProviderSeriesBatch{}, 0, errors.New("alarmd access uq: nonscalar group value")
+			return execution.ProviderSeriesBatch{}, 0, nil, errors.New("alarmd access uq: nonscalar group value")
 		}
 		dimensions[key] = encoded
 	}
@@ -1082,36 +1091,36 @@ func normalizeSeries(spec execution.PhysicalQuerySpec, ref execution.ProviderRes
 	// encoding from here rather than making it again.
 	identity, err := contract.EncodeDimensionIdentityV2(spec.PlanFacts.TenantID, spec.PlanFacts.BusinessID, identityFields)
 	if err != nil {
-		return execution.ProviderSeriesBatch{}, 0, err
+		return execution.ProviderSeriesBatch{}, 0, nil, err
 	}
 	dimensionDigest := identity.Digest
 	records := make([]contract.CanonicalRecordV2, 0, len(source.Values))
 	lastTime := int64(-1)
 	for _, row := range source.Values {
 		if len(row) != len(source.Columns) {
-			return execution.ProviderSeriesBatch{}, 0, errors.New("alarmd access uq: row width differs from columns")
+			return execution.ProviderSeriesBatch{}, 0, nil, errors.New("alarmd access uq: row width differs from columns")
 		}
 		timestamp, value, err := rowFacts(source.Columns, row, spec.PlanFacts.QueryList)
 		if err != nil {
-			return execution.ProviderSeriesBatch{}, 0, err
+			return execution.ProviderSeriesBatch{}, 0, nil, err
 		}
 		sourceTime, err := spec.PlanFacts.Normalization.NormalizeSourceTime(timestamp)
 		if err != nil {
-			return execution.ProviderSeriesBatch{}, 0, err
+			return execution.ProviderSeriesBatch{}, 0, nil, err
 		}
 		if sourceTime <= lastTime {
-			return execution.ProviderSeriesBatch{}, 0, errors.New("alarmd access uq: source order contract violation")
+			return execution.ProviderSeriesBatch{}, 0, nil, errors.New("alarmd access uq: source order contract broken")
 		}
 		lastTime = sourceTime
 		if sourceTime < spec.AcceptedRange.Start || sourceTime >= spec.AcceptedRange.End {
 			continue
 		}
 		if spec.PlanFacts.NotTimeAlign && !onRequestGrid(spec, sourceTime) {
-			return execution.ProviderSeriesBatch{}, 0, errOffRequestGrid
+			return execution.ProviderSeriesBatch{}, 0, nil, errOffRequestGrid
 		}
 		recordID, err := contract.DeriveRecordIDV2(dimensionDigest, sourceTime)
 		if err != nil {
-			return execution.ProviderSeriesBatch{}, 0, err
+			return execution.ProviderSeriesBatch{}, 0, nil, err
 		}
 		records = append(records, contract.CanonicalRecordV2{RecordID: recordID, SourceTime: sourceTime,
 			BusinessID:        spec.PlanFacts.BusinessID,
@@ -1119,14 +1128,24 @@ func normalizeSeries(spec execution.PhysicalQuerySpec, ref execution.ProviderRes
 			Values:            map[string]json.RawMessage{spec.PlanFacts.Normalization.CanonicalValueField: value},
 			Dimensions:        dimensions, ReceivedTime: receivedAt})
 	}
-	dataset := execution.NewDataset(records)
+	// Every id was derived just above from the series digest and the
+	// point's time, so the Dataset keeps none and derives them again only
+	// for the window that reads the series.
+	dataset := execution.NewDatasetOfDerivedRecordIDs(records)
 	digest, err := contract.DeriveSeriesRecordsDigestV2("alarmd-provider-series-delivery-v1", records, identity)
 	if err != nil {
-		return execution.ProviderSeriesBatch{}, 0, err
+		return execution.ProviderSeriesBatch{}, 0, nil, err
+	}
+	var recordIDs []string
+	if keepIDs {
+		recordIDs = make([]string, len(records))
+		for index := range records {
+			recordIDs[index] = records[index].RecordID
+		}
 	}
 	return execution.ProviderSeriesBatch{PhysicalQuery: spec.Digest, CompletionRef: ref, Dataset: dataset,
 		Delivery: execution.SeriesDelivery{PhysicalQuery: spec.Digest, QueryRevision: spec.PlanFacts.QueryRevision,
-			Series: 1, Records: uint64(len(records)), Digest: digest}}, nullIdentityFields, nil
+			Series: 1, Records: uint64(len(records)), Digest: digest}}, nullIdentityFields, recordIDs, nil
 }
 
 func rowFacts(columns []string, row []json.RawMessage, queries []execution.QueryClause) (int64, json.RawMessage, error) {

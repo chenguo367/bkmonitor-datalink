@@ -579,6 +579,14 @@ Labels: `function`
 
 Control rounds this process ran as a fallback Leader without a second-tier function, by function: the functions only the preferred control process runs, which detection never depends on. Non-zero while a Worker holds the control lease for want of a control process; it stops when control is handed back.
 
+## alarmd_dataset_record_ids_derived_outside_window_total
+
+Record ids of columnar Dataset points derived outside a window: read from a run that keeps no ids when no window has derived them, each derived for the read. Every reader of a Slot's inputs reads them in the window that evaluates its series, from ids derived once a point, so this stays near zero; a rising count is a reader outside a window paying a SHA-256 per read. A folded series' records are read once a point here, and a diagnostic query derives its own and is not counted.
+
+## alarmd_dataset_record_ids_kept_runs_total
+
+Columnar Dataset runs (one series' consecutive points) that keep their record ids, because at least one id is not the one derived from the series and the point's source time. A run whose every id is the derived one keeps none, 64 bytes a point less, and a window derives them when it reads the series. Every producer of Datasets builds its records from derived ids, so this stays zero; a rising count is a producer that does not, whose input is held at 64 bytes a point more than the share was measured at.
+
 ## alarmd_diagnostic_redis_dial_retries_total
 
 Labels: `client`, `reason`

@@ -454,15 +454,22 @@ func answeredState(answer namedOutputAnswer) execution.NamedOutputState {
 }
 
 // noteDelivered keeps the points of a legacy series that was delivered.
-func (named *namedOutputDecoding) noteDelivered(ctx context.Context, series responseSeries, dataset *execution.Dataset, valueField string) error {
+// recordIDs is the ids the normalization derived for the Dataset's records,
+// in its order: the points outlive every window, and the Dataset keeps no
+// ids to read them back from, so they are taken from that derivation rather
+// than derived again. They are held as they always were, in named.hold.
+func (named *namedOutputDecoding) noteDelivered(ctx context.Context, series responseSeries, dataset *execution.Dataset, recordIDs []string, valueField string) error {
+	if len(recordIDs) != dataset.Len() {
+		return fmt.Errorf("alarmd access uq: %d record ids for a series of %d records", len(recordIDs), dataset.Len())
+	}
 	labels := alignLabels(series)
 	for index := 0; index < dataset.Len(); index++ {
 		record, _ := dataset.Record(index)
 		value, _ := record.Value(valueField)
-		if err := named.hold(ctx, namedLegacyPointBytes+uint64(len(record.RecordID())+len(value))); err != nil {
+		if err := named.hold(ctx, namedLegacyPointBytes+uint64(len(recordIDs[index])+len(value))); err != nil {
 			return err
 		}
-		named.points = append(named.points, legacyPoint{recordID: record.RecordID(),
+		named.points = append(named.points, legacyPoint{recordID: recordIDs[index],
 			key: alignKey{time: record.SourceTime(), labels: labels}, value: value})
 	}
 	return nil

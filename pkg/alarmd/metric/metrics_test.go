@@ -765,8 +765,11 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		// graph survives a cutover instead of a series vanishing at it.
 		fqName("canonical_encoding_calls_total"):          2,
 		fqName("canonical_encoding_records_shadow_total"): 2,
-		fqName("object_catalog_redis_duration_seconds"):   histogramSeries(2*2, len(activeQGSetDurationBuckets)),
-		fqName("object_catalog_manifest_bytes"):           1,
+		// Unlabelled: one count each.
+		fqName("dataset_record_ids_kept_runs_total"):              1,
+		fqName("dataset_record_ids_derived_outside_window_total"): 1,
+		fqName("object_catalog_redis_duration_seconds"):           histogramSeries(2*2, len(activeQGSetDurationBuckets)),
+		fqName("object_catalog_manifest_bytes"):                   1,
 		// Kinds and results are closed vocabularies plus "other" for each.
 		fqName("object_read_total"):           (len(observability.ObjectReadKinds) + 1) * (len(observability.ObjectReadResults) + 1),
 		fqName("state_generation_skew_total"): len(observability.StateGenerationSkewKinds) + 1,
