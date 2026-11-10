@@ -100,6 +100,9 @@ type slicedSource struct {
 	series      []slicedSeries
 	facts       *execution.QueryPlanFacts
 	ignoreSlice bool
+	// tooLong is a store that refuses every slice's query as too long and
+	// answers a whole read.
+	tooLong bool
 	// plans and requirements replace the fixture's one Plan when set.
 	plans        []execution.DuePlan
 	requirements []execution.DataRequirement
@@ -225,6 +228,10 @@ func (source *slicedSource) answer(ctx context.Context, request execution.QueryE
 	if completeness == execution.CompletenessPartial {
 		physical.PartialEvidence = &execution.PartialEvidence{Kind: execution.PartialEvidenceOmissionStable, Version: 1,
 			EvidenceDigest: strings.Repeat("d", 64), OmissionOnly: true, ReturnedRecordsStable: true}
+	}
+	if source.tooLong && !request.Slice.IsZero() {
+		physical.RouteFacts = execution.ProviderRouteFacts{Attempts: []execution.RouteAttemptFact{{AttemptNo: 1,
+			Rejection: &execution.ProviderRejection{Class: execution.RejectionClassQueryTooLong}}}}
 	}
 	completion := execution.QueryExecutionCompletion{AllRequiredCompleted: true,
 		PhysicalQueries: []execution.PhysicalQueryCompletion{physical}}
@@ -426,6 +433,25 @@ func TestASourceThatIgnoresTheSliceEndsValueConcentratedWithinKMax(t *testing.T)
 	}
 	if len(fixture.source.landed()) != 0 || fixture.ports.eventCount != 0 || len(fixture.state.saved) != 0 {
 		t.Fatal("a Slot refused for its values landed a slice")
+	}
+}
+
+// A store that refuses a slice's query as too long refuses the Slot under
+// INPUT_SLICE_QUERY_TOO_LONG, final for the scheduler as a share refusal is,
+// with the slice's condition bytes as why; nothing is written.
+func TestASliceTheStoreRefusesAsTooLongEndsTheSlotFinal(t *testing.T) {
+	fixture := newSlicedFixture(t, slicedHosts(24, 40<<10), sliceableFacts(), 200)
+	fixture.source.tooLong = true
+	result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
+	if reason, ok := worker.InputSliceRefusal(err); err == nil || result.Completed || !ok || reason != contract.ReasonInputSliceQueryTooLong {
+		t.Fatalf("Execute() result=%+v err=%v, want the Slot refused as %s", result, err, contract.ReasonInputSliceQueryTooLong)
+	}
+	if refusal, final := execution.ShareRefusalOf(err); !final || refusal.Reason != contract.ReasonInputSliceQueryTooLong ||
+		!strings.HasPrefix(refusal.Detail, "conditions of ") || refusal.LimitBytes != slicedShare {
+		t.Fatalf("share refusal of %v = %+v, %t; want a final one under %s with the slice's bytes", err, refusal, final, contract.ReasonInputSliceQueryTooLong)
+	}
+	if fixture.ports.eventCount != 0 || len(fixture.state.saved) != 0 {
+		t.Fatal("a Slot refused for its slice's length wrote events or State")
 	}
 }
 

@@ -44,9 +44,10 @@ const (
 
 // crossSeriesFunctions are the functions that, with no grouping of their
 // own, aggregate over every series they are given: PromQL's aggregation
-// operators (controlplane promQLAggregations).
+// operators (controlplane promQLAggregations) and mean, the query service's
+// name for avg that the compiler writes.
 var crossSeriesFunctions = map[string]bool{
-	"sum": true, "min": true, "max": true, "avg": true, "group": true, "stddev": true, "stdvar": true, "count": true,
+	"sum": true, "min": true, "max": true, "avg": true, "mean": true, "group": true, "stddev": true, "stdvar": true, "count": true,
 	"count_values": true, "bottomk": true, "topk": true, "quantile": true, "limitk": true, "limit_ratio": true,
 }
 
@@ -218,10 +219,11 @@ func groupedByEvery(dimension string, facts []QueryPlanFacts) bool {
 
 // crossSeries is whether facts combine series across any dimension: a
 // clause function aggregating every series with no grouping, or a metric
-// merge that is not element-wise.
+// merge that is not element-wise. A clause's time aggregation folds each
+// series' own points over its window and never crosses series.
 func crossSeries(facts QueryPlanFacts) bool {
 	for _, clause := range facts.QueryList {
-		for _, function := range append([]QueryFunction{clause.TimeAggregation}, clause.Functions...) {
+		for _, function := range clause.Functions {
 			if crossSeriesFunctions[strings.ToLower(function.Method)] && len(function.Dimensions) == 0 && !function.Without {
 				return true
 			}

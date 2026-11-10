@@ -49,6 +49,12 @@ func TestSliceableDimensionsAreTheRawGroupByLabelsEveryQueryShares(t *testing.T)
 	topkByHost := groupedFacts("host")
 	topkByHost.QueryList[0].Functions = append(topkByHost.QueryList[0].Functions, execution.QueryFunction{Method: "topk", Dimensions: []string{"host"},
 		Arguments: []execution.QueryScalar{{Kind: execution.QueryScalarNumber, NumberValue: "1"}}})
+	// A time aggregation is over each series' own window, whatever its name;
+	// mean is the query service's avg.
+	overTime := groupedFacts("host")
+	overTime.QueryList[0].TimeAggregation = execution.QueryFunction{Method: "avg", Window: "60s"}
+	meanOfEvery := groupedFacts("host")
+	meanOfEvery.QueryList[0].Functions = append(meanOfEvery.QueryList[0].Functions, execution.QueryFunction{Method: "mean"})
 	merged := func(expression string) execution.QueryPlanFacts {
 		facts := groupedFacts("host")
 		facts.MetricMerge = expression
@@ -73,6 +79,8 @@ func TestSliceableDimensionsAreTheRawGroupByLabelsEveryQueryShares(t *testing.T)
 		{name: "no_queries", reason: "storage_dialect"},
 		{name: "clause_topk_of_every_series", facts: []execution.QueryPlanFacts{topk}, reason: "cross_series"},
 		{name: "clause_topk_by_host", facts: []execution.QueryPlanFacts{topkByHost}, want: []string{"host"}},
+		{name: "time_aggregation_avg", facts: []execution.QueryPlanFacts{overTime}, want: []string{"host"}},
+		{name: "clause_mean_of_every_series", facts: []execution.QueryPlanFacts{meanOfEvery}, reason: "cross_series"},
 		{name: "merge_absent", facts: []execution.QueryPlanFacts{merged("absent(a)")}, reason: "cross_series"},
 		{name: "merge_topk", facts: []execution.QueryPlanFacts{merged("topk(1, a)")}, reason: "cross_series"},
 		{name: "merge_sum", facts: []execution.QueryPlanFacts{merged("sum(a)")}, reason: "cross_series"},
