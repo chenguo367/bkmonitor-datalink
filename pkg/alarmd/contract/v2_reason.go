@@ -174,6 +174,11 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	// every time until the strategy's shape changes, so calling it retryable
 	// would have the scheduler back off and re-run it forever.
 	ReasonQGBudgetShareExceeded: {ReasonQGBudgetShareExceeded, ReasonClassDeterministic, ReasonDomainObservation},
+	// Deterministic as the share is: the same Slot cannot be sliced, or its
+	// values split, any other way on a retry.
+	ReasonInputSliceUnsupported:       {ReasonInputSliceUnsupported, ReasonClassDeterministic, ReasonDomainObservation},
+	ReasonInputSliceValueConcentrated: {ReasonInputSliceValueConcentrated, ReasonClassDeterministic, ReasonDomainObservation},
+	ReasonInputSliceQueryTooLong:      {ReasonInputSliceQueryTooLong, ReasonClassDeterministic, ReasonDomainObservation},
 	// Deterministic: the kept read is the one the lookback made, and a retry
 	// of the supplement asks it for the same query it does not hold.
 	ReasonSupplementKeptReadAbsent: {ReasonSupplementKeptReadAbsent, ReasonClassDeterministic, ReasonDomainObservation},

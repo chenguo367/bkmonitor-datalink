@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"runtime/debug"
 	"runtime/metrics"
@@ -182,6 +183,16 @@ func (answers windowMeasureAnswers) ServeHTTP(writer http.ResponseWriter, reques
 	var query struct {
 		StartTime string `json:"start_time"`
 		EndTime   string `json:"end_time"`
+		QueryList []struct {
+			Conditions struct {
+				Fields []struct {
+					Field    string   `json:"field_name"`
+					Operator string   `json:"op"`
+					Values   []string `json:"value"`
+				} `json:"field_list"`
+				Connectors []string `json:"condition_list"`
+			} `json:"conditions"`
+		} `json:"query_list"`
 	}
 	if err := json.NewDecoder(request.Body).Decode(&query); err != nil {
 		http.Error(writer, err.Error(), http.StatusBadRequest)
@@ -197,25 +208,84 @@ func (answers windowMeasureAnswers) ServeHTTP(writer http.ResponseWriter, reques
 		http.Error(writer, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// A sliced read's conditions, as UQ reads them for VictoriaMetrics: OR
+	// groups of ANDed conditions; only the req and nreq ones on the answer's
+	// own dimensions are judged, the strategy's own conditions holding for
+	// every series this fake answers.
+	var groups [][]windowMeasureCondition
+	if len(query.QueryList) > 0 {
+		conditions := query.QueryList[0].Conditions
+		current := []windowMeasureCondition{}
+		for index, field := range conditions.Fields {
+			if index > 0 && index-1 < len(conditions.Connectors) && conditions.Connectors[index-1] == "or" {
+				groups, current = append(groups, current), []windowMeasureCondition{}
+			}
+			if (field.Operator != "req" && field.Operator != "nreq") || len(field.Values) != 1 {
+				continue
+			}
+			pattern, err := regexp.Compile(field.Values[0])
+			if err != nil {
+				http.Error(writer, err.Error(), http.StatusBadRequest)
+				return
+			}
+			current = append(current, windowMeasureCondition{dimension: field.Field, negated: field.Operator == "nreq", pattern: pattern})
+		}
+		groups = append(groups, current)
+	}
 	writer.Header().Set("Content-Type", "application/json")
 	out := bufio.NewWriterSize(writer, 1<<20)
-	_ = writeWindowMeasureAnswer(out, answers.series, start, end)
+	_ = writeWindowMeasureAnswer(out, answers.series, start, end, groups)
 	_ = out.Flush()
+}
+
+// windowMeasureCondition is one slice condition of a read.
+type windowMeasureCondition struct {
+	dimension string
+	negated   bool
+	pattern   *regexp.Regexp
+}
+
+// windowMeasureSeriesIn is whether the series with these values is in the
+// read: some OR group's every condition holds.
+func windowMeasureSeriesIn(groups [][]windowMeasureCondition, values map[string]string) bool {
+	if len(groups) == 0 {
+		return true
+	}
+	for _, group := range groups {
+		holds := true
+		for _, condition := range group {
+			if condition.pattern.MatchString(values[condition.dimension]) == condition.negated {
+				holds = false
+				break
+			}
+		}
+		if holds {
+			return true
+		}
+	}
+	return false
 }
 
 // writeWindowMeasureAnswer writes the answer for [start, end): series series,
 // the three dimensions at the lengths the largest group's carry at most - a
 // cloud id of three bytes, an address of fourteen, a device name of 32 - and a
 // point at each step of the range.
-func writeWindowMeasureAnswer(out *bufio.Writer, series int, start, end int64) error {
+func writeWindowMeasureAnswer(out *bufio.Writer, series int, start, end int64, groups [][]windowMeasureCondition) error {
 	first := (start + windowMeasureStep - 1) / windowMeasureStep * windowMeasureStep
 	_, _ = out.WriteString(`{"series":[`)
 	var line []byte
+	written := 0
 	for index := 0; index < series; index++ {
+		values := map[string]string{"bk_target_cloud_id": fmt.Sprintf("%03d", index%1000),
+			"bk_target_ip": fmt.Sprintf("198.51.100.%03d", index%256), "device_name": fmt.Sprintf("device-%025d", index)}
+		if !windowMeasureSeriesIn(groups, values) {
+			continue
+		}
 		line = line[:0]
-		if index > 0 {
+		if written > 0 {
 			line = append(line, ',')
 		}
+		written++
 		line = fmt.Appendf(line, `{"name":"_result0","columns":["_time","_result"],"types":["int64","float64"],`+
 			`"group_keys":["bk_target_cloud_id","bk_target_ip","device_name"],"group_values":["%03d","198.51.100.%03d","device-%025d"],`+
 			`"values":[`, index%1000, index%256, index)
@@ -700,7 +770,8 @@ func (measured windowMeasureResult) line(shape windowMeasureShape) string {
 		"write_batches=%d events_written=%d record_ids_kept_runs=%d record_ids_outside_window=%d "+
 		"witness_items=%.0f witness_bytes=%.0f redis=[%s] "+
 		"apply_ms=%d record_ids_ms=%d cut_ms=%d merge_ms=%d series_ms=%d no_data_read_ms=%d no_data_write_ms=%d "+
-		"unattributed_ms=%d redis_wall_by_caller=[%s] memory_at_held_peak=[%s] memory_after=[%s]",
+		"unattributed_ms=%d input_slices=%d input_slices_discarded=%d first_seen_unseen_slices=%d first_seen_unseen_series=%d "+
+		"redis_wall_by_caller=[%s] memory_at_held_peak=[%s] memory_after=[%s]",
 		shape.series, shape.points, shape.noData, measured.result, measured.reason, measured.cause, runErr,
 		measured.rejected, strings.Join(refusals, ","), measured.took.Round(time.Millisecond),
 		measured.timing.Slot, measured.timing.Input, measured.timing.Preflight, measured.timing.Evaluate,
@@ -715,6 +786,7 @@ func (measured windowMeasureResult) line(shape windowMeasureShape) string {
 		windowMeasureCommandLine(measured.commands),
 		measured.timing.Apply, measured.timing.RecordIDs, measured.timing.Cut, measured.timing.Merge, measured.timing.Series,
 		measured.timing.NoDataRead, measured.timing.NoDataWrite, measured.timing.Unattributed,
+		usage.InputSlices, usage.InputSlicesDiscarded, usage.FirstSeenUnseenSlices, usage.FirstSeenUnseenSeries,
 		windowMeasureSecondsLine(measured.redisCallers),
 		measured.classesAtPeak, measured.classesAfter)
 }

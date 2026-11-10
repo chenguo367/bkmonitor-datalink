@@ -95,6 +95,15 @@ type SlotBudgetUsageFacts struct {
 	// that no PRIMARY input of the same Plan named, let go at the completion
 	// (input_series_discarded_total{reason="dependency_without_primary"}).
 	DependencySeriesDiscarded uint64 `json:"dependency_series_discarded"`
+	// InputSlices is the slices the Slot's input was read in, one for a Slot
+	// read whole, and InputSlicesDiscarded the ones let go and split while
+	// they streamed. FirstSeenUnseenSlices and FirstSeenUnseenSeries are the
+	// slices, and their series, a Plan judged first-seen wrote before a later
+	// slice found it had run: they were written without warming up.
+	InputSlices           uint64 `json:"input_slices"`
+	InputSlicesDiscarded  uint64 `json:"input_slices_discarded"`
+	FirstSeenUnseenSlices uint64 `json:"first_seen_unseen_slices"`
+	FirstSeenUnseenSeries uint64 `json:"first_seen_unseen_series"`
 
 	// RetainedBytes split by what the memory was held for, summing to it.
 	//

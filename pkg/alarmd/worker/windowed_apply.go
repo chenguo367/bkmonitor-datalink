@@ -115,6 +115,10 @@ type slotWindows struct {
 	// (mergeGapGuardStatements), and one statement per Plan per Slot is what
 	// the marker takes.
 	headOpened map[execution.PlanIdentity]struct{}
+	// headStatements is the open statement each of them was written with,
+	// for a later slice to extend (applySliceHead): the marker takes one
+	// statement per Plan per Slot, grown, never a second one.
+	headStatements map[execution.PlanIdentity]execution.PlanGapMutation
 	// bytes is what the output and state phases have retained for the
 	// window's results and views since the last window landed, and the input
 	// phase for its record id buffers: the window's own share of the Slot.
@@ -376,6 +380,7 @@ func (coordinator *SlotExecutionCoordinator) applyWindowHead(ctx context.Context
 		apply.judgeForced(unseen)
 		apply.keys = make(slotStateKeys)
 		headOpened := make(map[execution.PlanIdentity]struct{}, len(opens))
+		headStatements := make(map[execution.PlanIdentity]execution.PlanGapMutation, len(opens))
 		for _, due := range sortedDuePlans(stream.header.DuePlans) {
 			if apply.changed(due) {
 				apply.withheldNoData[due.Identity] = struct{}{}
@@ -394,8 +399,10 @@ func (coordinator *SlotExecutionCoordinator) applyWindowHead(ctx context.Context
 			if _, err := apply.planGapsBefore(sequenceCtx, due, &statement); err != nil {
 				return err
 			}
+			headStatements[due.Identity] = open
 		}
 		stream.windows.apply, stream.windows.headOpened, stream.windows.started = apply, headOpened, true
+		stream.windows.headStatements = headStatements
 		started = true
 		return nil
 	})
@@ -581,7 +588,18 @@ func (stream *streamedExecution) fixWindowCeiling(ctx context.Context, series in
 	perWindow = max(perWindow, 1)
 	windows := (uint64(series) + perWindow - 1) / perWindow
 	stream.windows.perWindow, stream.windows.ceilingWindows = perWindow, windows
-	stream.windows.ceiling = deadline.Add(time.Duration(windows) * windowStepBound)
+	stream.windows.ceiling = deadline.Add(time.Duration(windows*stream.sliceCeilingFactor()) * windowStepBound)
+}
+
+// raiseSliceCeiling moves a Slot read in slices' ceiling as it reads them:
+// the first slice's windows once for every slice read or let go so far,
+// never past 2*K_max-1 of them (§7.5).
+func (stream *streamedExecution) raiseSliceCeiling(ctx context.Context) {
+	deadline := execution.ExecutionDeadline(ctx)
+	if deadline.IsZero() || stream.windows.ceilingWindows == 0 {
+		return
+	}
+	stream.windows.ceiling = deadline.Add(time.Duration(stream.windows.ceilingWindows*stream.sliceCeilingFactor()) * windowStepBound)
 }
 
 // eventsPerSeries is the most events one prepared series can send in this

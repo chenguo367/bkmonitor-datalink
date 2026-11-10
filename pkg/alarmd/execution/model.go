@@ -4784,6 +4784,15 @@ type SlotBudgetUsage struct {
 	// that no PRIMARY input of the same Plan named, let go at the
 	// completion: nothing evaluates a dependency without its series.
 	DependencySeriesDiscarded uint64
+	// InputSlices is the slices the Slot's input was read in (one for a Slot
+	// read whole), InputSlicesDiscarded the ones let go and split while they
+	// streamed, and FirstSeenUnseenSlices and FirstSeenUnseenSeries the
+	// slices, and their series, a Plan judged first-seen wrote before a later
+	// slice found it had run.
+	InputSlices           uint64
+	InputSlicesDiscarded  uint64
+	FirstSeenUnseenSlices uint64
+	FirstSeenUnseenSeries uint64
 
 	// RetainedBytes split by what the memory was held for. They sum to
 	// RetainedBytes.

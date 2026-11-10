@@ -212,7 +212,10 @@ var failureFacets = map[string]facets{
 	"STATE_READ_DEADLINE": {StageEvaluate, ClassTimeout, DependencyNone},
 	// The object is too big for one replica's share; no dependency is involved
 	// and waiting does not help.
-	"QG_BUDGET_SHARE_EXCEEDED": {StageEvaluate, ClassCapacity, DependencyNone},
+	"QG_BUDGET_SHARE_EXCEEDED":       {StageEvaluate, ClassCapacity, DependencyNone},
+	"INPUT_SLICE_UNSUPPORTED":        {StageEvaluate, ClassCapacity, DependencyNone},
+	"INPUT_SLICE_VALUE_CONCENTRATED": {StageEvaluate, ClassCapacity, DependencyNone},
+	"INPUT_SLICE_QUERY_TOO_LONG":     {StageEvaluate, ClassCapacity, DependencyNone},
 	// A supplement planned a query its kept read did not hold: the query
 	// stage, as this deployment's own contract between plan and read.
 	"SUPPLEMENT_KEPT_READ_ABSENT": {StageQuery, ClassContract, DependencyNone},

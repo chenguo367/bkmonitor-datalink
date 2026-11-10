@@ -298,6 +298,19 @@ const (
 	// RESOURCE_HARD_STOP stays the pool's refusal of what belongs to no Query
 	// Group.
 	ReasonResourcePoolHeldByOthers = "RESOURCE_POOL_HELD_BY_OTHERS"
+	// The three ways a Slot past its share that has to be read in slices
+	// cannot be (decision-020 batch 8): its store's regular expressions are
+	// not the anchored RE2 the slices rest on, its query is a PromQL
+	// expression, or a dimension is not a raw group-by label of every query
+	// (UNSUPPORTED); its series are too many under one set of dimension
+	// values for any slice to hold them (VALUE_CONCENTRATED - the values'
+	// distribution, not the Slot's size, is what refuses); or the slice's
+	// conditions made the query longer than the store takes
+	// (QUERY_TOO_LONG). Each refuses the Slot every round until the strategy
+	// changes.
+	ReasonInputSliceUnsupported       = "INPUT_SLICE_UNSUPPORTED"
+	ReasonInputSliceValueConcentrated = "INPUT_SLICE_VALUE_CONCENTRATED"
+	ReasonInputSliceQueryTooLong      = "INPUT_SLICE_QUERY_TOO_LONG"
 	// ReasonSupplementKeptReadAbsent names a supplement of a Slot whose
 	// queries, planned again from the Slot's frozen plan, are not all the
 	// query the lookback kept the late read of. Nothing is run and nothing

@@ -25,6 +25,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/inputslice"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sourceliveness"
@@ -134,6 +135,9 @@ type SlotExecutionCoordinator struct {
 	ports        Ports
 	budget       ProvisionalBudget
 	reservations processProvisionalReservations
+	// slicedInput is each Query Group's last read on this replica, for its
+	// next Slot's first slices (sliced_input.go).
+	slicedInput sliceTrees
 	// noDataSkips is how long each Plan's no-data detection has been skipping.
 	// One per process, because a streak is about rounds rather than about one
 	// Slot. See no_data_skip_streak.go.
@@ -527,42 +531,76 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	queryRequest := execution.QueryExecutionRequest{
 		Contract: request.Contract, Operation: request.Operation, AttemptNo: request.AttemptNo,
 	}
-	execution.MarkStage(ctx, execution.SlotStageQuery)
-	completion, err := coordinator.ports.Query.Execute(ctx, queryRequest, stream)
-	if err != nil {
-		if isReadinessDeferred(err) {
-			// A readiness deferral is the normal pacing of a Slot whose data is
-			// not in yet, and it is the single highest-volume line alarmd emits.
-			// It has to say so: an empty reason on a non-success result
-			// normalizes to internal_unknown (observability.NormalizeReason),
-			// which made every deferral read as an unclassified internal error -
-			// in the logs and in the stage counter's reason label alike.
-			// And what it waits for: the query, its requirement, when it is
-			// ready and on what basis.
-			coordinator.emitObservation(ctx, observability.Observation{
-				Component: observability.ComponentAccess, Stage: observability.StageQueryCompleted,
-				Result: observability.ResultRetrying, Operation: observability.Operation(request.Operation),
-				ReasonCode: observability.ReasonCode(contract.ReasonQueryNotReady),
-				Duration:   time.Since(started), DurationKnown: true, ReadinessDeferral: readinessDeferralOf(err),
-			})
-		} else {
-			coordinator.observeQueryFailure(ctx, request.Operation, started, "execute", err)
+	// One read of the whole Query Group, or one a slice when this Slot is
+	// read in slices (sliced_input.go): a slice whose input passes its limit
+	// while it streams is let go and split, its children read in its place.
+	stream.slices = coordinator.sliceReadingFor(request)
+	var completion execution.QueryExecutionCompletion
+	completionCtx, cancelCompletion := ctx, context.CancelFunc(func() {})
+	defer func() { cancelCompletion() }()
+	read := false
+	for {
+		var leaf inputslice.Leaf
+		if stream.slicing() {
+			pending := stream.slices.pending()
+			leaf = pending[0]
+			stream.beginSlice(leaf, len(pending) == 1)
+			queryRequest.Slice = leaf.Slice
 		}
-		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: query: %w", err)
+		execution.MarkStage(ctx, execution.SlotStageQuery)
+		sliceCompletion, err := coordinator.ports.Query.Execute(ctx, queryRequest, stream)
+		if err != nil && stream.slicing() && errors.Is(err, errSliceOverflow) {
+			if refused := stream.splitSlice(leaf); refused != nil {
+				coordinator.observeQueryFailure(ctx, request.Operation, started, "execute", refused)
+				return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: query: %w", refused)
+			}
+			continue
+		}
+		if err != nil {
+			if isReadinessDeferred(err) {
+				// A readiness deferral is the normal pacing of a Slot whose data is
+				// not in yet, and it is the single highest-volume line alarmd emits.
+				// It has to say so: an empty reason on a non-success result
+				// normalizes to internal_unknown (observability.NormalizeReason),
+				// which made every deferral read as an unclassified internal error -
+				// in the logs and in the stage counter's reason label alike.
+				// And what it waits for: the query, its requirement, when it is
+				// ready and on what basis.
+				coordinator.emitObservation(ctx, observability.Observation{
+					Component: observability.ComponentAccess, Stage: observability.StageQueryCompleted,
+					Result: observability.ResultRetrying, Operation: observability.Operation(request.Operation),
+					ReasonCode: observability.ReasonCode(contract.ReasonQueryNotReady),
+					Duration:   time.Since(started), DurationKnown: true, ReadinessDeferral: readinessDeferralOf(err),
+				})
+			} else {
+				coordinator.observeQueryFailure(ctx, request.Operation, started, "execute", err)
+			}
+			return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: query: %w", err)
+		}
+		if !read {
+			execution.MarkQueryReturned(ctx, time.Now())
+			completionCtx, cancelCompletion = shortPeriodCompletionContext(ctx, request.Operation, stream.header)
+			read = true
+		}
+		if err := completionCtx.Err(); err != nil {
+			return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: completion deadline: %w", err)
+		}
+		if completion, err = foldSliceCompletion(completion, sliceCompletion); err != nil {
+			return execution.SlotExecutionResult{}, err
+		}
+		if err := stream.complete(completionCtx, sliceCompletion); err != nil {
+			coordinator.observeQueryFailure(completionCtx, request.Operation, started, "stream_complete", err)
+			// Not "invalid query result": the query is only one of the things
+			// this step does, and the failure that brought 163 Slots down in a
+			// day was a state read of ours timing out, with the query fine.
+			return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: complete Slot: %w", err)
+		}
+		if !stream.slicing() || stream.slices.landSliceRead(leaf) {
+			break
+		}
 	}
-	execution.MarkQueryReturned(ctx, time.Now())
-	ctx, cancelCompletion := shortPeriodCompletionContext(ctx, request.Operation, stream.header)
-	defer cancelCompletion()
-	if err := ctx.Err(); err != nil {
-		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: completion deadline: %w", err)
-	}
-	if err := stream.complete(ctx, completion); err != nil {
-		coordinator.observeQueryFailure(ctx, request.Operation, started, "stream_complete", err)
-		// Not "invalid query result": the query is only one of the things
-		// this step does, and the failure that brought 163 Slots down in a
-		// day was a state read of ours timing out, with the query fine.
-		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: complete Slot: %w", err)
-	}
+	ctx = completionCtx
+	coordinator.rememberSlotInput(request, stream)
 	// The Slot's result is the evaluation's; the query line reports the
 	// physical queries' own beside it (observeQueryCompleted).
 	queryResult, queryReason := provisionalResult(stream.evaluated)
@@ -684,11 +722,13 @@ func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 		Events: stream.effectsSpent.events + stream.effects.events, EventsWithoutMessage: stream.summary.withoutMessage,
 		RetainedBytes: stream.peakRetained, Series: stream.series,
 		DependencySeriesDiscarded: stream.dependencyDiscarded,
-		RetainedInputBytes:        stream.peakByPhase[retainPhaseInput],
-		RetainedGapBytes:          stream.peakByPhase[retainPhaseGap],
-		RetainedOutputBytes:       stream.peakByPhase[retainPhaseOutput],
-		RetainedStateBytes:        stream.peakByPhase[retainPhaseState],
-		StateMutationsLimit:       budget.MaxStateMutations, GapMutationsLimit: budget.MaxGapMutations,
+		InputSlices:               stream.slicesRead(), InputSlicesDiscarded: stream.slicesDiscarded(),
+		FirstSeenUnseenSlices: stream.unseenSlices(), FirstSeenUnseenSeries: stream.unseenSeries(),
+		RetainedInputBytes:  stream.peakByPhase[retainPhaseInput],
+		RetainedGapBytes:    stream.peakByPhase[retainPhaseGap],
+		RetainedOutputBytes: stream.peakByPhase[retainPhaseOutput],
+		RetainedStateBytes:  stream.peakByPhase[retainPhaseState],
+		StateMutationsLimit: budget.MaxStateMutations, GapMutationsLimit: budget.MaxGapMutations,
 		EventsLimit: budget.MaxEvents, RetainedBytesLimit: budget.MaxRetainedBytes, SeriesLimit: budget.MaxSeries,
 		RetainedShareBytes: stream.coordinator.qgShareBytes(),
 		Windows:            uint64(stream.windows.count), WindowCeilingWindows: stream.windows.ceilingWindows,

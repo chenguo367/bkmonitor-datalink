@@ -143,6 +143,11 @@ func (coordinator *SlotExecutionCoordinator) readSlotActivations(
 func (apply *slotApply) judgeForced(unseen map[execution.PlanKey]struct{}) {
 	forced, firstSeen := firstSeenActivations(apply.forced, apply.loadedGaps, unseen)
 	for _, fact := range forced.Facts {
+		// Judged again by a later slice (applySliceHead): a Plan already
+		// forced stays as it was.
+		if _, already := apply.changedPlans[fact.Key()]; already {
+			continue
+		}
 		apply.changedPlans[fact.Key()] = struct{}{}
 		apply.changedActivations.Facts = append(apply.changedActivations.Facts, fact)
 	}

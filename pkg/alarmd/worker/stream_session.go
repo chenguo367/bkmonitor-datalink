@@ -203,6 +203,9 @@ type streamedExecution struct {
 	// supplement is set on a supplement execution and nil on every Slot.
 	// See supplement.go.
 	supplement *supplementRun
+	// slices is the Slot read slice by slice (sliceReading); nil for a Slot
+	// read whole.
+	slices *sliceReading
 }
 
 // slotPhase says which part of a Slot a stretch of wall clock was spent in.
@@ -528,6 +531,14 @@ type preparedNamedInputIndex struct {
 }
 
 func (stream *streamedExecution) Begin(ctx context.Context, header execution.InternalExecutionHeader) error {
+	if stream.began && stream.slicing() {
+		// Every slice's read begins again; the Slot began with the first.
+		if header.Contract != stream.request.Contract {
+			return errors.New("alarmd worker: execution header changed frozen contract")
+		}
+		stream.resetSliceStream()
+		return nil
+	}
 	if stream.began {
 		return errors.New("alarmd worker: QueryExecutionSource called Begin more than once")
 	}
@@ -593,11 +604,15 @@ func (stream *streamedExecution) ConsumeSeries(ctx context.Context, batch execut
 	if _, held := stream.inputHolds[series]; !held {
 		retained += seriesBookkeepingBytes
 	}
+	if err := stream.admitSliceInput(batch, retained); err != nil {
+		return err
+	}
 	if err := stream.reserveProvisional(ctx, batch.Delivery.Series, retained); err != nil {
 		return err
 	}
 	stream.series += batch.Delivery.Series
 	stream.retainBytes(retainPhaseInput, retained)
+	stream.noteSliceInput(batch, retained)
 	hold := stream.holdInput(series, retained)
 	folded := make(map[*execution.Dataset]foldedDataset)
 	for _, binding := range batch.Inputs {
@@ -1132,8 +1147,19 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 	// call goes on to decide about it: a completion this Slot refuses still
 	// waited for its records, and charging that wait to nothing would make a
 	// refused Slot look instantaneous.
-	stream.spend(slotPhaseInput, stream.beganAt)
-	stream.clockPhase, stream.clockSince = slotPhaseOther, time.Now()
+	// A Slot read in slices completes once a slice: the first starts its
+	// clock and loads what the Slot holds whole (its gaps, its no-data memory
+	// and ends), the last judges what needs every series (completion-only
+	// Plans, the no-data round); the slices between evaluate their own series.
+	first := !stream.slicing() || stream.slices.index == 0
+	last := !stream.slicing() || stream.slices.last
+	if first {
+		stream.spend(slotPhaseInput, stream.beganAt)
+		stream.clockPhase, stream.clockSince = slotPhaseOther, time.Now()
+	} else if stream.slices.leaveInput != nil {
+		stream.slices.leaveInput()
+		stream.slices.leaveInput = nil
+	}
 	if err := completion.Validate(stream.header, stream.delivered); err != nil {
 		return wrapCompletionContractError(codeCompletionInvalid, err)
 	}
@@ -1289,8 +1315,12 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 	// Listed with its query's: what the completion said of the query stays
 	// with the Plan whatever series it answered.
 	stream.discardDependenciesWithoutPrimary()
-	for _, binding := range completion.CompletionBindings {
-		stream.bindings = append(stream.bindings, compactNamedInputBinding(binding))
+	if first {
+		// A completion's bindings are the same every slice: the Slot keeps
+		// them once.
+		for _, binding := range completion.CompletionBindings {
+			stream.bindings = append(stream.bindings, compactNamedInputBinding(binding))
+		}
 	}
 	sort.SliceStable(stream.bindings, func(i, j int) bool {
 		left, right := stream.bindings[i], stream.bindings[j]
@@ -1302,37 +1332,56 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 		}
 		return left.RequirementID < right.RequirementID
 	})
+	// The order is taken; from here on a Plan's series are only counted,
+	// every slice's into its Plan's. A Plan none of them answered is
+	// completion-only, which only the last slice can say.
+	counts := stream.planSeriesCounts
+	if counts == nil {
+		counts = make(map[execution.PlanIdentity]*int, len(stream.header.DuePlans))
+	}
 	for _, due := range stream.header.DuePlans {
-		// A supplement decides nothing for a Plan without series: that
-		// judgement was the Slot's, on the Slot's own read.
-		if len(stream.planSeries[due.Identity]) == 0 && stream.supplement == nil {
-			if err := stream.validateCompletionOnlyExactSet(due, completionBindings, completion.PhysicalQueries); err != nil {
-				return err
+		matched := len(stream.planSeries[due.Identity])
+		if counted := counts[due.Identity]; counted != nil {
+			matched += *counted
+		}
+		counts[due.Identity] = &matched
+	}
+	if last {
+		for _, due := range stream.header.DuePlans {
+			// A supplement decides nothing for a Plan without series: that
+			// judgement was the Slot's, on the Slot's own read.
+			if *counts[due.Identity] == 0 && stream.supplement == nil {
+				if err := stream.validateCompletionOnlyExactSet(due, completionBindings, completion.PhysicalQueries); err != nil {
+					return err
+				}
 			}
 		}
 	}
-	// The order is taken; from here on a Plan's series are only counted.
-	counts := make(map[execution.PlanIdentity]*int, len(stream.header.DuePlans))
-	for _, due := range stream.header.DuePlans {
-		matched := len(stream.planSeries[due.Identity])
-		counts[due.Identity] = &matched
-	}
 	stream.planSeries, stream.planSeriesCounts = nil, counts
-	if err := stream.loadGaps(ctx); err != nil {
-		return err
+	if first {
+		if err := stream.loadGaps(ctx); err != nil {
+			return err
+		}
+		if err := stream.loadNoDataMemory(ctx); err != nil {
+			return err
+		}
+		if err := stream.readSupplementNoDataGroups(ctx, preparedSeriesEvaluations); err != nil {
+			return err
+		}
+		if err := stream.loadNoDataEnds(ctx); err != nil {
+			return err
+		}
 	}
-	if err := stream.loadNoDataMemory(ctx); err != nil {
-		return err
+	stream.windows.prepared, stream.windows.reached, stream.windows.dropped = preparedSeriesEvaluations, 0, 0
+	if first {
+		stream.fixWindowCeiling(ctx, len(preparedSeriesEvaluations))
+	} else {
+		stream.raiseSliceCeiling(ctx)
+		if err := stream.coordinator.applySliceHead(ctx, stream); err != nil {
+			return err
+		}
 	}
-	if err := stream.readSupplementNoDataGroups(ctx, preparedSeriesEvaluations); err != nil {
-		return err
-	}
-	if err := stream.loadNoDataEnds(ctx); err != nil {
-		return err
-	}
-	stream.windows.prepared = preparedSeriesEvaluations
-	stream.fixWindowCeiling(ctx, len(preparedSeriesEvaluations))
-	if err := stream.evaluateSeries(ctx, completion, preparedSeriesEvaluations); err != nil {
+	if err := stream.evaluateSeries(ctx, completion, preparedSeriesEvaluations, last); err != nil {
 		var exceeded *provisionalBudgetExceededError
 		// A supplement over its budget fails as it is: the replacement opens
 		// a gap on every Plan, and a supplement moves no marker.
@@ -1346,6 +1395,9 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 	// The no-data partition is reported once, when the Slot's results are
 	// final, on the replaced path as on the ordinary one: absence and the
 	// Plans without series were the Slot's to decide, never a supplement's.
+	if !last {
+		return stream.landSlice(ctx)
+	}
 	if stream.supplement == nil {
 		stream.observeNoDataOutcomes(ctx)
 	}
@@ -1425,6 +1477,7 @@ func (stream *streamedExecution) evaluateSeries(
 	ctx context.Context,
 	completion execution.QueryExecutionCompletion,
 	preparedSeriesEvaluations []preparedSeries,
+	last bool,
 ) error {
 	// Runtime State is read in bounded batches ahead of evaluation while
 	// evaluation itself keeps the exact Plan-then-series order. A series whose
@@ -1484,6 +1537,11 @@ func (stream *streamedExecution) evaluateSeries(
 	}
 	if stream.supplement != nil {
 		// Absence and the Plans without series were the Slot's to decide.
+		return nil
+	}
+	if !last {
+		// A slice before the last: absence and the Plans without series
+		// are decided once every slice has been read.
 		return nil
 	}
 	// Absence is decided after the Slot's own series, because which groups

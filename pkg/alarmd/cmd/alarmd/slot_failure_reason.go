@@ -74,6 +74,10 @@ func slotFailureReason(err error) (observability.ReasonCode, string) {
 	if worker.PoolHeldByOthers(err) {
 		reason = observability.ReasonCode(contract.ReasonResourcePoolHeldByOthers)
 	}
+	// A Slot that has to be read in slices and cannot be, by why.
+	if word, sliced := worker.InputSliceRefusal(err); sliced {
+		reason = observability.ReasonCode(word)
+	}
 	if conflict, named := worker.GapGuardConflictReason(err); named {
 		reason = observability.ReasonCode(conflict)
 	}
