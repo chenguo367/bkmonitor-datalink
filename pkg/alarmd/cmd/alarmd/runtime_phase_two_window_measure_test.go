@@ -833,8 +833,19 @@ func measureWindowedShape(t *testing.T, shape windowMeasureShape) windowMeasureR
 			mu.Lock()
 			defer mu.Unlock()
 			if observation.Stage == observability.StageSlotCompleted {
-				measured.warmups = append(measured.warmups, fmt.Sprintf("%s/%s/%s",
-					observation.Result, observation.ReasonCode, observation.SlotCompletionCause))
+				// With how its input was read: the first Slot of a shape has
+				// no reading to count its slices from, and the slices it let
+				// go and its time are what that costs.
+				var slices, discarded uint64
+				if usage := observation.SlotBudgetUsage; usage != nil {
+					slices, discarded = usage.InputSlices, usage.InputSlicesDiscarded
+				}
+				var slotMillis uint64
+				if timing := observation.SlotTiming; timing != nil {
+					slotMillis = timing.Slot
+				}
+				measured.warmups = append(measured.warmups, fmt.Sprintf("%s/%s/%s/slices=%d/discarded=%d/slot_ms=%d",
+					observation.Result, observation.ReasonCode, observation.SlotCompletionCause, slices, discarded, slotMillis))
 			}
 			if observation.Err != nil && len(measured.warmupErrors) < 4 {
 				measured.warmupErrors = append(measured.warmupErrors, fmt.Sprintf("%s: %v", observation.Stage, observation.Err))
