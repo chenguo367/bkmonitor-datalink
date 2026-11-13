@@ -61,6 +61,9 @@ type NoDataHashBackend interface {
 	// proving the formal header is the one the caller read as ApplyHashDelta
 	// does, and that the staging key is this attempt's and whole.
 	SwapStagedHash(context.Context, HashStageSwap) (HashDeltaOutcome, error)
+	// DiscardStagedHash deletes a staging key that still holds the marker
+	// given, and leaves one another write under its name has started over.
+	DiscardStagedHash(ctx context.Context, key, markerField string, marker []byte) error
 }
 
 // HashDeltaWrite is one atomic change to a hash record.

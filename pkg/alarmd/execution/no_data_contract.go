@@ -325,7 +325,16 @@ func derivePlanNoDataStatementDigest(mutation PlanNoDataMutation) (MutationDiges
 	if mutation.MemoryDigest == "" {
 		return "", errors.New("alarmd execution: Plan no-data mutation states no resulting memory")
 	}
-	digest, err := contract.DeriveCanonicalDigestV2("alarmd-plan-no-data-statement-v2", struct {
+	// A whole record is stated by its memory digest and group count, not by
+	// its groups: they are staged a segment at a time, some before the
+	// statement exists (NoDataStaged), and the store proves the staged ones
+	// fold to that digest before it puts them in place. A delta is stated by
+	// its groups, which it carries whole.
+	set := mutation.Set
+	if mutation.ReplacesWholeRecord() {
+		set = nil
+	}
+	digest, err := contract.DeriveCanonicalDigestV2("alarmd-plan-no-data-statement-v3", struct {
 		Identity               PlanNoDataIdentity   `json:"identity"`
 		SchemaVersion          NoDataMemorySchema   `json:"schema_version"`
 		DerivedFrom            NoDataRepresentation `json:"derived_from"`
@@ -344,7 +353,7 @@ func derivePlanNoDataStatementDigest(mutation PlanNoDataMutation) (MutationDiges
 		mutation.Identity, mutation.SchemaVersion, mutation.DerivedFrom, mutation.ExpectedMarkerRevision,
 		mutation.LoadedApplyVersion, mutation.ApplyVersion,
 		mutation.ScheduleRevision, mutation.RosterVersion, mutation.PresentAsOf, mutation.TrackingExhaustedAt,
-		mutation.MemoryDigest, mutation.GroupCount, mutation.Set, mutation.Del,
+		mutation.MemoryDigest, mutation.GroupCount, set, mutation.Del,
 	})
 	if err != nil {
 		return "", fmt.Errorf("alarmd execution: derive Plan no-data statement digest: %w", err)

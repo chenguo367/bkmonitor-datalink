@@ -78,6 +78,27 @@ func (stream *streamedExecution) materializeRecordIDs(ctx context.Context, posit
 	return nil
 }
 
+// recordIDsWouldCut says whether the record id buffers inputs still need
+// would overfill the window being filled, so that materializing them cuts it
+// (windowBeforeRecordIDs): the caller first merges every series prepared
+// before.
+func (stream *streamedExecution) recordIDsWouldCut(inputs []execution.SeriesEvaluationInputRequest) bool {
+	windows := &stream.windows
+	if stream.supplement != nil || windows.single || stream.effects.states+stream.effects.events == 0 ||
+		stream.windowReleasable() == 0 {
+		return false
+	}
+	var bytes uint64
+	for _, input := range inputs {
+		for _, binding := range input.Inputs {
+			if dataset := binding.Dataset; dataset != nil && windows.recordIDs[dataset] == nil {
+				bytes += dataset.RecordIDWindowBytes()
+			}
+		}
+	}
+	return bytes > 0 && windows.bytes+bytes > stream.windowBound()
+}
+
 // windowBeforeRecordIDs applies the window being filled when the record id
 // buffers of the series at position would overfill it, as windowBeforeMerge
 // does for a merge: the series before position are all merged, so the

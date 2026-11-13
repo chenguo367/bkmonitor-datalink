@@ -49,8 +49,8 @@ func TestEveryScriptOfTheBinaryHasItsName(t *testing.T) {
 		"query_cooldown_save",
 		"rollout_create", "rollout_put", "rollout_read", "rollout_release", "rollout_take",
 		"sre_node_cancel", "sre_node_create", "sre_node_dispatch", "sre_node_replace",
-		"state_apply_hash_delta", "state_compare_and_set", "state_fenced_batch_write", "state_record_hash_field",
-		"state_renew_if_below", "state_stage_hash_segment", "state_swap_staged_hash",
+		"state_apply_hash_delta", "state_compare_and_set", "state_discard_staged_hash", "state_fenced_batch_write",
+		"state_record_hash_field", "state_renew_if_below", "state_stage_hash_segment", "state_swap_staged_hash",
 	}
 	if got := redisscript.Names(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("the binary's scripts = %v\nwant %v", got, want)

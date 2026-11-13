@@ -35,6 +35,30 @@ Labels: `wait`
 
 Slot executions that waited in place, holding their execution slot, for a later query of the Slot to become readable, by their total wait. A Slot whose queries become readable at different times is not deferred as a whole; its dispatch waits for each later query while keeping its slot, its prepared plan and the input its earlier queries delivered. Its slot_completed line carries the wait (inplace_wait_ms, inplace_waits, inplace_longest_ms, inplace_sent_before, inplace_wait_before_any_sent_ms) and what it held: inplace_held_input_bytes is exact, from the Slot's own retention accounting; inplace_held_prepared_bytes_estimate is an estimate, the struct sizes of the copies this execution made for itself, not the cached plan they reference, which is shared and held without the wait. Every cell exists from the start.
 
+## alarmd_access_query_answer_bytes
+
+Labels: `outcome`
+
+Bytes of each physical query's answer as read. By outcome: ok, timeout_alarmd_deadline (alarmd's own deadline: the round's, its transport, its body read or its delivery), upstream_504 (the provider answered that its backend ran out of time, 504 or 408), unavailable (no usable answer for another reason) and rejected (the provider refused the query). Counted where access_query_duration_seconds is.
+
+## alarmd_access_query_answer_records
+
+Labels: `outcome`
+
+Records (points) in each physical query's answer. By outcome: ok, timeout_alarmd_deadline (alarmd's own deadline: the round's, its transport, its body read or its delivery), upstream_504 (the provider answered that its backend ran out of time, 504 or 408), unavailable (no usable answer for another reason) and rejected (the provider refused the query). Counted where access_query_duration_seconds is.
+
+## alarmd_access_query_answer_seconds
+
+Labels: `outcome`
+
+Seconds each physical query's provider took, to 60 s: a query read past 30 s is in it, as its round's window on a one-minute period runs to about 45. By outcome: ok, timeout_alarmd_deadline (alarmd's own deadline: the round's, its transport, its body read or its delivery), upstream_504 (the provider answered that its backend ran out of time, 504 or 408), unavailable (no usable answer for another reason) and rejected (the provider refused the query). Counted where access_query_duration_seconds is.
+
+## alarmd_access_query_answer_series
+
+Labels: `outcome`
+
+Series in each physical query's answer. By outcome: ok, timeout_alarmd_deadline (alarmd's own deadline: the round's, its transport, its body read or its delivery), upstream_504 (the provider answered that its backend ran out of time, 504 or 408), unavailable (no usable answer for another reason) and rejected (the provider refused the query). Counted where access_query_duration_seconds is.
+
 ## alarmd_access_query_duration_seconds
 
 Each physical query a Slot runs, every attempt including retries, by the time its provider took from request to answer or failure. Counted where worker_work_total{work_kind="physical_query"} is, so the two agree; diagnostic reads are not in it. A query cut at 30 seconds lands in +Inf.
@@ -1151,7 +1175,7 @@ Bytes the formal first reads delivered, by source, counted as the rechecks' are.
 
 Labels: `source`
 
-Formal first reads seen, by source - the data source the Query Group reads, labelled as the directory labels its Query Groups, so every lookback family reads beside them: the denominator of the query volume the lookback adds (lookback_rechecks_total over it).
+Formal first reads seen, a Slot read in slices one, by source - the data source the Query Group reads, labelled as the directory labels its Query Groups, so every lookback family reads beside them: the denominator of the query volume the lookback adds (lookback_rechecks_total over it).
 
 ## alarmd_lookback_floor_probe_changes_total
 
@@ -1270,6 +1294,12 @@ The longest a supplement held its Query Group's flight in this process, by sourc
 Labels: `source`, `bucket`
 
 Supplements by how long each held its Query Group's flight, by source: from taking the flight to the supplement's return - freezing the Slot's contract, evaluating, writing its State, and any wait on Redis inside them - which is how long the group's own Slot waited behind it. Buckets close at their bound: le_100ms, le_500ms, le_1s, le_5s, gt_5s. A supplement refused for the flight never held it and is not counted.
+
+## alarmd_lookback_supplement_partly_refused_total
+
+Labels: `source`
+
+Directed Slots read in slices some of whose rereads the memory share refused, by source: each came to the outcome of the slices read in lookback_supplement_windows_total and is in no reason of lookback_supplement_unobserved_total.
 
 ## alarmd_lookback_supplement_points_total
 
@@ -2175,7 +2205,7 @@ Times this process forgot every generation-scoped key life it had remembered, be
 
 ## alarmd_state_retained_share_approaching_slots_total
 
-Slots whose retained bytes reached at least 95 percent of the one-object share of the retained pool they were admitted under: completed Slots at or past the threshold, and Slots given up because the share refused them (RESOURCE_SHARE_EXCEEDED), which are past it. The objects are listed by name under RETAINED_SHARE_APPROACHING on the page and in fleet.get.
+Slots whose retained bytes reached at least 95 percent of the one-object share of the retained pool they were admitted under: completed Slots at or past the threshold, and Slots given up because the share refused them (RESOURCE_SHARE_EXCEEDED), which are past it. The objects are listed by name under RETAINED_SHARE_APPROACHING on the page and in fleet.get, except a completed Slot applied in more than one window: its windows are bounded by the share, so it reaches the share by construction and is counted here but not listed.
 
 ## alarmd_state_series_held
 
@@ -2473,6 +2503,12 @@ Labels: `stage`
 
 Phase-two worker busy time by coarse workflow stage.
 
+## alarmd_worker_first_seen_unseen_total
+
+Labels: `unit`
+
+What completed Slots wrote as first-seen before a later slice found the Plan had run, by unit: slices and series. Those series were written without warming up; a rate above zero says the first-seen judgement changed within Slots read in slices.
+
 ## alarmd_worker_frozen_state_census_total
 
 Labels: `stage`
@@ -2491,11 +2527,33 @@ Labels: `status`, `reason`, `progress`
 
 One per held gap scope per round that read it, by status, by why it is held, and by where its count stands against its requirement. The rate is how many scopes are being held; progress=none holding up is a guard that has had no complete round since it was raised, which is the state somebody is looking for and the one a changed-only signal would say nothing about. It is counted per round rather than gauged because whether a guard is moving is a question about a stretch of time, and because a gauge would need a memory of the previous round that survives a Query Group changing owner. progress=ready should stay near zero: a warming scope cannot persist in that state. reason=other is a reason nobody named here. Every combination has a label at startup.
 
+## alarmd_worker_input_slice_shapes_total
+
+Labels: `outcome`
+
+Slots by what they did with their Query Group's shape, the leaves a slice that ran out of time for its size was split into, which the next Slot starts in: started, read in it; kept, a slice split for its time kept in it; merged, its last kept split taken back after three quick rounds; voided_revision, voided_dimensions, voided_max_leaves, dropped as the query revision or the dimensions changed or it grew past a starting tree's leaves; refused_not_a_leaf, refused_not_a_partition, refused_max_leaves, dropped as its leaves were not a partition of every value. A dropped shape's Slot starts in slices counted anew. evicted_idle counts the Query Groups whose slice memory, shape or none, was dropped for no Slot started on this replica for ten of their periods and ten minutes at least. Which Query Group is not a label here.
+
+## alarmd_worker_input_slice_timeouts_total
+
+Labels: `outcome`
+
+Slices of Slots read in slices whose read ran out of time, by how each ended: split_succeeded, split and its children read in its place, the Slot's query completing; split_failed, split and the Slot's query failing after; not_split, failed as before - the query cooldown held, its time could not be put on its size, the window left was too short for its children, or the Slot had split once. A Slot splits so once. Which Query Group is not a label here.
+
+## alarmd_worker_input_slices_total
+
+Labels: `outcome`
+
+Slices the input of completed Slots read in slices was read in, by outcome: landed, read and evaluated, and discarded, let go past the slice limit while they streamed and split. A Slot read whole counts nothing. Read beside worker_sliced_slots_total: their ratio is the slices a sliced Slot reads.
+
 ## alarmd_worker_no_data_absences_total
 
 Labels: `outcome`
 
 Groups of the Plans that detect no-data, summed over every Slot that judged them, by what the round counted each group as. expected is the roster's size and present what arrived; absent is the groups tracked and reported absent this round; unavailable the groups a round that did not see the whole period could not judge; dropped the series whose dimensions did not match the item. expired is the absences the tracking horizon stopped this round and suppressed the groups the round met already stopped -- the standing size of what the horizon holds down and of what manual closes hold down. manual_closed is the absences a round stopped because a user closed their alert by hand (decision-024); each is in suppressed from the next round on unless its history roster forgot it. Read expired and suppressed against each other: expired moving is the horizon acting, suppressed is what it has acted on and is still holding; a deployment that switched the horizon on and reads zero on both has a horizon nothing reached. Both are counted where each group is decided, never by differencing one round's memory against the last, so the round that failed to load its memory does not read as a quiet one. Every label is created at startup so a zero can be told from a label nothing ever wrote. Read absent + expired + suppressed against the fleet page's per-object line, which carries the same counts per Plan for the round it last decided.
+
+## alarmd_worker_no_data_groups_staged_ahead_total
+
+Groups of no-data first writes staged as their windows landed, ahead of the statements: what the worker held no longer to the tail. Counted from completed Slots.
 
 ## alarmd_worker_no_data_manual_close_dropped_total
 
@@ -2547,6 +2605,18 @@ Labels: `outcome`
 
 Plans that detect no-data, counted once per Slot by what happened to that detection. The outcomes partition: every such Plan lands on exactly one every Slot, so their sum is the no-data Plans this worker evaluated. EVALUATED is the only one that judged absence; SKIPPED_QUERY_NOT_FULL and SKIPPED_ANSWER_TRUNCATED still judge the groups that arrived present, and judge no group absent. The others are different kinds of not judging and must be read apart, because once the round is over they look identical. Among them: SKIPPED_QUERY_NOT_FULL is a query that did not cover the period and resolves itself next round; SKIPPED_MEMORY_UNREADABLE is a record written by a newer build, which lasts as long as a rollback does; SKIPPED_SLOT_BUDGET is the Slot being unable to carry the work, which does not resolve on its own - a history roster only grows, so a Plan that did not fit this round does not fit the next one either, and a steady zero on it is the expected reading; and SKIPPED_ANSWER_TRUNCATED is an answer the query service may have cut at its group cap (uq_answer_truncated_total), which lasts as long as the strategy's groups stay at the cap. Any non-zero on those last two is worth acting on. Every outcome's label is created at startup so a zero can be told from a label nothing ever wrote. Read the fleet's sum over every outcome over a minute against the leader's sum(catalog_no_data_plans) times the Slots in that minute: they are the same Plans counted at the two ends of the publication, so the two should agree. Every outcome at zero while the leader reports Plans is what a Plan losing its no-data section between the leader and the worker looks like, and it looks like nothing else: the Plans still execute, nothing fails, and every label here reads as a computed zero.
 
+## alarmd_worker_no_data_stage_ahead_differs_total
+
+Labels: `reason`
+
+No-data first writes staged as their windows landed whose round wrote every group with the statement instead, by why: kept_otherwise, a staged group the round kept otherwise or not at all; count_mismatch, the stage's groups not the ones the round marked and kept; present_as_of, the round's present-as-of not the one they were staged against. A rate above zero is a shape the staging does not cover, held whole to the tail as before. Counted from completed Slots.
+
+## alarmd_worker_no_data_stage_ahead_total
+
+Labels: `outcome`
+
+No-data first writes staged as their windows landed, a Plan each, by how the staging ended: carried, the statement put the stage in place with it; differs, the round kept a staged group otherwise and wrote every group with the statement; discarded, the round wrote no statement and the stage was taken back; stopped, a segment could not be staged and the groups after it went with the statement. Counted from completed Slots. Which Query Group is not a label here.
+
 ## alarmd_worker_owned_query_groups
 
 Labels: `worker_role`
@@ -2582,6 +2652,16 @@ Query permits held at the moment of the scrape, by holder: each operation, and t
 Labels: `queue`
 
 Callers queued for a permit at the moment of the scrape, by queue. Non-zero means the budget is the constraint right now; zero does NOT mean it has spare room, because a caller that is admitted immediately never appears here.
+
+## alarmd_worker_slice_read_ahead_total
+
+Labels: `outcome`
+
+How the slices read ahead - read while the slice before completed - ended, by outcome: replayed, handed to the Slot; other_leaf, let go because the next slice was another; yielded, let go for a reservation of the Slot's own the share or the pool would otherwise refuse; failed, let go because the read failed before it was handed on. Every slice let go is read again on the Slot's goroutine. Counted from completed Slots.
+
+## alarmd_worker_sliced_slots_total
+
+Completed Slots whose input was read in more than one slice or had a slice let go: the Slots slicing reached. Which Query Group is not a label here.
 
 ## alarmd_worker_work_total
 

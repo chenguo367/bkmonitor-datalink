@@ -24,13 +24,13 @@ import (
 func TestConditionBudgetIsNamed(t *testing.T) {
 	tail := strings.Repeat("a", 60)
 	values := []string{"x" + tail, "y" + tail}
-	tree, err := newTree([]string{"pod"}, 1, 1_000_000)
+	tree, err := newTree([]string{"pod"}, 1, 1_000_000, FixedCut("pod"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	leaf := tree.Pending()[0]
 	for depth := 0; ; depth++ {
-		children, err := tree.Split(leaf.ID, map[string][]string{"pod": values})
+		children, err := tree.Split(leaf.ID, SampleOf(map[string][]string{"pod": values}))
 		if err != nil {
 			var concentrated *ValueConcentratedError
 			if !errors.As(err, &concentrated) || concentrated.Reason != ReasonConditionBudget {

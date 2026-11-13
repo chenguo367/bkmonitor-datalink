@@ -454,7 +454,7 @@ func (judge *absenceJudge) judgePresent(group *groupRound) {
 	if group.present {
 		if group.foreign {
 			group.kept = false
-		} else if !group.whole {
+		} else if keptAsSeen(group.whole, group.foreign) {
 			if !judge.recoveryDisabled {
 				group.verdict = VerdictNormal
 			}
@@ -467,6 +467,21 @@ func (judge *absenceJudge) judgePresent(group *groupRound) {
 		}
 		group.kept = false
 	}
+}
+
+// keptAsSeen is whether a present group is kept as seen at this round: any
+// but the whole item and a host of another business (judgePresent).
+func keptAsSeen(whole, foreign bool) bool { return !whole && !foreign }
+
+// KeptAsSeen is whether a present group of key is kept as seen at this
+// round, given the hosts of other businesses known before the read
+// (HostResolution.OutOfBusiness): the rule judgePresent keeps it by, for a
+// caller that stages it ahead. A history roster's hosts the scan
+// resolves are not known before it, and a round with a stored record stages
+// nothing.
+func KeptAsSeen(key string, outOfBusiness map[string]struct{}) bool {
+	_, foreign := outOfBusiness[key]
+	return keptAsSeen(key == WholeItemGroup().Key(), foreign)
 }
 
 // heldPresent is a group judgePresent found present and left without its

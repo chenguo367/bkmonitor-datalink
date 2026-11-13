@@ -142,7 +142,7 @@ func TestSeriesMadeCanonicalSideBySideAreHandedOnAsOneAtATime(t *testing.T) {
 					}
 				}
 				sink := &failingSink{failAt: test.failAt}
-				done, err := client.decodeShared(context.Background(), strings.NewReader(framedBody(t, series)), attempt, sink)
+				done, err := client.decodeShared(context.Background(), nil, strings.NewReader(framedBody(t, series)), attempt, sink)
 				if fmt.Sprint(err) != fmt.Sprint(wantErr) {
 					t.Fatalf("run %d: error %v, want %v", run, err, wantErr)
 				}

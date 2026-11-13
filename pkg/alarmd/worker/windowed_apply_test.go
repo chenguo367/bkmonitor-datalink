@@ -127,8 +127,11 @@ func TestAWindowedSlotWritesEachWindowsEventsBeforeItsStateAndProgressAfterAll(t
 		t.Fatalf("write order = %v, want %v", writes, want)
 	}
 	// The first window is written once the third series' result would have
-	// overfilled it, so before the fourth series is evaluated.
-	if nthStage(t, trace, "state_apply", 1) > nthStage(t, trace, "evaluate", 4) {
+	// overfilled it. The series of a preflight batch (two here, the cap) are
+	// evaluated together before any of them is merged, so it is written
+	// before the batch after the third series' is evaluated: before the
+	// fifth evaluation.
+	if nthStage(t, trace, "state_apply", 1) > nthStage(t, trace, "evaluate", 5) {
 		t.Fatalf("the first window was written after the evaluation went on: %v", trace)
 	}
 	if sequences := countStage(trace, "sequence"); sequences != 5 {

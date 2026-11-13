@@ -60,8 +60,9 @@ const (
 	// cost more than ConditionBudget.
 	ReasonConditionBudget = "condition_budget"
 	// ReasonSingleValue is a slice whose sample shows one value, or no
-	// further character, on the dimension it is cut on and on every
-	// candidate dimension after it: no split would separate its series.
+	// further character, on the dimension it is cut on and on every other
+	// candidate dimension it is not cut on yet: no split would separate its
+	// series.
 	ReasonSingleValue = "single_value"
 )
 
@@ -142,6 +143,8 @@ type node struct {
 	segments []segment
 	state    nodeState
 	slice    execution.InputSlice
+	// parent is the node this one was split from, -1 for the root.
+	parent int
 }
 
 // Leaf is one slice of the tree waiting to be read: the ID to land or split
@@ -162,25 +165,62 @@ type Tree struct {
 	leaves     int
 	discarded  int
 	maxLeaves  int
+	// splits is every split the tree was made by, in the order made: what
+	// its Shape is taken from (shape.go).
+	splits []treeSplit
 }
 
-// New starts a tree that cuts on dimensions, in order: the first one first,
-// each later one only when the slices seen show a single value on the ones
-// before it. Every dimension has to be a raw group-by label of every physical
-// query of the Query Group, which the caller checks.
+// New starts a tree that cuts on dimensions: each split on the one of them
+// that splits its slice's sample most evenly (Split). Every dimension has to
+// be a raw group-by label of every physical query of the Query Group, which
+// the caller checks.
 //
-// The tree starts with at least leavesAtLeast leaves (K_0, §7.4): the root is
-// split level by level on the first dimension by the fixed alphabet, the
-// shallowest leaf first, so the starting slices are as even as an alphabet
-// without a sample can make them. One or fewer is the single root leaf, the
-// zero slice, which reads the whole Query Group as before slicing. A K_0 the
-// tree cannot reach within MaxLeaves is a ValueConcentratedError: the Query
-// Group needs more slices than the tree may have.
-func New(dimensions []string, leavesAtLeast int) (*Tree, error) {
-	return newTree(dimensions, leavesAtLeast, MaxLeaves)
+// With on one of the dimensions - the one the Query Group's last read was
+// cut on, which a sample chose - the tree starts with at least
+// leavesAtLeast leaves (K_0, §7.4): the root is split level by level on that
+// dimension by the fixed alphabet, the shallowest leaf first, so the starting
+// slices are as even as an alphabet without a sample of this read can make
+// them. With on empty, nothing chose a dimension, and one or fewer leaves
+// asked, it is the single root leaf, the zero slice, which reads the whole
+// Query Group as before slicing. A K_0 the tree cannot reach within
+// MaxLeaves is a ValueConcentratedError: the Query Group needs more slices
+// than the tree may have.
+func New(dimensions []string, leavesAtLeast int, on string) (*Tree, error) {
+	cut := Cut{}
+	if on != "" {
+		cut = FixedCut(on)
+	}
+	return newTree(dimensions, leavesAtLeast, MaxLeaves, cut)
 }
 
-func newTree(dimensions []string, leavesAtLeast, maxLeaves int) (*Tree, error) {
+// Cut is how a tree's root is cut: the dimension and the classes of its
+// last character, a partition of every rune. A tree started on a Cut
+// (NewCut) cuts every level of its starting leaves by those classes; the
+// Cut a sample makes (BestCut) is what a read whole cuts its root by
+// (SplitCut), and the one a tree's root was cut by (RootCut) is what the
+// Query Group's next Slot, and this Slot's retry, start in - the same root
+// slices. The zero Cut is none.
+type Cut struct {
+	Dimension string
+	classes   []class
+}
+
+// IsZero reports whether the Cut is none.
+func (cut Cut) IsZero() bool { return cut.Dimension == "" }
+
+// FixedCut is the Cut of a dimension by the fixed alphabet: what a tree is
+// cut by when no sample chose its classes.
+func FixedCut(dimension string) Cut { return Cut{Dimension: dimension, classes: fixedClasses()} }
+
+// NewCut is New starting on a Cut: the root split level by level on its
+// dimension by its classes to at least leavesAtLeast leaves, the zero Cut
+// the single root leaf.
+func NewCut(dimensions []string, leavesAtLeast int, cut Cut) (*Tree, error) {
+	return newTree(dimensions, leavesAtLeast, MaxLeaves, cut)
+}
+
+func newTree(dimensions []string, leavesAtLeast, maxLeaves int, cut Cut) (*Tree, error) {
+	on := cut.Dimension
 	if len(dimensions) == 0 {
 		return nil, errors.New("alarmd inputslice: no dimension to slice on")
 	}
@@ -194,14 +234,25 @@ func newTree(dimensions []string, leavesAtLeast, maxLeaves int) (*Tree, error) {
 		}
 		seen[dimension] = struct{}{}
 	}
+	root := 0
+	if on != "" {
+		if root = slices.Index(dimensions, on); root < 0 {
+			return nil, fmt.Errorf("alarmd inputslice: dimension %q to start on is not one to slice on", on)
+		}
+	}
+	if on != "" && !partitionOf(class{negated: true}, cut.classes) {
+		return nil, fmt.Errorf("alarmd inputslice: the classes to start on %q are no partition of every rune", on)
+	}
 	tree := &Tree{dimensions: append([]string(nil), dimensions...), maxLeaves: maxLeaves}
-	tree.add([]segment{{dimension: 0}})
-	for tree.leaves < leavesAtLeast {
+	tree.add([]segment{{dimension: root}}, -1)
+	for on != "" && tree.leaves < leavesAtLeast {
 		target := tree.shallowestCuttable()
 		if target == nil {
-			return nil, &ValueConcentratedError{Reason: ReasonSingleValue, Dimension: dimensions[0]}
+			return nil, &ValueConcentratedError{Reason: ReasonSingleValue, Dimension: on}
 		}
-		if _, err := tree.split(target, nil); err != nil {
+		last := target.segments[len(target.segments)-1]
+		children := deeper(target.segments[:len(target.segments)-1], last, cut.classes)
+		if _, err := tree.splitInto(target, children, last.dimension, splitStarting); err != nil {
 			return nil, err
 		}
 	}
@@ -220,14 +271,14 @@ func (tree *Tree) shallowestCuttable() *node {
 	return nil
 }
 
-func (tree *Tree) add(segments []segment) *node {
+func (tree *Tree) add(segments []segment, parent int) *node {
 	conditions := make([]execution.InputSliceCondition, 0, len(segments))
 	for _, s := range segments {
 		if s.writesCondition() {
 			conditions = append(conditions, s.condition(tree.dimensions))
 		}
 	}
-	created := &node{id: len(tree.nodes), segments: segments, slice: execution.InputSlice{Conditions: conditions}}
+	created := &node{id: len(tree.nodes), segments: segments, slice: execution.InputSlice{Conditions: conditions}, parent: parent}
 	tree.nodes = append(tree.nodes, created)
 	tree.leaves++
 	return created
@@ -243,6 +294,122 @@ func (tree *Tree) Pending() []Leaf {
 		}
 	}
 	return pending
+}
+
+// CutOn is the dimension the tree's root was split on, empty while the
+// root is a leaf (RootCut).
+func (tree *Tree) CutOn() string { return tree.RootCut().Dimension }
+
+// RootCut is the Cut the tree's root was split by - the dimension and the
+// classes of its children's last character - the zero Cut while the root is
+// a leaf.
+func (tree *Tree) RootCut() Cut {
+	for _, split := range tree.splits {
+		if split.parent != 0 {
+			continue
+		}
+		var cut Cut
+		for _, child := range split.children {
+			last := tree.nodes[child].segments[len(tree.nodes[child].segments)-1]
+			cut.Dimension = tree.dimensions[last.dimension]
+			if !last.exhausted && len(last.path) == 1 {
+				cut.classes = append(cut.classes, last.path[0])
+			}
+		}
+		return cut
+	}
+	return Cut{}
+}
+
+// SplitCut is Split for the root, a read whole that passed its limit, cut
+// by cut (BestCut) rather than by its sample's own split: the cut the Query
+// Group's next Slot and this Slot's retry start in (RootCut, NewCut).
+func (tree *Tree) SplitCut(id int, cut Cut) ([]Leaf, error) {
+	target, err := tree.pending(id)
+	if err != nil {
+		return nil, err
+	}
+	dimension := slices.Index(tree.dimensions, cut.Dimension)
+	if len(target.segments) != 1 || target.segments[0].writesCondition() || dimension < 0 ||
+		!partitionOf(class{negated: true}, cut.classes) {
+		return nil, fmt.Errorf("alarmd inputslice: slice %d is no root to cut on %q by its classes", id, cut.Dimension)
+	}
+	children, err := tree.splitInto(target, deeper(nil, segment{dimension: dimension}, cut.classes), dimension, splitRead)
+	if err != nil {
+		return nil, err
+	}
+	tree.discarded++
+	leaves := make([]Leaf, 0, len(children))
+	for _, child := range children {
+		leaves = append(leaves, Leaf{ID: child.id, Slice: child.slice})
+	}
+	return leaves, nil
+}
+
+// Sample is what a slice read before it was let go shows of its series: by
+// dimension, each value seen once, with how many of the series sampled
+// carried it. A split is judged by the series its parts would hold, not by
+// how many values each holds: a dimension of many values, one of which most
+// series carry, is no even cut.
+type Sample map[string][]SampledValue
+
+// SampledValue is one value of a dimension in a Sample and the series of
+// the sample that carried it.
+type SampledValue struct {
+	Value  string
+	Series int
+}
+
+// SampleOf is the Sample of values, one entry a series, by dimension: each
+// distinct value once, with the entries that carried it.
+func SampleOf(values map[string][]string) Sample {
+	if values == nil {
+		return nil
+	}
+	sample := make(Sample, len(values))
+	for dimension, list := range values {
+		index := map[string]int{}
+		for _, value := range list {
+			if at, seen := index[value]; seen {
+				sample[dimension][at].Series++
+				continue
+			}
+			index[value] = len(sample[dimension])
+			sample[dimension] = append(sample[dimension], SampledValue{Value: value, Series: 1})
+		}
+	}
+	return sample
+}
+
+// BestCut is the Cut to cut the whole Query Group's root by, by sample: of
+// the dimensions on which the sample shows more than one value, each cut by
+// the classes its sample's last characters split into by the series they
+// carry (splitClasses), the one whose largest part holds the fewest series
+// sampled, the dimensions in order among equals. Judged by the classes it
+// is cut by. A fixed alphabet assumes how values end: values ending in
+// digits, most hosts' addresses and numbered names, put nine in ten series
+// in its [0-8]. False when no dimension is one: no read chose.
+func BestCut(dimensions []string, sample Sample) (Cut, bool) {
+	if _, err := New(dimensions, 1, ""); err != nil {
+		return Cut{}, false
+	}
+	best, bestShare, bestClasses := -1, share{}, []class(nil)
+	for index, dimension := range dimensions {
+		values := sample[dimension]
+		histogram, progress := nextHistogram(values, 0)
+		if len(values) == 0 || !progress {
+			continue
+		}
+		classes := splitClasses(histogram)
+		part := shareOf(deeper(nil, segment{dimension: index}, classes), values)
+		if best < 0 || part.below(bestShare) {
+			best, bestShare, bestClasses = index, part, classes
+		}
+	}
+	if best < 0 {
+		return Cut{}, false
+	}
+	return Cut{Dimension: dimensions[best], classes: bestClasses}, true
 }
 
 // Leaves is how many leaves the tree has, landed or pending.
@@ -270,14 +437,18 @@ func (tree *Tree) Land(id int) error {
 // also pending. Landed leaves are untouched.
 //
 // sample is the dimension values of the series the discarded slice read
-// before it was abandoned, by dimension; a series without a dimension counts
-// as the empty value. It only steers the split: the leaf is cut by the next
-// character from the end into classes of roughly equal count in the sample,
-// and when the sample shows a single value on the dimension being cut, or no
-// further character, the leaf is cut instead on the next candidate dimension
-// on which the sample shows more than one value, keeping the leaf's own
-// conditions and ANDing a fresh tree on that dimension. A dimension with no
-// values in the sample, or a nil sample, is split by the fixed alphabet.
+// before it was abandoned, by dimension, with the series that carried each
+// (Sample); a series without a dimension counts as the empty value. It only steers the split. Each candidate is cut by the
+// next character from the end into classes of roughly equal count in the
+// sample: the dimension the leaf is cut on, further, and every other
+// dimension the leaf is not cut on yet on which the sample shows more than
+// one value, from its root, the leaf's own conditions kept and a fresh tree
+// on that dimension ANDed. The split taken is the one whose largest part
+// holds the smallest share of the series sampled - the most even, judged on
+// the series each value carried (Sample), which a dimension of a single value
+// never is - the leaf's own dimension first among equals, then the
+// dimensions in order. A dimension with no values in the sample, or a nil
+// sample, is split by the fixed alphabet.
 //
 // It never cuts by equality to a sampled value: the sample is only the start
 // of the stream, and a series with another value not yet delivered would then
@@ -286,12 +457,23 @@ func (tree *Tree) Land(id int) error {
 // A split that cannot separate anything, would take the tree past
 // MaxLeaves, or would cost more than ConditionBudget is a
 // ValueConcentratedError, and the leaf stays pending as it was.
-func (tree *Tree) Split(id int, sample map[string][]string) ([]Leaf, error) {
+func (tree *Tree) Split(id int, sample Sample) ([]Leaf, error) {
+	return tree.splitRead(id, sample, splitRead)
+}
+
+// SplitKept is Split for a slice its Query Group's next Slot is to be read
+// split too: one that ran out of time for its size. The split is in the
+// tree's Shape, which a slice Split is not.
+func (tree *Tree) SplitKept(id int, sample Sample) ([]Leaf, error) {
+	return tree.splitRead(id, sample, splitKept)
+}
+
+func (tree *Tree) splitRead(id int, sample Sample, kind splitKind) ([]Leaf, error) {
 	target, err := tree.pending(id)
 	if err != nil {
 		return nil, err
 	}
-	children, err := tree.split(target, sample)
+	children, err := tree.split(target, sample, kind)
 	if err != nil {
 		return nil, err
 	}
@@ -317,11 +499,16 @@ func (tree *Tree) pending(id int) (*node, error) {
 	return target, nil
 }
 
-func (tree *Tree) split(target *node, sample map[string][]string) ([]*node, error) {
+func (tree *Tree) split(target *node, sample Sample, kind splitKind) ([]*node, error) {
 	children, dimension, err := tree.childSegments(target, sample)
 	if err != nil {
 		return nil, err
 	}
+	return tree.splitInto(target, children, dimension, kind)
+}
+
+// splitInto replaces target by children, the split's kind kept with it.
+func (tree *Tree) splitInto(target *node, children [][]segment, dimension int, kind splitKind) ([]*node, error) {
 	concentrated := func(reason string) error {
 		return &ValueConcentratedError{Reason: reason, Dimension: tree.dimensions[dimension], Slice: target.slice}
 	}
@@ -336,9 +523,12 @@ func (tree *Tree) split(target *node, sample map[string][]string) ([]*node, erro
 	target.state = stateDiscarded
 	tree.leaves--
 	created := make([]*node, 0, len(children))
+	ids := make([]int, 0, len(children))
 	for _, segments := range children {
-		created = append(created, tree.add(segments))
+		child := tree.add(segments, target.id)
+		created, ids = append(created, child), append(ids, child.id)
 	}
+	tree.splits = append(tree.splits, treeSplit{parent: target.id, children: ids, kind: kind})
 	return created, nil
 }
 
@@ -356,35 +546,27 @@ func conditionCost(segments []segment) int {
 	return cost
 }
 
-// childSegments is the children of target and the dimension they are cut on.
-func (tree *Tree) childSegments(target *node, sample map[string][]string) ([][]segment, int, error) {
+// childSegments is the children of target and the dimension they are cut
+// on: of every candidate split (Split), the most even by the sample.
+func (tree *Tree) childSegments(target *node, sample Sample) ([][]segment, int, error) {
 	last := target.segments[len(target.segments)-1]
-	kept := target.segments[:len(target.segments)-1]
-	values := sample[tree.dimensions[last.dimension]]
-	if !last.exhausted {
-		histogram, progress := nextHistogram(values, len(last.path))
-		if len(values) == 0 || separatesAt(values, len(last.path)) {
-			return deeper(kept, last, splitClasses(histogram)), last.dimension, nil
+	var best [][]segment
+	bestDimension, bestShare := last.dimension, share{}
+	consider := func(children [][]segment, dimension int) {
+		if part := shareOf(children, sample[tree.dimensions[dimension]]); best == nil || part.below(bestShare) {
+			best, bestDimension, bestShare = children, dimension, part
 		}
-		// The next character does not tell the sample apart. A class an
-		// earlier split took from the part of the stream it saw may hold
-		// characters that do, and only cutting that class separates them:
-		// values that differ only within it share every character before
-		// it, and going deeper would only walk that shared prefix to its end.
-		if children, refined := refine(kept, last, values); refined {
-			return children, last.dimension, nil
-		}
-		if progress {
-			return deeper(kept, last, splitClasses(histogram)), last.dimension, nil
-		}
-	} else if children, refined := refine(kept, last, values); refined {
-		return children, last.dimension, nil
 	}
-	// An exhausted node has no next character on its dimension, and a node
-	// whose sample is one value there would only grow deeper around that
-	// value: either way the next dimension that tells the sample apart is
-	// cut instead, from its root.
-	for next := last.dimension + 1; next < len(tree.dimensions); next++ {
+	if children, ok := further(target.segments, sample[tree.dimensions[last.dimension]]); ok {
+		consider(children, last.dimension)
+	}
+	// Another dimension that tells the sample apart is cut from its root:
+	// one before the leaf's as well as one after, so a first dimension of a
+	// single value is no slice the tree has to cut through first.
+	for next := range tree.dimensions {
+		if next == last.dimension || cutOn(target.segments, next) {
+			continue
+		}
 		values := sample[tree.dimensions[next]]
 		histogram, progress := nextHistogram(values, 0)
 		if len(values) > 0 && !progress {
@@ -395,21 +577,108 @@ func (tree *Tree) childSegments(target *node, sample map[string][]string) ([][]s
 			// A root that constrains nothing need not be carried.
 			kept = kept[:len(kept)-1]
 		}
-		return deeper(kept, segment{dimension: next}, splitClasses(histogram)), next, nil
+		consider(deeper(kept, segment{dimension: next}, splitClasses(histogram)), next)
 	}
-	return nil, last.dimension, &ValueConcentratedError{
-		Reason: ReasonSingleValue, Dimension: tree.dimensions[last.dimension], Slice: target.slice,
+	if best == nil {
+		return nil, last.dimension, &ValueConcentratedError{
+			Reason: ReasonSingleValue, Dimension: tree.dimensions[last.dimension], Slice: target.slice,
+		}
 	}
+	return best, bestDimension, nil
+}
+
+// further is the children of the node of segments cut further on its own
+// dimension, by values, the sample's on it, and false when that cannot
+// separate anything: an exhausted node has no next character there, and a
+// node whose sample is one value would only grow deeper around that value.
+func further(segments []segment, values []SampledValue) ([][]segment, bool) {
+	last := segments[len(segments)-1]
+	kept := segments[:len(segments)-1]
+	if last.exhausted {
+		return refine(kept, last, values)
+	}
+	histogram, progress := nextHistogram(values, len(last.path))
+	if len(values) == 0 || separatesAt(values, len(last.path)) {
+		return deeper(kept, last, splitClasses(histogram)), true
+	}
+	// The next character does not tell the sample apart. A class an earlier
+	// split took from the part of the stream it saw may hold characters that
+	// do, and only cutting that class separates them: values that differ only
+	// within it share every character before it, and going deeper would only
+	// walk that shared prefix to its end.
+	if children, refined := refine(kept, last, values); refined {
+		return children, true
+	}
+	if progress {
+		return deeper(kept, last, splitClasses(histogram)), true
+	}
+	return nil, false
+}
+
+// cutOn reports whether segments already cut on dimension.
+func cutOn(segments []segment, dimension int) bool {
+	for _, s := range segments {
+		if s.dimension == dimension && s.writesCondition() {
+			return true
+		}
+	}
+	return false
+}
+
+// share is the series of a split's largest part over all the series it was
+// judged on: a split judged on none is as uneven as one that keeps them all
+// together.
+type share struct{ largest, of int }
+
+// shareOf is how children, each cut on its last segment, part the series
+// of values.
+func shareOf(children [][]segment, values []SampledValue) share {
+	total := 0
+	for _, value := range values {
+		total += value.Series
+	}
+	if total == 0 {
+		return share{largest: 1, of: 1}
+	}
+	largest := 0
+	for _, child := range children {
+		cut, count := child[len(child)-1], 0
+		for _, value := range values {
+			if cut.holds(value.Value) {
+				count += value.Series
+			}
+		}
+		largest = max(largest, count)
+	}
+	return share{largest: largest, of: total}
+}
+
+// below reports whether the share is smaller than other's.
+func (s share) below(other share) bool { return s.largest*other.of < other.largest*s.of }
+
+// holds reports whether value is in the segment: its characters from the
+// end in the path's classes, and, for an exhausted segment, none before them.
+func (s segment) holds(value string) bool {
+	for depth, c := range s.path {
+		if r, ok := nextRune(value, depth); !ok || !c.contains(r) {
+			return false
+		}
+	}
+	if s.exhausted {
+		_, more := nextRune(value, len(s.path))
+		return !more
+	}
+	return true
 }
 
 // separatesAt reports whether the sample's characters at depth+1 from the end
 // tell it apart: two different characters there, or one character beside a
 // value that has none (the exhausted child's).
-func separatesAt(values []string, depth int) bool {
+func separatesAt(values []SampledValue, depth int) bool {
 	var first rune
 	seen, short := false, false
 	for _, value := range values {
-		r, ok := nextRune(value, depth)
+		r, ok := nextRune(value.Value, depth)
 		switch {
 		case !ok:
 			short = true
@@ -431,13 +700,13 @@ func separatesAt(values []string, depth int) bool {
 // class is wider than what the sample shows there, which separates the
 // series seen from the ones the class holds besides. It reports false when
 // no level can be cut, or a part would not fit its level's condition bytes.
-func refine(kept []segment, parent segment, values []string) ([][]segment, bool) {
+func refine(kept []segment, parent segment, values []SampledValue) ([][]segment, bool) {
 	level, parts := -1, []class(nil)
 	for index := range parent.path {
 		histogram := map[rune]int{}
 		for _, value := range values {
-			if r, ok := nextRune(value, index); ok {
-				histogram[r]++
+			if r, ok := nextRune(value.Value, index); ok {
+				histogram[r] += value.Series
 			}
 		}
 		if len(histogram) == 0 {
@@ -488,16 +757,16 @@ func appendSegment(kept []segment, last segment) []segment {
 	return append(append(segments, kept...), last)
 }
 
-// nextHistogram counts the sample's characters at depth+1 from the end and
-// reports whether a split there would make progress: more than one distinct
-// value, at least one of which has such a character.
-func nextHistogram(values []string, depth int) (map[rune]int, bool) {
+// nextHistogram counts the sample's series by their characters at depth+1
+// from the end and reports whether a split there would make progress: more
+// than one distinct value, at least one of which has such a character.
+func nextHistogram(values []SampledValue, depth int) (map[rune]int, bool) {
 	histogram := map[rune]int{}
 	distinct := map[string]struct{}{}
 	for _, value := range values {
-		distinct[value] = struct{}{}
-		if r, ok := nextRune(value, depth); ok {
-			histogram[r]++
+		distinct[value.Value] = struct{}{}
+		if r, ok := nextRune(value.Value, depth); ok {
+			histogram[r] += value.Series
 		}
 	}
 	return histogram, len(distinct) > 1 && len(histogram) > 0

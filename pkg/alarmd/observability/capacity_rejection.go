@@ -104,6 +104,55 @@ type SlotBudgetUsageFacts struct {
 	InputSlicesDiscarded  uint64 `json:"input_slices_discarded"`
 	FirstSeenUnseenSlices uint64 `json:"first_seen_unseen_slices"`
 	FirstSeenUnseenSeries uint64 `json:"first_seen_unseen_series"`
+	// InputSlicesReadAhead is the slices read while the slice before
+	// completed and handed to the Slot; the other three the reads ahead let
+	// go, by why: the next slice was another, the read yielded to the Slot's
+	// own reservation, or it failed. Each let go was read again after.
+	// SliceReadAheadOutcomes names the four, in this order.
+	InputSlicesReadAhead          uint64 `json:"input_slices_read_ahead,omitempty"`
+	InputSlicesReadAheadOtherLeaf uint64 `json:"input_slices_read_ahead_other_leaf,omitempty"`
+	InputSlicesReadAheadYielded   uint64 `json:"input_slices_read_ahead_yielded,omitempty"`
+	InputSlicesReadAheadFailed    uint64 `json:"input_slices_read_ahead_failed,omitempty"`
+	// InputSliceTimeouts is the slices that ran out of time and were split
+	// and read again, the Slot completing: at most one a Slot.
+	InputSliceTimeouts uint64 `json:"input_slice_timeouts,omitempty"`
+	// InputSliceShape* is what the Slot did with its Query Group's shape,
+	// one each at most (InputSliceShapeOutcomes).
+	InputSliceShapeStarted              uint64 `json:"input_slice_shape_started,omitempty"`
+	InputSliceShapeKept                 uint64 `json:"input_slice_shape_kept,omitempty"`
+	InputSliceShapeMerged               uint64 `json:"input_slice_shape_merged,omitempty"`
+	InputSliceShapeVoidedRevision       uint64 `json:"input_slice_shape_voided_revision,omitempty"`
+	InputSliceShapeVoidedDimensions     uint64 `json:"input_slice_shape_voided_dimensions,omitempty"`
+	InputSliceShapeVoidedMaxLeaves      uint64 `json:"input_slice_shape_voided_max_leaves,omitempty"`
+	InputSliceShapeRefusedNotALeaf      uint64 `json:"input_slice_shape_refused_not_a_leaf,omitempty"`
+	InputSliceShapeRefusedNotAPartition uint64 `json:"input_slice_shape_refused_not_a_partition,omitempty"`
+	InputSliceShapeRefusedMaxLeaves     uint64 `json:"input_slice_shape_refused_max_leaves,omitempty"`
+	InputSliceShapeEvictedIdle          uint64 `json:"input_slice_shape_evicted_idle,omitempty"`
+	// InputSliceCutOn is where the dimension the Slot's starting slices
+	// were cut on came from (InputSliceCutOnSources), empty for a Slot not
+	// started in slices counted: read whole, or in its Query Group's shape.
+	InputSliceCutOn string `json:"input_slice_cut_on,omitempty"`
+	// InputSlicesDeferred is the slices read last for the provider having
+	// timed them out the Slot before, completing degraded: judged against
+	// the slices read before them.
+	InputSlicesDeferred uint64 `json:"input_slices_deferred,omitempty"`
+	// InputSliceStartDiscarded is 1 when a slice the Slot started in from
+	// its memory - the cut a read before chose, or its shape - was let go
+	// for its size: the cut did not fit the input.
+	InputSliceStartDiscarded uint64 `json:"input_slice_start_discarded,omitempty"`
+	// NoDataStagesAhead* is how the Slot's no-data first writes staged as
+	// their windows landed ended, a Plan each (NoDataStageAheadOutcomes);
+	// NoDataStageAheadDiffers* the differs among them by why
+	// (nodata.StagedDiffersReasons); NoDataGroupsStagedAhead the groups
+	// they staged.
+	NoDataStagesAheadCarried             uint64 `json:"no_data_stages_ahead_carried,omitempty"`
+	NoDataStagesAheadDiffers             uint64 `json:"no_data_stages_ahead_differs,omitempty"`
+	NoDataStagesAheadDiscarded           uint64 `json:"no_data_stages_ahead_discarded,omitempty"`
+	NoDataStagesAheadStopped             uint64 `json:"no_data_stages_ahead_stopped,omitempty"`
+	NoDataStageAheadDiffersKeptOtherwise uint64 `json:"no_data_stage_ahead_differs_kept_otherwise,omitempty"`
+	NoDataStageAheadDiffersCountMismatch uint64 `json:"no_data_stage_ahead_differs_count_mismatch,omitempty"`
+	NoDataStageAheadDiffersPresentAsOf   uint64 `json:"no_data_stage_ahead_differs_present_as_of,omitempty"`
+	NoDataGroupsStagedAhead              uint64 `json:"no_data_groups_staged_ahead,omitempty"`
 
 	// RetainedBytes split by what the memory was held for, summing to it.
 	//
@@ -183,3 +232,74 @@ type SlotTimingFacts struct {
 	NoDataWrite  uint64 `json:"no_data_write_millis"`
 	Unattributed uint64 `json:"unattributed_millis"`
 }
+
+// SliceReadAheadOutcomes are the words for how a slice read ahead ended, in
+// the order of the SlotBudgetUsageFacts fields that count them: replayed
+// (InputSlicesReadAhead), other_leaf, yielded and failed.
+var SliceReadAheadOutcomes = [4]string{"replayed", "other_leaf", "yielded", "failed"}
+
+// How a slice's read that ran out of time ended, closed: split and read
+// again, the Slot's query completing; split and read again, the Slot's query
+// failing after; not split - the cooldown held, its time could not be put on
+// its size, the window left was too short, or the Slot had split once.
+const (
+	InputSliceTimeoutSplitSucceeded = "split_succeeded"
+	InputSliceTimeoutSplitFailed    = "split_failed"
+	InputSliceTimeoutNotSplit       = "not_split"
+)
+
+// NoDataStageAheadOutcomes are how a no-data first write staged as its
+// windows landed ended, in this order: carried, the statement put the stage
+// in place with it; differs, the round kept a staged group otherwise and
+// wrote every group with the statement; discarded, the round wrote no
+// statement and the stage was taken back; stopped, a segment could not be
+// staged and the groups after it went with the statement.
+var NoDataStageAheadOutcomes = [4]string{"carried", "differs", "discarded", "stopped"}
+
+// What a Slot did with its Query Group's shape - the leaves a slice that ran
+// out of time for its size was split into, which the next Slot starts in -
+// closed: started, read in it; kept, a slice split for its time kept in it;
+// merged, its last kept split taken back after quick rounds; dropped, by
+// why: voided, the query revision or the dimensions changed or it grew past
+// a starting tree's leaves; refused, its leaves not a partition of every
+// value (inputslice.FromShape: a split of no leaf, children that are no
+// partition, more leaves than a tree may have); evicted_idle, the memories
+// of other Query Groups not started for ten of their periods and ten
+// minutes at least, shape or none, that a Slot's start dropped.
+const (
+	InputSliceShapeStarted              = "started"
+	InputSliceShapeKept                 = "kept"
+	InputSliceShapeMerged               = "merged"
+	InputSliceShapeVoidedRevision       = "voided_revision"
+	InputSliceShapeVoidedDimensions     = "voided_dimensions"
+	InputSliceShapeVoidedMaxLeaves      = "voided_max_leaves"
+	InputSliceShapeRefusedNotALeaf      = "refused_not_a_leaf"
+	InputSliceShapeRefusedNotAPartition = "refused_not_a_partition"
+	InputSliceShapeRefusedMaxLeaves     = "refused_max_leaves"
+	InputSliceShapeEvictedIdle          = "evicted_idle"
+)
+
+// InputSliceShapeOutcomes is every outcome, in the order of the
+// SlotBudgetUsageFacts fields that count them.
+var InputSliceShapeOutcomes = [10]string{InputSliceShapeStarted, InputSliceShapeKept, InputSliceShapeMerged,
+	InputSliceShapeVoidedRevision, InputSliceShapeVoidedDimensions, InputSliceShapeVoidedMaxLeaves,
+	InputSliceShapeRefusedNotALeaf, InputSliceShapeRefusedNotAPartition, InputSliceShapeRefusedMaxLeaves,
+	InputSliceShapeEvictedIdle}
+
+// Where the dimension a Slot's starting slices were cut on came from,
+// closed: root_split, the one its Query Group's last read had its root split
+// on; whole_sample, the one the sample of its last read, read whole, split
+// most evenly; first_dimension_fallback, the first of its dimensions, for a
+// Query Group no read ever delivered a series of - its read whole the
+// provider timed out - which nothing else can choose for.
+const (
+	InputSliceCutOnRootSplit      = "root_split"
+	InputSliceCutOnWholeSample    = "whole_sample"
+	InputSliceCutOnFirstDimension = "first_dimension_fallback"
+)
+
+// InputSliceCutOnSources is every source.
+var InputSliceCutOnSources = [3]string{InputSliceCutOnRootSplit, InputSliceCutOnWholeSample, InputSliceCutOnFirstDimension}
+
+// InputSliceTimeoutOutcomes is every outcome.
+var InputSliceTimeoutOutcomes = []string{InputSliceTimeoutSplitSucceeded, InputSliceTimeoutSplitFailed, InputSliceTimeoutNotSplit}

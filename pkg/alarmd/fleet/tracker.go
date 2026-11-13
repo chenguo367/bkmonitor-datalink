@@ -484,6 +484,12 @@ type queryGroupState struct {
 	// (RESOURCE_SHARE_EXCEEDED), from their slot_skipped lines; cleared when
 	// a round completes any other way.
 	shareRefusal *ShareRefusalFacts
+	// shareRefusedLatest says the object's latest attempt was refused at its
+	// share (QG_BUDGET_SHARE_EXCEEDED), whether the Slot is still retried or
+	// was given up; a completed attempt clears it. The share-approaching line
+	// leaves such an object to its own row once that row is listed
+	// (RetainedShare).
+	shareRefusedLatest bool
 	// upkeep is the last this process saw of the store keeping this object's
 	// memories alive, by Plan: the last read's stored shape and the last
 	// renewal that reached the store. Positive evidence, kept apart from the
@@ -1305,11 +1311,13 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	switch {
 	case string(observation.ReasonCode) == contract.ReasonQGBudgetShareExceeded:
 		// A refused attempt, which the Slot retries: the reading stays as it
-		// is and so does the row. The Slot given up at the share replaces it
-		// with the refusal's bytes (noteShareRefusedUsage); an object refused
-		// on every Slot completes none, and dropping it from the row on each
-		// attempt hid exactly the object the row is for.
+		// is. The Slot given up at the share replaces it with the refusal's
+		// bytes (noteShareRefusedUsage).
+		if observation.Stage == observability.StageSlotCompleted {
+			state.shareRefusedLatest = true
+		}
 	case observation.Stage == observability.StageSlotCompleted && observation.Err == nil:
+		state.shareRefusedLatest = false
 		state.noteShareUsage(observation.SlotBudgetUsage, trace.EvaluationTime, at)
 	}
 	if progress := observation.GapProgress; progress != nil {

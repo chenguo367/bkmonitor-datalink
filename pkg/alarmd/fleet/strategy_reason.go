@@ -430,7 +430,7 @@ var checkSentences = map[Check]string{
 	CheckQueryRefused:             "查询服务拒绝了这条策略的查询，每轮都检测不了；可能是策略的输入，也可能是查询服务的故障，还判不出（不是已知的本服务故障），由 alarmd 维护方查明是谁的",
 	CheckQueryTargetMissing:       "查询服务答复这条策略引用的表或字段不存在；策略负责人检查指标和数据源是否还在",
 	CheckPlanUnevaluable:          "这条策略的检测计划算不了，策略定义有问题；策略负责人检查算法与触发条件",
-	CheckRetainedShareApproaching: "这条策略单轮占用的内存已接近单个对象的上限，再涨就会整条停检；策略负责人收窄分组或缩短窗口",
+	CheckRetainedShareApproaching: "这条策略单轮占用已接近单个对象的内存份额；再涨会改为分窗处理，检测照常、单轮变慢；不用改策略",
 	CheckReadBeforeComplete:       "alarmd 在数据到齐之前就读取判定，检测结果不能采信；策略负责人把 time_delay 调到数据到齐所需",
 	CheckReadHeld:                 "数据比 time_delay 晚到，alarmd 自动推后读取，读到的数据完整、结果可信；把策略 time_delay 调到数据到齐所需，就不必再推后（可选）",
 	CheckLatePastRound:            "部分序列晚到，连续两轮补读都没补回，这些轮次是在缺数据时判定的；策略负责人调大 time_delay",

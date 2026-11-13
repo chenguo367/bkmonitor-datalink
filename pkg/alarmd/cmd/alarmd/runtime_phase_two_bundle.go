@@ -89,6 +89,11 @@ type phaseTwoProductionExternalDependencies struct {
 	// test's clock sets it to that clock, so a query's elapsed time is the
 	// latency the backend was given.
 	QueryClock func() time.Time
+	// StreamClock is the clock the view stream judges silence by, both ends,
+	// nil for Now. A test whose Now jumps a minute a Slot sets it to the real
+	// clock: silence read off a jumping clock is a jump, and a real stall
+	// between two jumps reads as none.
+	StreamClock func() time.Time
 	// PrepareEvents validates the output coordinates and returns the opener
 	// that connects; validation errors refuse startup, the opener's errors
 	// are retried while the replica reports itself not ready.
@@ -189,6 +194,21 @@ func openProductionPhaseTwoBundle(
 		},
 		defaultPhaseTwoProductionExternalDependencies(),
 	)
+}
+
+// The worker takes back what the lookback captured of a slice it read ahead
+// and let go through its query port's DiscardSliceRead; the port is the
+// access Source, which has to keep that method.
+var _ interface {
+	DiscardSliceRead(execution.FrozenExecutionContractRef, execution.InputSlice)
+} = (*access.Source)(nil)
+
+// streamClock is the view stream's clock: StreamClock, or Now without one.
+func (external phaseTwoProductionExternalDependencies) streamClock() func() time.Time {
+	if external.StreamClock != nil {
+		return external.StreamClock
+	}
+	return external.Now
 }
 
 func openProductionPhaseTwoBundleWithDependencies(
@@ -616,6 +636,7 @@ func openProductionPhaseTwoBundleAssembly(
 		ObserveHostPlacement:      hostPlacementObserver(recorder, addressDiffers, external.Now),
 		ObserveDownstreamDistress: recorder.RecordDownstreamDistress,
 		ObserveQuery:              recorder.RecordPhysicalQuery,
+		ObserveQueryAnswer:        recorder.RecordPhysicalQueryAnswer,
 		Superseded:                superseded,
 		ObserveSeriesPulled:       seriesPullTally.Add,
 		Lookback:                  lookbackEngine,
@@ -794,6 +815,10 @@ func openProductionPhaseTwoBundleAssembly(
 	// line: named, never limited.
 	newOpens := newopens.New(external.Now)
 	recorder.SetNewOpensSource(newopens.Outcomes, newOpens.Stats)
+	// The worker stages a first write's groups as its windows land only on
+	// a store that can (execution.PlanNoDataStager), and writes it whole at
+	// the statement otherwise: the store it is handed has to be one.
+	var _ execution.PlanNoDataStager = executionStore
 	workerPorts := worker.Ports{
 		Now:           time.Now,
 		EffectiveTime: legacyTime.Provider(),
@@ -819,6 +844,7 @@ func openProductionPhaseTwoBundleAssembly(
 		MaxSeries: cfg.PhaseTwo.Coordinator.MaxSeries, MaxRetainedBytes: cfg.PhaseTwo.Coordinator.MaxRetainedBytes,
 		MaxStateMutations: cfg.PhaseTwo.Coordinator.MaxStateMutations, MaxEvents: cfg.PhaseTwo.Coordinator.MaxEvents,
 		MaxGapMutations: cfg.PhaseTwo.Coordinator.MaxGapMutations, StoreMaxItems: uint64(cfg.Limits.Store.MaxKeysPerBatch),
+		QueryPermits: cfg.PhaseTwo.Scheduler.ProcessQueryPermits,
 	})
 	if err != nil {
 		return nil, err
@@ -873,7 +899,7 @@ func openProductionPhaseTwoBundleAssembly(
 	// round for the byte constraint (decision-020 section 5.7).
 	costs := scheduler.NewCostLedger(external.Now)
 	viewServer, err := viewstream.NewServer(viewStreamAdmission{registry: ownershipStore, now: external.Now}, observer,
-		viewstream.ServerOptions{Now: external.Now, Costs: costLedgerSink{ledger: costs}})
+		viewstream.ServerOptions{Now: external.streamClock(), Costs: costLedgerSink{ledger: costs}})
 	if err != nil {
 		return nil, err
 	}
@@ -952,7 +978,7 @@ func openProductionPhaseTwoBundleAssembly(
 	viewGate.retryWithin = cfg.PhaseTwo.Ownership.LeaseRenewInterval.Duration()
 	viewClient, err := viewstream.NewClient(
 		viewstream.ClientIdentity{WorkerID: cfg.PhaseTwo.Worker.ID, Incarnation: incarnation, StreamToken: streamIdentity.Token},
-		viewStreamDiscovery{store: ownershipStore}, repository, observer, viewstream.ClientOptions{Now: external.Now, Switched: viewGate,
+		viewStreamDiscovery{store: ownershipStore}, repository, observer, viewstream.ClientOptions{Now: external.streamClock(), Switched: viewGate,
 			Costs: workerCosts, LookbackPlans: lookbackPlansInto(lookbackEngine)},
 	)
 	if err != nil {
@@ -1299,6 +1325,7 @@ func openProductionPhaseTwoBundleAssembly(
 	// soon as the hold ends, not at its next turn.
 	flights.OnTurnedAwayReleased(bundle.noticeFlightReleased)
 	bundle.workerPorts = workerPorts
+	bundle.coordinator = coordinator
 	bundle.cmdbIndex = cmdbIndex
 	// The link's close by filter, where its control plane is named: the
 	// inactive and scope closes send through it, and the control leader's

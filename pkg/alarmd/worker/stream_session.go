@@ -149,6 +149,27 @@ type streamedExecution struct {
 	// reader on another goroutine: access reads it across an in-place
 	// readiness wait while the series path keeps adding.
 	retainedInputNow atomic.Uint64
+	// ahead is the next slice read while this one completes, and aheadBytes
+	// what it holds (slice_read_ahead.go): counted in retainedTotal, so the
+	// share, the slice limit and the windows see it.
+	aheads     []*sliceReadAhead
+	aheadBytes atomic.Uint64
+	// aheadAtRefusal is aheadBytes when a reservation of the stream's was
+	// last refused (judgeRetainedLocked), for yieldReadAhead.
+	aheadAtRefusal atomic.Uint64
+	// readAheadEnds counts how the Slot's reads ahead ended (readAheadEnd).
+	readAheadEnds [readAheadEnds]uint64
+	// stageAheadEnds counts how the Slot's no-data first writes staged
+	// ahead ended (observability.NoDataStageAheadOutcomes), and
+	// groupsStagedAhead the groups they staged.
+	// routineEvaluations is, by Plan in the order first met, the routine
+	// evaluations of the batch being evaluated merged into one line each
+	// (observability.MergeRoutineEvaluation), said as the batch ends.
+	routineEvaluations      map[execution.PlanIdentity]*observability.Observation
+	routineEvaluationsOrder []execution.PlanIdentity
+	stageAheadEnds          [4]uint64
+	stageAheadDiffers       [3]uint64
+	groupsStagedAhead       uint64
 	// retainedNow is retainedByPhase again for a reader on another goroutine
 	// (RetainedHolders), and heldSince when this execution first retained;
 	// holding says it has joined the coordinator's holder registry. holding
@@ -467,16 +488,20 @@ func (coordinator *SlotExecutionCoordinator) holdRetained(owner *streamedExecuti
 	if bytes == 0 {
 		return nil
 	}
-	coordinator.reservations.mu.Lock()
-	err := coordinator.judgeRetainedLocked(owner, bytes, phase)
-	if err == nil {
-		coordinator.reservations.retainedBytes += bytes
+	for {
+		coordinator.reservations.mu.Lock()
+		err := coordinator.judgeRetainedLocked(owner, bytes, phase)
+		if err == nil {
+			coordinator.reservations.retainedBytes += bytes
+		}
+		coordinator.reservations.mu.Unlock()
+		if err == nil || !owner.yieldReadAhead() {
+			if err == nil && owner != nil {
+				owner.retainBytes(retainPhaseState, bytes)
+			}
+			return err
+		}
 	}
-	coordinator.reservations.mu.Unlock()
-	if err == nil && owner != nil {
-		owner.retainBytes(retainPhaseState, bytes)
-	}
-	return err
 }
 
 // letGoRetained gives back what holdRetained reserved.
@@ -498,7 +523,7 @@ func (stream *streamedExecution) retainedTotal() uint64 {
 	if stream == nil {
 		return 0
 	}
-	var total uint64
+	total := stream.aheadBytes.Load()
 	for _, retained := range stream.retainedByPhase {
 		total += retained
 	}
@@ -544,6 +569,11 @@ func (stream *streamedExecution) Begin(ctx context.Context, header execution.Int
 	}
 	if header.Contract != stream.request.Contract {
 		return errors.New("alarmd worker: execution header changed frozen contract")
+	}
+	if stream.slicing() && stream.slices.dimensionsGone(header) {
+		// Begun before any query is sent (access.Source): the slices go
+		// with nothing read, and the Slot begins again read whole.
+		return errSliceDimensionsGone
 	}
 	inputBuilder, err := execution.PrepareSeriesEvaluationInputBuilder(header)
 	if err != nil {
@@ -1377,6 +1407,9 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 		}
 	}
 	stream.windows.prepared, stream.windows.reached, stream.windows.dropped = preparedSeriesEvaluations, 0, 0
+	if stream.slicing() {
+		stream.slices.notePrepared(preparedSeriesEvaluations)
+	}
 	if first {
 		stream.fixWindowCeiling(ctx, len(preparedSeriesEvaluations))
 	} else {
@@ -1489,13 +1522,54 @@ func (stream *streamedExecution) evaluateSeries(
 	// flushed first so its degraded result merges in order.
 	batchLimit := stream.statePreflightBatchLimit()
 	pending := make([]completedSeries, 0, batchLimit)
-	flush := func() error {
+	// A full batch's State read starts as the batch is full and is evaluated
+	// once the next batch is full, or at flush: the read of one batch
+	// overlaps the evaluation and merge of the one before (startPreflightRead).
+	// The batches stay in order, and the series of two batches are different
+	// keys: a Slot's prepared series hold each (Plan, series) once - they
+	// come from the per-Plan series sets the stream keeps (planSeries) - the
+	// slices of a Slot read in slices are disjoint, so no series is in two,
+	// and the no-data synthetic series, with digests of their own, are
+	// evaluated after every real batch has been flushed (evaluateNoData),
+	// never read ahead beside one. A goroutine costs nothing beside a Redis round trip, and one more
+	// batch of loaded views in flight is a batch's, so every batch is read
+	// ahead.
+	var read struct {
+		batch []completedSeries
+		state *preflightRead
+	}
+	// No read outlives the evaluation that started it, whichever way it
+	// returns.
+	defer func() {
+		if read.state != nil {
+			<-read.state.done
+		}
+	}()
+	evaluateRead := func() error {
+		if read.state == nil {
+			return nil
+		}
+		batch, state := read.batch, read.state
+		read.batch, read.state = nil, nil
+		return stream.evaluateReadBatch(ctx, batch, state)
+	}
+	// next is the series before the next full batch.
+	next := func() error {
 		if len(pending) == 0 {
 			return nil
 		}
-		err := stream.evaluateCompletedSeriesBatch(ctx, pending)
-		pending = pending[:0]
+		batch := pending
+		pending = make([]completedSeries, 0, batchLimit)
+		state := stream.startPreflightRead(ctx, batch, true)
+		err := evaluateRead()
+		read.batch, read.state = batch, state
 		return err
+	}
+	flush := func() error {
+		if err := next(); err != nil {
+			return err
+		}
+		return evaluateRead()
 	}
 	// Counted here, before the first branch that can drop a series: this is
 	// the Slot's intent, and every later count is measured against it.
@@ -1566,7 +1640,7 @@ func (stream *streamedExecution) evaluateSeries(
 				Plan: due.Identity, StateGeneration: due.StateGeneration, SeriesIdentityDigest: prepared.identity,
 			}, ApplyVersion: version, CarryFrom: carryFrom(due), Sharded: !due.Shard.IsZero()}})
 		if len(pending) >= batchLimit {
-			if err := flush(); err != nil {
+			if err := next(); err != nil {
 				return err
 			}
 		}
@@ -2260,22 +2334,66 @@ func (stream *streamedExecution) mergePrimaryIncompleteSeries(
 // own view. Per-item read outcomes stay isolated: a corrupt blob degrades only
 // its series, as it did when every series was read alone.
 func (stream *streamedExecution) evaluateCompletedSeriesBatch(ctx context.Context, batch []completedSeries) error {
+	return stream.evaluateReadBatch(ctx, batch, stream.startPreflightRead(ctx, batch, false))
+}
+
+// preflightRead is one preflight batch's State read, started on its own
+// goroutine while the batch before it is evaluated (prefetch), or on the
+// Slot's. done closes when the read has come back; the read touches only the
+// store and its own fields.
+type preflightRead struct {
+	request execution.StatePreflightRequest
+	loaded  execution.StatePreflightResult
+	err     error
+	started time.Time
+	timing  *execution.PreflightTiming
+	done    chan struct{}
+}
+
+// startPreflightRead reads the batch's Runtime State: on a goroutine of its
+// own with prefetch, so the next batch's read overlaps this batch's
+// evaluation and merge, or before it returns without.
+func (stream *streamedExecution) startPreflightRead(ctx context.Context, batch []completedSeries, prefetch bool) *preflightRead {
 	stateItems := make([]execution.StatePreflightItem, len(batch))
 	for index, entry := range batch {
 		stateItems[index] = entry.item
 	}
-	stateRequest := execution.StatePreflightRequest{Contract: stream.request.Contract, Items: stateItems, OwnerFence: stream.request.OwnerFence}
-	started := time.Now()
-	leave := stream.enter(slotPhasePreflight)
+	read := &preflightRead{request: execution.StatePreflightRequest{Contract: stream.request.Contract, Items: stateItems,
+		OwnerFence: stream.request.OwnerFence}, started: time.Now(), done: make(chan struct{})}
 	timedCtx, timing := execution.WithPreflightTiming(ctx)
-	loaded, err := stream.coordinator.ports.State.LoadRuntime(timedCtx, stateRequest)
-	if err == nil {
-		loaded, err = execution.ClassifyStatePreflight(stateRequest, loaded)
+	read.timing = timing
+	state := stream.coordinator.ports.State
+	run := func() {
+		defer close(read.done)
+		read.loaded, read.err = state.LoadRuntime(timedCtx, read.request)
+		if read.err == nil {
+			read.loaded, read.err = execution.ClassifyStatePreflight(read.request, read.loaded)
+		}
 	}
+	if prefetch {
+		go run()
+	} else {
+		run()
+	}
+	return read
+}
+
+// evaluateReadBatch evaluates the batch from its State read, once the read
+// has come back.
+func (stream *streamedExecution) evaluateReadBatch(ctx context.Context, batch []completedSeries, read *preflightRead) error {
+	// The batch's routine evaluations are said as it ends, however it ends:
+	// each was evaluated.
+	defer stream.sayRoutineEvaluations(ctx)
+	// The phase is the wait for the read: a read that overlapped the batch
+	// before charges only what it had left when this batch needed it.
+	leave := stream.enter(slotPhasePreflight)
+	<-read.done
 	// Both outcomes: a read that did not come back is the one that took the
 	// longest, and leaving it out would make the phase's total fall exactly
 	// when the reads started timing out.
 	leave()
+	stateRequest, loaded, err, started, timing := read.request, read.loaded, read.err, read.started, read.timing
+	stateItems := stateRequest.Items
 	if err != nil {
 		// The read's own facts, because they are the ones that decide what to
 		// do. A read that did not come back has no byte count - that is why the
@@ -2300,17 +2418,33 @@ func (stream *streamedExecution) evaluateCompletedSeriesBatch(ctx context.Contex
 			StateFetchMillis: timing.Fetch.Milliseconds(), StateDecodeMillis: timing.Decode.Milliseconds()}, nil)
 	outcomes := make(map[string]int)
 	defer stream.observeCarries(ctx, outcomes)
+	// The series are evaluated side by side and merged one after another in
+	// the batch's order (evaluateSideBySide): everything that reads or moves
+	// the Slot's own state - the window, the Plan in progress, the reservations
+	// - stays on this goroutine and in this order. pending is the series
+	// prepared and not yet merged; settle evaluates and merges them, and runs
+	// before anything else that merges or cuts a window.
+	var pending []*seriesEvaluation
+	settle := func() error {
+		err := stream.evaluateSideBySide(ctx, pending)
+		clear(pending)
+		pending = pending[:0]
+		return err
+	}
 	for index, entry := range batch {
 		// The batch stops pointing at the series' inputs as it is taken: a
 		// window applied part way through the batch lets the inputs of the
 		// series before go, and the batch is not to keep them alive past it.
 		batch[index].inputs = nil
-		stream.beginEvaluating(entry.due.Identity)
 		view, outcome := carryHistory(entry.due, loaded.Items[index])
 		if outcome != "" {
 			outcomes[outcome]++
 		}
 		if stream.supplement != nil && stream.supplementReached(view) {
+			if err := settle(); err != nil {
+				return err
+			}
+			stream.beginEvaluating(entry.due.Identity)
 			continue
 		}
 		// Before the evaluation and beside the supplement's own skip, for the
@@ -2320,117 +2454,32 @@ func (stream *streamedExecution) evaluateCompletedSeriesBatch(ctx context.Contex
 		// store answers the same way on every retry -- it does not go back --
 		// so the Query Group stood still until the replay expired.
 		if execution.SupersededBy(view.PersistedApplyVersion, entry.item.ApplyVersion) {
+			if err := settle(); err != nil {
+				return err
+			}
+			stream.beginEvaluating(entry.due.Identity)
 			if err := stream.skipSupersededSeries(ctx, entry, view); err != nil {
 				return err
 			}
 			continue
 		}
-		if err := stream.evaluateLoadedSeries(ctx, entry, view); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry completedSeries, view execution.RuntimeStateView) error {
-	defer stream.enter(slotPhaseSeries)()
-	due, series, inputs := entry.due, entry.series, entry.inputs
-	if view.VersionComparison == execution.ApplyVersionEqual {
-		resumed, gapSuperseded, err := resumedSeriesResult(stream.header, due, view, stream.gaps)
-		if err != nil {
-			return err
-		}
-		// Its key was loaded, and its witness is held as any loaded key's is.
-		if err := stream.mergeMeasured(ctx, resumed, stream.measureMerge(resumed, 0, loadedKeyHeldBytes)); err != nil {
-			return err
-		}
-		stream.noteResumed(due.Identity)
-		if gapSuperseded {
-			stream.noteSupersededGap(ctx, due.GapIdentity())
-		}
-		stream.coordinator.observe(ctx, observability.ComponentState, observability.StageMutationCompared,
-			stream.request.Operation, time.Now(), observability.ResultSuccess,
-			observability.ReasonStateAlreadyAppliedBeforeEvaluation, nil)
-		return nil
-	}
-	stateItems := []execution.StatePreflightItem{entry.item}
-	loaded := execution.StatePreflightResult{Items: []execution.RuntimeStateView{view}}
-	// The effective time is judged at the decision: the facts prepared when
-	// the Slot began are judged again only if a window boundary has passed
-	// since, which is when they stop holding.
-	decision := stream.coordinator.now().Unix()
-	if !effectiveFactsHoldAt(stream.effective, decision) {
-		effective, err := PrepareEffectiveTimeFacts(ctx, stream.header, stream.coordinator.ports.EffectiveTime, decision)
-		if err != nil {
-			return fmt.Errorf("alarmd worker: prepare EffectiveTime facts at the decision: %w", err)
-		}
-		stream.effective = effective
-	}
-	evaluationHeader, err := bindAlwaysEffectiveTimeFacts(stream.header, stateItems, stream.effective, entry.kind())
-	if err != nil {
-		return fmt.Errorf("alarmd worker: bind series EffectiveTime facts: %w", err)
-	}
-	evaluationHeader.DecisionTime = decision
-	// The window that evaluates the series is the one that reads its ids:
-	// derived here, once a point, and gone when the window lands.
-	if err := stream.materializeRecordIDs(ctx, entry.position, inputs); err != nil {
-		return err
-	}
-	request := execution.EvaluationRequest{Header: evaluationHeader, Inputs: inputs, State: loaded, Gaps: stream.gaps,
-		HostOverlay: stream.hostOverlays[due.Identity][series], NamedOutputs: stream.primaryNamedOutputs(inputs)}
-	// Told before the evaluation, so the strategy is in the copy's next read
-	// even if no record of this round asks about it. The constructor requires
-	// the port; the guard is for tests that build the struct.
-	if openAlerts := stream.coordinator.ports.OpenAlerts; openAlerts != nil {
-		openAlerts.TrackPlans(stream.header.Contract.Slot.QueryGroup, []execution.PlanIdentity{due.Identity})
-		request.OpenAlerts = openAlerts
-		if entry.closing {
-			request.OpenAlerts = oneTimeClose{}
-		}
-	}
-	started := time.Now()
-	leaveEvaluate := stream.enter(slotPhaseEvaluate)
-	execution.MarkStage(ctx, execution.SlotStageEvaluate)
-	evaluated, err := stream.coordinator.ports.Evaluator.Evaluate(ctx, request)
-	leaveEvaluate()
-	if err != nil {
-		stream.observeEvaluationFailure(ctx, started, due, err)
-		return wrapEvaluationError(codeEvaluationFailed, fmt.Errorf("alarmd worker: evaluate series: %w", err))
-	}
-	incomplete := make([]execution.NamedInputBinding, 0)
-	for _, input := range inputs {
-		for _, binding := range input.Inputs {
-			// The same predicate the fold reads, so the marker proposed here
-			// covers exactly the Levels whose outcomes will name its reason.
-			if execution.InputIncompleteForGuard(binding) {
-				incomplete = append(incomplete, binding)
+		if view.VersionComparison == execution.ApplyVersionEqual {
+			if err := settle(); err != nil {
+				return err
 			}
+			stream.beginEvaluating(entry.due.Identity)
+			if err := stream.mergeResumedSeries(ctx, entry, view); err != nil {
+				return err
+			}
+			continue
 		}
-	}
-	if len(incomplete) != 0 {
-		if len(evaluated.Plans) != 1 || evaluated.Plans[0].Plan != due.Identity {
-			return errors.New("alarmd worker: incomplete named input produced an invalid Plan result")
+		job, err := stream.prepareSeriesEvaluation(ctx, entry, view, settle)
+		if err != nil {
+			return err
 		}
-		mutation, mutationErr := stream.completionGapMutationFor(due, incomplete)
-		if mutationErr != nil {
-			return mutationErr
-		}
-		evaluated.Plans[0].GuardBeforeEvents = []execution.PlanGapMutation{mutation}
-		evaluated.Plans[0].GuardAfterState = nil
+		pending = append(pending, job)
 	}
-	if err := evaluated.Validate(request); err != nil {
-		stream.observeEvaluationFailure(ctx, started, due, err)
-		return wrapEvaluationError(codeEvaluationResultInvalid, fmt.Errorf("alarmd worker: invalid series evaluation: %w", err))
-	}
-	stream.observeEvaluationCompleted(ctx, started, due, series, inputs, evaluated)
-	retained, err := evaluationRetainedSize(loaded, execution.EvaluationResult{})
-	if err != nil {
-		return fmt.Errorf("alarmd worker: measure evaluated retention: %w", err)
-	}
-	if stream.supplement != nil {
-		stream.noteSupplementEvaluated(due, series, inputs, &evaluated)
-	}
-	return stream.mergeEvaluatedSeries(ctx, entry.position, evaluated, retained, loaded.Items, stateItems)
+	return settle()
 }
 
 // mergeEvaluatedSeries merges one evaluated series' result with the views it
@@ -2525,7 +2574,44 @@ func (stream *streamedExecution) observeEvaluationCompleted(
 		CarriedReason: execution.CarriedReasonFacts(evaluated.ReasonCarried && evaluated.Result != observability.ResultSuccess,
 			evaluated.ReasonOrigin),
 	}
+	stream.sayEvaluation(ctx, due, observation)
+}
+
+// sayEvaluation says one series' evaluation line, or merges it.
+func (stream *streamedExecution) sayEvaluation(ctx context.Context, due execution.DuePlan, observation observability.Observation) {
+	// A routine evaluation - one the line counts and does not write, with no
+	// reason and no gate of its own - is merged with its Plan's others of
+	// the batch into one line: every count read from the lines is the same,
+	// and a batch of thousands of series is one line a Plan, not one a
+	// series (decision-020 0.6.x throughput design 3.4-3).
+	if observability.Routine(observation) && observation.DurationKnown && observation.ReasonCode == "" && observation.CarriedReason == nil &&
+		len(observation.RecoveryGates) == 0 && len(observation.OpenAlertGates) == 0 && len(observation.RecoveryWithheld) == 0 {
+		if stream.routineEvaluations == nil {
+			stream.routineEvaluations = make(map[execution.PlanIdentity]*observability.Observation)
+		}
+		merged := stream.routineEvaluations[due.Identity]
+		if merged == nil {
+			// Started from the line itself, which the merge then takes as
+			// the Plan's first (Counts.Evaluations still zero).
+			first := observation
+			merged = &first
+			stream.routineEvaluations[due.Identity] = merged
+			stream.routineEvaluationsOrder = append(stream.routineEvaluationsOrder, due.Identity)
+		}
+		observability.MergeRoutineEvaluation(merged, observation)
+		return
+	}
 	stream.coordinator.ports.Observer.Observe(ctx, observation)
+}
+
+// sayRoutineEvaluations says the batch's routine evaluations, a line a Plan.
+func (stream *streamedExecution) sayRoutineEvaluations(ctx context.Context) {
+	defer func() { _ = recover() }()
+	for _, plan := range stream.routineEvaluationsOrder {
+		stream.coordinator.ports.Observer.Observe(ctx, *stream.routineEvaluations[plan])
+	}
+	clear(stream.routineEvaluations)
+	stream.routineEvaluationsOrder = stream.routineEvaluationsOrder[:0]
 }
 
 // planSeriesCount is how many series the stream bound for the Plan: from
@@ -2777,10 +2863,9 @@ func (stream *streamedExecution) algorithmObservationFacts(
 			if !found {
 				continue
 			}
-			for _, binding := range input.Inputs {
-				if !algorithmObservesBinding(algorithm, binding) {
-					continue
-				}
+			for _, binding := range oneBindingARequirement(input.Inputs, func(binding execution.NamedInputBinding) bool {
+				return algorithmObservesBinding(algorithm, binding)
+			}) {
 				inputFacts = append(inputFacts, stream.algorithmInputFacts(algorithm, outcome, binding)...)
 			}
 		}
@@ -2843,6 +2928,35 @@ func algorithmObservesBinding(algorithm observedAlgorithm, binding execution.Nam
 	return found
 }
 
+// oneBindingARequirement is the bindings keep takes, one a requirement: a
+// Plan answered from its completion in a Slot read in slices carries a
+// binding of each slice that did not complete beside the first slice's, for
+// the same requirement, and its input is one input of the round,
+// counted once. The one taken is the first that did not complete, if one did
+// not - the round is as short as its shortest slice - and the first
+// otherwise, in the order the requirements first appear.
+func oneBindingARequirement(bindings []execution.NamedInputBinding, keep func(execution.NamedInputBinding) bool) []execution.NamedInputBinding {
+	chosen := make(map[execution.RequirementID]int, len(bindings))
+	order := make([]execution.RequirementID, 0, len(bindings))
+	for index, binding := range bindings {
+		if !keep(binding) {
+			continue
+		}
+		earlier, seen := chosen[binding.RequirementID]
+		if !seen {
+			order = append(order, binding.RequirementID)
+		}
+		if !seen || bindings[earlier].Completeness == execution.CompletenessFull && binding.Completeness != execution.CompletenessFull {
+			chosen[binding.RequirementID] = index
+		}
+	}
+	taken := make([]execution.NamedInputBinding, 0, len(order))
+	for _, requirement := range order {
+		taken = append(taken, bindings[chosen[requirement]])
+	}
+	return taken
+}
+
 func (stream *streamedExecution) completionOnlyAlgorithmInputFacts(
 	due execution.DuePlan,
 ) []observability.AlgorithmInputFact {
@@ -2858,11 +2972,9 @@ func (stream *streamedExecution) completionOnlyAlgorithmInputFacts(
 			if !observed {
 				continue
 			}
-			for _, binding := range bindings {
-				if !binding.Consumer.HasLevel || binding.Consumer.LevelID != levelID ||
-					!algorithmObservesBinding(algorithm, binding) {
-					continue
-				}
+			for _, binding := range oneBindingARequirement(bindings, func(binding execution.NamedInputBinding) bool {
+				return binding.Consumer.HasLevel && binding.Consumer.LevelID == levelID && algorithmObservesBinding(algorithm, binding)
+			}) {
 				facts = append(facts, stream.completionOnlyAlgorithmBindingFacts(algorithm, levelID, binding)...)
 			}
 		}

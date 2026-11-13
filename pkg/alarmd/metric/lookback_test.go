@@ -60,6 +60,7 @@ func lookbackSeriesUpperBounds() map[string]int {
 		"lookback_supplement_unobserved_total":        sources * len(lookback.DirectedUnobservedReasons),
 		"lookback_supplement_series_total":            sources * len(lookback.SupplementSeriesOutcomes),
 		"lookback_supplement_points_total":            sources,
+		"lookback_supplement_partly_refused_total":    sources,
 		"lookback_directed_read_bytes_total":          sources,
 		"lookback_supplement_hold_total":              sources * len(lookback.SupplementHoldBuckets),
 		"lookback_supplement_hold_max_seconds":        sources,

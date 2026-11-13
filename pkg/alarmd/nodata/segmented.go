@@ -60,6 +60,11 @@ const (
 	// that it is the closing one (AbsenceResult.Closing).
 	presentFlagNormal
 	presentFlagClosing
+	// presentFlagStaged is a present group the caller staged ahead of the
+	// statement, as seen at this round (PresentSet.MarkStaged), and
+	// presentFlagStagedKept one the round kept as exactly that.
+	presentFlagStaged
+	presentFlagStagedKept
 )
 
 // PresentSet is one Plan's present groups in one Slot, kept by the caller as
@@ -105,6 +110,27 @@ func (set *PresentSet) Add(dimensions map[string]string) (string, bool) {
 // Len is how many groups the set holds.
 func (set *PresentSet) Len() int { return len(set.keys) }
 
+// MarkStaged records that the caller staged a held key ahead of the
+// statement as a group seen at this round; the round then leaves it
+// out of the delta it holds when it keeps it as that, and says when it did
+// not (SegmentedResult.StagedDiffers). Taken only before a round has the set.
+func (set *PresentSet) MarkStaged(key string) {
+	if flags, held := set.keys[key]; held && !set.claimed {
+		set.keys[key] = flags | presentFlagStaged
+	}
+}
+
+// StagedCount is how many held keys were marked staged.
+func (set *PresentSet) StagedCount() uint64 {
+	var staged uint64
+	for _, flags := range set.keys {
+		if flags&presentFlagStaged != 0 {
+			staged++
+		}
+	}
+	return staged
+}
+
 // claim hands the set to a round, once, refusing one kept for other groups
 // than the round's.
 func (set *PresentSet) claim(aggDimension []string) error {
@@ -136,6 +162,26 @@ type SegmentedRound struct {
 	set         []execution.NoDataGroupDelta
 	del         []string
 	held        uint64
+	// staged is what the caller staged of a whole record ahead of the
+	// statement (UseStaged), stagedKept the staged groups the round kept as
+	// staged, and stagedDiffers that one was kept otherwise or not kept.
+	staged        *execution.NoDataStaged
+	stagedKept    uint64
+	stagedDiffers bool
+}
+
+// UseStaged hands the round what the caller staged of the whole record
+// ahead of the statement, before Finish: the groups marked staged in the
+// present set (PresentSet.MarkStaged).
+func (round *SegmentedRound) UseStaged(staged *execution.NoDataStaged) { round.staged = staged }
+
+// stagedFlags is the present set's flags of key, and whether it was staged.
+func (round *SegmentedRound) stagedFlags(key string) (uint8, bool) {
+	if round.judge.absence == nil {
+		return 0, false
+	}
+	flags, present := round.judge.absence.present[key]
+	return flags, present && flags&presentFlagStaged != 0
 }
 
 // NewSegmentedRound prepares one Plan's round; input.Present is required and
@@ -259,6 +305,18 @@ func (round *SegmentedRound) fold(judgement GroupJudgement) error {
 			return err
 		}
 	}
+	if flags, staged := round.stagedFlags(judgement.Key); staged {
+		// Staged as seen at this round: kept as that, it is in the staging
+		// key already and not held here; kept otherwise, the stage is not
+		// this round's record (Finish).
+		if round.replace && set != nil && set.Absent == nil && at == round.input.EvaluationTime {
+			round.judge.absence.present[judgement.Key] = flags | presentFlagStagedKept
+			round.stagedKept++
+			set = nil
+		} else {
+			round.stagedDiffers = true
+		}
+	}
 	if set != nil {
 		round.set = append(round.set, *set)
 		round.held += SegmentedDeltaBytes(*set)
@@ -313,7 +371,26 @@ type SegmentedResult struct {
 	PresentKeys []string
 	// Mutation is nil when nothing moved or the round is not judged.
 	Mutation *execution.PlanNoDataMutation
+	// StagedDiffers says why the groups staged ahead of the statement are
+	// not this round's to put in place (StagedDiffersReasons), empty when
+	// they are or none were: the statement then carries every group, and the
+	// caller discards what it staged. A round not judged, or with nothing to
+	// write, leaves its stage to discard as well.
+	StagedDiffers string
 }
+
+// Why a round's stage is not its record, closed: a staged group the round
+// kept otherwise or not at all; the stage's groups not the ones the round
+// marked and kept (a segment staged and not marked, or the reverse); the
+// round's present-as-of not the one they were staged against.
+const (
+	StagedDiffersKeptOtherwise = "kept_otherwise"
+	StagedDiffersCount         = "count_mismatch"
+	StagedDiffersPresentAsOf   = "present_as_of"
+)
+
+// StagedDiffersReasons is every reason.
+var StagedDiffersReasons = [3]string{StagedDiffersKeptOtherwise, StagedDiffersCount, StagedDiffersPresentAsOf}
 
 // Finish judges the groups no stored entry named, settles the Plan and builds
 // the statement of the memory it results in.
@@ -355,6 +432,27 @@ func (round *SegmentedRound) Finish(version execution.ApplyVersion) (SegmentedRe
 		return result, nil
 	}
 	input := round.input
+	staged := round.staged
+	differs := ""
+	switch {
+	case staged == nil:
+	case round.stagedDiffers || !round.replace:
+		differs = StagedDiffersKeptOtherwise
+	case round.stagedKept != staged.Groups() || round.stagedKept != input.Present.StagedCount():
+		differs = StagedDiffersCount
+	case staged.PresentAsOf != judgement.PresentAsOf:
+		differs = StagedDiffersPresentAsOf
+	}
+	if differs != "" {
+		// Not this round's record: every group goes with the statement, the
+		// ones kept as staged back in the delta.
+		for key, flags := range round.judge.absence.present {
+			if flags&presentFlagStagedKept != 0 {
+				round.set = append(round.set, execution.NoDataGroupDelta{GroupKey: key})
+			}
+		}
+		staged, result.StagedDiffers = nil, differs
+	}
 	mutation, err := execution.BuildPlanNoDataSegmentedMutation(execution.PlanNoDataSegmentedUpdate{
 		Identity: input.Identity, GroupLimit: input.MaxGroups,
 		DerivedFrom: input.Snapshot.Representation, ExpectedMarkerRevision: input.Snapshot.MarkerRevision,
@@ -362,7 +460,7 @@ func (round *SegmentedRound) Finish(version execution.ApplyVersion) (SegmentedRe
 		ScheduleRevision: input.ScheduleRevision, RosterVersion: judgement.RosterVersion,
 		PresentAsOf: judgement.PresentAsOf, TrackingExhaustedAt: judgement.TrackingExhaustedAt,
 		LoadedPresentAsOf: input.Snapshot.PresentAsOf, LoadedTrackingExhaustedAt: input.Snapshot.TrackingExhaustedAt,
-		Set: round.set, Del: round.del, Memory: &round.memory,
+		Set: round.set, Del: round.del, Memory: &round.memory, Staged: staged,
 	})
 	if err != nil {
 		return SegmentedResult{}, err

@@ -108,7 +108,7 @@ func BenchmarkDecodeALargeAnswer(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		sink := &deliveryFoldingSink{}
-		done, err := client.decodeShared(context.Background(), strings.NewReader(string(body)), attempt, sink)
+		done, err := client.decodeShared(context.Background(), nil, strings.NewReader(string(body)), attempt, sink)
 		if err != nil || done.Completeness != execution.CompletenessFull || done.Delivery.Series != largeAnswerSeries {
 			b.Fatalf("decode = %+v, %v", done, err)
 		}

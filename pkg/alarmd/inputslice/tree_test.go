@@ -127,16 +127,17 @@ func members(t *testing.T, slice execution.InputSlice, population []series) []se
 	return in
 }
 
-// sampleOf is the sample a discarded slice hands Split: each dimension's
-// values, a missing label read as empty.
-func sampleOf(dimensions []string, in []series) map[string][]string {
-	sample := map[string][]string{}
+// sampleOf is the sample a discarded slice hands Split, as the worker keeps
+// it (worker sampleSlice): each dimension's distinct values with the series
+// that carried each, a missing label read as empty.
+func sampleOf(dimensions []string, in []series) inputslice.Sample {
+	values := map[string][]string{}
 	for _, dimension := range dimensions {
-		for _, values := range in {
-			sample[dimension] = append(sample[dimension], values[dimension])
+		for _, series := range in {
+			values[dimension] = append(values[dimension], series[dimension])
 		}
 	}
-	return sample
+	return inputslice.SampleOf(values)
 }
 
 // awkwardRunes are characters that mean something in a bracket expression or
@@ -206,7 +207,7 @@ func TestEveryValueInExactlyOneLeafAfterAnySplits(t *testing.T) {
 			population := randomPopulation(rng, dimensions, 300)
 			unseen := randomPopulation(rng, dimensions, 300)
 			probe := append(append([]series(nil), population...), unseen...)
-			tree, err := inputslice.New(dimensions, 1+rng.Intn(12))
+			tree, err := inputslice.New(dimensions, 1+rng.Intn(12), dimensions[0])
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -223,7 +224,7 @@ func TestEveryValueInExactlyOneLeafAfterAnySplits(t *testing.T) {
 					continue
 				}
 				in := members(t, leaf.Slice, population)
-				var sample map[string][]string
+				var sample inputslice.Sample
 				switch rng.Intn(5) {
 				case 0:
 				case 1:
@@ -263,7 +264,7 @@ func TestEveryValueInExactlyOneLeafAfterAnySplits(t *testing.T) {
 // characters in four groups of nine, the last group left to the complement,
 // and the root's exhausted child negated.
 func TestRootSplitConditions(t *testing.T) {
-	tree, err := inputslice.New([]string{"pod"}, 1)
+	tree, err := inputslice.New([]string{"pod"}, 1, "pod")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +319,7 @@ func TestSampledClassesEscapeBracketCharacters(t *testing.T) {
 		}
 	}
 	population = append(population, series{}, series{"pod": ""})
-	tree, err := inputslice.New([]string{"pod"}, 1)
+	tree, err := inputslice.New([]string{"pod"}, 1, "pod")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +354,7 @@ func TestFixedSuffixMakesProgress(t *testing.T) {
 			for index := 0; index < 200; index++ {
 				population = append(population, series{"pod": fmt.Sprintf("name-%d%s", index, suffix)})
 			}
-			tree, err := inputslice.New([]string{"pod"}, 1)
+			tree, err := inputslice.New([]string{"pod"}, 1, "pod")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -384,18 +385,20 @@ func TestFixedSuffixMakesProgress(t *testing.T) {
 }
 
 // TestSingleValueSwitchesDimension is a slice whose series all share one
-// value of the dimension being cut: the split moves to the next dimension,
+// value of the dimension being cut: the split moves to another dimension,
 // keeps the slice's own condition, and never compares to the shared value.
+// Four clusters, a quarter of the series each, split the root more evenly
+// than two pods, half each, so the root is cut on cluster.
 func TestSingleValueSwitchesDimension(t *testing.T) {
 	dimensions := []string{"cluster", "pod"}
 	var population []series
-	for index := 0; index < 60; index++ {
-		population = append(population,
-			series{"cluster": "a1", "pod": fmt.Sprintf("pod-%d", index)},
-			series{"cluster": "b1", "pod": fmt.Sprintf("pod-%d", index)})
+	for index := 0; index < 30; index++ {
+		for _, cluster := range []string{"a1", "b2", "c3", "d4"} {
+			population = append(population, series{"cluster": cluster, "pod": fmt.Sprintf("pod-%d", index%2)})
+		}
 	}
 	population = append(population, series{"pod": "x"}, series{"cluster": "a1"}, series{})
-	tree, err := inputslice.New(dimensions, 1)
+	tree, err := inputslice.New(dimensions, 1, dimensions[0])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -476,7 +479,7 @@ func TestSwitchFromRootCarriesNoEmptyCondition(t *testing.T) {
 	for index := 0; index < 40; index++ {
 		population = append(population, series{"cluster": "c", "pod": fmt.Sprintf("p%d", index)})
 	}
-	tree, err := inputslice.New(dimensions, 1)
+	tree, err := inputslice.New(dimensions, 1, dimensions[0])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -499,7 +502,7 @@ func TestSwitchFromRootCarriesNoEmptyCondition(t *testing.T) {
 func TestConcentratedOnEveryDimensionIsNamed(t *testing.T) {
 	dimensions := []string{"cluster", "pod"}
 	population := []series{{"cluster": "c", "pod": "p"}, {"cluster": "c", "pod": "p"}}
-	tree, err := inputslice.New(dimensions, 1)
+	tree, err := inputslice.New(dimensions, 1, dimensions[0])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -514,7 +517,7 @@ func TestConcentratedOnEveryDimensionIsNamed(t *testing.T) {
 // TestMaxLeavesIsNamed splits without samples until the tree would pass
 // MaxLeaves.
 func TestMaxLeavesIsNamed(t *testing.T) {
-	tree, err := inputslice.New([]string{"pod", "zone"}, 1)
+	tree, err := inputslice.New([]string{"pod", "zone"}, 1, "pod")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -543,7 +546,7 @@ func TestInitialTreeReachesK0(t *testing.T) {
 	probe := randomPopulation(rng, dimensions, 400)
 	reachable := 0
 	for k0 := 0; k0 <= inputslice.MaxLeaves; k0++ {
-		tree, err := inputslice.New(dimensions, k0)
+		tree, err := inputslice.New(dimensions, k0, dimensions[0])
 		if err != nil {
 			assertConcentrated(t, err, inputslice.ReasonMaxLeaves)
 			if k0 <= 2 {
@@ -570,7 +573,7 @@ func TestInitialTreeReachesK0(t *testing.T) {
 // TestLandAndSplitRefuseSettledLeaves is the rule that only unlanded leaves
 // change.
 func TestLandAndSplitRefuseSettledLeaves(t *testing.T) {
-	tree, err := inputslice.New([]string{"pod"}, 2)
+	tree, err := inputslice.New([]string{"pod"}, 2, "pod")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -590,10 +593,10 @@ func TestLandAndSplitRefuseSettledLeaves(t *testing.T) {
 	if _, err := tree.Split(1000, nil); err == nil {
 		t.Fatal("split a leaf that does not exist")
 	}
-	if _, err := inputslice.New(nil, 1); err == nil {
+	if _, err := inputslice.New(nil, 1, ""); err == nil {
 		t.Fatal("built a tree with no dimension")
 	}
-	if _, err := inputslice.New([]string{"pod", "pod"}, 1); err == nil {
+	if _, err := inputslice.New([]string{"pod", "pod"}, 1, "pod"); err == nil {
 		t.Fatal("built a tree with a dimension twice")
 	}
 }
@@ -627,7 +630,7 @@ func TestAStreamPrefixSampleNeverLumpsDistinctValuesForGood(t *testing.T) {
 	}
 	for room := 4; room <= 9; room++ {
 		t.Run(fmt.Sprint(room), func(t *testing.T) {
-			tree, err := inputslice.New([]string{"host"}, 1)
+			tree, err := inputslice.New([]string{"host"}, 1, "host")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -650,4 +653,221 @@ func TestAStreamPrefixSampleNeverLumpsDistinctValuesForGood(t *testing.T) {
 			assertPartition(t, tr.leaves(), population)
 		})
 	}
+}
+
+// TestTheMostEvenDimensionIsCutFirst is a Query Group whose first dimension
+// is nearly one value: 95 series of cloud "0" and 5 of "1", over 100 hosts
+// host-00 to host-99. Cut on cloud, [0] and the rest, the larger part holds
+// 95 of the 100 series; cut on host by its last digit - ten series a digit,
+// the classes [0-2], [3-4], [5-7] and the complement [8-9] by the cumulative
+// count - the largest holds 30. The root is cut on host, every child holding
+// 30 series at most.
+func TestTheMostEvenDimensionIsCutFirst(t *testing.T) {
+	dimensions := []string{"cloud", "host"}
+	var population []series
+	for index := 0; index < 100; index++ {
+		cloud := "0"
+		if index%20 == 0 {
+			cloud = "1"
+		}
+		population = append(population, series{"cloud": cloud, "host": fmt.Sprintf("host-%02d", index)})
+	}
+	tree, err := inputslice.New(dimensions, 1, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	children, err := tree.Split(tree.Pending()[0].ID, sampleOf(dimensions, population))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, child := range children {
+		if conditions := child.Slice.Conditions; len(conditions) != 1 || conditions[0].Dimension != "host" {
+			t.Fatalf("child is %s, want a single host condition", describe([]execution.InputSlice{child.Slice}))
+		}
+		if got := len(members(t, child.Slice, population)); got > 30 {
+			t.Fatalf("a child holds %d series, want 30 at most", got)
+		}
+	}
+	if got := tree.CutOn(); got != "host" {
+		t.Fatalf("cut on %q, want host", got)
+	}
+	assertPartition(t, (&tracker{tree: tree}).leaves(), append(population, series{}, series{"cloud": "0"}))
+}
+
+// TestASliceOfOneValueIsCutOnAnEarlierDimension is a tree started on its
+// second dimension, host, by the fixed alphabet, whose [0-8] slice holds 40
+// series of host "h1" over zones z1 to z4, ten each. On host the slice can
+// only be refined to [1] and the rest of [0-8], the first holding all 40;
+// on zone, the first dimension, by its last digit, each part holds 10. The
+// slice is cut on zone, its host condition kept, and the tree built back
+// from its shape - the split kept - has the same leaves.
+func TestASliceOfOneValueIsCutOnAnEarlierDimension(t *testing.T) {
+	dimensions := []string{"zone", "host"}
+	var population []series
+	for index := 0; index < 40; index++ {
+		population = append(population, series{"zone": fmt.Sprintf("z%d", 1+index%4), "host": "h1"})
+	}
+	probe := append(append([]series(nil), population...),
+		series{"zone": "z9", "host": "h2"}, series{"host": "h1"}, series{"zone": "z1"}, series{}, series{"zone": "z1", "host": "hx"})
+	tree, err := inputslice.New(dimensions, 2, "host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var leaf *inputslice.Leaf
+	for _, pending := range tree.Pending() {
+		if len(members(t, pending.Slice, population)) == len(population) {
+			leaf = &pending
+		}
+	}
+	if leaf == nil {
+		t.Fatalf("no starting slice holds every h1 series: %s", describe(leavesOf(tree)))
+	}
+	hostCondition := leaf.Slice.Conditions[0]
+	children, err := tree.SplitKept(leaf.ID, sampleOf(dimensions, population))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, child := range children {
+		conditions := child.Slice.Conditions
+		if len(conditions) != 2 || conditions[0] != hostCondition || conditions[1].Dimension != "zone" {
+			t.Fatalf("child is %s, want %+v and a zone condition", describe([]execution.InputSlice{child.Slice}), hostCondition)
+		}
+		if got := len(members(t, child.Slice, population)); got > 10 {
+			t.Fatalf("a child holds %d series, want 10 at most", got)
+		}
+	}
+	assertPartition(t, leavesOf(tree), probe)
+	built, err := inputslice.FromShape(dimensions, tree.Shape())
+	if err != nil {
+		t.Fatalf("from its shape: %v", err)
+	}
+	if got, want := built.Leaves(), tree.Leaves(); got != want {
+		t.Fatalf("built from its shape %d leaves, want %d", got, want)
+	}
+	assertPartition(t, leavesOf(built), probe)
+	if got := built.CutOn(); got != "host" {
+		t.Fatalf("built tree cut on %q, want host", got)
+	}
+}
+
+// A tree starts on the dimension it is given, in the leaves asked, and
+// whole with none: no read chose one. Best is the dimension a sample of the
+// whole Query Group cuts first, none when the sample tells nothing apart.
+func TestATreeStartsOnTheDimensionChosenOrWhole(t *testing.T) {
+	dimensions := []string{"cloud", "host"}
+	whole, err := inputslice.New(dimensions, 4, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending := whole.Pending(); len(pending) != 1 || !pending[0].Slice.IsZero() || whole.CutOn() != "" {
+		t.Fatalf("a tree on no dimension: pending %+v, cut on %q, want the zero slice alone", pending, whole.CutOn())
+	}
+	started, err := inputslice.New(dimensions, 4, "host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started.Leaves() < 4 || started.CutOn() != "host" {
+		t.Fatalf("a tree on host: %d leaves, cut on %q, want 4 at least on host", started.Leaves(), started.CutOn())
+	}
+	for _, leaf := range started.Pending() {
+		for _, condition := range leaf.Slice.Conditions {
+			if condition.Dimension != "host" {
+				t.Fatalf("a starting slice on %s, want host", describe([]execution.InputSlice{leaf.Slice}))
+			}
+		}
+	}
+	if _, err := inputslice.New(dimensions, 4, "pod"); err == nil {
+		t.Fatal("started on a dimension not sliced on")
+	}
+	for _, test := range []struct {
+		name   string
+		sample inputslice.Sample
+		want   string
+	}{
+		{"cloud of one value", inputslice.SampleOf(map[string][]string{"cloud": {"0", "0", "0", "0"}, "host": {"a1", "b2", "c3", "d4"}}), "host"},
+		{"host of one value", inputslice.SampleOf(map[string][]string{"cloud": {"1", "2", "3", "4"}, "host": {"h", "h", "h", "h"}}), "cloud"},
+		{"one value on both", inputslice.SampleOf(map[string][]string{"cloud": {"0", "0"}, "host": {"h", "h"}}), ""},
+		{"no sample", nil, ""},
+	} {
+		cut, ok := inputslice.BestCut(dimensions, test.sample)
+		got := cut.Dimension
+		if got != test.want || ok != (test.want != "") {
+			t.Errorf("%s: best %q %t, want %q", test.name, got, ok, test.want)
+		}
+	}
+}
+
+// TestTheEvenestCutIsJudgedOnSeries is a dimension of many values one of
+// which most series carry: ten cloud ids, "0" on 91 of 100 series and the
+// nine others one each; 100 hosts. By its values cloud would cut as evenly
+// as host - ten values over ten last digits, three of ten in the largest
+// part, as host's 30 of 100 - and, the leaf's own dimension first among
+// equals, be taken. By the series the sample counts, cut on cloud the part
+// of "0" holds 91 series and more - the classes go by the series each
+// character carries - and on host the largest part holds 30: the root is
+// cut on host, every child holding 30 series at most.
+func TestTheEvenestCutIsJudgedOnSeries(t *testing.T) {
+	dimensions := []string{"cloud", "host"}
+	var population []series
+	for index := 0; index < 100; index++ {
+		cloud := "0"
+		if index >= 91 {
+			cloud = fmt.Sprint(index - 90)
+		}
+		population = append(population, series{"cloud": cloud, "host": fmt.Sprintf("host-%02d", index)})
+	}
+	tree, err := inputslice.New(dimensions, 1, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	children, err := tree.Split(tree.Pending()[0].ID, sampleOf(dimensions, population))
+	if err != nil {
+		t.Fatal(err)
+	}
+	largest := 0
+	for _, child := range children {
+		if conditions := child.Slice.Conditions; len(conditions) != 1 || conditions[0].Dimension != "host" {
+			t.Fatalf("child is %s, want a single host condition", describe([]execution.InputSlice{child.Slice}))
+		}
+		largest = max(largest, len(members(t, child.Slice, population)))
+	}
+	if largest > 30 {
+		t.Fatalf("the largest child holds %d series, want 30 at most", largest)
+	}
+}
+
+// TestAStartOnTheSampledCutIsEvenWhereValuesEndInDigits is the window
+// measurement's shape: cloud "0" throughout, device names device-%025d,
+// 20,000 series. Their last two digits are each spread evenly over 0 to 9.
+// The fixed alphabet puts 0 to 8 in one class: a start of 21 leaves, two
+// levels deep, holds 0.9 x 0.9 = 81% of the series in one slice. The cut the
+// sample makes (BestCut) is on device, its last digits split by the series
+// they carry into [0-2], [3-4], [5-7] and the rest [8-9]; a start on it
+// (NewCut), the same classes at both levels, holds at most 0.3 x 0.3 = 9%,
+// 1,800 series, in a slice.
+func TestAStartOnTheSampledCutIsEvenWhereValuesEndInDigits(t *testing.T) {
+	dimensions := []string{"cloud", "device"}
+	var population []series
+	for index := 0; index < 20_000; index++ {
+		population = append(population, series{"cloud": "0", "device": fmt.Sprintf("device-%025d", index)})
+	}
+	cut, ok := inputslice.BestCut(dimensions, sampleOf(dimensions, population))
+	if !ok || cut.Dimension != "device" {
+		t.Fatalf("cut %+v %t, want one on device", cut, ok)
+	}
+	tree, err := inputslice.NewCut(dimensions, 21, cut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	largest := 0
+	for _, leaf := range tree.Pending() {
+		largest = max(largest, len(members(t, leaf.Slice, population)))
+	}
+	if tree.Leaves() < 21 || largest > 1_800 {
+		t.Fatalf("%d leaves, the largest holding %d series; want 21 at least, 1,800 at most", tree.Leaves(), largest)
+	}
+	if got := tree.RootCut(); got.Dimension != "device" {
+		t.Fatalf("root cut on %q, want device", got.Dimension)
+	}
+	assertPartition(t, leavesOf(tree), population[:2_000])
 }

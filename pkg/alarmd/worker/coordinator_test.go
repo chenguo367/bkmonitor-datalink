@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1395,6 +1396,10 @@ func (ports *recordingPorts) LoadActivations(
 }
 
 type recordingPorts struct {
+	// traceMu guards the trace, and callMu the evaluator and the State read:
+	// a Slot evaluates a batch's series side by side and reads the next
+	// batch's State beside them.
+	traceMu, callMu sync.Mutex
 	// refuseGapStage refuses one of the Slot's two gap applies ("gap_before"
 	// or "gap_after"), so a case can tell which of them a refusal came from;
 	// refuseGapStatus is the status it answers with, CONFLICT when empty.
@@ -1777,6 +1782,8 @@ func (ports *recordingPorts) Sequence(
 }
 
 func (ports *recordingPorts) Evaluate(_ context.Context, request execution.EvaluationRequest) (execution.EvaluationResult, error) {
+	ports.callMu.Lock()
+	defer ports.callMu.Unlock()
 	ports.record("evaluate")
 	ports.lastEvaluation = request
 	seriesDigest := string(request.State.Items[0].Identity.SeriesIdentityDigest)
@@ -1912,6 +1919,8 @@ func (ports *recordingPorts) Evaluate(_ context.Context, request execution.Evalu
 }
 
 func (ports *recordingPorts) LoadRuntime(ctx context.Context, request execution.StatePreflightRequest) (execution.StatePreflightResult, error) {
+	ports.callMu.Lock()
+	defer ports.callMu.Unlock()
 	ports.record("state_load")
 	ports.stateLoadCalls++
 	items := make([]execution.RuntimeStateView, len(request.Items))
@@ -2103,6 +2112,8 @@ func (ports *recordingPorts) Acknowledged(events []contract.TriggerEventV1) {
 }
 
 func (ports *recordingPorts) lastTrace() string {
+	ports.traceMu.Lock()
+	defer ports.traceMu.Unlock()
 	if ports.trace == nil || len(*ports.trace) == 0 {
 		return ""
 	}
@@ -2271,7 +2282,11 @@ func (ports *recordingPorts) LoadProgress(context.Context, execution.ProgressIde
 	return execution.ProgressLoadResult{Status: execution.ProgressMissing}, nil
 }
 
-func (ports *recordingPorts) record(stage string) { *ports.trace = append(*ports.trace, stage) }
+func (ports *recordingPorts) record(stage string) {
+	ports.traceMu.Lock()
+	defer ports.traceMu.Unlock()
+	*ports.trace = append(*ports.trace, stage)
+}
 
 func isZeroProgressCommit(request execution.ProgressCommitRequest) bool {
 	return request.Identity == (execution.ProgressIdentity{}) && request.OwnerFence == (execution.OwnerFence{}) &&

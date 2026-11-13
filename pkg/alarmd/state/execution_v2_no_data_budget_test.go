@@ -301,6 +301,10 @@ func (*unreadableBackend) StageHashSegment(context.Context, HashStageSegment) (H
 	return HashDeltaOutcome{}, errors.New("state: the store did not answer")
 }
 
+func (*unreadableBackend) DiscardStagedHash(context.Context, string, string, []byte) error {
+	return errors.New("state: the store did not answer")
+}
+
 func (*unreadableBackend) SwapStagedHash(context.Context, HashStageSwap) (HashDeltaOutcome, error) {
 	return HashDeltaOutcome{}, errors.New("state: the store did not answer")
 }

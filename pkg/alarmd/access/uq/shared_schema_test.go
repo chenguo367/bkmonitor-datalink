@@ -97,7 +97,7 @@ func TestSharedSchemaPreservesLegacyBusinessSemantics(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			newDone, err := client.decodeShared(context.Background(), strings.NewReader(sharedTestBody(t, sample.series, sample.metadata)), queryIdentity{Spec: attempt.Spec, AttemptNo: attempt.AttemptNo}, newSink)
+			newDone, err := client.decodeShared(context.Background(), nil, strings.NewReader(sharedTestBody(t, sample.series, sample.metadata)), queryIdentity{Spec: attempt.Spec, AttemptNo: attempt.AttemptNo}, newSink)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -150,7 +150,7 @@ func TestSharedSchemaLookbackReceivesExpandedDeliveryBytes(t *testing.T) {
 	sink := &sharedLookbackSink{read: engine.Begin(lookback.Query{Contract: execution.FrozenExecutionContractRef{Slot: attempt.Slot},
 		Spec: attempt.Spec, Operation: execution.OperationNormal, AttemptNo: 1, Secondary: true})}
 	series := sharedTestSeries()
-	done, err := client.decodeShared(context.Background(), strings.NewReader(sharedTestBody(t, []responseSeries{series}, map[string]any{"is_partial": false})),
+	done, err := client.decodeShared(context.Background(), nil, strings.NewReader(sharedTestBody(t, []responseSeries{series}, map[string]any{"is_partial": false})),
 		queryIdentity{Spec: attempt.Spec, AttemptNo: 1}, sink)
 	sink.read.Complete(done, err)
 	if err != nil {
@@ -414,7 +414,7 @@ func TestSharedSchemaDeterministicLimitsConserveDelivery(t *testing.T) {
 	limits.MaxSeries = 1
 	client := fixtureClient(t, http.StatusOK, "", limits)
 	sink := &collectingSink{}
-	done, err := client.decodeShared(context.Background(), strings.NewReader(good), queryIdentity{Spec: validAttempt(t).Spec, AttemptNo: 1}, sink)
+	done, err := client.decodeShared(context.Background(), nil, strings.NewReader(good), queryIdentity{Spec: validAttempt(t).Spec, AttemptNo: 1}, sink)
 	if err != nil || done.Completeness != execution.CompletenessUnavailable || len(sink.batches) != 1 || done.Delivery != sink.batches[0].Delivery || done.RouteFacts.Attempts[0].Detail != "response=limit_total_series" {
 		t.Fatalf("limit outcome=%+v err=%v", done, err)
 	}
@@ -423,16 +423,16 @@ func TestSharedSchemaDeterministicLimitsConserveDelivery(t *testing.T) {
 	client = fixtureClient(t, http.StatusOK, "", DefaultLimits())
 	identity := queryIdentity{Spec: validAttempt(t).Spec, AttemptNo: 1}
 	end := "{\"seq\":1,\"end\":{\"series\":0,\"points\":0,\"is_partial\":false}}\n"
-	if done, err := client.decodeShared(context.Background(), strings.NewReader(exact+end), identity, &collectingSink{}); err != nil || done.Completeness != execution.CompletenessFull {
+	if done, err := client.decodeShared(context.Background(), nil, strings.NewReader(exact+end), identity, &collectingSink{}); err != nil || done.Completeness != execution.CompletenessFull {
 		t.Fatal("exact frame boundary rejected", err)
 	}
-	if done, err := client.decodeShared(context.Background(), strings.NewReader(" "+exact+end), identity, &collectingSink{}); err != nil || done.Completeness != execution.CompletenessUnavailable || done.RouteFacts.Attempts[0].Detail != "response=limit_frame_bytes" {
+	if done, err := client.decodeShared(context.Background(), nil, strings.NewReader(" "+exact+end), identity, &collectingSink{}); err != nil || done.Completeness != execution.CompletenessUnavailable || done.RouteFacts.Attempts[0].Detail != "response=limit_frame_bytes" {
 		t.Fatal("oversized frame not named", done, err)
 	}
 	limits = DefaultLimits()
 	limits.MaxRecords = 1
 	client = fixtureClient(t, http.StatusOK, "", limits)
-	if done, err := client.decodeShared(context.Background(), strings.NewReader(sharedTestBody(t, []responseSeries{series}, map[string]any{"is_partial": false})), identity, &collectingSink{}); err != nil || done.Completeness != execution.CompletenessUnavailable || done.RouteFacts.Attempts[0].Detail != "response=limit_total_records" {
+	if done, err := client.decodeShared(context.Background(), nil, strings.NewReader(sharedTestBody(t, []responseSeries{series}, map[string]any{"is_partial": false})), identity, &collectingSink{}); err != nil || done.Completeness != execution.CompletenessUnavailable || done.RouteFacts.Attempts[0].Detail != "response=limit_total_records" {
 		t.Fatal("raw end row escaped record budget", done, err)
 	}
 }
@@ -552,13 +552,13 @@ func TestSharedSchemaDictionaryAndFrameSeriesLimits(t *testing.T) {
 		body.WriteByte('\n')
 	}
 	exact := body.String() + fmt.Sprintf("{\"seq\":%d,\"end\":{\"series\":0,\"points\":0,\"is_partial\":false}}\n", sharedSchemaCount+1)
-	if done, err := client.decodeShared(context.Background(), strings.NewReader(exact), identity, &collectingSink{}); err != nil || done.Completeness != execution.CompletenessFull {
+	if done, err := client.decodeShared(context.Background(), nil, strings.NewReader(exact), identity, &collectingSink{}); err != nil || done.Completeness != execution.CompletenessFull {
 		t.Fatal("exact schema count rejected", err)
 	}
 	extra, _ := json.Marshal(map[string]any{"seq": sharedSchemaCount + 1, "schemas": []sharedSchema{{ID: sharedSchemaCount, Columns: []string{"_time", "_value"}, Types: []string{"float", "float"}, GroupKeys: []string{}}}})
 	body.Write(extra)
 	body.WriteByte('\n')
-	if done, err := client.decodeShared(context.Background(), strings.NewReader(body.String()), identity, &collectingSink{}); err != nil || done.Completeness != execution.CompletenessUnavailable || done.RouteFacts.Attempts[0].Detail != "response=limit_dictionary" {
+	if done, err := client.decodeShared(context.Background(), nil, strings.NewReader(body.String()), identity, &collectingSink{}); err != nil || done.Completeness != execution.CompletenessUnavailable || done.RouteFacts.Attempts[0].Detail != "response=limit_dictionary" {
 		t.Fatal("dictionary count limit unnamed", done, err)
 	}
 	// A declaration may have a large (unconsumed) column, still below its
@@ -570,7 +570,7 @@ func TestSharedSchemaDictionaryAndFrameSeriesLimits(t *testing.T) {
 		body.Write(raw)
 		body.WriteByte('\n')
 	}
-	if done, err := client.decodeShared(context.Background(), strings.NewReader(body.String()), identity, &collectingSink{}); err != nil || done.Completeness != execution.CompletenessUnavailable || done.RouteFacts.Attempts[0].Detail != "response=limit_dictionary" {
+	if done, err := client.decodeShared(context.Background(), nil, strings.NewReader(body.String()), identity, &collectingSink{}); err != nil || done.Completeness != execution.CompletenessUnavailable || done.RouteFacts.Attempts[0].Detail != "response=limit_dictionary" {
 		t.Fatal("dictionary bytes limit unnamed", done, err)
 	}
 	entries := make([]any, sharedFrameSeries+1)
@@ -579,7 +579,52 @@ func TestSharedSchemaDictionaryAndFrameSeriesLimits(t *testing.T) {
 	}
 	raw, _ := json.Marshal(map[string]any{"seq": 2, "series": entries})
 	prefix := "{\"seq\":0,\"v\":1}\n{\"seq\":1,\"schemas\":[{\"id\":0,\"columns\":[\"_time\",\"_value\"],\"types\":[\"float\",\"float\"],\"group_keys\":[]}]}\n"
-	if done, err := client.decodeShared(context.Background(), strings.NewReader(prefix+string(raw)+"\n"), identity, &collectingSink{}); err != nil || done.Completeness != execution.CompletenessUnavailable || done.RouteFacts.Attempts[0].Detail != "response=limit_frame_series" {
+	if done, err := client.decodeShared(context.Background(), nil, strings.NewReader(prefix+string(raw)+"\n"), identity, &collectingSink{}); err != nil || done.Completeness != execution.CompletenessUnavailable || done.RouteFacts.Attempts[0].Detail != "response=limit_frame_series" {
 		t.Fatal("frame series limit unnamed", done, err)
+	}
+}
+
+// The frames are read one ahead of the one handed on. An answer this side
+// ends before its body does - a series past the answer's limit - is
+// returned while the frame reader waits on the body for more: the body is
+// closed under it (abort), it stops, and nothing reads the body once the
+// decode returns. What was handed on before stays handed on.
+func TestAnAnswerEndedBeforeItsBodyStopsItsFrameReader(t *testing.T) {
+	series := sharedTestSeries()
+	body := sharedTestBody(t, []responseSeries{series, series}, map[string]any{"is_partial": false})
+	// Everything but the footer: the body stays open after the second series.
+	cut := strings.LastIndex(strings.TrimSuffix(body, "\n"), "\n") + 1
+	limits := DefaultLimits()
+	limits.MaxSeries = 1
+	client := fixtureClient(t, http.StatusOK, "", limits)
+	reader, writer := io.Pipe()
+	go func() { _, _ = writer.Write([]byte(body[:cut])) }()
+	aborted := 0
+	sink := &collectingSink{}
+	returned := make(chan struct{})
+	var done execution.ProviderCompletion
+	var err error
+	go func() {
+		defer close(returned)
+		done, err = client.decodeShared(context.Background(), func() {
+			aborted++
+			_ = reader.CloseWithError(errors.New("alarmd test: the body was closed"))
+		}, reader, queryIdentity{Spec: validAttempt(t).Spec, AttemptNo: 1}, sink)
+	}()
+	select {
+	case <-returned:
+	case <-testwait.Expired(t):
+		t.Fatal("the decode did not return while its frame reader waited on the body")
+	}
+	if err != nil || done.RouteFacts.Attempts[0].Detail != "response=limit_total_series" || len(sink.batches) != 1 || aborted != 1 {
+		t.Fatalf("decode = %+v (%v) after %d aborts with %d series handed on, want the limit named, the body "+
+			"closed once and the first series handed on", done, err, aborted, len(sink.batches))
+	}
+	// Read to the end, the answer needs no abort.
+	aborted = 0
+	whole := fixtureClient(t, http.StatusOK, "", DefaultLimits())
+	if done, err := whole.decodeShared(context.Background(), func() { aborted++ }, strings.NewReader(body), queryIdentity{Spec: validAttempt(t).Spec, AttemptNo: 1},
+		&collectingSink{}); err != nil || done.Completeness != execution.CompletenessFull || aborted != 0 {
+		t.Fatalf("whole answer = %+v (%v) after %d aborts, want it full and no abort", done, err, aborted)
 	}
 }

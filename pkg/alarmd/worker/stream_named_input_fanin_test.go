@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -233,6 +234,8 @@ func TestSlotExecutionCoordinatorKeepsHealthyLevelAndQueryGroupRunningWhenOneDep
 }
 
 type recordingEvaluator struct {
+	// mu guards what it records: a batch's series are evaluated side by side.
+	mu       sync.Mutex
 	inner    execution.Evaluator
 	requests []execution.EvaluationRequest
 	results  []execution.EvaluationResult
@@ -243,6 +246,8 @@ type recordingEvaluator struct {
 }
 
 func (e *recordingEvaluator) Evaluate(ctx context.Context, request execution.EvaluationRequest) (execution.EvaluationResult, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	e.requests = append(e.requests, request)
 	if e.fail != nil {
 		return execution.EvaluationResult{}, e.fail

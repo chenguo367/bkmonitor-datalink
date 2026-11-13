@@ -31,22 +31,33 @@ const (
 	windowBound   = time.Minute
 )
 
-// hookedEvaluator runs hook before the at-th series it evaluates, which in
-// the windowed fixture (a b | c d | e f) is a point between two windows when
-// at is four: the first window landed when the third series' result would
-// have overfilled it, before the fourth was evaluated.
+// hookedEvaluator runs hook once, before the first series it evaluates after
+// a window's State apply returned (applied counts them): in the windowed
+// fixture (a b | c d | e f) a point between the first window and the next,
+// whatever order the series of a batch are evaluated in.
 type hookedEvaluator struct {
 	*recordingPorts
-	calls, at int
-	hook      func()
+	applied *atomic.Int64
+	once    sync.Once
+	hook    func()
 }
 
 func (evaluator *hookedEvaluator) Evaluate(ctx context.Context, request execution.EvaluationRequest) (execution.EvaluationResult, error) {
-	evaluator.calls++
-	if evaluator.calls == evaluator.at && evaluator.hook != nil {
-		evaluator.hook()
+	if evaluator.applied.Load() > 0 && evaluator.hook != nil {
+		evaluator.once.Do(evaluator.hook)
 	}
 	return evaluator.recordingPorts.Evaluate(ctx, request)
+}
+
+// appliedState counts the State applies that returned.
+type appliedState struct {
+	*persistedRetryState
+	applied *atomic.Int64
+}
+
+func (state *appliedState) ApplyRuntime(ctx context.Context, request execution.StateApplyRequest) (execution.StateApplyResult, error) {
+	defer state.applied.Add(1)
+	return state.persistedRetryState.ApplyRuntime(ctx, request)
 }
 
 // hookedWindowedSlot is windowedSlot with the evaluator hooked.
@@ -55,10 +66,12 @@ func hookedWindowedSlot(t *testing.T) (*recordingPorts, *persistedRetryState, *h
 	trace := make([]string, 0)
 	ports := &recordingPorts{trace: &trace, ready: true, extraSeries: windowedSeries("a", "b", "d", "e", "f")}
 	state := &persistedRetryState{recordingPorts: ports, saved: map[execution.StateKeyIdentity]execution.StateMutation{}}
-	evaluator := &hookedEvaluator{recordingPorts: ports, at: 4}
+	applied := &atomic.Int64{}
+	evaluator := &hookedEvaluator{recordingPorts: ports, applied: applied}
 	coordinator, err := worker.NewSlotExecutionCoordinator(worker.Ports{OpenAlerts: ports, Finalization: ports, Activation: ports,
 		Query: ports, Sequencer: ports, Evaluator: evaluator, Admission: ports, GapGuard: ports, NoData: worker.SharedNoDataStore,
-		Hosts: worker.SharedHostBusiness, Events: ports, State: state, Progress: ports, ExecutionEvidence: newMemoryEvidenceStore(),
+		Hosts: worker.SharedHostBusiness, Events: ports, State: &appliedState{persistedRetryState: state, applied: applied},
+		Progress: ports, ExecutionEvidence: newMemoryEvidenceStore(),
 		Observer: observability.ObserverFunc(func(context.Context, observability.Observation) {})},
 		worker.ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxStateMutations: 2, MaxEvents: 100, MaxGapMutations: 10})
 	if err != nil {
@@ -225,6 +238,7 @@ func (events *watchedEvents) WriteBatch(ctx context.Context, batch []contract.Tr
 // the Slot once more from inside the apply, noting the stage it finds.
 type watchedState struct {
 	*persistedRetryState
+	applied       atomic.Int64
 	watch         *commitGapWatch
 	claimedInside bool
 	stages        []string
@@ -236,6 +250,7 @@ func (state *watchedState) ApplyRuntime(ctx context.Context, request execution.S
 		state.claimedInside = true
 	}
 	state.stages = append(state.stages, state.watch.marker.Stage())
+	defer state.applied.Add(1)
 	return state.persistedRetryState.ApplyRuntime(ctx, request)
 }
 
@@ -248,7 +263,7 @@ func watchedWindowedSlot(t *testing.T, marker *execution.StageMarker) (*recordin
 	watch := &commitGapWatch{marker: marker}
 	state := &watchedState{watch: watch,
 		persistedRetryState: &persistedRetryState{recordingPorts: ports, saved: map[execution.StateKeyIdentity]execution.StateMutation{}}}
-	evaluator := &hookedEvaluator{recordingPorts: ports, at: 4}
+	evaluator := &hookedEvaluator{recordingPorts: ports, applied: &state.applied}
 	coordinator, err := worker.NewSlotExecutionCoordinator(worker.Ports{OpenAlerts: ports, Finalization: ports, Activation: ports,
 		Query: ports, Sequencer: ports, Evaluator: evaluator, Admission: ports, GapGuard: ports, NoData: worker.SharedNoDataStore,
 		Hosts: worker.SharedHostBusiness, Events: &watchedEvents{recordingPorts: ports, watch: watch}, State: state, Progress: ports,

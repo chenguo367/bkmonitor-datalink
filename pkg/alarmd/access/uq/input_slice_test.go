@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 // orGroupsConfig is a metric strategy grouped by host whose conditions are
@@ -281,5 +282,37 @@ func TestTheSlicePartitionConditionsAreTheRecordedOnes(t *testing.T) {
 	}
 	if !jsonEqual(got, want) {
 		t.Fatalf("the partition's conditions are\n%s\nrecorded\n%s", got, want)
+	}
+}
+
+// A recheck of a slice's read reads the same slice: the request it sends is
+// the sliced first read's byte for byte, and without a slice on ctx it is
+// the whole Query Group's.
+func TestARecheckOfASliceReadsTheSameSlice(t *testing.T) {
+	spec := compiledSpec(t, orGroupsConfig)
+	server := &recordingServer{}
+	client := server.start(t)
+	slice := execution.InputSlice{Conditions: []execution.InputSliceCondition{
+		{Dimension: "host", Pattern: "^(?s:.*)a$"}, {Dimension: "host", Negated: true, Pattern: "^(?s:.*)ba$"}}}
+	if _, err := client.Execute(context.Background(), slicedAttempt(t, spec, slice), &collectingSink{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(testwait.Context(t))
+	defer cancel()
+	if _, err := client.Recheck(execution.WithInputSlice(ctx, slice), spec, &collectingSink{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Recheck(ctx, spec, &collectingSink{}); err != nil {
+		t.Fatal(err)
+	}
+	bodies := server.sent()
+	if len(bodies) != 3 {
+		t.Fatalf("sent %d requests, want the sliced read and two rechecks", len(bodies))
+	}
+	if !jsonEqual(wireConditions(t, bodies[1])[0], wireConditions(t, bodies[0])[0]) {
+		t.Fatalf("the recheck of the slice asked for other conditions:\n%s\n%s", bodies[0], bodies[1])
+	}
+	if jsonEqual(wireConditions(t, bodies[2])[0], wireConditions(t, bodies[0])[0]) {
+		t.Fatal("a recheck without a slice asked for the slice")
 	}
 }

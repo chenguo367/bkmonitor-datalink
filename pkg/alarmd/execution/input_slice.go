@@ -10,6 +10,7 @@
 package execution
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -127,3 +128,27 @@ func InputSliceUnsupportedOf(err error) (string, bool) {
 	}
 	return "", false
 }
+
+type inputSliceKey struct{}
+
+// WithInputSlice carries slice to a read made outside a Slot's own query -
+// the lookback's recheck of a slice it captured - so the read asks for the
+// same part of the Query Group the first read did.
+func WithInputSlice(ctx context.Context, slice InputSlice) context.Context {
+	if slice.IsZero() {
+		return ctx
+	}
+	return context.WithValue(ctx, inputSliceKey{}, slice)
+}
+
+// InputSliceFrom is the slice ctx carries, the zero slice - the whole Query
+// Group - when it carries none.
+func InputSliceFrom(ctx context.Context) InputSlice {
+	slice, _ := ctx.Value(inputSliceKey{}).(InputSlice)
+	return slice
+}
+
+// ErrSliceOverflow is a slice's input past its limit while it streams: the
+// worker lets the slice go and splits it, and the read of it is no read -
+// what the lookback captured of it is discarded (lookback.Read.Discard).
+var ErrSliceOverflow = errors.New("alarmd worker: the slice's input passed its limit")

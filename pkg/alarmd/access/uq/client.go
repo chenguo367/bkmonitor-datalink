@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
@@ -414,7 +415,12 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 	delivered := &countingSink{sink: sink}
 	var completion execution.ProviderCompletion
 	if shared {
-		completion, err = client.decodeShared(ctx, counted, attempt, delivered)
+		// Abort ends a read of the body the decoder's frame reader is in,
+		// when the answer ends before the body does.
+		completion, err = client.decodeShared(ctx, func() {
+			counted.stop()
+			_ = response.Body.Close()
+		}, counted, attempt, delivered)
 	} else {
 		completion, err = client.decodeQuery(ctx, counted, attempt, delivered, scanned)
 	}
@@ -596,6 +602,10 @@ type countingReader struct {
 	failed      error
 	failedBegan time.Time
 	failedAt    time.Time
+	// stopped is set when the decoder stopped reading the answer itself
+	// (decodeShared's abort), so the read the closed body ends is not
+	// counted as how the answer failed.
+	stopped atomic.Bool
 }
 
 type boundedReader struct {
@@ -676,11 +686,15 @@ func (reader *countingReader) Read(buffer []byte) (int, error) {
 	returned := reader.now()
 	reader.waited += returned.Sub(began)
 	reader.bytes += uint64(count)
-	if err != nil && err != io.EOF && reader.failed == nil {
+	if err != nil && err != io.EOF && reader.failed == nil && !reader.stopped.Load() {
 		reader.failed, reader.failedBegan, reader.failedAt = err, began, returned
 	}
 	return count, err
 }
+
+// stop marks every read from now on as one the decoder ended, not the
+// backend: a read the closed body ends is no failure of the answer's.
+func (reader *countingReader) stop() { reader.stopped.Store(true) }
 
 func buildRequestCarrying(spec execution.PhysicalQuerySpec, carryApp bool) (request, error) {
 	if err := spec.Validate(); err != nil {

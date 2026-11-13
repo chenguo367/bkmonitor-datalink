@@ -766,6 +766,10 @@ type phaseTwoWorkerBundle struct {
 	// The check is a scan of the whole struct rather than of one field, so the
 	// next optional port is covered without anybody remembering to add it.
 	workerPorts worker.Ports
+	// coordinator is the Slot coordinator this runtime runs, which owns the
+	// retained pool. Kept so a measurement can read what the pool holds
+	// without gathering every metric family.
+	coordinator *worker.SlotExecutionCoordinator
 	// applied and capacity feed the heartbeat's acknowledgement and load.
 	// Both are set at assembly and may be nil, in which case the heartbeat
 	// carries neither, which readers take as unknown.

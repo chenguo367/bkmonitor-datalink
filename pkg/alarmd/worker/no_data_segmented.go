@@ -305,10 +305,13 @@ func (stream *streamedExecution) decideNoDataRound(
 			return noDataRound{}, err
 		}
 	}
+	// What the windows staged of the whole record ahead of the statement.
+	round.UseStaged(stream.stagedAhead(due.Identity))
 	finished, err := round.Finish(version)
 	if err != nil {
 		return noDataRound{}, derivationFailed(err)
 	}
+	stream.endStagedAhead(ctx, due, finished)
 	if err := reading.hold(ctx, 0); err != nil {
 		return noDataRound{}, err
 	}
@@ -366,14 +369,30 @@ func (reading *segmentedNoDataRound) scan(ctx context.Context) error {
 	stream, store := reading.stream, reading.stream.coordinator.ports.NoData
 	count := stream.coordinator.noDataSegmentGroups()
 	reading.absent = map[[sha256.Size]byte]string{}
-	for cursor := uint64(0); ; {
-		page, err := store.ScanNoDataGroups(ctx, execution.NoDataScanRequest{
-			Identity: reading.source, Cursor: cursor, Count: count, PresentAsOf: reading.header.PresentAsOf})
+	// The next page is read while this one is taken (decision-020 0.6.x
+	// throughput design 3.1, way 4): its cursor is this page's, so one page
+	// ahead, held unreserved until it is taken - a segment's groups at most.
+	// What the reads ask by, taken here: the goroutines read no field of
+	// the round, which this one goes on changing.
+	source, presentAsOf := reading.source, reading.header.PresentAsOf
+	scan := func(cursor uint64) <-chan noDataRead[execution.NoDataScanPage] {
+		return readAhead(func() (execution.NoDataScanPage, error) {
+			return store.ScanNoDataGroups(ctx, execution.NoDataScanRequest{
+				Identity: source, Cursor: cursor, Count: count, PresentAsOf: presentAsOf})
+		})
+	}
+	next := scan(0)
+	for {
+		read := <-next
+		page, err := read.value, read.err
 		if err != nil {
 			return noDataRosterUnread(reading.identity, "", err)
 		}
 		if err := reading.pageStatus(page.Status, page.ReasonCode); err != nil {
 			return err
+		}
+		if page.Next != 0 {
+			next = scan(page.Next)
 		}
 		held := groupsHeldBytes(page.Groups)
 		if err := stream.reserveNoDataHeld(ctx, retainPhaseState, held); err != nil {
@@ -387,7 +406,6 @@ func (reading *segmentedNoDataRound) scan(ctx context.Context) error {
 		if page.Next == 0 {
 			break
 		}
-		cursor = page.Next
 	}
 	// The record read is one record when the header after the scan still
 	// names the memory the scan began on: every write moves the revision or,
@@ -480,14 +498,33 @@ func (reading *segmentedNoDataRound) readAbsent(ctx context.Context) error {
 	})
 	stream, store := reading.stream, reading.stream.coordinator.ports.NoData
 	window := stream.coordinator.noDataSegmentGroups()
-	for start := 0; start < len(names); start += window {
+	keysOf := func(start int) []string {
 		part := names[start:min(start+window, len(names))]
 		keys := make([]string, len(part))
 		for index, name := range part {
 			keys[index] = name.name
 		}
-		read, err := store.ReadNoDataGroups(ctx, execution.NoDataGroupsRequest{
-			Identity: reading.source, Keys: keys, PresentAsOf: reading.header.PresentAsOf})
+		return keys
+	}
+	// The next window is read while this one is fed and said - its series
+	// evaluated - one window ahead, as the scan reads its next page.
+	source, presentAsOf := reading.source, reading.header.PresentAsOf
+	readWindow := func(keys []string) <-chan noDataRead[execution.NoDataGroupsResult] {
+		return readAhead(func() (execution.NoDataGroupsResult, error) {
+			return store.ReadNoDataGroups(ctx, execution.NoDataGroupsRequest{
+				Identity: source, Keys: keys, PresentAsOf: presentAsOf})
+		})
+	}
+	keys := keysOf(0)
+	next := readWindow(keys)
+	for start := 0; start < len(names); start += window {
+		answer := <-next
+		read, err := answer.value, answer.err
+		current := keys
+		if start+window < len(names) {
+			keys = keysOf(start + window)
+			next = readWindow(keys)
+		}
 		if err != nil {
 			return noDataRosterUnread(reading.identity, "", err)
 		}
@@ -498,7 +535,7 @@ func (reading *segmentedNoDataRound) readAbsent(ctx context.Context) error {
 		if err := stream.reserveNoDataHeld(ctx, retainPhaseState, held); err != nil {
 			return err
 		}
-		err = reading.takeAbsent(ctx, keys, read.Groups)
+		err = reading.takeAbsent(ctx, current, read.Groups)
 		stream.unretain(retainPhaseState, held)
 		if err != nil {
 			return err
@@ -603,4 +640,23 @@ func (stream *streamedExecution) noteAbsenceStarts(plan execution.PlanIdentity, 
 		stream.noDataAbsenceStarts = make(noDataAbsenceStarts)
 	}
 	stream.noDataAbsenceStarts[plan] = starts
+}
+
+// noDataRead is one read of a no-data memory's parts, answered on its own
+// goroutine.
+type noDataRead[T any] struct {
+	value T
+	err   error
+}
+
+// readAhead starts one read and answers it on the channel when it is done.
+// A read whose answer is never taken - the round ended first - goes with its
+// goroutine; the channel holds its one answer.
+func readAhead[T any](read func() (T, error)) <-chan noDataRead[T] {
+	answered := make(chan noDataRead[T], 1)
+	go func() {
+		value, err := read()
+		answered <- noDataRead[T]{value: value, err: err}
+	}()
+	return answered
 }

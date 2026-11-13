@@ -169,6 +169,9 @@ type PlanNoDataSegmentedUpdate struct {
 	Del []string
 	// Memory is every group the resulting memory holds, folded once each.
 	Memory *NoDataMemoryDigestAccumulator
+	// Staged is the groups of a whole record staged ahead of the statement,
+	// which Set then leaves out (PlanNoDataMutation.Staged).
+	Staged *NoDataStaged
 }
 
 // BuildPlanNoDataSegmentedMutation is BuildPlanNoDataMutation for a round that
@@ -229,17 +232,26 @@ func BuildPlanNoDataSegmentedMutation(update PlanNoDataSegmentedUpdate) (PlanNoD
 		GroupLimit:             update.GroupLimit,
 		Set:                    update.Set,
 		Del:                    update.Del,
+		Staged:                 update.Staged,
 	}
 	sort.Slice(mutation.Set, func(left, right int) bool { return mutation.Set[left].GroupKey < mutation.Set[right].GroupKey })
 	sort.Strings(mutation.Del)
-	if mutation.ReplacesWholeRecord() && uint64(len(mutation.Set)) != groups {
+	if update.Staged != nil && !mutation.ReplacesWholeRecord() {
+		return PlanNoDataMutation{}, errors.New("alarmd execution: a no-data delta carries staged groups")
+	}
+	if update.Staged != nil && update.Staged.PresentAsOf != update.PresentAsOf {
+		return PlanNoDataMutation{}, fmt.Errorf(
+			"alarmd execution: no-data groups were staged against present-as-of %d and the statement is of %d",
+			update.Staged.PresentAsOf, update.PresentAsOf)
+	}
+	if mutation.ReplacesWholeRecord() && update.Staged.Groups()+uint64(len(mutation.Set)) != groups {
 		// A statement derived from no record is the whole memory, and the
 		// staged write proves the staged field count against GroupCount: a
 		// whole statement that sets fewer groups than it counts would be
 		// refused there on every attempt.
 		return PlanNoDataMutation{}, fmt.Errorf(
-			"alarmd execution: a no-data statement replacing the record sets %d groups of the %d it holds",
-			len(mutation.Set), groups)
+			"alarmd execution: a no-data statement replacing the record sets %d groups and staged %d of the %d it holds",
+			len(mutation.Set), update.Staged.Groups(), groups)
 	}
 	if len(mutation.Set) == 0 {
 		mutation.Set = nil

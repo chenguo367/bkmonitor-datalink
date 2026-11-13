@@ -45,6 +45,12 @@ const (
 	// pipeline round trip. With MaxValueBytes up to 512 KiB an item bound alone
 	// could stage 128 MiB; whichever bound is reached first cuts the batch.
 	runtimeApplyBatchBytes = 8 << 20
+	// runtimeApplyBatchesInFlight is how many of a request's batches are
+	// exchanged at once (decision-020 0.6.x throughput design 3.1-3): the
+	// next one is encoded and sent while the one before is on the server.
+	// The server runs one script at a time; two keep it from waiting on this
+	// side between them.
+	runtimeApplyBatchesInFlight = 2
 	// runtimeWitnessMaxGroups and runtimeWitnessMaxItems bound the preflight
 	// witnesses retained between LoadRuntime and ApplyRuntime. Evicting a
 	// witness only sends its item through the sequential re-read path.
@@ -361,6 +367,25 @@ type runtimeApplyPipeline struct {
 	// those may be written back over an external change (§4.4).
 	cached []bool
 	bytes  int
+	// inFlight is the batches being exchanged, at most
+	// runtimeApplyBatchesInFlight (slots); failed is the first error one of
+	// them returned, after which no batch is sent.
+	inFlight sync.WaitGroup
+	slots    chan struct{}
+	mu       sync.Mutex
+	failed   error
+}
+
+// runtimeApplyBatch is one staged batch, taken out of the pipeline to be
+// exchanged while the next one is staged.
+type runtimeApplyBatch struct {
+	// backend is the target the batch was staged for: the pipeline's own
+	// moves on to the next batch's while this one is out.
+	backend  FencedBatchBackend
+	indexes  []int
+	writes   []FencedWrite
+	expected []uint64
+	cached   []bool
 }
 
 func (pipeline *runtimeApplyPipeline) add(
@@ -368,7 +393,9 @@ func (pipeline *runtimeApplyPipeline) add(
 ) error {
 	if len(pipeline.writes) > 0 && (pipeline.target != target || len(pipeline.writes) >= runtimeApplyBatchItems ||
 		pipeline.bytes+len(write.Value) > runtimeApplyBatchBytes) {
-		if err := pipeline.flush(ctx); err != nil {
+		if err := pipeline.send(ctx); err != nil {
+			// Every batch sent is back before the request returns.
+			pipeline.inFlight.Wait()
 			return err
 		}
 	}
@@ -381,22 +408,65 @@ func (pipeline *runtimeApplyPipeline) add(
 	return nil
 }
 
-func (pipeline *runtimeApplyPipeline) reset() {
-	pipeline.indexes, pipeline.writes, pipeline.expected, pipeline.cached, pipeline.bytes = pipeline.indexes[:0], pipeline.writes[:0], pipeline.expected[:0], pipeline.cached[:0], 0
+// flush sends the staged batch and waits for every batch sent: what the
+// request wrote is known once it returns, and its first error with it.
+func (pipeline *runtimeApplyPipeline) flush(ctx context.Context) error {
+	err := pipeline.send(ctx)
+	pipeline.inFlight.Wait()
+	if err != nil {
+		return err
+	}
+	pipeline.mu.Lock()
+	defer pipeline.mu.Unlock()
+	return pipeline.failed
 }
 
-// flush exchanges the staged batch. When the exchange itself fails every
-// staged item is in doubt and becomes retryable, exactly like one failed EVAL
-// on the sequential path. A stale owner fails the whole request after the
-// other replies of the same batch have been recorded.
-func (pipeline *runtimeApplyPipeline) flush(ctx context.Context) error {
+// send exchanges the staged batch on a goroutine of its own, once one of the
+// runtimeApplyBatchesInFlight is free, and stages the next into empty
+// slices. A batch sent after one failed is not sent: the first error - a
+// stale owner, a moved content scope - is the request's.
+func (pipeline *runtimeApplyPipeline) send(ctx context.Context) error {
 	if len(pipeline.writes) == 0 {
 		return nil
 	}
-	defer pipeline.reset()
-	outcomes, err := pipeline.backend.CompareAndSetManyByDigest(ctx, pipeline.guard, pipeline.writes)
-	if err != nil || len(outcomes) != len(pipeline.writes) {
-		for _, index := range pipeline.indexes {
+	if pipeline.slots == nil {
+		pipeline.slots = make(chan struct{}, runtimeApplyBatchesInFlight)
+	}
+	pipeline.slots <- struct{}{}
+	pipeline.mu.Lock()
+	failed := pipeline.failed
+	pipeline.mu.Unlock()
+	if failed != nil {
+		<-pipeline.slots
+		return failed
+	}
+	batch := runtimeApplyBatch{backend: pipeline.backend, indexes: pipeline.indexes, writes: pipeline.writes,
+		expected: pipeline.expected, cached: pipeline.cached}
+	pipeline.indexes, pipeline.writes, pipeline.expected, pipeline.cached, pipeline.bytes = nil, nil, nil, nil, 0
+	pipeline.inFlight.Add(1)
+	go func() {
+		defer pipeline.inFlight.Done()
+		defer func() { <-pipeline.slots }()
+		if err := pipeline.exchange(ctx, batch); err != nil {
+			pipeline.mu.Lock()
+			if pipeline.failed == nil {
+				pipeline.failed = err
+			}
+			pipeline.mu.Unlock()
+		}
+	}()
+	return nil
+}
+
+// exchange exchanges one batch. When the exchange itself fails every item of
+// it is in doubt and becomes retryable, exactly like one failed EVAL on the
+// sequential path. A stale owner fails the whole request after the other
+// replies of the same batch have been recorded. Each batch writes the result
+// items of its own indexes, no other batch's.
+func (pipeline *runtimeApplyPipeline) exchange(ctx context.Context, batch runtimeApplyBatch) error {
+	outcomes, err := batch.backend.CompareAndSetManyByDigest(ctx, pipeline.guard, batch.writes)
+	if err != nil || len(outcomes) != len(batch.writes) {
+		for _, index := range batch.indexes {
 			pipeline.result.Items[index] = execution.StateApplyItemResult{Identity: pipeline.request.Items[index].Identity,
 				Status: execution.StateApplyRetryable, ReasonCode: execution.ReasonCode(contract.ReasonStateWriteRetryable)}
 		}
@@ -404,7 +474,7 @@ func (pipeline *runtimeApplyPipeline) flush(ctx context.Context) error {
 	}
 	stale, moved := false, false
 	var restores []int
-	for position, index := range pipeline.indexes {
+	for position, index := range batch.indexes {
 		outcome := outcomes[position]
 		if outcome.Err == nil && outcome.Status == FencedWriteStaleOwner {
 			stale = true
@@ -414,18 +484,18 @@ func (pipeline *runtimeApplyPipeline) flush(ctx context.Context) error {
 			moved = true
 			continue
 		}
-		pipeline.result.Items[index] = pipeline.store.classifyFencedOutcome(pipeline.request.Contract, pipeline.request.Items[index], outcome, pipeline.expected[position])
-		if pipeline.cached[position] && pipeline.store.restorable(ctx, pipeline.request, pipeline.request.Items[index].Identity, pipeline.writes[position], outcome) {
-			pipeline.writes[position].ExpectedMissing = outcome.Status == FencedWriteConflictMissing
-			pipeline.writes[position].ExpectedDigest = ""
-			if !pipeline.writes[position].ExpectedMissing {
-				pipeline.writes[position].ExpectedDigest = ExpectedValueDigest(outcome.Current)
+		pipeline.result.Items[index] = pipeline.store.classifyFencedOutcome(pipeline.request.Contract, pipeline.request.Items[index], outcome, batch.expected[position])
+		if batch.cached[position] && pipeline.store.restorable(ctx, pipeline.request, pipeline.request.Items[index].Identity, batch.writes[position], outcome) {
+			batch.writes[position].ExpectedMissing = outcome.Status == FencedWriteConflictMissing
+			batch.writes[position].ExpectedDigest = ""
+			if !batch.writes[position].ExpectedMissing {
+				batch.writes[position].ExpectedDigest = ExpectedValueDigest(outcome.Current)
 			}
 			restores = append(restores, position)
 		}
 	}
 	if len(restores) > 0 && !stale && !moved {
-		pipeline.restore(ctx, restores, outcomes)
+		pipeline.restore(ctx, batch, restores, outcomes)
 	}
 	if stale {
 		return fmt.Errorf("state: runtime state apply for %s: %w", pipeline.request.Contract.Slot.QueryGroup, ownership.ErrStaleFence)
@@ -512,7 +582,18 @@ func (store *ExecutionStore) applyRuntime(
 		// Two refusals, not one. Both reach the line as STATE_CORRUPT, and
 		// which one happened is the difference between reading what the
 		// producer computed and reading the identity it computed it for.
-		if err := mutation.ValidateDigest(); err != nil {
+		//
+		// A mutation the admission framed is written from that frame, encoded
+		// from its content checked whole there, before the events: here it
+		// is proved the same mutation (ValidateSealed), and a write that
+		// encodes it again checks its content whole first (encodeChecked).
+		// One without a frame is checked whole here.
+		framed := admittedFrame(request, index, mutation) != nil
+		check := mutation.ValidateDigest
+		if framed {
+			check = mutation.ValidateSealed
+		}
+		if err := check(); err != nil {
 			item.Status, item.ReasonCode = execution.StateApplyDeterministicInvalid, execution.ReasonCode(contract.ReasonStateCorrupt)
 			item.RefusalRule = PackedRuleMutationDigestMismatch
 			result.Items[index] = item
@@ -546,7 +627,7 @@ func (store *ExecutionStore) applyRuntime(
 				result.Items[index] = item
 				continue
 			}
-			result.Items[index] = store.applyRuntimeSequential(ctx, request.Contract, mutation, keys[index], ttl, casBackend)
+			result.Items[index] = store.applyRuntimeSequential(ctx, request.Contract, mutation, keys[index], ttl, casBackend, !framed)
 			// The later copy of a key this request already wrote meets the
 			// earlier copy's bytes one revision up. Name that for what it is
 			// -- the producer sent one series twice -- so it does not count as
@@ -565,7 +646,7 @@ func (store *ExecutionStore) applyRuntime(
 			result.Items[index] = classified
 			continue
 		}
-		encoded, refusal, legacyIDs := store.frameForWrite(request, index, mutation, witness.framedRevision+1)
+		encoded, refusal, legacyIDs := store.frameForWrite(request, index, mutation, witness.framedRevision+1, !framed)
 		if refusal.reason != "" {
 			item.Status, item.ReasonCode = execution.StateApplyDeterministicInvalid, execution.ReasonCode(refusal.reason)
 			item.RefusalRule = refusal.rule
@@ -601,7 +682,7 @@ func (store *ExecutionStore) applyRuntime(
 // serves callers without a preflight witness and requests with repeated keys.
 func (store *ExecutionStore) applyRuntimeSequential(
 	ctx context.Context, contractRef execution.FrozenExecutionContractRef, mutation execution.StateMutation,
-	framedKey string, ttl time.Duration, backend CompareAndSetBackend,
+	framedKey string, ttl time.Duration, backend CompareAndSetBackend, checked bool,
 ) execution.StateApplyItemResult {
 	item := execution.StateApplyItemResult{Identity: mutation.Identity}
 	values, err := backend.MGet(ctx, []string{framedKey})
@@ -623,7 +704,7 @@ func (store *ExecutionStore) applyRuntimeSequential(
 	if classified, proceed := classifyWitnessedMutation(witness, mutation); !proceed {
 		return classified
 	}
-	encoded, refusal, legacyIDs := store.encodeForWrite(mutation, witness.framedRevision+1)
+	encoded, refusal, legacyIDs := store.encodeChecked(mutation, witness.framedRevision+1, checked)
 	if refusal.reason != "" {
 		item.Status, item.ReasonCode = execution.StateApplyDeterministicInvalid, execution.ReasonCode(refusal.reason)
 		item.RefusalRule = refusal.rule
@@ -645,6 +726,18 @@ func (store *ExecutionStore) applyRuntimeSequential(
 // refused it and the store's sentence. The zero value is no refusal.
 type writeRefusal struct {
 	reason, rule, text string
+}
+
+// encodeChecked is encodeForWrite of a mutation whose content was checked
+// whole (checked), or is checked whole now: a write that encodes a mutation
+// the admission framed encodes its content as it stands.
+func (store *ExecutionStore) encodeChecked(mutation execution.StateMutation, revision uint64, checked bool) ([]byte, writeRefusal, int) {
+	if !checked {
+		if err := mutation.ValidateDigest(); err != nil {
+			return nil, writeRefusal{reason: contract.ReasonStateCorrupt, rule: PackedRuleMutationDigestMismatch}, 0
+		}
+	}
+	return store.encodeForWrite(mutation, revision)
 }
 
 // encodeForWrite frames the record every write stores, naming the refusal
@@ -1131,12 +1224,12 @@ func (store *ExecutionStore) restorable(
 // restore writes the round's values back over the external changes the
 // restorable writes met, in one more exchange. One that conflicts again is
 // the ordinary conflict already recorded.
-func (pipeline *runtimeApplyPipeline) restore(ctx context.Context, positions []int, first []FencedWriteOutcome) {
+func (pipeline *runtimeApplyPipeline) restore(ctx context.Context, batch runtimeApplyBatch, positions []int, first []FencedWriteOutcome) {
 	writes := make([]FencedWrite, len(positions))
 	for at, position := range positions {
-		writes[at] = pipeline.writes[position]
+		writes[at] = batch.writes[position]
 	}
-	outcomes, err := pipeline.backend.CompareAndSetManyByDigest(ctx, pipeline.guard, writes)
+	outcomes, err := batch.backend.CompareAndSetManyByDigest(ctx, pipeline.guard, writes)
 	if err != nil || len(outcomes) != len(writes) {
 		return
 	}
@@ -1144,7 +1237,7 @@ func (pipeline *runtimeApplyPipeline) restore(ctx context.Context, positions []i
 		if outcomes[at].Err != nil || outcomes[at].Status != FencedWriteApplied {
 			continue
 		}
-		index := pipeline.indexes[position]
+		index := batch.indexes[position]
 		pipeline.result.Items[index] = execution.StateApplyItemResult{Identity: pipeline.request.Items[index].Identity, Status: execution.StateApplied}
 		cause := StateCacheRestoreRolledBack
 		if first[position].Status == FencedWriteConflictMissing {

@@ -295,6 +295,13 @@ func (backend *casMemoryBackend) StageHashSegment(_ context.Context, segment Has
 	return HashDeltaOutcome{Status: HashDeltaApplied}, nil
 }
 
+func (backend *casMemoryBackend) DiscardStagedHash(_ context.Context, key, markerField string, marker []byte) error {
+	if found, ok := backend.hashes[key][markerField]; ok && string(found) == string(marker) {
+		delete(backend.hashes, key)
+	}
+	return nil
+}
+
 func (backend *casMemoryBackend) SwapStagedHash(_ context.Context, swap HashStageSwap) (HashDeltaOutcome, error) {
 	staged := backend.hashes[swap.StageKey]
 	marker, found := staged[swap.MarkerField]

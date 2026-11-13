@@ -2865,7 +2865,7 @@ func (runtime *RedisCatalogRuntime) readPersistedSegment(
 // round's range has to reach back to the event: R + T + 1 windows before it.
 // The window accepted is the same, so the trigger reads what it read.
 func eventCountProviderLeads(query execution.QueryPlanFacts, duePlans []execution.DuePlan) map[int64]int64 {
-	if !readsEventCountOnly(query) {
+	if !execution.ReadsEventCountOnly(query) {
 		return nil
 	}
 	var histories []levelHistory
@@ -2887,10 +2887,10 @@ func eventCountProviderLeads(query execution.QueryPlanFacts, duePlans []executio
 // answer until they can. The requirement's identity is the template's and is
 // not changed.
 func countPrimary(requirement *execution.DataRequirement, facts execution.QueryPlanFacts, duePlans []execution.DuePlan) {
-	requirement.UnfilledCounts = readsUnfilledCounts(facts)
-	requirement.ZeroIsNoObservation = readsZeroAsNoObservation(facts)
+	requirement.UnfilledCounts = execution.ReadsUnfilledCounts(facts)
+	requirement.ZeroIsNoObservation = execution.ZeroCountIsNoObservation(facts)
 	requirement.ValueFiltered = readsValueFilter(facts)
-	if !readsEventCountOnly(facts) || requirement.StepMillis <= 0 {
+	if !execution.ReadsEventCountOnly(facts) || requirement.StepMillis <= 0 {
 		return
 	}
 	window := requirement.RelativeWindow.EndOffsetSeconds - requirement.RelativeWindow.StartOffsetSeconds
@@ -2930,11 +2930,6 @@ func eventLeadPoints(level strategy.CompiledLevel) int64 {
 	return points
 }
 
-// readsEventCountOnly is whether a query reads custom/event and nothing else.
-func readsEventCountOnly(query execution.QueryPlanFacts) bool {
-	return len(query.SourceSemantics) == 1 && query.SourceSemantics[0] == eventCountSourceSemantics && query.StepMillis > 0
-}
-
 // providerLeads is, by window, the most history points of a Level due with
 // it times the window, rounded up to a whole number of steps; zero points
 // lead nothing.
@@ -2950,24 +2945,6 @@ func providerLeads(stepMillis int64, histories []levelHistory) map[int64]int64 {
 		}
 	}
 	return leads
-}
-
-// readsZeroAsNoObservation is whether a query's count of zero is no
-// observation (DataRequirement.ZeroIsNoObservation): an event count, grouped
-// or not, or a log count whose clauses group by nothing.
-func readsZeroAsNoObservation(query execution.QueryPlanFacts) bool {
-	if readsEventCountOnly(query) {
-		return true
-	}
-	if !readsUnfilledCounts(query) {
-		return false
-	}
-	for _, clause := range query.QueryList {
-		if len(clause.Dimensions) > 0 {
-			return false
-		}
-	}
-	return true
 }
 
 // readsValueFilter is whether a query's expression compares its values: a
@@ -3045,51 +3022,6 @@ func sameSource(left, right execution.QueryPlanFacts) bool {
 		reflect.DeepEqual(left.QueryList, right.QueryList)
 }
 
-// readsUnfilledCounts is whether a query's one source answers counts its
-// provider does not zero-fill: a log count (bk_log_search/log, bk_monitor/log)
-// or a log time series aggregated by count or a count-like distinct
-// (bk_log_search/time_series), all read from an Elasticsearch date histogram
-// whose groups are absent rather than zero while they have no document. Its
-// range is not widened as an event count's is - the store already refuses
-// the largest log groups at one period - so its empty answer is labelled for
-// what it is instead. avg, sum, max and the rest keep their diagnosis.
-func readsUnfilledCounts(query execution.QueryPlanFacts) bool {
-	if len(query.SourceSemantics) != 1 {
-		return false
-	}
-	switch query.SourceSemantics[0] {
-	case "bk_log_search/log", "bk_monitor/log":
-		return true
-	case "bk_log_search/time_series":
-		return countsEveryClause(query.QueryList)
-	}
-	return false
-}
-
-// countsEveryClause is whether every clause of a query is aggregated by count
-// or a count-like distinct: count_over_time or distinct_over_time over time,
-// or count without time (compileAggregation).
-func countsEveryClause(clauses []execution.QueryClause) bool {
-	if len(clauses) == 0 {
-		return false
-	}
-	for _, clause := range clauses {
-		switch clause.TimeAggregation.Method {
-		case "count_over_time", "distinct_over_time":
-			continue
-		case "":
-			if len(clause.Functions) == 1 && clause.Functions[0].Method == "count" {
-				continue
-			}
-		}
-		return false
-	}
-	return true
-}
-
-// eventCountSourceSemantics is the source an event count reads.
-const eventCountSourceSemantics = "custom/event"
-
 // primaryIdentityFields is the dimensions every series of the query is told
 // apart by: the dataset's identity fields. The primary requirement reads them
 // beside the value - an event count with any is a count of groups, which is
@@ -3128,8 +3060,8 @@ func (runtime *RedisCatalogRuntime) primaryRequirements(
 				return nil, err
 			}
 			requirement = &execution.DataRequirement{RequirementID: execution.RequirementID(identity), ProviderLeadSeconds: lead,
-				UnfilledCounts:      readsUnfilledCounts(group.QueryPlan),
-				ZeroIsNoObservation: readsZeroAsNoObservation(group.QueryPlan),
+				UnfilledCounts:      execution.ReadsUnfilledCounts(group.QueryPlan),
+				ZeroIsNoObservation: execution.ZeroCountIsNoObservation(group.QueryPlan),
 				ValueFiltered:       readsValueFilter(group.QueryPlan),
 				DatasetName:         execution.DatasetName("primary:" + identity), Role: execution.InputRolePrimary,
 				LogicalQueryRef: execution.LogicalQueryRef(group.QueryPlan.QueryRevision),

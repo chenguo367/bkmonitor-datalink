@@ -158,7 +158,19 @@ redis.call('PEXPIRE', KEYS[1], ARGV[5])
 return {'APPLIED'}
 `
 
+// discardStagedHashScript deletes the staging key KEYS[1] when its marker
+// field ARGV[1] holds ARGV[2]: compared before deleted, as the swap's refusal
+// deletes, so a discard never takes another write's key.
+const discardStagedHashScript = `
+if redis.call('HGET', KEYS[1], ARGV[1]) == ARGV[2] then redis.call('DEL', KEYS[1]) end
+return 1
+`
+
 var (
+	discardStagedHashSHA = func() string {
+		sum := sha1.Sum([]byte(discardStagedHashScript))
+		return hex.EncodeToString(sum[:])
+	}()
 	stageHashSegmentSHA = func() string {
 		sum := sha1.Sum([]byte(stageHashSegmentScript))
 		return hex.EncodeToString(sum[:])
@@ -190,6 +202,18 @@ func (backend *RedisBackend) StageHashSegment(ctx context.Context, segment HashS
 		return HashDeltaOutcome{}, err
 	}
 	return decodeHashDeltaReply(reply)
+}
+
+func (backend *RedisBackend) DiscardStagedHash(ctx context.Context, key, markerField string, marker []byte) error {
+	if backend == nil || backend.client == nil {
+		return fmt.Errorf("state: redis backend is not configured")
+	}
+	keys := []string{key}
+	_, err := backend.client.EvalSha(ctx, discardStagedHashSHA, keys, markerField, marker).Result()
+	if noScriptReply(err) {
+		_, err = backend.client.Eval(ctx, discardStagedHashScript, keys, markerField, marker).Result()
+	}
+	return err
 }
 
 func (backend *RedisBackend) SwapStagedHash(ctx context.Context, swap HashStageSwap) (HashDeltaOutcome, error) {

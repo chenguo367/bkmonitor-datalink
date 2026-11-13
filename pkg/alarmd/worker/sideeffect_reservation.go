@@ -227,8 +227,20 @@ func (coordinator *SlotExecutionCoordinator) acquireEffects(delta effectCounts, 
 	// than remaining, because a share measured against what happens to be free
 	// means a different thing every round - the same object would fit or not by
 	// the luck of who else is running, and nobody could act on the answer.
-	if err := coordinator.judgeRetainedLocked(stream, retained, phase); err != nil {
-		return err
+	//
+	// A refusal the stream's read ahead may stand behind is judged again once
+	// it has yielded (yieldReadAhead), outside the lock its giving back takes.
+	for {
+		err := coordinator.judgeRetainedLocked(stream, retained, phase)
+		if err == nil {
+			break
+		}
+		reservation.mu.Unlock()
+		yielded := stream.yieldReadAhead()
+		reservation.mu.Lock()
+		if !yielded {
+			return err
+		}
 	}
 	reservation.states += delta.states
 	reservation.events += delta.events

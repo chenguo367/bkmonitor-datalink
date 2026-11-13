@@ -422,7 +422,7 @@ var checkAnswers = map[Check]struct {
 	CheckPlanUnevaluable:         {OwnerStrategy, GroupByStrategy},
 	CheckQueryTargetMissing:      {OwnerStrategy, GroupByDetail},
 	// The strategy's, as the refusal it warns of is: what fits in a share is
-	// the strategy's size, and the remedy is to shard or reshape it.
+	// the strategy's size, and the remedy is to reshape it.
 	CheckRetainedShareApproaching: {OwnerStrategy, GroupByStrategy},
 	// The strategy's: its time_delay decides when its window is read.
 	CheckReadBeforeComplete: {OwnerStrategy, GroupByStrategy},

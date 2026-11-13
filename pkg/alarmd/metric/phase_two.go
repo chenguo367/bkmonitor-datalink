@@ -101,6 +101,15 @@ type phaseTwoMetrics struct {
 	scheduleTimelineBytes          prometheus.Histogram
 	scheduleSegmentsPruned         prometheus.Counter
 	retainedShareApproaching       prometheus.Counter
+	inputSlices                    *prometheus.CounterVec
+	slicedSlots                    prometheus.Counter
+	firstSeenUnseen                *prometheus.CounterVec
+	sliceReadAhead                 *prometheus.CounterVec
+	inputSliceTimeouts             *prometheus.CounterVec
+	inputSliceShapes               *prometheus.CounterVec
+	noDataStagesAhead              *prometheus.CounterVec
+	noDataGroupsStagedAhead        prometheus.Counter
+	noDataStageAheadDiffers        *prometheus.CounterVec
 	schedulePruneSkipped           *prometheus.CounterVec
 	scheduleCutoverDuration        *prometheus.HistogramVec
 	scheduleCutovers               *prometheus.CounterVec
@@ -891,15 +900,92 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	// Completed Slots at or past the threshold of their one-object share of
 	// the retained pool. A counter, not a gauge per object: the objects are
 	// named on the page and in fleet.get, and a label per Query Group would
-	// grow with the fleet. What this answers is whether any Slot on this
-	// replica is near the wall at all - a rate above zero - which is the
-	// alerting question; the share refusal after it stops a strategy whole.
+	// grow with the fleet. A Slot applied in windows reaches the share by
+	// construction and is counted, so on a replica running a Query Group in
+	// windows the rate is above zero every round and says the windows are in
+	// use; a Slot near the wall is the page line's, which leaves those out,
+	// and the share refusal after it stops a strategy whole.
+	// Whether slicing and its read ahead happen at all, which the completion
+	// row alone says on a sampled line. Bounded labels only: which Query
+	// Group is the control API's.
+	metrics.inputSlices = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem,
+		Name: "worker_input_slices_total", Help: "Slices the input of completed Slots read in slices was read in, by outcome: landed, read and " +
+			"evaluated, and discarded, let go past the slice limit while they streamed and split. A Slot read " +
+			"whole counts nothing. Read beside worker_sliced_slots_total: their ratio is the slices a sliced Slot " +
+			"reads."}, []string{"outcome"})
+	metrics.slicedSlots = prometheus.NewCounter(prometheus.CounterOpts{Subsystem: metricSubsystem,
+		Name: "worker_sliced_slots_total", Help: "Completed Slots whose input was read in more than one slice or had a slice let go: the Slots slicing " +
+			"reached. Which Query Group is not a label here."})
+	metrics.firstSeenUnseen = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem,
+		Name: "worker_first_seen_unseen_total", Help: "What completed Slots wrote as first-seen before a later slice found the Plan had run, by unit: " +
+			"slices and series. Those series were written without warming up; a rate above zero says the " +
+			"first-seen judgement changed within Slots read in slices."}, []string{"unit"})
+	metrics.sliceReadAhead = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem,
+		Name: "worker_slice_read_ahead_total", Help: "How the slices read ahead - read while the slice before completed - ended, by outcome: replayed, " +
+			"handed to the Slot; other_leaf, let go because the next slice was another; yielded, let go for a " +
+			"reservation of the Slot's own the share or the pool would otherwise refuse; failed, let go because " +
+			"the read failed before it was handed on. Every slice let go is read again on the Slot's goroutine. " +
+			"Counted from completed Slots."}, []string{"outcome"})
+	for _, outcome := range []string{"landed", "discarded"} {
+		metrics.inputSlices.WithLabelValues(outcome)
+	}
+	for _, unit := range []string{"slices", "series"} {
+		metrics.firstSeenUnseen.WithLabelValues(unit)
+	}
+	for _, outcome := range observability.SliceReadAheadOutcomes {
+		metrics.sliceReadAhead.WithLabelValues(outcome)
+	}
+	metrics.inputSliceTimeouts = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem,
+		Name: "worker_input_slice_timeouts_total", Help: "Slices of Slots read in slices whose read ran out of time, by how each ended: split_succeeded, split and its " +
+			"children read in its place, the Slot's query completing; split_failed, split and the Slot's query failing " +
+			"after; not_split, failed as before - the query cooldown held, its time could not be put on its size, the " +
+			"window left was too short for its children, or the Slot had split once. A Slot splits so once. Which Query " +
+			"Group is not a label here."}, []string{"outcome"})
+	for _, outcome := range observability.InputSliceTimeoutOutcomes {
+		metrics.inputSliceTimeouts.WithLabelValues(outcome)
+	}
+	metrics.inputSliceShapes = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem,
+		Name: "worker_input_slice_shapes_total", Help: "Slots by what they did with their Query Group's shape, the leaves a " +
+			"slice that ran out of time for its size was split into, which the next Slot starts in: started, read in it; " +
+			"kept, a slice split for its time kept in it; merged, its last kept split taken back after three quick rounds; " +
+			"voided_revision, voided_dimensions, voided_max_leaves, dropped as the query revision or the dimensions " +
+			"changed or it grew past a starting tree's leaves; refused_not_a_leaf, refused_not_a_partition, " +
+			"refused_max_leaves, dropped as its leaves were not a partition of every value. A dropped shape's Slot " +
+			"starts in slices counted anew. evicted_idle counts the Query Groups whose slice memory, shape or none, " +
+			"was dropped for no Slot started on this replica for ten of their periods and ten minutes at least. Which " +
+			"Query Group is not a label here."}, []string{"outcome"})
+	for _, outcome := range observability.InputSliceShapeOutcomes {
+		metrics.inputSliceShapes.WithLabelValues(outcome)
+	}
+	metrics.noDataStagesAhead = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem,
+		Name: "worker_no_data_stage_ahead_total", Help: "No-data first writes staged as their windows landed, a Plan each, by how " +
+			"the staging ended: carried, the statement put the stage in place with it; differs, the round kept a staged " +
+			"group otherwise and wrote every group with the statement; discarded, the round wrote no statement and the " +
+			"stage was taken back; stopped, a segment could not be staged and the groups after it went with the statement. " +
+			"Counted from completed Slots. Which Query Group is not a label here."}, []string{"outcome"})
+	for _, outcome := range observability.NoDataStageAheadOutcomes {
+		metrics.noDataStagesAhead.WithLabelValues(outcome)
+	}
+	metrics.noDataStageAheadDiffers = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem,
+		Name: "worker_no_data_stage_ahead_differs_total", Help: "No-data first writes staged as their windows landed whose round wrote every group with the statement instead, " +
+			"by why: kept_otherwise, a staged group the round kept otherwise or not at all; count_mismatch, the stage's " +
+			"groups not the ones the round marked and kept; present_as_of, the round's present-as-of not the one they were " +
+			"staged against. A rate above zero is a shape the staging does not cover, held whole to the tail as before. " +
+			"Counted from completed Slots."}, []string{"reason"})
+	for _, reason := range nodata.StagedDiffersReasons {
+		metrics.noDataStageAheadDiffers.WithLabelValues(reason)
+	}
+	metrics.noDataGroupsStagedAhead = prometheus.NewCounter(prometheus.CounterOpts{Subsystem: metricSubsystem,
+		Name: "worker_no_data_groups_staged_ahead_total", Help: "Groups of no-data first writes staged as their windows " +
+			"landed, ahead of the statements: what the worker held no longer to the tail. Counted from completed Slots."})
 	metrics.retainedShareApproaching = prometheus.NewCounter(prometheus.CounterOpts{Subsystem: metricSubsystem,
 		Name: "state_retained_share_approaching_slots_total",
 		Help: "Slots whose retained bytes reached at least 95 percent of the one-object share of the retained " +
 			"pool they were admitted under: completed Slots at or past the threshold, and Slots given up because " +
 			"the share refused them (RESOURCE_SHARE_EXCEEDED), which are past it. The objects are listed by name " +
-			"under RETAINED_SHARE_APPROACHING on the page and in fleet.get."})
+			"under RETAINED_SHARE_APPROACHING on the page and in fleet.get, except a completed Slot applied in more " +
+			"than one window: its windows are bounded by the share, so it reaches the share by construction and is " +
+			"counted here but not listed."})
 	metrics.schedulePruneSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "schedule_prune_skipped_total", Help: "Schedule timelines a cutover left unpruned, by reason."}, []string{"reason"})
 	metrics.scheduleCutoverDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{Subsystem: metricSubsystem, Name: "schedule_cutover_duration_seconds", Help: "Publication cutover compare-and-set duration.", Buckets: scheduleCutoverDurationBuckets}, []string{"result"})
 	metrics.scheduleCutoverFirstSeen = new(atomic.Bool)
@@ -2144,7 +2230,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 	return append(append(m.workflow.collectors(), []prometheus.Collector{
 		m.shortPeriod.completed, m.shortPeriod.duration, m.shortPeriod.lag,
 		m.queryStatus.responses,
-		m.flow.queryDuration, m.flow.queryFailures, m.flow.decisionLag, m.flow.outputRejectedAll,
+		m.flow.queryDuration, m.flow.answerBytes, m.flow.answerSeries, m.flow.answerRecords, m.flow.answerSeconds, m.flow.queryFailures, m.flow.decisionLag, m.flow.outputRejectedAll,
 		m.queryCodec.responses,
 		m.queryTruncation.truncated,
 		m.queryUnavailable.attributions,
@@ -2158,7 +2244,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.queryAdmission, m.queryDownstreamDistress,
 		m.noDataSlotPlans, m.noDataAbsences, m.noDataManualCloseDropped, m.noDataManualCloseReadFailures, m.targetPlanResolutions, m.targetSelectorResolutions, m.targetExcludedAbsentMembers, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.inPlaceWaits, m.inPlaceHeldInputBytes, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetRedis,
-		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.retainedShareApproaching, m.schedulePruneSkipped, m.scheduleCutoverDuration,
+		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.retainedShareApproaching, m.inputSlices, m.slicedSlots, m.firstSeenUnseen, m.sliceReadAhead, m.inputSliceTimeouts, m.inputSliceShapes, m.noDataStagesAhead, m.noDataStageAheadDiffers, m.noDataGroupsStagedAhead, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
 		m.scheduleCutoverQueryGroups, m.scheduleCutoverReadHoldLinks, m.fleetOverdueEpisodes, m.fleetRestoreUnread, m.scheduleCutoverTimelinesRead, m.scheduleCutoverFirstDuration,
 		m.scheduleCutoverFirstTimelines, m.replayExpiries, m.replayTakeovers, m.slotDiversions, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
@@ -2332,6 +2418,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	}
 	if facts := observation.QueryFailure; facts != nil && observation.Result == observability.ResultFailed {
 		m.queryFailures.WithLabelValues(facts.Stage, facts.Category).Inc()
+		if facts.SliceTimeout != "" {
+			m.inputSliceTimeouts.WithLabelValues(facts.SliceTimeout).Inc()
+		}
 	}
 	if facts := observation.ReplayExpiry; facts != nil {
 		m.replayExpiries.WithLabelValues(facts.Reason).Inc()
@@ -2360,6 +2449,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		if usage := observation.SlotBudgetUsage; usage != nil &&
 			observability.RetainedShareApproaching(usage.RetainedBytes, usage.RetainedShareBytes) {
 			m.retainedShareApproaching.Inc()
+		}
+		if usage := observation.SlotBudgetUsage; usage != nil {
+			m.observeSlicing(usage)
 		}
 	}
 	// A Slot given up at its share is past the threshold, not short of it:
@@ -2428,7 +2520,7 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	for _, fact := range observation.AlgorithmEvaluations {
 		m.algorithmEvaluations.WithLabelValues(
 			string(fact.SourceAlgorithmFamily), string(fact.Result),
-		).Inc()
+		).Add(float64(max(1, fact.Count)))
 	}
 	if rejected := observation.HistoryCoverageRejected; rejected != nil {
 		m.historyCoverageRejected.WithLabelValues(string(rejected.Rule)).Inc()
@@ -2468,7 +2560,7 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		m.algorithmInputs.WithLabelValues(
 			string(fact.SourceAlgorithmFamily), string(fact.InputName),
 			string(fact.DependencyPoint), string(fact.Result),
-		).Inc()
+		).Add(float64(max(1, fact.Count)))
 	}
 	if observation.Component == observability.ComponentScheduler &&
 		observation.Stage == observability.StageQueryAdmission && observation.QueryPermit != nil {
@@ -3380,4 +3472,33 @@ func (r *Recorder) ObserveLeaderForward(route, result string, duration time.Dura
 		return
 	}
 	r.phaseTwo.leaderForward.WithLabelValues(route, result).Observe(duration.Seconds())
+}
+
+// observeSlicing counts a completed Slot's slices, its first-seen writes a
+// later slice overturned, and how its reads ahead ended.
+func (m phaseTwoMetrics) observeSlicing(usage *observability.SlotBudgetUsageFacts) {
+	if usage.InputSlices > 1 || usage.InputSlicesDiscarded > 0 {
+		m.slicedSlots.Inc()
+		m.inputSlices.WithLabelValues("landed").Add(float64(usage.InputSlices))
+		m.inputSlices.WithLabelValues("discarded").Add(float64(usage.InputSlicesDiscarded))
+	}
+	m.firstSeenUnseen.WithLabelValues("slices").Add(float64(usage.FirstSeenUnseenSlices))
+	m.firstSeenUnseen.WithLabelValues("series").Add(float64(usage.FirstSeenUnseenSeries))
+	for outcome, count := range [...]uint64{usage.InputSlicesReadAhead, usage.InputSlicesReadAheadOtherLeaf,
+		usage.InputSlicesReadAheadYielded, usage.InputSlicesReadAheadFailed} {
+		m.sliceReadAhead.WithLabelValues(observability.SliceReadAheadOutcomes[outcome]).Add(float64(count))
+	}
+	m.inputSliceTimeouts.WithLabelValues(observability.InputSliceTimeoutSplitSucceeded).Add(float64(usage.InputSliceTimeouts))
+	for outcome, count := range [...]uint64{usage.InputSliceShapeStarted, usage.InputSliceShapeKept, usage.InputSliceShapeMerged, usage.InputSliceShapeVoidedRevision, usage.InputSliceShapeVoidedDimensions, usage.InputSliceShapeVoidedMaxLeaves, usage.InputSliceShapeRefusedNotALeaf, usage.InputSliceShapeRefusedNotAPartition, usage.InputSliceShapeRefusedMaxLeaves, usage.InputSliceShapeEvictedIdle} {
+		m.inputSliceShapes.WithLabelValues(observability.InputSliceShapeOutcomes[outcome]).Add(float64(count))
+	}
+	for outcome, count := range [...]uint64{usage.NoDataStagesAheadCarried, usage.NoDataStagesAheadDiffers,
+		usage.NoDataStagesAheadDiscarded, usage.NoDataStagesAheadStopped} {
+		m.noDataStagesAhead.WithLabelValues(observability.NoDataStageAheadOutcomes[outcome]).Add(float64(count))
+	}
+	for reason, count := range [...]uint64{usage.NoDataStageAheadDiffersKeptOtherwise,
+		usage.NoDataStageAheadDiffersCountMismatch, usage.NoDataStageAheadDiffersPresentAsOf} {
+		m.noDataStageAheadDiffers.WithLabelValues(nodata.StagedDiffersReasons[reason]).Add(float64(count))
+	}
+	m.noDataGroupsStagedAhead.Add(float64(usage.NoDataGroupsStagedAhead))
 }

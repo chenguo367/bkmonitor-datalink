@@ -179,6 +179,10 @@ func (coordinator *SlotExecutionCoordinator) observeQueryFailure(ctx context.Con
 	if facts.Request != nil && errors.As(err, &sourced) {
 		facts.Request.TimeoutSource = sourced.QueryFailureTimeoutSource()
 	}
+	var timedOut *sliceTimeoutError
+	if errors.As(err, &timedOut) {
+		facts.SliceTimeout = timedOut.outcome
+	}
 	var planned interface {
 		QueryFailurePlanned() *execution.PlannedQueryFacts
 	}

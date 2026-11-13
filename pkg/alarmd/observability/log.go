@@ -91,8 +91,7 @@ func (p *BoundedLogPolicy) Admit(observation Observation) LogAdmission {
 			return LogAdmission{Allowed: true, Candidate: true, ReasonChanged: true, PreviousReasons: previous}
 		}
 	}
-	if routineResult(observation.Result) && !evaluationHeldQuery(observation) && !readAtLimitRound(observation) &&
-		!supersededRound(observation) {
+	if Routine(observation) {
 		switch {
 		case roundStages[observation.Stage] && roundChanged(observation), cutoverChanged(observation):
 			return LogAdmission{Allowed: true, Candidate: true}
@@ -109,6 +108,15 @@ func (p *BoundedLogPolicy) Admit(observation Observation) LogAdmission {
 	admission := p.repeated.Admit(observation)
 	admission.Candidate = true
 	return admission
+}
+
+// Routine is whether an observation's result is routine for the line: the
+// line counts it without writing it (Admit), and an evaluation of one may be
+// merged with the routine ones beside it (MergeRoutineEvaluation). One
+// function for both, so the two cannot part.
+func Routine(observation Observation) bool {
+	return routineResult(observation.Result) && !evaluationHeldQuery(observation) && !readAtLimitRound(observation) &&
+		!supersededRound(observation)
 }
 
 type LoggingObserver struct {
@@ -182,8 +190,15 @@ func (l *LoggingObserver) LineCounts() LogLineCounts {
 }
 
 // countLine adds one line of the stage to the count the admission says: a
-// routine line counted and not written, a line written, or one held back.
-func (l *LoggingObserver) countLine(stage Stage, admission LogAdmission) {
+// routine line counted and not written, a line written, or one held back. An
+// evaluation line merged from routine ones counts as the lines it stands
+// for (EvaluationsOf), as each was counted before they were merged.
+func (l *LoggingObserver) countLine(observation Observation, admission LogAdmission) {
+	stage := observation.Stage
+	lines := uint64(1)
+	if stage == StageEvaluationCompleted {
+		lines = uint64(EvaluationsOf(observation))
+	}
 	place, known := logStageIndex[stage]
 	if !known {
 		place = logStageIndex[StageOther]
@@ -196,7 +211,7 @@ func (l *LoggingObserver) countLine(stage Stage, admission LogAdmission) {
 		counts = l.written
 	}
 	if place < len(counts) {
-		counts[place].Add(1)
+		counts[place].Add(lines)
 	}
 }
 
@@ -286,7 +301,7 @@ func (l *LoggingObserver) Observe(ctx context.Context, observation Observation) 
 	// a routine stage's success counted and not written. A success outside
 	// the workflow stages is not a line at all.
 	if admission.Candidate {
-		l.countLine(observation.Stage, admission)
+		l.countLine(observation, admission)
 	}
 	if !admission.Allowed {
 		return

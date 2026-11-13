@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -93,6 +94,10 @@ type slotWindows struct {
 	// own series, from which groups reported, and that is all it reads of
 	// them - one key and a few bits a group, not the series' dimensions.
 	present map[execution.PlanIdentity]*nodata.PresentSet
+	// staging is, by no-data Plan whose round writes its whole record, what
+	// of it the landed windows staged ahead of the statement
+	// (no_data_stage_ahead.go).
+	staging map[execution.PlanIdentity]*noDataStageAhead
 	// seen is the Plans a landed window's views showed something written
 	// before the Slot, for unseenPlans in the tail: the views themselves are
 	// gone by then.
@@ -213,6 +218,13 @@ func (stream *streamedExecution) windowReleasable() uint64 {
 	return stream.windows.bytes
 }
 
+// windowBoundPercent, between 1 and 99, bounds windows at that percent of
+// the share instead of all of it. Zero, as every build but the measurement's
+// leaves it, is the whole share: only the alarmd_measure build has a setter
+// (window_bound_measure.go), for the reading of how the collector paces when
+// the windows leave the soft limit room.
+var windowBoundPercent atomic.Uint32
+
 // windowBound is the most the window being filled may hold: the Slot's
 // share of the pool, less what the Slot holds outside the window - the
 // inputs of the series no window has landed yet, the gap facts, the no-data
@@ -227,6 +239,9 @@ func (stream *streamedExecution) windowBound() uint64 {
 	share := stream.coordinator.qgShareBytes()
 	if share == 0 {
 		return math.MaxUint64
+	}
+	if percent := windowBoundPercent.Load(); percent > 0 && percent < 100 {
+		share = share / 100 * uint64(percent)
 	}
 	outside := stream.retainedTotal() - min(stream.windowReleasable(), stream.retainedTotal())
 	if outside >= share {
@@ -252,6 +267,14 @@ func (stream *streamedExecution) windowBeforeMerge(ctx context.Context, next exe
 	full := stream.effects.states+delta.states > budget.MaxStateMutations ||
 		stream.effects.events+delta.events > budget.MaxEvents
 	if !full && stream.windowReleasable() > 0 {
+		// A series that alone would not fit the window the read ahead leaves
+		// it is judged again once the read ahead has yielded. No refusal was
+		// judged here, so what yieldReadAhead says - read against the last
+		// refusal's aheadAtRefusal - is not used: full is worked out again
+		// from windowBound once, with no loop.
+		if measured.total() > stream.windowBound() {
+			stream.yieldReadAhead()
+		}
 		full = stream.windows.bytes+measured.total() > stream.windowBound()
 	}
 	if !full {
@@ -732,6 +755,13 @@ func (stream *streamedExecution) releaseWindow(ctx context.Context, final bool, 
 	if held, keep := stream.retainedByPhase[retainPhaseOutput], kept+stream.summaryHeld; held > keep {
 		stream.unretain(retainPhaseOutput, held-keep)
 	}
+	if note := windowSizesForMeasurement.Load(); note != nil {
+		through := windows.reached
+		if final {
+			through = len(windows.prepared)
+		}
+		(*note)(windows.bytes, through-windows.dropped)
+	}
 	windows.bytes, windows.stateBytes = 0, 0
 	through := windows.reached
 	if final {
@@ -814,6 +844,7 @@ func (stream *streamedExecution) dropWindowInputs(ctx context.Context, through i
 			for _, dimensions := range stream.seriesDimensionsFor(windows.prepared[index:index+1], entry.due.Identity) {
 				if key, fresh := windows.presentSet(*entry.due).Add(dimensions); fresh {
 					kept += presentKeyHeldBytes(key)
+					stream.stageAhead(ctx, *entry.due, key)
 				}
 			}
 		}

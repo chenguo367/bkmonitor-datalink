@@ -1034,7 +1034,7 @@ func (c *CostSummary) Observe(ctx context.Context, o Observation) {
 			addCost(&p.windows.current, o, trace, now)
 			p.windows.observeSlot(o, trace, now)
 		} else {
-			account.windows.current.UnattributedEvaluations++
+			account.windows.current.UnattributedEvaluations += uint64(EvaluationsOf(o))
 		}
 	}
 }
@@ -1082,16 +1082,27 @@ func (c *CostSummary) observeHeld(ctx context.Context, o Observation) {
 }
 
 func addWall(w *CostWall, o Observation) {
+	lines := uint64(observedLines(o))
 	if o.Duration >= 0 && (o.DurationKnown || o.Duration > 0) {
-		w.Measured++
+		w.Measured += lines
 		w.ObservedNS += max(0, int64(o.Duration))
 	} else {
-		w.Unknown++
+		w.Unknown += lines
 	}
 }
 
+// observedLines is how many lines an observation stands for: an evaluation
+// line merged from routine ones the evaluations it was merged from
+// (EvaluationsOf), any other one.
+func observedLines(o Observation) int64 {
+	if o.Stage == StageEvaluationCompleted {
+		return EvaluationsOf(o)
+	}
+	return 1
+}
+
 func addCost(s *CostScalars, o Observation, trace TraceFields, now time.Time) {
-	s.Observations++
+	s.Observations += uint64(observedLines(o))
 	switch o.Stage {
 	case StageSlotStarted:
 		s.Attempts++
@@ -1127,14 +1138,14 @@ func addCost(s *CostScalars, o Observation, trace TraceFields, now time.Time) {
 			}
 		}
 	case StageEvaluationCompleted:
-		s.Evaluations++
+		s.Evaluations += uint64(EvaluationsOf(o))
 		if o.Err != nil || o.Result == ResultFailed {
 			s.FailedEvaluations++
 		}
 		if o.EvaluationRecordsKnown || o.Counts.Records > 0 {
 			s.EvaluationRecords += uint64(max(0, o.Counts.Records))
 		} else {
-			s.EvaluationRecordsUnknown++
+			s.EvaluationRecordsUnknown += uint64(EvaluationsOf(o))
 		}
 		addWall(&s.EvaluationWall, o)
 	case StageQueryCompleted:

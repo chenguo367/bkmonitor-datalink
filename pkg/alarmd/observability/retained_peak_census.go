@@ -204,7 +204,7 @@ func (c *RetainedPeakCensus) Observe(ctx context.Context, o Observation) {
 		if o.Duration >= 0 && (o.DurationKnown || o.Duration > 0) {
 			w.computeWallNS += max(0, int64(o.Duration))
 		} else {
-			w.computeWallUnknown++
+			w.computeWallUnknown += uint64(observedLines(o))
 		}
 	}
 }

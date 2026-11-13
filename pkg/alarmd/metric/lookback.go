@@ -48,6 +48,7 @@ type lookbackCollector struct {
 	supplementUnobserved *prometheus.Desc
 	supplementSeries     *prometheus.Desc
 	supplementPoints     *prometheus.Desc
+	partlyRefused        *prometheus.Desc
 	directedBytes        *prometheus.Desc
 	supplementHold       *prometheus.Desc
 	supplementHoldMax    *prometheus.Desc
@@ -207,7 +208,7 @@ func newLookbackCollector() *lookbackCollector {
 				"their owner releasing them once drained, before a round came back to them. A drained group closed by "+
 				"neither leaves its successor reading the open record as the hold bound.", "site"),
 		firstReads: desc("lookback_first_reads_total",
-			"Formal first reads seen, by source - the data source the Query Group reads, labelled as the directory "+
+			"Formal first reads seen, a Slot read in slices one, by source - the data source the Query Group reads, labelled as the directory "+
 				"labels its Query Groups, so every lookback family reads beside them: the denominator of the query "+
 				"volume the lookback adds (lookback_rechecks_total over it).", "source"),
 		checks: desc("lookback_rechecks_total",
@@ -250,6 +251,10 @@ func newLookbackCollector() *lookbackCollector {
 			"source", "outcome"),
 		supplementPoints: desc("lookback_supplement_points_total",
 			"Points the admitted series of the supplements were evaluated on, by source.", "source"),
+		partlyRefused: desc("lookback_supplement_partly_refused_total",
+			"Directed Slots read in slices some of whose rereads the memory share refused, by source: each came to "+
+				"the outcome of the slices read in lookback_supplement_windows_total and is in no reason of "+
+				"lookback_supplement_unobserved_total.", "source"),
 		directedBytes: desc("lookback_directed_read_bytes_total",
 			"Bytes the directed reads delivered, by source: a Slot's frozen query each, read against "+
 				"lookback_first_read_bytes_total over lookback_first_reads_total.", "source"),
@@ -382,7 +387,7 @@ func newLookbackCollector() *lookbackCollector {
 
 func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, desc := range []*prometheus.Desc{c.firstReads, c.checks, c.changed, c.changes, c.classes, c.readEarly, c.seriesLate, c.supplementWindows, c.supplementUnobserved, c.supplementSeries,
-		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.earlierBytes, c.earlierReads, c.earlierOvertaken, c.earlierPreparedLate, c.earlierAhead, c.earlierSkipped, c.probationRereads, c.probationCaught, c.probationGroups, c.floorProbeRounds, c.floorProbes, c.floorProbeGroups, c.floorProbeChanges, c.holdIgnored, c.readBytes, c.checkBytes, c.unknown, c.coverage,
+		c.supplementPoints, c.partlyRefused, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.earlierBytes, c.earlierReads, c.earlierOvertaken, c.earlierPreparedLate, c.earlierAhead, c.earlierSkipped, c.probationRereads, c.probationCaught, c.probationGroups, c.floorProbeRounds, c.floorProbes, c.floorProbeGroups, c.floorProbeChanges, c.holdIgnored, c.readBytes, c.checkBytes, c.unknown, c.coverage,
 		c.pending, c.yields, c.refused, c.faults, c.plans, c.planHeld, c.readHoldTransition, c.readHoldOvertaken,
 		c.readHoldPredecessor, c.readHoldSeed, c.readHoldDuration, c.readHoldEarlierSkip, c.readHoldFloorProbes, c.readHoldProbeProgress, c.readHoldFindings, c.roundsReadAtLimit, c.readHoldClamped, c.readHoldCorrupt, c.readHoldRetireClose, c.readHoldRetireClosed, c.readHoldWaits, c.readHoldWaiting, c.readHoldCloseSkip, c.readHoldDegraded,
 		c.readHoldGroups, c.readHoldMax} {
@@ -481,6 +486,7 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 			counter(c.supplementSeries, source.SupplementSeries[outcome], name, outcome)
 		}
 		counter(c.supplementPoints, source.SupplementPoints, name)
+		counter(c.partlyRefused, source.SupplementPartlyRefused, name)
 		counter(c.directedBytes, source.DirectedReadBytes, name)
 		for _, bucket := range lookback.SupplementHoldBuckets {
 			counter(c.supplementHold, source.SupplementHold[bucket], name, bucket)

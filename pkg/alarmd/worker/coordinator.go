@@ -178,6 +178,29 @@ type ProvisionalBudget struct {
 	// caps what one Slot may produce (see slotBudget). Zero means the store
 	// has no bound below the process budget.
 	StoreMaxItems uint64
+	// QueryPermits is the process's query permits (ProcessQueryPermits), what
+	// the provider is asked at once across every Slot; a Slot read in slices
+	// reads at most sliceReadWidth of them at once. Zero, as tests build it,
+	// reads one slice ahead.
+	QueryPermits int
+}
+
+// sliceReadWidth is how many slices of one Slot are read at once: the one it
+// is on and the ones read ahead. Half the process's query permits at most,
+// so one large Query Group never takes them all, and four at most: the
+// share is split among the slices in flight (sliceReadAheadLimit), and a
+// fifth would leave each too small to be worth its request. A constant, not
+// a setting: what the provider can take in all is the permits' to say, and
+// how many of them one Query Group uses the program knows better than an
+// operator (decision-020 throughput design 3.1, way 6).
+func (coordinator *SlotExecutionCoordinator) sliceReadWidth() int {
+	if width := sliceReadWidthForMeasurement.Load(); width > 0 {
+		return int(width)
+	}
+	if coordinator.budget.QueryPermits <= 0 {
+		return 2
+	}
+	return min(4, max(1, coordinator.budget.QueryPermits/2))
 }
 
 type activationProtectionRequiredError struct {
@@ -228,13 +251,22 @@ func NewSlotExecutionCoordinator(ports Ports, budget ProvisionalBudget) (*SlotEx
 
 func (coordinator *SlotExecutionCoordinator) acquireProvisional(series, retainedBytes uint64, stream *streamedExecution, phase string) error {
 	coordinator.reservations.mu.Lock()
-	defer coordinator.reservations.mu.Unlock()
 	// The bytes are the budget and are judged first; the series count is a
 	// guardrail at the smallest a series can encode, which binds only when
-	// the byte accounting has gone wrong.
-	if err := coordinator.judgeRetainedLocked(stream, retainedBytes, phase); err != nil {
-		return err
+	// the byte accounting has gone wrong. A refusal the stream's read ahead
+	// may stand behind is judged again once it has yielded (yieldReadAhead).
+	for {
+		err := coordinator.judgeRetainedLocked(stream, retainedBytes, phase)
+		if err == nil {
+			break
+		}
+		coordinator.reservations.mu.Unlock()
+		if !stream.yieldReadAhead() {
+			return err
+		}
+		coordinator.reservations.mu.Lock()
 	}
+	defer coordinator.reservations.mu.Unlock()
 	if series > coordinator.budget.MaxSeries-coordinator.reservations.series {
 		return budgetRejection(observability.CapacityBudgetSeries, phase, coordinator.reservations.series, series, coordinator.budget.MaxSeries, stream.ownBudget(observability.CapacityBudgetSeries), stream.ownBudgetUsage(coordinator.budget))
 	}
@@ -264,6 +296,15 @@ func (coordinator *SlotExecutionCoordinator) releaseProvisional(series, retained
 // - the worker's own preparation - and a query-free owner, whose usage is not
 // the whole execution's, is the pool's RESOURCE_HARD_STOP.
 func (coordinator *SlotExecutionCoordinator) judgeRetainedLocked(stream *streamedExecution, retainedBytes uint64, phase string) error {
+	err := coordinator.judgeRetainedOnceLocked(stream, retainedBytes, phase)
+	if err != nil && stream != nil {
+		stream.aheadAtRefusal.Store(stream.aheadBytes.Load())
+	}
+	return err
+}
+
+// judgeRetainedOnceLocked is judgeRetainedLocked's judgement.
+func (coordinator *SlotExecutionCoordinator) judgeRetainedOnceLocked(stream *streamedExecution, retainedBytes uint64, phase string) error {
 	owned := stream != nil && stream.began
 	if share := coordinator.qgShareBytes(); stream != nil && share > 0 && retainedBytes > 0 && stream.retainedTotal()+retainedBytes > share {
 		return shareRejection(phase, stream.retainedTotal(), retainedBytes, share, stream.ownBudgetUsage(coordinator.budget))
@@ -529,6 +570,9 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	started := time.Now()
 	stream := &streamedExecution{coordinator: coordinator, request: request}
 	defer stream.releaseProvisional()
+	// Before the release: no read ahead outlives the Slot, and what it holds
+	// goes back with the rest.
+	defer stream.letGoReadAhead()
 	ctx = withRetainedOwner(ctx, stream)
 	queryRequest := execution.QueryExecutionRequest{
 		Contract: request.Contract, Operation: request.Operation, AttemptNo: request.AttemptNo,
@@ -536,7 +580,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	// One read of the whole Query Group, or one a slice when this Slot is
 	// read in slices (sliced_input.go): a slice whose input passes its limit
 	// while it streams is let go and split, its children read in its place.
-	stream.slices = coordinator.sliceReadingFor(request)
+	stream.slices = coordinator.sliceReadingFor(ctx, request)
 	var completion execution.QueryExecutionCompletion
 	completionCtx, cancelCompletion := ctx, context.CancelFunc(func() {})
 	defer func() { cancelCompletion() }()
@@ -550,7 +594,29 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 			queryRequest.Slice = leaf.Slice
 		}
 		execution.MarkStage(ctx, execution.SlotStageQuery)
-		sliceCompletion, err := coordinator.ports.Query.Execute(ctx, queryRequest, stream)
+		sliceStarted := time.Now()
+		// The slice read ahead while the one before completed, when it is
+		// this one and came back whole; read here otherwise.
+		sliceCompletion, err, replayed := stream.replayReadAhead(ctx, leaf)
+		if !replayed {
+			sliceCompletion, err = coordinator.ports.Query.Execute(ctx, queryRequest, stream)
+		}
+		// The provider's own timeout comes back as a completion, UNAVAILABLE:
+		// put on the slice's size it is the read out of time below, by the
+		// time its query took, read ahead or here alike.
+		if err == nil && stream.slicing() {
+			if took, answered, timedOut := providerTimedOut(sliceCompletion); timedOut {
+				if timeout := stream.providerTimeout(took, answered); timeout != nil {
+					err = timeout
+				} else {
+					stream.slices.noteDegradedTimeout()
+				}
+			}
+		}
+		if err != nil && stream.slicing() && errors.Is(err, errSliceDimensionsGone) {
+			stream.slices.forgetDimensions()
+			continue
+		}
 		if err != nil && stream.slicing() && errors.Is(err, errSliceOverflow) {
 			if refused := stream.splitSlice(leaf); refused != nil {
 				refused = stream.finalSliceRefusal(refused)
@@ -558,6 +624,31 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 				return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: query: %w", refused)
 			}
 			continue
+		}
+		if err != nil && stream.slicing() && sliceReadTimedOut(err) && !isReadinessDeferred(err) {
+			if took, provider := timedOutTook(err, time.Since(sliceStarted)); provider && stream.splitsOnTimeout(ctx, took) {
+				// Put on its size: let go and split as a slice past its
+				// limit is, its children read in its place, once a Slot. A
+				// Slot whose children complete is no timeout of its group's
+				// cooldown; one whose do not is, as before.
+				if refused := stream.splitSliceKept(leaf); refused == nil {
+					stream.slices.timeoutSplit = true
+					// Its read is no read: what the lookback captured of it
+					// is taken back, its children captured in its place.
+					if discarder, ok := coordinator.ports.Query.(sliceReadDiscarder); ok {
+						discarder.DiscardSliceRead(request.Contract, leaf.Slice)
+					}
+					continue
+				}
+			}
+			outcome := observability.InputSliceTimeoutNotSplit
+			if stream.slices.timeoutSplit {
+				outcome = observability.InputSliceTimeoutSplitFailed
+			}
+			err = &sliceTimeoutError{err: err, outcome: outcome}
+		} else if err != nil && stream.slicing() && stream.slices.timeoutSplit && !errors.Is(err, errSliceOverflow) {
+			// Split for its time, and failed after for another reason.
+			err = &sliceTimeoutError{err: err, outcome: observability.InputSliceTimeoutSplitFailed}
 		}
 		if err != nil {
 			if isReadinessDeferred(err) {
@@ -578,6 +669,17 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 			} else {
 				coordinator.observeQueryFailure(ctx, request.Operation, started, "execute", err)
 			}
+			// A read that ran out of time is remembered too: one the provider
+			// timed out at no less than the backend's 30 s, for the next Slot
+			// of the Query Group to start in slices by that time rather than
+			// read it whole to time out again; one alarmd's deadline ended at
+			// what it took, put on nothing (timedOutTook).
+			if stream.slices != nil && sliceReadTimedOut(err) {
+				stream.slices.timedOutTook, stream.slices.timedOutByProvider = timedOutTook(err, time.Since(sliceStarted))
+				stream.slices.queryMillis += stream.slices.timedOutTook
+				stream.keepTimedOutSplit(leaf)
+				coordinator.rememberSlotInput(request, stream, true)
+			}
 			return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: query: %w", err)
 		}
 		if !read {
@@ -596,6 +698,26 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 		if completion, err = foldSliceCompletion(completion, sliceCompletion); err != nil {
 			return execution.SlotExecutionResult{}, err
 		}
+		if stream.slices != nil {
+			// A read the provider timed out and that completed degraded took
+			// the backend's limit, whatever its answer took to come back: the
+			// slices after it are judged against that (timedOutForSize).
+			took := slowestQueryMillis(sliceCompletion)
+			if _, _, timedOut := providerTimedOut(sliceCompletion); timedOut {
+				took = max(took, 2*sliceQueryTargetMillis)
+			}
+			stream.slices.queryMillis += took
+			stream.slices.sliceMillis = append(stream.slices.sliceMillis, took)
+			stream.slices.noteLeafRead(leaf, took)
+		}
+		// The next slice is read while this one completes, up to half of what
+		// the share leaves beside this slice (sliceLimit): its decode is off
+		// the Slot's path (slice_read_ahead.go).
+		if width := coordinator.sliceReadWidth(); stream.slicing() && width > 1 && !sliceReadAheadOff.Load() {
+			if pending := stream.slices.pending(); len(pending) > 1 {
+				stream.startSliceReadAheads(ctx, queryRequest, pending, width)
+			}
+		}
 		if err := stream.complete(completionCtx, sliceCompletion); err != nil {
 			coordinator.observeQueryFailure(completionCtx, request.Operation, started, "stream_complete", err)
 			// Not "invalid query result": the query is only one of the things
@@ -608,7 +730,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 		}
 	}
 	ctx = completionCtx
-	coordinator.rememberSlotInput(request, stream)
+	coordinator.rememberSlotInput(request, stream, false)
 	// The Slot's result is the evaluation's; the query line reports the
 	// physical queries' own beside it (observeQueryCompleted).
 	queryResult, queryReason := provisionalResult(stream.evaluated)
@@ -732,6 +854,7 @@ func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 		return execution.SlotBudgetUsage{}
 	}
 	budget := stream.coordinator.budget
+	shapes := stream.sliceShapeOutcomes()
 	return execution.SlotBudgetUsage{
 		StateMutations: stream.effectsSpent.states + stream.effects.states, GapMutations: stream.effectsSpent.gaps + stream.effects.gaps,
 		Events: stream.effectsSpent.events + stream.effects.events, EventsWithoutMessage: stream.summary.withoutMessage,
@@ -739,11 +862,32 @@ func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 		DependencySeriesDiscarded: stream.dependencyDiscarded,
 		InputSlices:               stream.slicesRead(), InputSlicesDiscarded: stream.slicesDiscarded(),
 		FirstSeenUnseenSlices: stream.unseenSlices(), FirstSeenUnseenSeries: stream.unseenSeries(),
-		RetainedInputBytes:  stream.peakByPhase[retainPhaseInput],
-		RetainedGapBytes:    stream.peakByPhase[retainPhaseGap],
-		RetainedOutputBytes: stream.peakByPhase[retainPhaseOutput],
-		RetainedStateBytes:  stream.peakByPhase[retainPhaseState],
-		StateMutationsLimit: budget.MaxStateMutations, GapMutationsLimit: budget.MaxGapMutations,
+		InputSlicesReadAhead: stream.readAheadEnds[readAheadReplayed], InputSlicesReadAheadOtherLeaf: stream.readAheadEnds[readAheadOtherLeaf],
+		InputSlicesReadAheadYielded: stream.readAheadEnds[readAheadYielded], InputSlicesReadAheadFailed: stream.readAheadEnds[readAheadFailed],
+		InputSliceTimeouts:                  stream.sliceTimeoutsSplit(),
+		InputSliceShapeStarted:              shapes[0],
+		InputSliceShapeKept:                 shapes[1],
+		InputSliceShapeMerged:               shapes[2],
+		InputSliceShapeVoidedRevision:       shapes[3],
+		InputSliceShapeVoidedDimensions:     shapes[4],
+		InputSliceShapeVoidedMaxLeaves:      shapes[5],
+		InputSliceShapeRefusedNotALeaf:      shapes[6],
+		InputSliceShapeRefusedNotAPartition: shapes[7],
+		InputSliceShapeRefusedMaxLeaves:     shapes[8],
+		InputSliceShapeEvictedIdle:          shapes[9],
+		InputSliceCutOn:                     stream.sliceCutFrom(),
+		InputSlicesDeferred:                 stream.slicesDeferred(),
+		InputSliceStartDiscarded:            stream.sliceStartDiscarded(),
+		NoDataStagesAheadCarried:            stream.stageAheadEnds[stageAheadCarried], NoDataStagesAheadDiffers: stream.stageAheadEnds[stageAheadDiffers],
+		NoDataStagesAheadDiscarded: stream.stageAheadEnds[stageAheadDiscarded], NoDataStagesAheadStopped: stream.stageAheadEnds[stageAheadStopped],
+		NoDataStageAheadDiffersKeptOtherwise: stream.stageAheadDiffers[0], NoDataStageAheadDiffersCountMismatch: stream.stageAheadDiffers[1],
+		NoDataStageAheadDiffersPresentAsOf: stream.stageAheadDiffers[2],
+		NoDataGroupsStagedAhead:            stream.groupsStagedAhead,
+		RetainedInputBytes:                 stream.peakByPhase[retainPhaseInput],
+		RetainedGapBytes:                   stream.peakByPhase[retainPhaseGap],
+		RetainedOutputBytes:                stream.peakByPhase[retainPhaseOutput],
+		RetainedStateBytes:                 stream.peakByPhase[retainPhaseState],
+		StateMutationsLimit:                budget.MaxStateMutations, GapMutationsLimit: budget.MaxGapMutations,
 		EventsLimit: budget.MaxEvents, RetainedBytesLimit: budget.MaxRetainedBytes, SeriesLimit: budget.MaxSeries,
 		RetainedShareBytes: stream.coordinator.qgShareBytes(),
 		Windows:            uint64(stream.windows.count), WindowCeilingWindows: stream.windows.ceilingWindows,

@@ -424,13 +424,24 @@ func (store *ExecutionStore) AdmitRuntime(_ context.Context, request execution.S
 // fresh encode otherwise. The two are the same bytes where the first is used
 // -- one encoder, one mutation, one revision -- so which one is written is a
 // matter of cost only.
-func (store *ExecutionStore) frameForWrite(request execution.StateApplyRequest, index int, mutation execution.StateMutation, revision uint64) ([]byte, writeRefusal, int) {
+func (store *ExecutionStore) frameForWrite(
+	request execution.StateApplyRequest, index int, mutation execution.StateMutation, revision uint64, checked bool,
+) ([]byte, writeRefusal, int) {
+	if frame := admittedFrame(request, index, mutation); frame != nil && frame.Revision == revision {
+		return frame.Bytes, writeRefusal{}, frame.LegacyRecordIDs
+	}
+	return store.encodeChecked(mutation, revision, checked)
+}
+
+// admittedFrame is the frame the admission encoded for this item from this
+// mutation, nil for none.
+func admittedFrame(request execution.StateApplyRequest, index int, mutation execution.StateMutation) *execution.EncodedStateFrame {
 	if index < len(request.Frames) {
-		if frame := request.Frames[index]; frame != nil && frame.Revision == revision && frame.MutationDigest == mutation.MutationDigest {
-			return frame.Bytes, writeRefusal{}, frame.LegacyRecordIDs
+		if frame := request.Frames[index]; frame != nil && frame.MutationDigest == mutation.MutationDigest {
+			return frame
 		}
 	}
-	return store.encodeForWrite(mutation, revision)
+	return nil
 }
 
 // ApplyRuntime applies without an owner fence. Items whose key was witnessed by

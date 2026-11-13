@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,6 +24,9 @@ import (
 // Redis. Counters record how many storage round trips each path costs.
 type pipelineMemoryBackend struct {
 	casMemoryBackend
+	// pipelineMu serializes the pipelines: a request exchanges two at once
+	// (runtimeApplyBatchesInFlight), as a real server takes two calls.
+	pipelineMu   sync.Mutex
 	mgetCalls    int
 	pipelines    int
 	pipelineKeys int
@@ -100,6 +104,8 @@ func (backend *pipelineMemoryBackend) CompareAndSet(ctx context.Context, key str
 }
 
 func (backend *pipelineMemoryBackend) CompareAndSetManyByDigest(_ context.Context, guard *FenceGuard, writes []FencedWrite) ([]FencedWriteOutcome, error) {
+	backend.pipelineMu.Lock()
+	defer backend.pipelineMu.Unlock()
 	backend.pipelines++
 	backend.pipelineKeys += len(writes)
 	backend.guards = append(backend.guards, guard)

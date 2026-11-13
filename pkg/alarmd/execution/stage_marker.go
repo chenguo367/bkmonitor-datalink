@@ -288,6 +288,13 @@ func WithStageMarker(ctx context.Context, marker *StageMarker) context.Context {
 	return context.WithValue(ctx, stageMarkerKey{}, marker)
 }
 
+// WithoutStageMarker is ctx carrying no stage marker, whatever it carried:
+// for work beside the Slot's own - a read ahead of the slice it is on - which
+// must not move the stage the watchdog judges the Slot by.
+func WithoutStageMarker(ctx context.Context) context.Context {
+	return context.WithValue(ctx, stageMarkerKey{}, (*StageMarker)(nil))
+}
+
 func stageMarkerOf(ctx context.Context) *StageMarker {
 	marker, _ := ctx.Value(stageMarkerKey{}).(*StageMarker)
 	return marker

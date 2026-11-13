@@ -437,7 +437,15 @@ type Counts struct {
 	// returned; see execution.PreflightTiming.
 	StateFetchMillis  int64
 	StateDecodeMillis int64
+	// Evaluations is, on an evaluation_completed line, how many series
+	// evaluations it stands for: routine ones of one Plan's batch are one
+	// line (MergeRoutineEvaluation), and zero is one, a line of its own.
+	Evaluations int64
 }
+
+// EvaluationsOf is how many series evaluations an evaluation_completed
+// observation stands for.
+func EvaluationsOf(observation Observation) int64 { return max(1, observation.Counts.Evaluations) }
 
 // TargetResolutionFacts is one Plan's target plan resolved for one Slot:
 // the composed state, the age of a snapshot served past a failed refresh,
@@ -2339,6 +2347,9 @@ type AlgorithmEvaluationFact struct {
 	// that answered whole.
 	ReasonCarried bool                `json:"reason_carried,omitempty"`
 	Provenance    AlgorithmProvenance `json:"provenance,omitempty"`
+	// Count is how many evaluations the fact stands for, on a line merged
+	// from routine ones (MergeRoutineEvaluation); zero is one.
+	Count uint64 `json:"count,omitempty"`
 }
 
 // RecoveryGateCause is the state of the first other Level a RECOVERY record
@@ -2656,6 +2667,9 @@ type AlgorithmInputFact struct {
 	Result                AlgorithmInputResult     `json:"result"`
 	ReasonCode            ReasonCode               `json:"reason_code"`
 	Provenance            AlgorithmProvenance      `json:"provenance,omitempty"`
+	// Count is how many inputs the fact stands for, as on
+	// AlgorithmEvaluationFact; zero is one.
+	Count uint64 `json:"count,omitempty"`
 }
 
 type TraceFields struct {
@@ -4480,4 +4494,96 @@ func ObserveSlotWait(
 		Component: ComponentScheduler, Stage: StageSlotWait, Result: result, ReasonCode: reason, Operation: operation,
 		Duration: elapsed, DurationKnown: true, SlotWait: &SlotWaitFacts{Wait: wait},
 	})
+}
+
+// MergeRoutineEvaluation folds next, a routine evaluation_completed
+// observation of the Plan into's is of, into into: the evaluations, records
+// and time summed, the algorithm and Level facts summed by everything but
+// their counts (decision-020 0.6.x throughput design 3.4-3). Every count a
+// reader takes from the lines is the same over the merged line as over the
+// lines it was merged from. The trace is the Plan's, no series': the merged
+// line is no one series' evaluation.
+func MergeRoutineEvaluation(into *Observation, next Observation) {
+	if into.Counts.Evaluations == 0 {
+		*into = next
+		into.Counts.Evaluations = 1
+		into.Trace.DimensionIdentityDigest = ""
+		into.AlgorithmEvaluations = mergeAlgorithmEvaluations(nil, next.AlgorithmEvaluations)
+		into.AlgorithmInputs = mergeAlgorithmInputs(nil, next.AlgorithmInputs)
+		into.LevelOutcomes = mergeLevelOutcomes(nil, next.LevelOutcomes)
+		return
+	}
+	// Lines of known and of unknown time are not merged with each other
+	// (the worker merges only timed ones): the time of a merged line is
+	// known or not as each of its lines' was.
+	into.Counts.Evaluations += EvaluationsOf(next)
+	into.Counts.Records += next.Counts.Records
+	into.Duration += next.Duration
+	into.DurationKnown = into.DurationKnown && next.DurationKnown
+	into.EvaluationRecordsKnown = into.EvaluationRecordsKnown && next.EvaluationRecordsKnown
+	into.AlgorithmEvaluations = mergeAlgorithmEvaluations(into.AlgorithmEvaluations, next.AlgorithmEvaluations)
+	into.AlgorithmInputs = mergeAlgorithmInputs(into.AlgorithmInputs, next.AlgorithmInputs)
+	into.LevelOutcomes = mergeLevelOutcomes(into.LevelOutcomes, next.LevelOutcomes)
+}
+
+func mergeAlgorithmEvaluations(into, next []AlgorithmEvaluationFact) []AlgorithmEvaluationFact {
+	for _, fact := range next {
+		count := max(1, fact.Count)
+		merged := false
+		for index := range into {
+			held := into[index]
+			held.Count = fact.Count
+			if held == fact {
+				into[index].Count = max(1, into[index].Count) + count
+				merged = true
+				break
+			}
+		}
+		if !merged {
+			fact.Count = count
+			into = append(into, fact)
+		}
+	}
+	return into
+}
+
+func mergeAlgorithmInputs(into, next []AlgorithmInputFact) []AlgorithmInputFact {
+	for _, fact := range next {
+		count := max(1, fact.Count)
+		merged := false
+		for index := range into {
+			held := into[index]
+			held.Count = fact.Count
+			if held == fact {
+				into[index].Count = max(1, into[index].Count) + count
+				merged = true
+				break
+			}
+		}
+		if !merged {
+			fact.Count = count
+			into = append(into, fact)
+		}
+	}
+	return into
+}
+
+func mergeLevelOutcomes(into, next []LevelOutcomeFact) []LevelOutcomeFact {
+	for _, fact := range next {
+		merged := false
+		for index := range into {
+			held := into[index]
+			held.Count, held.OmittedRecoveries = fact.Count, fact.OmittedRecoveries
+			if held == fact {
+				into[index].Count += fact.Count
+				into[index].OmittedRecoveries += fact.OmittedRecoveries
+				merged = true
+				break
+			}
+		}
+		if !merged {
+			into = append(into, fact)
+		}
+	}
+	return into
 }

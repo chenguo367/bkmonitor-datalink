@@ -363,7 +363,7 @@ func (f *TargetFlow) Observe(ctx context.Context, o Observation) {
 	if o.Stage == StageEvaluationCompleted {
 		if ctx != nil {
 			if v, ok := ctx.Value(targetFlowContextKey{}).(*targetFlowContext); ok && v.flow == f && (o.Trace.QueryGroupKey == "" || o.Trace.QueryGroupKey == v.queryGroup) {
-				v.evaluations.Add(1)
+				v.evaluations.Add(uint64(EvaluationsOf(o)))
 				if o.Duration > 0 {
 					v.evaluationNS.Add(int64(o.Duration))
 				}

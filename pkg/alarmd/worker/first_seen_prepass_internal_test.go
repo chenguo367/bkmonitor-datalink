@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
@@ -31,7 +32,9 @@ type prepassPorts struct {
 	// levels are a found record's Level views, one FULL view for each Level
 	// of the Plan, as the store hands every found record.
 	levels []execution.RuntimeLevelStateView
-	loads  []execution.StatePreflightRequest
+	// mu guards loads: the next batch's State is read beside the batch before.
+	mu    sync.Mutex
+	loads []execution.StatePreflightRequest
 	// during runs inside every load, before it answers.
 	during func()
 }
@@ -45,7 +48,9 @@ func (ports *prepassPorts) LoadActivations(ctx context.Context, request executio
 }
 
 func (ports *prepassPorts) LoadRuntime(_ context.Context, request execution.StatePreflightRequest) (execution.StatePreflightResult, error) {
+	ports.mu.Lock()
 	ports.loads = append(ports.loads, request)
+	ports.mu.Unlock()
 	if ports.during != nil {
 		ports.during()
 	}

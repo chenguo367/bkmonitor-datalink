@@ -217,12 +217,18 @@ type SlotExecutionRequest struct {
 	// Runner saw this Slot refused for its Query Group's retained-byte share
 	// (ShareRefusal) and decided no retry can fit it. Finalization then names
 	// the Slot RESOURCE_SHARE_EXCEEDED and runs no query.
-	ShareExceeded    bool
-	Operation        Operation
-	AttemptNo        uint32
-	OwnerFence       OwnerFence
-	ExpectedNextSlot EvaluationTime
-	ExpiredRange     *ExpiredRangeProjectionV1
+	ShareExceeded bool
+	// QueryCooldownHeld is a non-identity scheduler fact, like ShareExceeded:
+	// the Query Group's query cooldown holds as the Slot runs (one of its
+	// checks let the Slot through). A slice of it that runs out of time is
+	// then not split and read again: the backend is slow, and two more
+	// requests to it are what the cooldown is there to stop.
+	QueryCooldownHeld bool
+	Operation         Operation
+	AttemptNo         uint32
+	OwnerFence        OwnerFence
+	ExpectedNextSlot  EvaluationTime
+	ExpiredRange      *ExpiredRangeProjectionV1
 	// ContentScope names the execution content this Slot runs under: the
 	// ObjectDigest of the Schedule Segment it was frozen from (decision-016).
 	// Every fenced write the Slot makes -- State, Progress, the expired range
@@ -1800,6 +1806,12 @@ type PlanNoDataMutation struct {
 	GroupLimit uint32
 	Set        []NoDataGroupDelta
 	Del        []string
+	// Staged is, for a statement replacing the whole record, the groups this
+	// attempt staged ahead of it (NoDataStaged): Set is then the groups
+	// left, and GroupCount is the two together. Not part of the statement:
+	// a whole record's statement is its memory digest and count, which the
+	// store proves the staged groups against at the swap.
+	Staged *NoDataStaged
 }
 
 // ReplacesWholeRecord reports whether this statement stands on its own.
@@ -2632,7 +2644,9 @@ func (result EvaluationResult) Validate(request EvaluationRequest) error {
 				!candidateFound || mutation.ApplyVersion != candidate.ApplyVersion {
 				return errors.New("alarmd execution: invalid state mutation")
 			}
-			if err := mutation.ValidateDigest(); err != nil {
+			// The mutation built, by its seal; its content is the store
+			// admission's to check whole, before the events.
+			if err := mutation.ValidateSealed(); err != nil {
 				return err
 			}
 			if err := mutation.ApplyVersion.Validate(); err != nil {
@@ -4793,6 +4807,52 @@ type SlotBudgetUsage struct {
 	InputSlicesDiscarded  uint64
 	FirstSeenUnseenSlices uint64
 	FirstSeenUnseenSeries uint64
+	// InputSlicesReadAhead is the slices read while the slice before
+	// completed and handed to the Slot (replayed); the other three are the
+	// reads ahead let go - the next slice was another, the read yielded to a
+	// reservation of the Slot's own, or it failed - each read again after.
+	InputSlicesReadAhead          uint64
+	InputSlicesReadAheadOtherLeaf uint64
+	InputSlicesReadAheadYielded   uint64
+	InputSlicesReadAheadFailed    uint64
+	// InputSliceTimeouts is the slices of a completed Slot that ran out of
+	// time and were split and read again (split_succeeded): at most one.
+	InputSliceTimeouts uint64
+	// InputSliceShape* is what this Slot did with its Query Group's shape,
+	// one each at most (observability.InputSliceShapeOutcomes).
+	InputSliceShapeStarted              uint64
+	InputSliceShapeKept                 uint64
+	InputSliceShapeMerged               uint64
+	InputSliceShapeVoidedRevision       uint64
+	InputSliceShapeVoidedDimensions     uint64
+	InputSliceShapeVoidedMaxLeaves      uint64
+	InputSliceShapeRefusedNotALeaf      uint64
+	InputSliceShapeRefusedNotAPartition uint64
+	InputSliceShapeRefusedMaxLeaves     uint64
+	InputSliceShapeEvictedIdle          uint64
+	// InputSliceCutOn is where the dimension this Slot's starting slices
+	// were cut on came from (observability.InputSliceCutOnSources), empty
+	// for a Slot not started in slices counted.
+	InputSliceCutOn string
+	// InputSlicesDeferred is the slices of this Slot read last for the
+	// provider having timed them out the Slot before.
+	InputSlicesDeferred uint64
+	// InputSliceStartDiscarded is 1 when a slice this Slot started in from
+	// its memory was let go for its size.
+	InputSliceStartDiscarded uint64
+	// NoDataStagesAhead* is how this Slot's no-data first writes staged
+	// ahead of their statements ended, a Plan each
+	// (observability.NoDataStageAheadOutcomes), NoDataStageAheadDiffers* the
+	// differs among them by why (nodata.StagedDiffersReasons), and
+	// NoDataGroupsStagedAhead the groups staged.
+	NoDataStagesAheadCarried             uint64
+	NoDataStagesAheadDiffers             uint64
+	NoDataStagesAheadDiscarded           uint64
+	NoDataStagesAheadStopped             uint64
+	NoDataStageAheadDiffersKeptOtherwise uint64
+	NoDataStageAheadDiffersCountMismatch uint64
+	NoDataStageAheadDiffersPresentAsOf   uint64
+	NoDataGroupsStagedAhead              uint64
 
 	// RetainedBytes split by what the memory was held for. They sum to
 	// RetainedBytes.

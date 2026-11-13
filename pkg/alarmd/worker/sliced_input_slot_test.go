@@ -16,8 +16,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
+	"slices"
+	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -43,10 +49,13 @@ const slicedShare = slicedPool / 4 * 3
 
 // slicedSeries is one series of the sliced fixture: its value on the
 // dimension the Slot is sliced on, and the padding, in a dimension outside
-// its identity, that makes its input as large as the case needs.
+// its identity, that makes its input as large as the case needs. cloud, set,
+// is its value on a second dimension, which a case groups by too
+// (cloudHostFacts).
 type slicedSeries struct {
 	host    string
 	padding int
+	cloud   string
 }
 
 // digest is the series' identity, a function of its sliced value alone.
@@ -81,7 +90,10 @@ type slicedCall struct {
 	delivered []string
 	padding   int
 	completed bool
-	err       error
+	// partial is a read answered short of FULL, and timedOut one that ran
+	// out of time (slicedSource.timedOutRead).
+	partial, timedOut bool
+	err               error
 }
 
 // slicedSource is the query source over a fixed set of series. It honours
@@ -107,22 +119,88 @@ type slicedSource struct {
 	plans        []execution.DuePlan
 	requirements []execution.DataRequirement
 	completeness func(read, held int) execution.Completeness
-	calls        []slicedCall
-	partial      map[string]bool
+	// mu guards calls, partial and incomplete: the next slice is read on a
+	// goroutine of its own while the Slot completes the one before.
+	mu      sync.Mutex
+	started atomic.Int64
+	calls   []slicedCall
+	partial map[string]bool
 	// incomplete is set once any read was answered short of FULL.
 	incomplete bool
+	// timeoutWhole times out every read of the whole Query Group, the zero
+	// slice; queryMillis is what every answered read says its query took.
+	timeoutWhole bool
+	queryMillis  uint64
+	// timeoutTimes times out that many slices once timeoutAfter reads of
+	// slices were answered, every read of each - read ahead or again on the
+	// Slot's goroutine - as one; answered counts the reads answered.
+	timeoutAfter, timeoutTimes, answered int
+	timedOut                             map[string]bool
+	// timeoutKind is how a read runs out of time (slicedTimeout): UQ's 504
+	// unless set, through provider's real client.
+	timeoutKind slicedTimeout
+	provider    slicedProvider
+	// timeoutBySize times out every read, whole or a slice, that holds
+	// timeoutHolding series or more, as UQ does a request too large for its
+	// 30 s: zero is every read, a backend slow as a whole.
+	timeoutBySize  bool
+	timeoutHolding int
+}
+
+// holding is how many of the source's series the slice holds.
+func (source *slicedSource) holding(slice execution.InputSlice) int {
+	count := 0
+	for _, series := range source.series {
+		if in, err := slice.Matches(map[string]string{"host": series.host, "cloud": series.cloud}); err == nil && in {
+			count++
+		}
+	}
+	return count
 }
 
 func (source *slicedSource) Execute(ctx context.Context, request execution.QueryExecutionRequest, consumer execution.QueryExecutionConsumer) (execution.QueryExecutionCompletion, error) {
+	source.started.Add(1)
 	source.ports.record("query")
 	call := slicedCall{slice: request.Slice}
+	if source.timeoutWhole && request.Slice.IsZero() || source.timeoutBySize && source.holding(request.Slice) >= source.timeoutHolding {
+		completion, err := source.timedOutRead(ctx, request, consumer, &call)
+		source.mu.Lock()
+		source.calls = append(source.calls, call)
+		source.mu.Unlock()
+		return completion, err
+	}
+	source.mu.Lock()
+	digest := request.Slice.Digest()
+	timedOut := source.timedOut[digest]
+	if !timedOut && !request.Slice.IsZero() && source.timeoutTimes > 0 && source.answered >= source.timeoutAfter {
+		source.timeoutTimes--
+		if source.timedOut == nil {
+			source.timedOut = map[string]bool{}
+		}
+		source.timedOut[digest], timedOut = true, true
+	}
+	source.mu.Unlock()
+	if timedOut {
+		completion, err := source.timedOutRead(ctx, request, consumer, &call)
+		source.mu.Lock()
+		source.calls = append(source.calls, call)
+		source.mu.Unlock()
+		return completion, err
+	}
 	completion, err := source.answer(ctx, request, consumer, &call)
 	call.completed, call.err = err == nil, err
+	source.mu.Lock()
 	source.calls = append(source.calls, call)
+	if err == nil && !request.Slice.IsZero() {
+		source.answered++
+	}
+	source.mu.Unlock()
 	return completion, err
 }
 
-func (source *slicedSource) answer(ctx context.Context, request execution.QueryExecutionRequest, consumer execution.QueryExecutionConsumer, call *slicedCall) (execution.QueryExecutionCompletion, error) {
+// headerFor is the header the source begins every read of request with, as
+// the access source begins one before it sends the query (access.Source).
+func (source *slicedSource) headerFor(request execution.QueryExecutionRequest) execution.InternalExecutionHeader {
 	input := validInternalExecution()
 	plans, requirements := input.DuePlans, input.Requirements
 	if source.plans != nil {
@@ -143,11 +221,25 @@ func (source *slicedSource) answer(ctx context.Context, request execution.QueryE
 	if source.facts != nil {
 		header.QueryFacts = map[execution.LogicalQueryRef]execution.QueryPlanFacts{requirements[0].LogicalQueryRef: *source.facts}
 	}
+	return header
+}
+
+func (source *slicedSource) answer(ctx context.Context, request execution.QueryExecutionRequest, consumer execution.QueryExecutionConsumer, call *slicedCall) (execution.QueryExecutionCompletion, error) {
+	input := validInternalExecution()
+	requirements := input.Requirements
+	if source.plans != nil {
+		requirements = source.requirements
+	}
+	queryRevision := execution.QueryRevision(requirements[0].LogicalQueryRef)
+	header := source.headerFor(request)
 	if err := consumer.Begin(ctx, header); err != nil {
 		return execution.QueryExecutionCompletion{}, err
 	}
 	reads, heldBefore := 1, 0
-	for _, earlier := range source.calls {
+	source.mu.Lock()
+	earlierCalls := append([]slicedCall(nil), source.calls...)
+	source.mu.Unlock()
+	for _, earlier := range earlierCalls {
 		if earlier.completed {
 			reads++
 			if len(earlier.delivered) != 0 {
@@ -162,7 +254,7 @@ func (source *slicedSource) answer(ctx context.Context, request execution.QueryE
 			break
 		}
 		if !source.ignoreSlice {
-			in, err := request.Slice.Matches(map[string]string{"host": series.host})
+			in, err := request.Slice.Matches(map[string]string{"host": series.host, "cloud": series.cloud})
 			if err != nil {
 				return execution.QueryExecutionCompletion{}, err
 			}
@@ -171,13 +263,17 @@ func (source *slicedSource) answer(ctx context.Context, request execution.QueryE
 			}
 		}
 		host, _ := json.Marshal(series.host)
+		dimensions := map[string]json.RawMessage{"host": host,
+			"padding": json.RawMessage(`"` + strings.Repeat("p", series.padding) + `"`)}
+		if series.cloud != "" {
+			dimensions["cloud"], _ = json.Marshal(series.cloud)
+		}
 		dataset := execution.NewDataset([]contract.CanonicalRecordV2{{
 			RecordID: derivedTestRecordID(), SourceTime: 1_788_000_000, BusinessID: "2",
 			DimensionIdentity: contract.DimensionIdentityV2{Digest: series.digest()},
 			Values:            map[string]json.RawMessage{"value": json.RawMessage(`50.1`)},
-			Dimensions: map[string]json.RawMessage{"host": host,
-				"padding": json.RawMessage(`"` + strings.Repeat("p", series.padding) + `"`)},
-			ReceivedTime: 1_788_000_000,
+			Dimensions:        dimensions,
+			ReceivedTime:      1_788_000_000,
 		}})
 		view, _ := execution.NewDatasetView(dataset, []uint32{0})
 		binding := input.Inputs[0]
@@ -209,7 +305,8 @@ func (source *slicedSource) answer(ctx context.Context, request execution.QueryE
 		completeness = source.completeness(reads, held)
 	}
 	physical := execution.PhysicalQueryCompletion{Ref: "provider-result-1", PhysicalQuery: "physical-query-1",
-		QueryRevision: queryRevision, Completeness: completeness, DataState: execution.DataStateData, Delivery: delivery}
+		QueryRevision: queryRevision, Completeness: completeness, DataState: execution.DataStateData, Delivery: delivery,
+		Stats: execution.ProviderStats{QueryMillis: source.queryMillis}}
 	if len(call.delivered) == 0 {
 		physical.DataState = execution.DataStateEmpty
 	}
@@ -217,6 +314,8 @@ func (source *slicedSource) answer(ctx context.Context, request execution.QueryE
 		physical.DataState = execution.DataStateUnknown
 	}
 	if completeness != execution.CompletenessFull {
+		call.partial = true
+		source.mu.Lock()
 		source.incomplete = true
 		if source.partial == nil {
 			source.partial = make(map[string]bool)
@@ -224,6 +323,7 @@ func (source *slicedSource) answer(ctx context.Context, request execution.QueryE
 		for _, series := range call.delivered {
 			source.partial[series] = true
 		}
+		source.mu.Unlock()
 	}
 	if completeness == execution.CompletenessPartial {
 		physical.PartialEvidence = &execution.PartialEvidence{Kind: execution.PartialEvidenceOmissionStable, Version: 1,
@@ -376,16 +476,23 @@ func TestASlotPastHalfItsShareIsReadInSlicesEachSeriesWrittenOnce(t *testing.T) 
 	if len(writes) != len(series) || len(fixture.state.saved) != len(series) {
 		t.Fatalf("State written for %d keys (%d saved), want the %d series", len(writes), len(fixture.state.saved), len(series))
 	}
-	discarded := len(fixture.source.calls) - len(landed)
+	// A read the Slot let go is a slice past its limit, split; or a slice
+	// read ahead that yielded to the slice before it, read again after.
+	discarded := 0
+	for _, call := range fixture.source.calls {
+		switch {
+		case call.completed:
+		case strings.Contains(fmt.Sprint(call.err), "passed its limit"):
+			discarded++
+		case errors.Is(call.err, context.Canceled):
+		default:
+			t.Fatalf("a read ended by %v, want only slices let go at their limit or read ahead and let go", call.err)
+		}
+	}
 	usage := result.Usage
 	if usage.InputSlices != uint64(len(landed)) || usage.InputSlicesDiscarded != uint64(discarded) {
 		t.Fatalf("usage counts %d slices and %d discarded, want %d landed and %d split", usage.InputSlices,
 			usage.InputSlicesDiscarded, len(landed), discarded)
-	}
-	for _, call := range fixture.source.calls {
-		if !call.completed && !strings.Contains(fmt.Sprint(call.err), "passed its limit") {
-			t.Fatalf("a read ended by %v, want only slices let go at their limit", call.err)
-		}
 	}
 	if usage.RetainedBytes > slicedShare {
 		t.Fatalf("the Slot held %d bytes at its peak, past its share %d", usage.RetainedBytes, slicedShare)
@@ -798,8 +905,34 @@ type coveredEvents struct {
 	failAfterPartialAt int
 }
 
+// afterPartial says whether the batch's series were read in a slice answered
+// short of FULL or in one that landed after such a slice: judged by the order the slices
+// landed, not by when the source answered them - the next slice is read
+// while the Slot completes the one before.
+func (source *slicedSource) afterPartial(batch []contract.TriggerEventV1) bool {
+	if len(batch) == 0 {
+		return false
+	}
+	digest := batch[0].RecordRef.DimensionIdentityDigest
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	partialBefore := false
+	for _, call := range source.calls {
+		if !call.completed {
+			continue
+		}
+		for _, delivered := range call.delivered {
+			if delivered == digest {
+				return partialBefore || call.partial
+			}
+		}
+		partialBefore = partialBefore || call.partial
+	}
+	return partialBefore
+}
+
 func (events *coveredEvents) WriteBatch(ctx context.Context, batch []contract.TriggerEventV1) error {
-	if events.source.incomplete {
+	if events.source.afterPartial(batch) {
 		if !events.gaps.marker.gapped() {
 			events.uncovered = append(events.uncovered, fmt.Sprint(len(events.eventBatches)))
 		}
@@ -818,9 +951,15 @@ func (events *coveredEvents) WriteBatch(ctx context.Context, batch []contract.Tr
 // that series: the evaluator sees the series' own inputs, not the Slot.
 type partialEvaluator struct {
 	*recordingPorts
+	// mu takes one evaluation at a time: degraded is the recording ports'
+	// for the one series being answered, and a batch's series are evaluated
+	// side by side.
+	mu sync.Mutex
 }
 
 func (evaluator *partialEvaluator) Evaluate(ctx context.Context, request execution.EvaluationRequest) (execution.EvaluationResult, error) {
+	evaluator.mu.Lock()
+	defer evaluator.mu.Unlock()
 	partial := false
 	for _, input := range request.Inputs {
 		for _, binding := range input.Inputs {
@@ -942,6 +1081,8 @@ func (ports *slicedFirstSeen) LoadRuntime(ctx context.Context, request execution
 	if err != nil {
 		return result, err
 	}
+	ports.mu.Lock()
+	defer ports.mu.Unlock()
 	for index, item := range request.Items {
 		if _, written := ports.saved[item.Identity]; written || !ports.prior[item.Identity.SeriesIdentityDigest] {
 			continue
@@ -956,7 +1097,14 @@ func (ports *slicedFirstSeen) LoadRuntime(ctx context.Context, request execution
 // activation and the series in prior holding State from the Slot before.
 func newSlicedFirstSeenFixture(t *testing.T, series []slicedSeries, prior []string) (*slicedFixture, *slicedFirstSeen) {
 	t.Helper()
-	fixture := newSlicedFixture(t, series, sliceableFacts(), 200)
+	return newSlicedFirstSeenFixtureOf(t, series, prior, 200)
+}
+
+// newSlicedFirstSeenFixtureOf is newSlicedFirstSeenFixture writing at most
+// maxStates State mutations a window.
+func newSlicedFirstSeenFixtureOf(t *testing.T, series []slicedSeries, prior []string, maxStates uint64) (*slicedFixture, *slicedFirstSeen) {
+	t.Helper()
+	fixture := newSlicedFixture(t, series, sliceableFacts(), maxStates)
 	fixture.ports.gapMissing = true
 	refs, err := execution.DeriveRuntimeLevelContractRefs(compiledPlanForTest(nil))
 	if err != nil {
@@ -974,7 +1122,7 @@ func newSlicedFirstSeenFixture(t *testing.T, series []slicedSeries, prior []stri
 		ports.prior[execution.SeriesIdentityDigest(digest)] = true
 	}
 	gaps := &markerStore{t: t, ports: fixture.ports}
-	fixture.coordinator = fixture.build(t, worker.Ports{Activation: ports, State: ports, GapGuard: gaps, Events: fixture.ports}, 200)
+	fixture.coordinator = fixture.build(t, worker.Ports{Activation: ports, State: ports, GapGuard: gaps, Events: fixture.ports}, maxStates)
 	return fixture, ports
 }
 
@@ -999,8 +1147,24 @@ func satisfiedMarkers(mutations []execution.PlanGapMutation) int {
 // their series that went out as first-seen. Which series a slice holds is
 // learned from a first run of the same input with nothing from before.
 func TestFirstSeenIsJudgedPerSliceAndAPlanFoundSeenWarmsUpFromThatSlice(t *testing.T) {
+	firstSeenPerSlice(t, 200)
+}
+
+// The same, every window three State mutations at most: every slice of six
+// series and more is cut into windows halfway through, and the windows it
+// wrote let go of their series before the slice ends (dropWindowInputs).
+// The slices written as first-seen and their series are counted whole all
+// the same: a slice's series are counted as they are prepared, not by what
+// is left of them at its end (what is left depended on whether a
+// window was cut, which the reads ahead decided now and then).
+func TestFirstSeenCountsTheSeriesOfASliceCutIntoWindows(t *testing.T) {
+	firstSeenPerSlice(t, 3)
+}
+
+func firstSeenPerSlice(t *testing.T, maxStates uint64) {
+	t.Helper()
 	series := slicedHosts(24, 40<<10)
-	learn, _ := newSlicedFirstSeenFixture(t, series, nil)
+	learn, _ := newSlicedFirstSeenFixtureOf(t, series, nil, maxStates)
 	if result, err := learn.coordinator.Execute(context.Background(), windowedRequest()); err != nil || !result.Completed {
 		t.Fatalf("learning run result=%+v err=%v", result, err)
 	}
@@ -1026,7 +1190,7 @@ func TestFirstSeenIsJudgedPerSliceAndAPlanFoundSeenWarmsUpFromThatSlice(t *testi
 	// The Plan found to have run is warmed up as any forced Plan is: it
 	// writes nothing more this attempt, its WARMING marker is written by the
 	// protection path, and the attempt is retried to converge.
-	fixture, _ := newSlicedFirstSeenFixture(t, series, []string{slices[2].delivered[0]})
+	fixture, _ := newSlicedFirstSeenFixtureOf(t, series, []string{slices[2].delivered[0]}, maxStates)
 	request := windowedRequest()
 	first, err := fixture.coordinator.Execute(context.Background(), request)
 	if err != nil || first.Completed || first.ReasonCode != execution.ReasonCode(contract.ReasonPlanReactivated) {
@@ -1070,12 +1234,15 @@ func TestFirstSeenIsJudgedPerSliceAndAPlanFoundSeenWarmsUpFromThatSlice(t *testi
 // K_0 (7.4): a replica that read a Query Group's last Slot in slices starts
 // its next one already sliced, from that reading, rather than reading the
 // whole group first and letting it go: the next Slot's first read is a
-// slice, none is split, and there are at least as many as its input over
-// the slice limit. The first Slot, with no reading, began with the whole
-// group, which did not fit. The starting slices divide a fixed alphabet,
-// so the series here end in characters spread over it, as the alphabet
-// assumes; values that all end in digits fall in one of its classes, and
-// the adaptive split then recovers them at the cost of reads let go.
+// slice, and there are at least as many as its input over the slice limit.
+// The first Slot, with no reading, began with the whole group, which did
+// not fit. The next starts on the cut that Slot's sample made: its first
+// ten hosts, ending in 0 1 3 4 6 7 9 a c d, classes [013], [46], [79a] and
+// the rest, which holds the other 16 hosts (640 KiB, past the limit) - the
+// hosts' last characters are sorted slowest, and the sample saw only the
+// start (the limit 7.3 names). So one slice the next Slot started in is let
+// go and split by its own sample, every series read once among the slices
+// that land.
 func TestTheNextSlotOfAQueryGroupStartsWithTheSlicesItsLastReadNeeded(t *testing.T) {
 	const alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
 	series := make([]slicedSeries, 24)
@@ -1109,16 +1276,19 @@ func TestTheNextSlotOfAQueryGroupStartsWithTheSlicesItsLastReadNeeded(t *testing
 		padding += one.padding
 	}
 	least := (padding + slicedShare/2 - 1) / (slicedShare / 2)
-	if calls[0].slice.IsZero() || result.Usage.InputSlicesDiscarded != 0 || len(calls) != len(fixture.source.landed()) {
-		t.Fatalf("next Slot read %d times, %d discarded, first read whole=%v: want it sliced from its first read",
+	if calls[0].slice.IsZero() || result.Usage.InputSlicesDiscarded != 1 || result.Usage.InputSliceStartDiscarded != 1 ||
+		len(calls) != len(fixture.source.landed())+1 {
+		t.Fatalf("next Slot read %d times, %d discarded, first read whole=%v: want it sliced from its first read, the rest let go",
 			len(calls), result.Usage.InputSlicesDiscarded, calls[0].slice.IsZero())
 	}
-	if len(calls) < least || result.Usage.InputSlices != uint64(len(calls)) {
+	// The row counts the slices that landed: the five started in less the
+	// rest let go, and the four it was split into - eight.
+	if len(calls) < least || result.Usage.InputSlices != uint64(len(fixture.source.landed())) || result.Usage.InputSlices != 8 {
 		t.Fatalf("next Slot read %d slices (row says %d), want at least %d for its %d bytes of padding",
 			len(calls), result.Usage.InputSlices, least, padding)
 	}
 	reads := make([][]string, 0, len(calls))
-	for _, call := range calls {
+	for _, call := range fixture.source.landed() {
 		reads = append(reads, call.delivered)
 	}
 	for _, one := range series {
@@ -1179,8 +1349,15 @@ func TestALaterSliceAnsweringWorseRaisesTheMarkersReason(t *testing.T) {
 // as a PARTIAL answer of the whole read would - the Plan's marker is opened
 // before every later event, and the Slot completes with a partial gap, not
 // FULL - rather than being dropped because no series carried it.
+//
+// The empty slice is read before others: 24 numbered hosts of 45 KiB, read
+// whole and let go at the ninth over half the 768 KiB share (384 KiB). The
+// root is cut by that sample, last digits 0 to 8: [012], [34], [56] and the
+// rest - 9, 5, 4 and 6 hosts - and the exhausted slice, which holds none.
+// [012], 405 KiB, is let go in turn and its children read after every slice
+// made before them: the exhausted root slice is read, empty, before them.
 func TestAnEmptySliceAnsweredPartialStillGuardsThePlan(t *testing.T) {
-	fixture := newSlicedFixture(t, slicedHosts(24, 40<<10), sliceableFacts(), 200)
+	fixture := newSlicedFixture(t, slicedHosts(24, 45<<10), sliceableFacts(), 200)
 	fixture.ports.gapMissing = true
 	gaps := &markerStore{t: t, ports: fixture.ports}
 	events := &coveredEvents{recordingPorts: fixture.ports, source: fixture.source, gaps: gaps}
@@ -1209,5 +1386,603 @@ func TestAnEmptySliceAnsweredPartialStillGuardsThePlan(t *testing.T) {
 	}
 	if primary := fixture.ports.lastProgress.Completion.Primary; primary == nil || primary.Completeness != execution.CompletenessPartial {
 		t.Fatalf("the completion's PRIMARY fact is %+v, want the round PARTIAL", primary)
+	}
+}
+
+// overlapEvents is the event sink that, at the first window's events, waits
+// - up to a bound - for the source to have begun a second read, and says
+// whether it had: a read begun while a slice's events are written is the
+// next slice read ahead.
+type overlapEvents struct {
+	*recordingPorts
+	source     *slicedSource
+	once       sync.Once
+	overlapped bool
+}
+
+func (events *overlapEvents) WriteBatch(ctx context.Context, batch []contract.TriggerEventV1) error {
+	events.once.Do(func() {
+		for deadline := time.Now().Add(2 * time.Second); events.source.started.Load() < 2 && time.Now().Before(deadline); { // fixed-wait: the fake goes on either way; the case reads what came after
+			time.Sleep(time.Millisecond) // fixed-wait: polling for a read the read ahead begins, bounded above
+		}
+		events.overlapped = events.source.started.Load() >= 2
+	})
+	return events.recordingPorts.WriteBatch(ctx, batch)
+}
+
+// The next slice is read while the one before completes: a second read has
+// begun by the time the first slice's events are written. Replayed in the
+// order it came, every series is still read in one slice that landed, its
+// event and its State written once.
+func TestTheNextSliceIsReadWhileTheSliceBeforeCompletes(t *testing.T) {
+	series := slicedHosts(24, 40<<10)
+	fixture := newSlicedFixture(t, series, sliceableFacts(), 200)
+	events := &overlapEvents{recordingPorts: fixture.ports, source: fixture.source}
+	fixture.coordinator = fixture.build(t, worker.Ports{Activation: fixture.ports, State: fixture.state,
+		GapGuard: fixture.ports, Events: events}, 200)
+	result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
+	if err != nil || !result.Completed {
+		t.Fatalf("Execute() result=%+v err=%v", result, err)
+	}
+	if len(fixture.source.landed()) < 2 {
+		t.Fatalf("landed %d reads, want the Slot read in slices", len(fixture.source.landed()))
+	}
+	if !events.overlapped {
+		t.Fatal("no second read began while the first slice's events were written")
+	}
+	if usage := result.Usage; usage.InputSlicesReadAhead == 0 || usage.InputSlicesReadAhead+usage.InputSlicesReadAheadOtherLeaf+
+		usage.InputSlicesReadAheadYielded+usage.InputSlicesReadAheadFailed > usage.InputSlices+usage.InputSlicesDiscarded {
+		t.Fatalf("usage counts %d slices read ahead and replayed (%d, %d, %d let go) of %d read: want some replayed, "+
+			"no more ends than reads", usage.InputSlicesReadAhead, usage.InputSlicesReadAheadOtherLeaf,
+			usage.InputSlicesReadAheadYielded, usage.InputSlicesReadAheadFailed, usage.InputSlices)
+	}
+	counts, writes := countDigests(fixture.ports.eventBatches...), fixture.stateWrites()
+	for _, one := range series {
+		if counts[one.digest()] != 1 || writes[one.digest()] != 1 {
+			t.Fatalf("series %s: %d events and %d State writes, want one of each", one.host, counts[one.digest()], writes[one.digest()])
+		}
+	}
+}
+
+// A Query Group read whole that ran out of time starts its next read in
+// slices: the timed-out read is remembered at no less than the backend's
+// 30 s, and the next read is of slices only and completes, the backend
+// answering every slice. One that answered is read whole again, however
+// slowly it answered: its time is no measure of its size.
+func TestAQueryGroupThatTimedOutReadWholeIsReadInSlicesNext(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		timeout        bool
+		queryMillis    uint64
+		wantSlicedNext bool
+	}{
+		{"timed out", true, 0, true},
+		// Answered, however slowly: a backend slow as a whole is no slice
+		// too large, and is read whole again.
+		{"answered slowly", false, 40_000, false},
+		{"answered quickly", false, 1_000, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newSlicedFixture(t, slicedHosts(8, 1<<10), sliceableFacts(), 200)
+			fixture.source.timeoutWhole, fixture.source.queryMillis = test.timeout, test.queryMillis
+			// The next read of the Query Group on this replica is the same
+			// Slot's request again, as the K_0 case reads it: what it starts
+			// in slices from is the read before.
+			request := windowedRequest()
+			result, err := fixture.coordinator.Execute(context.Background(), request)
+			if err != nil || !result.Completed || (result.QueryAvailability == execution.QueryAvailabilityUnavailable) != test.timeout {
+				t.Fatalf("first read result=%+v err=%v, want it completed, its query unavailable %t", result, err, test.timeout)
+			}
+			first := len(fixture.source.calls)
+			fixture.source.timeoutWhole = false
+			result, err = fixture.coordinator.Execute(context.Background(), request)
+			if err != nil || !result.Completed {
+				t.Fatalf("next Slot result=%+v err=%v, want it completed", result, err)
+			}
+			calls := fixture.source.calls[first:]
+			sliced := len(calls) > 1 && !calls[0].slice.IsZero()
+			if sliced != test.wantSlicedNext {
+				t.Fatalf("next Slot read in slices = %t (%d reads, first zero %t), want %t", sliced, len(calls),
+					len(calls) > 0 && calls[0].slice.IsZero(), test.wantSlicedNext)
+			}
+		})
+	}
+}
+
+// A slice that runs out of time is split and read again only when its time
+// is put on its size: the slices before it in the Slot answered well under
+// the target, the cooldown does not hold, and the Slot has not split so. Its
+// children read, the Slot completes, split_succeeded; with the cooldown
+// holding, or every slice slow - the backend slow, not the slice large - it
+// fails as before, not_split; split and its children running out of time
+// too, split_failed.
+func TestASliceThatRunsOutOfTimeIsSplitOnlyWhenItIsLarge(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		cooldown     bool
+		sliceMillis  uint64
+		timeoutTimes int
+		want         string
+	}{
+		{"one slice large", false, 1_000, 1, observability.InputSliceTimeoutSplitSucceeded},
+		{"the cooldown holds", true, 1_000, 1, observability.InputSliceTimeoutNotSplit},
+		{"every slice slow", false, 20_000, 1, observability.InputSliceTimeoutNotSplit},
+		{"its children run out of time too", false, 1_000, 100, observability.InputSliceTimeoutSplitFailed},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newSlicedFixture(t, slicedHosts(8, 1<<10), sliceableFacts(), 200)
+			// A Slot before that ran out of time read whole, its size not
+			// known yet: the next is read in slices by that time.
+			fixture.source.timeoutWhole = true
+			request := windowedRequest()
+			readWholeTimedOut(t, fixture, request)
+			fixture.source.timeoutWhole = false
+			fixture.source.mu.Lock()
+			fixture.source.queryMillis, fixture.source.answered = test.sliceMillis, 0
+			fixture.source.timeoutAfter, fixture.source.timeoutTimes = 1, test.timeoutTimes
+			fixture.source.mu.Unlock()
+			first, observed := len(fixture.source.calls), len(*fixture.observations)
+			request.QueryCooldownHeld = test.cooldown
+			result, err := fixture.coordinator.Execute(context.Background(), request)
+			calls := fixture.source.calls[first:]
+			if test.want == observability.InputSliceTimeoutSplitSucceeded {
+				if err != nil || !result.Completed || result.Usage.InputSliceTimeouts != 1 {
+					t.Fatalf("result=%+v err=%v, want it completed with one slice split for its time", result, err)
+				}
+				if calls[0].slice.IsZero() || len(calls) < 4 {
+					t.Fatalf("%d reads, want the slices, the one timed out and its children", len(calls))
+				}
+				return
+			}
+			if test.want == observability.InputSliceTimeoutNotSplit {
+				// Not put on its size: the slice the provider timed out
+				// completes UNAVAILABLE as it came, and the Slot degraded.
+				if err != nil || !result.Completed || result.Usage.InputSliceTimeouts != 0 {
+					t.Fatalf("result=%+v err=%v, want it completed degraded, no slice split for its time", result, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("the Slot whose split slice's children ran out of time too completed")
+			}
+			// The Slot's own: the one before ran out of time read whole, and
+			// said so on its query line too.
+			var ended []string
+			for _, observation := range (*fixture.observations)[observed:] {
+				if facts := observation.QueryFailure; facts != nil && facts.SliceTimeout != "" {
+					ended = append(ended, facts.SliceTimeout)
+				}
+			}
+			if len(ended) != 1 || ended[0] != test.want {
+				t.Fatalf("timed-out slices ended %v on the query line, want %s once", ended, test.want)
+			}
+		})
+	}
+}
+
+// A Slot whose slice ran out of time for its size and was split completes,
+// and the next Slot of its Query Group is read in the slices it landed: the
+// slice too large is not read again whole, to run out of time and be split
+// once a round. The backend times out that slice every time it is asked it.
+func TestASliceSplitForItsTimeIsReadSplitTheRoundAfter(t *testing.T) {
+	fixture := newSlicedFixture(t, slicedHosts(8, 1<<10), sliceableFacts(), 200)
+	// A Slot before that ran out of time read whole, its size not known
+	// yet: the next is read in slices by that time.
+	fixture.source.timeoutWhole = true
+	request := windowedRequest()
+	readWholeTimedOut(t, fixture, request)
+	fixture.source.mu.Lock()
+	fixture.source.timeoutWhole, fixture.source.queryMillis = false, 1_000
+	fixture.source.timeoutAfter, fixture.source.timeoutTimes = 1, 1
+	fixture.source.mu.Unlock()
+	first := len(fixture.source.calls)
+	result, err := fixture.coordinator.Execute(context.Background(), request)
+	if err != nil || !result.Completed || result.Usage.InputSliceTimeouts != 1 || result.Usage.InputSliceShapeKept != 1 {
+		t.Fatalf("round 1: result=%+v err=%v, want it completed with one slice split for its time, kept", result, err)
+	}
+	landed := answeredSlices(fixture.source.calls[first:])
+	first = len(fixture.source.calls)
+	result, err = fixture.coordinator.Execute(context.Background(), request)
+	if err != nil || !result.Completed || result.Usage.InputSliceShapeStarted != 1 {
+		t.Fatalf("round 2: result=%+v err=%v, want it completed, read in the shape", result, err)
+	}
+	if result.Usage.InputSliceTimeouts != 0 {
+		t.Fatalf("round 2 split %d slices for their time, want the slice split in round 1 read split", result.Usage.InputSliceTimeouts)
+	}
+	for _, call := range fixture.source.calls[first:] {
+		if call.err != nil || call.timedOut {
+			t.Fatalf("round 2 read slice %s: %v, want every slice answered", call.slice.Digest(), call.err)
+		}
+	}
+	if got := answeredSlices(fixture.source.calls[first:]); !reflect.DeepEqual(got, landed) {
+		t.Fatalf("round 2 read slices %v, want the ones round 1 landed %v", got, landed)
+	}
+}
+
+// answeredSlices is the digests of the slices calls answered, sorted.
+func answeredSlices(calls []slicedCall) []string {
+	var digests []string
+	for _, call := range calls {
+		if call.err == nil && call.completed {
+			digests = append(digests, call.slice.Digest())
+		}
+	}
+	sort.Strings(digests)
+	// A slice read ahead and read again is one slice.
+	return slices.Compact(digests)
+}
+
+// shapedFixture is a fixture whose Query Group's slice ran out of time for
+// its size in its first Slot read in slices and was split, the Slot
+// completing: its shape kept. The backend times that slice out whenever it
+// is asked it.
+func shapedFixture(t *testing.T) (*slicedFixture, execution.SlotExecutionRequest) {
+	t.Helper()
+	fixture := newSlicedFixture(t, slicedHosts(8, 1<<10), sliceableFacts(), 200)
+	fixture.source.timeoutWhole = true
+	request := windowedRequest()
+	readWholeTimedOut(t, fixture, request)
+	fixture.source.mu.Lock()
+	fixture.source.timeoutWhole, fixture.source.queryMillis = false, 1_000
+	fixture.source.timeoutAfter, fixture.source.timeoutTimes = 1, 1
+	fixture.source.mu.Unlock()
+	if result, err := fixture.coordinator.Execute(context.Background(), request); err != nil || result.Usage.InputSliceShapeKept != 1 {
+		t.Fatalf("result=%+v err=%v, want the slice split for its time kept", result, err)
+	}
+	return fixture, request
+}
+
+// A shape whose last kept split's leaves were each read whole under half a
+// slice's target three rounds in a row (sliceDecayRounds) has that split
+// taken back on the third: with no kept split left, the Query Group is read
+// in slices counted anew the round after. Two quick rounds keep it.
+func TestAShapeIsMergedBackAfterItsLeavesAreQuick(t *testing.T) {
+	fixture, request := shapedFixture(t)
+	const decayRounds = 3 // sliceDecayRounds
+	for round := 1; round <= decayRounds; round++ {
+		result, err := fixture.coordinator.Execute(context.Background(), request)
+		if err != nil || !result.Completed || result.Usage.InputSliceShapeStarted != 1 {
+			t.Fatalf("quick round %d: result=%+v err=%v, want it read in the shape", round, result, err)
+		}
+		if merged := result.Usage.InputSliceShapeMerged == 1; merged != (round == decayRounds) {
+			t.Fatalf("quick round %d merged %t, want it merged on round %d only", round, merged, decayRounds)
+		}
+	}
+	// The backend answers the slice again, as it would once it is no longer
+	// too large to.
+	fixture.source.mu.Lock()
+	fixture.source.timedOut = nil
+	fixture.source.mu.Unlock()
+	result, err := fixture.coordinator.Execute(context.Background(), request)
+	if err != nil || !result.Completed || result.Usage.InputSliceShapeStarted != 0 {
+		t.Fatalf("after the merge: result=%+v err=%v, want it read in slices counted anew", result, err)
+	}
+}
+
+// Under the query cooldown a slice the provider times out is no slice too
+// large, slices before it quick or not: it completes UNAVAILABLE and the
+// Slot degraded, and the next Slot asks it as it was, not split.
+func TestUnderTheCooldownASliceTheProviderTimesOutIsAskedAgainAsItWas(t *testing.T) {
+	fixture, request := shapedFixture(t)
+	fixture.source.mu.Lock()
+	fixture.source.timeoutAfter, fixture.source.timeoutTimes = fixture.source.answered+1, 1
+	fixture.source.mu.Unlock()
+	request.QueryCooldownHeld = true
+	first := len(fixture.source.calls)
+	if result, err := fixture.coordinator.Execute(context.Background(), request); err != nil || !result.Completed ||
+		result.Usage.InputSliceTimeouts != 0 || result.Usage.InputSliceShapeKept != 0 {
+		t.Fatalf("result=%+v err=%v, want it completed degraded, nothing split or kept", result, err)
+	}
+	var timedOut string
+	for _, call := range fixture.source.calls[first:] {
+		if call.timedOut {
+			timedOut = call.slice.Digest()
+		}
+	}
+	if timedOut == "" {
+		t.Fatal("no slice ran out of time")
+	}
+	fixture.source.mu.Lock()
+	fixture.source.timeoutTimes, fixture.source.timedOut = 0, nil
+	fixture.source.mu.Unlock()
+	first = len(fixture.source.calls)
+	result, err := fixture.coordinator.Execute(context.Background(), request)
+	if err != nil || !result.Completed || result.Usage.InputSliceShapeStarted != 1 {
+		t.Fatalf("read again: result=%+v err=%v, want it completed in the shape", result, err)
+	}
+	asked := false
+	for _, call := range fixture.source.calls[first:] {
+		asked = asked || call.slice.Digest() == timedOut
+	}
+	if !asked {
+		t.Fatalf("read again, the slice %s the provider timed out was not asked as it was", timedOut)
+	}
+}
+
+// A slice that has to be split twice to answer - split for its time, and a
+// child of it out of time too - fails its first Slot and is read a level
+// deeper by each Slot after, until one completes: that Slot splits the
+// last for its time, the one after reads every slice answered.
+func TestASliceThatNeedsTwoLevelsIsReadDeeperRoundByRound(t *testing.T) {
+	fixture := newSlicedFixture(t, slicedHosts(8, 1<<10), sliceableFacts(), 200)
+	fixture.source.timeoutWhole = true
+	request := windowedRequest()
+	readWholeTimedOut(t, fixture, request)
+	fixture.source.mu.Lock()
+	fixture.source.timeoutWhole, fixture.source.queryMillis = false, 1_000
+	// The slice, its child and its grandchild each run out of time once
+	// asked, the slices before them answered.
+	fixture.source.timeoutAfter, fixture.source.timeoutTimes = 1, 3
+	fixture.source.mu.Unlock()
+	if _, err := fixture.coordinator.Execute(context.Background(), request); err == nil {
+		t.Fatal("round 1, the slice and its child out of time, completed")
+	}
+	result, err := fixture.coordinator.Execute(context.Background(), request)
+	if err != nil || !result.Completed || result.Usage.InputSliceTimeouts != 1 || result.Usage.InputSliceShapeKept != 1 {
+		t.Fatalf("round 2: result=%+v err=%v, want it completed a level deeper, the last split for its time and kept", result, err)
+	}
+	first := len(fixture.source.calls)
+	result, err = fixture.coordinator.Execute(context.Background(), request)
+	if err != nil || !result.Completed || result.Usage.InputSliceTimeouts != 0 || result.Usage.InputSliceShapeStarted != 1 {
+		t.Fatalf("round 3: result=%+v err=%v, want it completed in the shape, nothing out of time", result, err)
+	}
+	for _, call := range fixture.source.calls[first:] {
+		if call.err != nil || call.timedOut {
+			t.Fatalf("round 3 slice %s: %v, want every slice answered", call.slice.Digest(), call.err)
+		}
+	}
+}
+
+// The first slice of a Slot read in a shape that runs out of time has no
+// slice before it to be put on its size against: it is against what it was
+// planned to take, its series the round before at the time a series took
+// then, and split and read again for twice that - not left to the cooldown
+// round after round.
+func TestTheFirstSliceOfAShapeOutOfTimeIsSplit(t *testing.T) {
+	fixture, request := shapedFixture(t)
+	fixture.source.mu.Lock()
+	fixture.source.timeoutAfter, fixture.source.timeoutTimes = fixture.source.answered, 1
+	fixture.source.mu.Unlock()
+	first := len(fixture.source.calls)
+	result, err := fixture.coordinator.Execute(context.Background(), request)
+	if err != nil || !result.Completed || result.Usage.InputSliceShapeStarted != 1 || result.Usage.InputSliceTimeouts != 1 {
+		t.Fatalf("result=%+v err=%v, want the shape's first slice split for its time and the Slot completed", result, err)
+	}
+	if calls := fixture.source.calls[first:]; len(calls) == 0 || !calls[0].timedOut {
+		t.Fatal("the shape's first slice did not run out of time")
+	}
+}
+
+// slowBackend makes every slice the fixture is asked from now on run out of
+// time, at the 30 s a read out of time is counted at, as a backend slow as a
+// whole does.
+func slowBackend(fixture *slicedFixture) {
+	fixture.source.mu.Lock()
+	defer fixture.source.mu.Unlock()
+	fixture.source.timeoutAfter, fixture.source.timeoutTimes = fixture.source.answered, 1_000
+}
+
+// firstSliceOf is the digest of the first slice a Slot read asked.
+func firstSliceOf(t *testing.T, fixture *slicedFixture, from int) string {
+	t.Helper()
+	calls := fixture.source.calls[from:]
+	if len(calls) == 0 {
+		t.Fatal("the Slot asked no slice")
+	}
+	return calls[0].slice.Digest()
+}
+
+// A backend slow as a whole times a shape's first slice out with no slice
+// before it to measure by: under the query cooldown that is no slice too
+// large. The Slot fails and its shape is not made deeper - read again, it
+// asks the same first slice.
+func TestTheFirstSliceOfAShapeOutOfTimeUnderTheCooldownDeepensNothing(t *testing.T) {
+	fixture, request := shapedFixture(t)
+	slowBackend(fixture)
+	request.QueryCooldownHeld = true
+	var firsts []string
+	for round := 0; round < 2; round++ {
+		from := len(fixture.source.calls)
+		if result, err := fixture.coordinator.Execute(context.Background(), request); err != nil || !result.Completed {
+			t.Fatalf("round %d with every slice out of time under the cooldown: result=%+v err=%v, want it completed degraded", round, result, err)
+		}
+		firsts = append(firsts, firstSliceOf(t, fixture, from))
+	}
+	if firsts[0] != firsts[1] {
+		t.Fatalf("under the cooldown the shape's first slice went %s to %s: made deeper", firsts[0], firsts[1])
+	}
+}
+
+// Before the query cooldown holds, a backend slow as a whole has a shape
+// split by each Slot that fails so - twice at most, three Slots in a row
+// before the scheduler holds the cooldown (unavailableThreshold): 24 leaves
+// more at most - and by none once it holds. The leaves are read as a Slot
+// that completes after lands them.
+func TestAShapeGrowsOnlyUntilTheCooldownHolds(t *testing.T) {
+	const beforeCooldown = 3 // scheduler unavailableThreshold
+	// landedAfter is the slices a Slot completing after rounds failing so
+	// lands: rounds before the cooldown and held more under it.
+	landedAfter := func(t *testing.T, held int) (before, after uint64) {
+		fixture, request := shapedFixture(t)
+		fixture.source.mu.Lock()
+		fixture.source.timedOut = nil
+		fixture.source.mu.Unlock()
+		result, err := fixture.coordinator.Execute(context.Background(), request)
+		if err != nil || !result.Completed {
+			t.Fatalf("the shape read before: result=%+v err=%v", result, err)
+		}
+		before = result.Usage.InputSlices
+		slowBackend(fixture)
+		for round := 0; round < beforeCooldown+held; round++ {
+			request.QueryCooldownHeld = round >= beforeCooldown
+			// Before the cooldown each fails, its shape split; under it each
+			// completes degraded, nothing put on a slice's size.
+			result, err := fixture.coordinator.Execute(context.Background(), request)
+			if request.QueryCooldownHeld != (err == nil && result.Completed) {
+				t.Fatalf("round %d with every slice out of time, cooldown %t: result=%+v err=%v", round, request.QueryCooldownHeld, result, err)
+			}
+		}
+		fixture.source.mu.Lock()
+		fixture.source.timedOut, fixture.source.timeoutTimes = nil, 0
+		fixture.source.mu.Unlock()
+		request.QueryCooldownHeld = false
+		result, err = fixture.coordinator.Execute(context.Background(), request)
+		if err != nil || !result.Completed || result.Usage.InputSliceShapeStarted != 1 {
+			t.Fatalf("the Slot after: result=%+v err=%v, want it completed in the shape", result, err)
+		}
+		return before, result.Usage.InputSlices
+	}
+	before, grown := landedAfter(t, 0)
+	_, held := landedAfter(t, 2)
+	if grown <= before || grown-before > 24 {
+		t.Fatalf("the shape went from %d to %d slices before the cooldown, want it grown by 24 at most", before, grown)
+	}
+	if held != grown {
+		t.Fatalf("the shape grew to %d slices under the cooldown from %d, want none more", held, grown)
+	}
+}
+
+// A slice out of time for its size that the window left is too short to
+// split fails its Slot, split into its tree: the next Slot reads it split.
+func TestASliceNotSplitForTheWindowIsReadSplitTheRoundAfter(t *testing.T) {
+	fixture, request := shapedFixture(t)
+	fixture.source.mu.Lock()
+	fixture.source.timeoutAfter, fixture.source.timeoutTimes = fixture.source.answered+1, 1
+	fixture.source.mu.Unlock()
+	// Less left than the children of a slice out of time take, at the
+	// backend's 30 s.
+	short, cancel := context.WithTimeout(context.Background(), 3*time.Second) // fixed-wait: a deadline the window is judged against, not a wait: 3 s is under any slice's children at 30 s
+	_, err := fixture.coordinator.Execute(short, request)
+	cancel()
+	if err == nil {
+		t.Fatal("a Slot with a slice out of time and no window to split it completed")
+	}
+	result, err := fixture.coordinator.Execute(context.Background(), request)
+	if err != nil || !result.Completed || result.Usage.InputSliceTimeouts != 0 || result.Usage.InputSliceShapeStarted != 1 {
+		t.Fatalf("the Slot after: result=%+v err=%v, want it completed in the shape with the slice split", result, err)
+	}
+}
+
+// A shape is voided once its Query Group is grouped by other dimensions: the
+// Slot that finds the change completes in the slices it started in, and the
+// next is read in slices counted anew.
+func TestAShapeIsVoidedWhenItsQueryGroupIsGroupedOtherwise(t *testing.T) {
+	fixture, request := shapedFixture(t)
+	fixture.source.mu.Lock()
+	fixture.source.facts = &execution.QueryPlanFacts{Provider: execution.ProviderUQ, QueryList: []execution.QueryClause{{
+		TableID: "system.cpu_summary", Dimensions: []string{"host", "instance"},
+		Functions: []execution.QueryFunction{{Method: "mean", Dimensions: []string{"host", "instance"}}},
+	}}}
+	fixture.source.timedOut = nil
+	fixture.source.mu.Unlock()
+	result, err := fixture.coordinator.Execute(context.Background(), request)
+	if err != nil || !result.Completed || result.Usage.InputSliceShapeVoidedDimensions != 1 {
+		t.Fatalf("the Slot grouped otherwise: result=%+v err=%v, want it completed and the shape voided", result, err)
+	}
+	result, err = fixture.coordinator.Execute(context.Background(), request)
+	if err != nil || !result.Completed || result.Usage.InputSliceShapeStarted != 0 {
+		t.Fatalf("the Slot after: result=%+v err=%v, want it read with no shape", result, err)
+	}
+}
+
+// A Query Group sliced for a read that ran out of time keeps its slices
+// the rounds after they answered - read whole the next round, it would run
+// out again, every other round - and is read whole again only after
+// sliceDecayRounds rounds of slices that all answered quickly.
+func TestASliceLearnedFromATimeoutIsKeptUntilItsReadsAreQuick(t *testing.T) {
+	fixture := newSlicedFixture(t, slicedHosts(8, 1<<10), sliceableFacts(), 200)
+	fixture.source.timeoutWhole, fixture.source.queryMillis = true, 1_000
+	request := windowedRequest()
+	readWholeTimedOut(t, fixture, request)
+	fixture.source.timeoutWhole = false
+	const decayRounds = 3 // sliceDecayRounds
+	sliced := func(round int) bool {
+		first := len(fixture.source.calls)
+		result, err := fixture.coordinator.Execute(context.Background(), request)
+		if err != nil || !result.Completed {
+			t.Fatalf("round %d: result=%+v err=%v, want it completed", round, result, err)
+		}
+		calls := fixture.source.calls[first:]
+		return len(calls) > 1 && !calls[0].slice.IsZero()
+	}
+	for round := 2; round <= 1+decayRounds; round++ {
+		if !sliced(round) {
+			t.Fatalf("round %d after the timeout read whole, want it kept in slices", round)
+		}
+	}
+	if sliced(2 + decayRounds) {
+		t.Fatalf("after %d quick rounds in slices the Query Group is still sliced, want one fewer: whole", decayRounds)
+	}
+}
+
+// A Query Group known small whose read whole runs out of time - a backend
+// slow as a whole - is read whole again: the time is put on no slice's size
+// and slices nothing.
+func TestASmallQueryGroupThatRanOutOfTimeIsReadWholeAgain(t *testing.T) {
+	fixture := newSlicedFixture(t, slicedHosts(8, 1<<10), sliceableFacts(), 200)
+	fixture.source.queryMillis = 1_000
+	request := windowedRequest()
+	if result, err := fixture.coordinator.Execute(context.Background(), request); err != nil || !result.Completed {
+		t.Fatalf("the first read: result=%+v err=%v, want it completed", result, err)
+	}
+	fixture.source.timeoutWhole = true
+	readWholeTimedOut(t, fixture, request)
+	fixture.source.timeoutWhole = false
+	first := len(fixture.source.calls)
+	if result, err := fixture.coordinator.Execute(context.Background(), request); err != nil || !result.Completed {
+		t.Fatalf("the read after: result=%+v err=%v, want it completed", result, err)
+	}
+	if calls := fixture.source.calls[first:]; len(calls) != 1 || !calls[0].slice.IsZero() {
+		t.Fatalf("the read after the timeout made %d reads (first whole %t), want one read whole", len(calls),
+			len(calls) > 0 && calls[0].slice.IsZero())
+	}
+}
+
+// The slices a Query Group is read in do not grow on their own: a tree holds
+// at least the slices asked, and each round asks what the round before was
+// started in, not what its tree landed. 24 numbered hosts of 45 KiB: the
+// first Slot, read whole, lets it go at the ninth over the slice limit (384
+// KiB, half the share) and cuts its root by that sample, last digits 0 to 8
+// - [012], [34], [56] and the rest, 9, 5, 4 and 6 hosts. Every round after
+// starts on that cut (three slices asked, 1,080 KiB over half the share),
+// and [012], 405 KiB, is past the limit and split as it streams: every round
+// lands more slices than it was started in, the tree asking the landed count
+// would hold more again. Five rounds in a row, reads answered without being
+// quick (no decay), land the same slices.
+func TestTheSlicesAQueryGroupIsReadInDoNotGrowRoundByRound(t *testing.T) {
+	fixture := newSlicedFixture(t, slicedHosts(24, 45<<10), sliceableFacts(), 200)
+	fixture.source.queryMillis = 10_000
+	request := windowedRequest()
+	if first, err := fixture.coordinator.Execute(context.Background(), request); err != nil || !first.Completed ||
+		!fixture.source.calls[0].slice.IsZero() || fixture.source.calls[0].completed {
+		t.Fatalf("the first Slot result=%+v err=%v, want the whole group read, let go and read in slices", first, err)
+	}
+	var first []string
+	for round := 2; round <= 6; round++ {
+		before := len(fixture.source.calls)
+		result, err := fixture.coordinator.Execute(context.Background(), request)
+		if err != nil || !result.Completed {
+			t.Fatalf("round %d: result=%+v err=%v, want it completed", round, result, err)
+		}
+		if result.Usage.InputSlicesDiscarded == 0 {
+			t.Fatalf("round %d split no slice as it streamed, want the digits' slice past the limit: more landed than started", round)
+		}
+		var slices []string
+		for _, call := range fixture.source.calls[before:] {
+			if call.completed {
+				slices = append(slices, call.slice.Digest())
+			}
+		}
+		sort.Strings(slices)
+		if len(slices) < 2 {
+			t.Fatalf("round %d landed %d slices, want the Slot in slices", round, len(slices))
+		}
+		if first == nil {
+			first = slices
+			continue
+		}
+		if !reflect.DeepEqual(slices, first) {
+			t.Fatalf("round %d landed %d slices %v, round 2 %d %v: want the same slices every round", round, len(slices), slices, len(first), first)
+		}
 	}
 }
