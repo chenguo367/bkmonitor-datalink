@@ -1058,8 +1058,8 @@ func (runner *Runner) runOneTracked(
 		// Decided on the Slot's refusals so far (noteShareRefusal); an
 		// expired replay or range is finalized query-free by its own rule.
 		ShareExceeded:     runner.shareExceeded(slot) && slot.Recovery.Disposition != ReplayExpired && slot.ExpiredRange == nil,
-		QueryCooldownHeld: runner.queryCooldownHolds(),
-		Operation:         operation, AttemptNo: runner.attemptNo(slot), OwnerFence: fence, ExpectedNextSlot: slot.ExpectedNextSlot,
+		QueryCooldownHeld: runner.queryCooldownHolds(), QueryCooldownProbe: runner.queryCooldownProbes(),
+		Operation: operation, AttemptNo: runner.attemptNo(slot), OwnerFence: fence, ExpectedNextSlot: slot.ExpectedNextSlot,
 		ContentScope: slot.Dispatch.ContentScope,
 	}
 	if err := request.Validate(); err != nil {

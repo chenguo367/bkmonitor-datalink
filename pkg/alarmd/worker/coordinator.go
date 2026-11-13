@@ -709,6 +709,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 			stream.slices.queryMillis += took
 			stream.slices.sliceMillis = append(stream.slices.sliceMillis, took)
 			stream.slices.noteLeafRead(leaf, took)
+			stream.slices.noteSliceCompletion(sliceCompletion)
 		}
 		// The next slice is read while this one completes, up to half of what
 		// the share leaves beside this slice (sliceLimit): its decode is off
@@ -730,7 +731,16 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 		}
 	}
 	ctx = completionCtx
-	coordinator.rememberSlotInput(request, stream, false)
+	if stream.slicing() && stream.slices.everySliceTargetMissing() {
+		// The provider answered the Query Group's target missing in every
+		// slice: nothing of its size was read, and slices kept from reads
+		// before - their shape, cut, count and the time they took - would
+		// only send the next probe as many requests, each answered the same.
+		// The next Slot reads it whole.
+		coordinator.slicedInput.forget(request.Contract.Slot.QueryGroup)
+	} else {
+		coordinator.rememberSlotInput(request, stream, false)
+	}
 	// The Slot's result is the evaluation's; the query line reports the
 	// physical queries' own beside it (observeQueryCompleted).
 	queryResult, queryReason := provisionalResult(stream.evaluated)
@@ -876,6 +886,7 @@ func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 		InputSliceShapeRefusedMaxLeaves:     shapes[8],
 		InputSliceShapeEvictedIdle:          shapes[9],
 		InputSliceCutOn:                     stream.sliceCutFrom(),
+		InputSliceDimension:                 stream.sliceDimension(),
 		InputSlicesDeferred:                 stream.slicesDeferred(),
 		InputSliceStartDiscarded:            stream.sliceStartDiscarded(),
 		NoDataStagesAheadCarried:            stream.stageAheadEnds[stageAheadCarried], NoDataStagesAheadDiffers: stream.stageAheadEnds[stageAheadDiffers],

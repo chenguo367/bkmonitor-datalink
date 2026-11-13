@@ -160,6 +160,14 @@ func (coordinator *SlotExecutionCoordinator) shapeOnFailure(reading *sliceReadin
 	return shape
 }
 
+// forget takes everything the memory holds of a Query Group out of it - its
+// shape, cut, slice count and times - so its next Slot reads it whole.
+func (trees *sliceTrees) forget(group execution.QueryGroupIdentity) {
+	trees.mu.Lock()
+	defer trees.mu.Unlock()
+	delete(trees.input, group)
+}
+
 // dropShape takes a Query Group's shape out of the memory, what else it
 // holds kept.
 func (trees *sliceTrees) dropShape(group execution.QueryGroupIdentity) {

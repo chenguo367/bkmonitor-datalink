@@ -88,26 +88,71 @@ func TestAStoppedTimerEndsASleepThatOutlivesItsTERM(t *testing.T) {
 
 // Under setsid the command leads a group by setsid, and the timer leads one
 // by job control, turned on once setsid has launched the command: its sleep
-// is in the timer's group, not the supervisor's, wherever this host's
-// /bin/sh gives a job a group of its own.
+// is in the timer's group, not the supervisor's, under a shell whose job
+// control works without a tty (bash). dash and busybox ash turn it off
+// without one, set -m though they accept: there the timer leads no group,
+// its sleep stays in the supervisor's, and the timer ends that sleep itself
+// when it is stopped (TestAStoppedTimerEndsASleepThatOutlivesItsTERM). Each
+// shell this host has is asked which it is, and judged by that.
 func TestUnderSetsidTheTimerLeadsAGroupOfItsOwn(t *testing.T) {
 	runtimeProvider(t)
-	if !hostGroups(t, "") {
-		t.Skip("this host's /bin/sh gives a job no group of its own")
+	ran := false
+	for offset, shell := range hostShells(t) {
+		ran = true
+		groups := shellJobControl(t, shell)
+		seconds := timerSeconds(t, offset)
+		command := exec.CommandContext(testwait.Context(t), shell, "-c", remoteSupervisor, supervisorName, "N0NCE", seconds, "/bin/sleep", "3")
+		command.Env = append(os.Environ(), "PATH="+withSetsid(t))
+		command.WaitDelay = time.Second
+		if err := command.Start(); err != nil {
+			t.Fatal(err)
+		}
+		supervisorGroup, err := syscall.Getpgid(command.Process.Pid)
+		if err != nil {
+			t.Fatalf("%s: supervisor's group: %v", shell, err)
+		}
+		var sleeps [][3]int
+		testwait.Until(t, "the timer's sleep", func() bool { sleeps = timerSleeps(t, seconds); return len(sleeps) > 0 })
+		if err := command.Wait(); err != nil {
+			t.Fatalf("%s: supervisor: %v", shell, err)
+		}
+		if len(sleeps) != 1 || sleeps[0][1] == command.Process.Pid {
+			t.Fatalf("%s: timer sleeps (pid, ppid, pgid) %v under supervisor %d: want one, the timer's child", shell, sleeps, command.Process.Pid)
+		}
+		if ownGroup := sleeps[0][2] == sleeps[0][1] && sleeps[0][2] != supervisorGroup; ownGroup != groups {
+			t.Fatalf("%s (job control %t): timer sleeps (pid, ppid, pgid) %v under supervisor %d of group %d: in its timer's own group %t, want %t",
+				shell, groups, sleeps, command.Process.Pid, supervisorGroup, ownGroup, groups)
+		}
 	}
-	seconds := timerSeconds(t, 0)
-	command := exec.CommandContext(testwait.Context(t), "/bin/sh", "-c", remoteSupervisor, supervisorName, "N0NCE", seconds, "/bin/sleep", "3")
-	command.Env = append(os.Environ(), "PATH="+withSetsid(t))
-	command.WaitDelay = time.Second
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
+	if !ran {
+		t.Skip("no shell here")
 	}
-	var sleeps [][3]int
-	testwait.Until(t, "the timer's sleep", func() bool { sleeps = timerSleeps(t, seconds); return len(sleeps) > 0 })
-	if err := command.Wait(); err != nil {
-		t.Fatalf("supervisor: %v", err)
+}
+
+// hostShells is each of /bin/sh, /bin/bash and /bin/dash this host has, once
+// each by what it resolves to.
+func hostShells(t *testing.T) []string {
+	t.Helper()
+	var shells []string
+	seen := map[string]bool{}
+	for _, shell := range []string{"/bin/sh", "/bin/bash", "/bin/dash"} {
+		resolved, err := filepath.EvalSymlinks(shell)
+		if err != nil || seen[resolved] {
+			continue
+		}
+		seen[resolved] = true
+		shells = append(shells, shell)
 	}
-	if len(sleeps) != 1 || sleeps[0][2] != sleeps[0][1] || sleeps[0][2] == command.Process.Pid {
-		t.Fatalf("timer sleeps (pid, ppid, pgid) %v under supervisor %d: want one, in its timer's own group", sleeps, command.Process.Pid)
+	return shells
+}
+
+// shellJobControl reports whether shell's job control takes effect without a
+// tty, as an exec's shell runs: set -m leaves m in $- only where it does.
+func shellJobControl(t *testing.T, shell string) bool {
+	t.Helper()
+	out, err := exec.Command(shell, "-c", `set -m 2>/dev/null; case $- in *m*) echo 1 ;; *) echo 0 ;; esac`).Output()
+	if err != nil {
+		t.Fatalf("%s: job control probe: %v", shell, err)
 	}
+	return strings.TrimSpace(string(out)) == "1"
 }

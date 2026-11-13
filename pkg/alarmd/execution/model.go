@@ -224,11 +224,18 @@ type SlotExecutionRequest struct {
 	// then not split and read again: the backend is slow, and two more
 	// requests to it are what the cooldown is there to stop.
 	QueryCooldownHeld bool
-	Operation         Operation
-	AttemptNo         uint32
-	OwnerFence        OwnerFence
-	ExpectedNextSlot  EvaluationTime
-	ExpiredRange      *ExpiredRangeProjectionV1
+	// QueryCooldownProbe is a non-identity scheduler fact too: the Query
+	// Group is in the query cooldown and its hold has run out, so this Slot
+	// is the one that decides whether it leaves (scheduler
+	// queryCooldownDecidedBy). It asks only whether the Query Group can be
+	// read: it is read whole, one request a query, never in the slices its
+	// memory holds.
+	QueryCooldownProbe bool
+	Operation          Operation
+	AttemptNo          uint32
+	OwnerFence         OwnerFence
+	ExpectedNextSlot   EvaluationTime
+	ExpiredRange       *ExpiredRangeProjectionV1
 	// ContentScope names the execution content this Slot runs under: the
 	// ObjectDigest of the Schedule Segment it was frozen from (decision-016).
 	// Every fenced write the Slot makes -- State, Progress, the expired range
@@ -4834,6 +4841,9 @@ type SlotBudgetUsage struct {
 	// were cut on came from (observability.InputSliceCutOnSources), empty
 	// for a Slot not started in slices counted.
 	InputSliceCutOn string
+	// InputSliceDimension is the dimension this Slot's slices were cut on at
+	// their root, however they started, empty for a Slot read whole.
+	InputSliceDimension string
 	// InputSlicesDeferred is the slices of this Slot read last for the
 	// provider having timed them out the Slot before.
 	InputSlicesDeferred uint64

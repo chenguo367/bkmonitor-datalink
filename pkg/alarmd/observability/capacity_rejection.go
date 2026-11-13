@@ -132,6 +132,10 @@ type SlotBudgetUsageFacts struct {
 	// were cut on came from (InputSliceCutOnSources), empty for a Slot not
 	// started in slices counted: read whole, or in its Query Group's shape.
 	InputSliceCutOn string `json:"input_slice_cut_on,omitempty"`
+	// InputSliceDimension is the dimension the Slot's slices were cut on at
+	// their root, however they started - cut counted, or in the Query
+	// Group's shape - empty for a Slot read whole.
+	InputSliceDimension string `json:"input_slice_dimension,omitempty"`
 	// InputSlicesDeferred is the slices read last for the provider having
 	// timed them out the Slot before, completing degraded: judged against
 	// the slices read before them.

@@ -95,6 +95,13 @@ type phaseTwoApplicationDependencies struct {
 	newHTTP        func(*metric.Recorder, observability.HealthSource, httpSurface) (httpRuntime, error)
 	// lifecycle opens the process's start/stop record; nil records nothing.
 	lifecycle func(config.Config) *lifecycleRecord
+	// goRuntime installs the collector budget derived from the container
+	// (applyPhaseTwoGoRuntime): the runtime's own setters in production. The
+	// limit is the process's, not the application's, and a test process runs
+	// many applications beside cases that read it - the observation memory
+	// line among them - so a case starting one installs nothing (the zero
+	// setters).
+	goRuntime goRuntimeBudgetSetters
 }
 
 // httpSurface is what the listener needs from the configuration: where the
@@ -122,7 +129,7 @@ type runtimeModeDependencies struct {
 
 func defaultPhaseTwoApplicationDependencies() phaseTwoApplicationDependencies {
 	return phaseTwoApplicationDependencies{
-		configureCPU: configurePhaseTwoCPU, lifecycle: newLifecycleRecord,
+		configureCPU: configurePhaseTwoCPU, lifecycle: newLifecycleRecord, goRuntime: runtimeGoBudgetSetters(),
 		run: runPhaseTwoApplication, openBundle: openProductionPhaseTwoBundle,
 		openRoles: openPhaseTwoRoleRuntime, openRoleBundle: openProductionRoleBundle,
 		newHTTP: func(recorder *metric.Recorder, source observability.HealthSource, surface httpSurface) (httpRuntime, error) {
@@ -198,7 +205,7 @@ func runPhaseTwoApplicationWithDependencies(
 	// budget, and is installed here rather than at configuration load because
 	// --check-config reports the derived pair without being the process that
 	// has to run under it.
-	applyPhaseTwoGoRuntime(config.DeriveGoRuntime(config.DetectCapacityInputs()), runtimeGoBudgetSetters())
+	applyPhaseTwoGoRuntime(config.DeriveGoRuntime(config.DetectCapacityInputs()), dependencies.goRuntime)
 	// The OB channel's one bound on a request is its answer's size, a share
 	// of the container's memory.
 	obchannel.SetMemoryLimit(config.DetectCapacityInputs().MemoryLimitBytes)

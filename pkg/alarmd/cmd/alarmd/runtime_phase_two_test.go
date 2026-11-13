@@ -104,6 +104,7 @@ func TestRunPhaseTwoApplicationUsesWorkerBundleInsteadOfFixedFailure(t *testing.
 	bundle := mustPhaseTwoWorkerBundle(t, cfg, health, control, owner)
 	ctx, cancel := context.WithCancel(context.Background())
 	dependencies := phaseTwoApplicationDependencies{
+		goRuntime:    noGoRuntime,
 		configureCPU: func() (string, error) { return "cpu_quota", nil },
 		openBundle: func(context.Context, config.Config, *metric.Recorder, *observability.Logger, *phaseTwoApplicationHealth) (*phaseTwoWorkerBundle, error) {
 			return bundle, nil
@@ -145,6 +146,7 @@ func TestRunPhaseTwoApplicationBoundsHTTPShutdownWhenBundleOpenFails(t *testing.
 	want := errors.New("open production bundle")
 	httpRelease := make(chan struct{})
 	dependencies := phaseTwoApplicationDependencies{
+		goRuntime: noGoRuntime,
 		openBundle: func(context.Context, config.Config, *metric.Recorder, *observability.Logger, *phaseTwoApplicationHealth) (*phaseTwoWorkerBundle, error) {
 			return nil, want
 		},
@@ -189,6 +191,7 @@ func TestRunPhaseTwoApplicationCancelsWorkerAndMarksFatalWhenHTTPStopsEarly(t *t
 		stages = append(stages, observation.Stage)
 	})
 	dependencies := phaseTwoApplicationDependencies{
+		goRuntime: noGoRuntime,
 		openBundle: func(
 			_ context.Context,
 			_ config.Config,
@@ -254,6 +257,7 @@ func TestRunPhaseTwoApplicationKeepsRunningAfterQueryGroupFailure(t *testing.T) 
 	httpCanceled := make(chan struct{})
 	var applicationHealth *phaseTwoApplicationHealth
 	dependencies := phaseTwoApplicationDependencies{
+		goRuntime: noGoRuntime,
 		openBundle: func(
 			_ context.Context,
 			_ config.Config,

@@ -95,6 +95,7 @@ func TestPhaseTwoRetainedBudgetProfileUsesResolvedDefaultAndOverride(t *testing.
 func TestPhaseTwoCPUInitializationFailsBeforeOpeningServices(t *testing.T) {
 	want := errors.New("CPU quota unavailable")
 	dependencies := phaseTwoApplicationDependencies{
+		goRuntime:    noGoRuntime,
 		configureCPU: func() (string, error) { return "", want },
 		openBundle: func(context.Context, config.Config, *metric.Recorder, *observability.Logger, *phaseTwoApplicationHealth) (*phaseTwoWorkerBundle, error) {
 			t.Fatal("opened bundle after CPU failure")

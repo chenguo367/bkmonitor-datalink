@@ -176,6 +176,12 @@ type sliceReading struct {
 	// nothing, its size is the read before's, and with no sample its next
 	// read is cut on the first dimension (cutOnNext).
 	wholeTimedOut bool
+	// readSlices is the slices that completed, and targetMissingSlices those
+	// of them every physical query of which the provider answered with its
+	// target missing (targetMissingCompletion): a read all of whose slices
+	// were is no reading of the Query Group's size, and the memory of it is
+	// let go (forget).
+	readSlices, targetMissingSlices int
 	// cutFrom is where the dimension this read's starting slices were cut
 	// on came from (observability.InputSliceCutOnSources), empty for a read
 	// not started in slices counted. unsampled is a read whole found to have
@@ -1050,6 +1056,14 @@ func (coordinator *SlotExecutionCoordinator) sliceReadingFor(ctx context.Context
 	}
 	reading := &sliceReading{}
 	coordinator.slicedInput.start(request.Contract.Slot.QueryGroup, coordinator.now(), slotPeriod(ctx, request))
+	// A query cooldown's probe asks only whether the Query Group can be read
+	// again: read whole, one request a query, not in the slices a Query
+	// Group read before holds - each of those is one more request the
+	// cooldown is there to stop, and a target that is missing is missing in
+	// every slice of it. Read past its limit, it is split as any read whole.
+	if request.QueryCooldownProbe {
+		return reading
+	}
 	share := coordinator.qgShareBytes()
 	last := coordinator.slicedInput.lastInput(request.Contract.Slot.QueryGroup)
 	reading.unknownSize = last.series == 0 && last.bytes == 0
@@ -1137,6 +1151,15 @@ func (stream *streamedExecution) sliceCutFrom() string {
 		return ""
 	}
 	return stream.slices.cutFrom
+}
+
+// sliceDimension is the dimension this Slot's slices were cut on at their
+// root, however they started, empty for a Slot read whole.
+func (stream *streamedExecution) sliceDimension() string {
+	if !stream.readInSlices() {
+		return ""
+	}
+	return stream.slices.tree.RootCut().Dimension
 }
 
 // cutOnNext is the dimension the next read's starting slices are cut on,
@@ -1295,6 +1318,40 @@ func (reading *sliceReading) landSliceRead(leaf inputslice.Leaf) bool {
 	}
 	reading.index++
 	return len(reading.tree.Pending()) == 0
+}
+
+// noteSliceCompletion counts a slice that completed, and whether the
+// provider answered its target missing for every physical query of it.
+func (reading *sliceReading) noteSliceCompletion(completion execution.QueryExecutionCompletion) {
+	reading.readSlices++
+	if targetMissingCompletion(completion) {
+		reading.targetMissingSlices++
+	}
+}
+
+// everySliceTargetMissing is whether every slice the Slot read completed
+// with its target missing.
+func (reading *sliceReading) everySliceTargetMissing() bool {
+	return reading.readSlices > 0 && reading.targetMissingSlices == reading.readSlices
+}
+
+// targetMissingCompletion is whether the provider answered every physical
+// query of completion with its target missing: UNAVAILABLE, attributed
+// QUERY_TARGET_MISSING (access/uq's SPACE_TABLE_ID_FIELD_IS_NOT_EXISTS with
+// no series).
+func targetMissingCompletion(completion execution.QueryExecutionCompletion) bool {
+	if len(completion.PhysicalQueries) == 0 {
+		return false
+	}
+	for _, item := range completion.PhysicalQueries {
+		if item.Completeness != execution.CompletenessUnavailable {
+			return false
+		}
+		if code, _ := physicalFailureReason(item.RouteFacts); code != execution.ReasonCode(contract.ReasonQueryTargetMissing) {
+			return false
+		}
+	}
+	return true
 }
 
 // rememberSlotInput keeps what this Slot read, for the next Slot of its

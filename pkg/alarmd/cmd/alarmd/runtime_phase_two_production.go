@@ -3591,6 +3591,7 @@ func slotBudgetUsageFacts(usage execution.SlotBudgetUsage) *observability.SlotBu
 		InputSliceShapeRefusedMaxLeaves:     usage.InputSliceShapeRefusedMaxLeaves,
 		InputSliceShapeEvictedIdle:          usage.InputSliceShapeEvictedIdle,
 		InputSliceCutOn:                     usage.InputSliceCutOn,
+		InputSliceDimension:                 usage.InputSliceDimension,
 		InputSlicesDeferred:                 usage.InputSlicesDeferred,
 		InputSliceStartDiscarded:            usage.InputSliceStartDiscarded,
 		NoDataStagesAheadCarried:            usage.NoDataStagesAheadCarried, NoDataStagesAheadDiffers: usage.NoDataStagesAheadDiffers,

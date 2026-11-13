@@ -468,7 +468,7 @@ func TestThePoolIsLeftOnlyOnAnAnswerItsNormalRoundGets(t *testing.T) {
 				t.Fatalf("the transition's probe = %+v, want a normal round's, %s, with budget %d ms", probe, test.outcome, decider.remaining.Milliseconds())
 			}
 			// The record a restart or the next owner reads back says the same.
-			if record := h.poolRecord(); record.LastProbe == nil || *record.LastProbe != *probe {
+			if record := h.poolRecord(); record.LastProbe == nil || !sameQueryCooldownProbe(*record.LastProbe, *probe) {
 				t.Fatalf("the pool record's probe = %+v, want %+v", record.LastProbe, probe)
 			}
 		})

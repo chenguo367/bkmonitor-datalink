@@ -106,6 +106,52 @@ func TestSliceableDimensionsAreTheRawGroupByLabelsEveryQueryShares(t *testing.T)
 	}
 }
 
+// The provider routes result tables by some dimensions before it reads a
+// series - bcs_cluster_id where a query names no table, apm_application_name
+// for the APM relation metrics - and a slice on one can route to no table,
+// answered as the target missing: they are not sliced on. Another the
+// queries group by is; with none, the Slot cannot be sliced, named. A query
+// that names its table is not routed by its cluster.
+func TestTheProvidersRoutingDimensionsAreNotSlicedOn(t *testing.T) {
+	container := func(dimensions ...string) execution.QueryPlanFacts {
+		facts := groupedFacts(dimensions...)
+		facts.QueryList[0].TableID = ""
+		facts.QueryList[0].FieldName = "container_cpu_usage_seconds_total"
+		return facts
+	}
+	relation := func(dimensions ...string) execution.QueryPlanFacts {
+		facts := groupedFacts(dimensions...)
+		facts.QueryList[0].FieldName = "apm_service_instance_with_pod_relation"
+		return facts
+	}
+	for _, test := range []struct {
+		name   string
+		facts  []execution.QueryPlanFacts
+		want   []string
+		reason string
+	}{
+		{name: "cluster_with_another", facts: []execution.QueryPlanFacts{container("bcs_cluster_id", "channel_id")}, want: []string{"channel_id"}},
+		{name: "cluster_alone", facts: []execution.QueryPlanFacts{container("bcs_cluster_id")}, reason: "dimension_not_grouped"},
+		{name: "cluster_in_one_query_of_two", facts: []execution.QueryPlanFacts{groupedFacts("bcs_cluster_id", "pod"), container("bcs_cluster_id", "pod")}, want: []string{"pod"}},
+		{name: "cluster_of_a_named_table", facts: []execution.QueryPlanFacts{groupedFacts("bcs_cluster_id", "pod")}, want: []string{"bcs_cluster_id", "pod"}},
+		{name: "application_of_a_relation", facts: []execution.QueryPlanFacts{relation("apm_application_name", "service_name")}, want: []string{"service_name"}},
+		{name: "application_of_another_metric", facts: []execution.QueryPlanFacts{groupedFacts("apm_application_name", "service_name")}, want: []string{"apm_application_name", "service_name"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := execution.SliceableDimensions(test.facts...)
+			if test.reason != "" {
+				if reason, ok := execution.InputSliceUnsupportedOf(err); !ok || reason != test.reason || got != nil {
+					t.Fatalf("SliceableDimensions() = %v, %v; want refused as %s", got, err, test.reason)
+				}
+				return
+			}
+			if err != nil || !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("SliceableDimensions() = %v, %v; want %v", got, err, test.want)
+			}
+		})
+	}
+}
+
 // A slice is checked against the Slot's dimensions: on one of them it can
 // be read, on any other it is refused, and the zero slice is always read.
 func TestCheckInputSliceNamesADimensionOutsideTheGroupBy(t *testing.T) {

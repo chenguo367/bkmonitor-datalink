@@ -695,6 +695,24 @@ func TestStoppedTimersLeaveNoSleep(t *testing.T) {
 	})
 }
 
+// withoutSetsid is a PATH of sleep and the tools named, and no setsid: a
+// target without setsid wherever this host keeps one beside them, as
+// Debian keeps /usr/bin/setsid.
+func withoutSetsid(t *testing.T, tools ...string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, tool := range append([]string{"sleep"}, tools...) {
+		path, err := exec.LookPath(tool)
+		if err != nil {
+			t.Fatalf("%s: %v", tool, err)
+		}
+		if err := os.Symlink(path, filepath.Join(dir, tool)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
 // dashOrSkip is the local dash, the /bin/sh of Debian-based images.
 func dashOrSkip(t *testing.T) {
 	t.Helper()
@@ -711,11 +729,11 @@ func dashOrSkip(t *testing.T) {
 func TestUnderDashWithoutSetsidTheCommandHasNoGroupAndSaysSo(t *testing.T) {
 	runtimeProvider(t)
 	dashOrSkip(t)
-	if records, _, _ := superviseHeld(t, "/bin/dash", "", "5", true, "/bin/sh", "-c", "cat >/dev/null; exit 4"); fmt.Sprint(records) != "[started group 0 complete 4]" {
+	if records, _, _ := superviseHeld(t, "/bin/dash", withoutSetsid(t, "cat"), "5", true, "/bin/sh", "-c", "cat >/dev/null; exit 4"); fmt.Sprint(records) != "[started group 0 complete 4]" {
 		t.Fatalf("records %q, want no group and complete 4", records)
 	}
 	pidPath := filepath.Join(t.TempDir(), "pids")
-	records, _, _ := superviseUnder(t, "/bin/dash", "", recordDeadline, "/bin/sh", "-c", "sleep 30 >/dev/null 2>&1 & echo $$ $! > \"$1\"; wait", "cmd", pidPath)
+	records, _, _ := superviseUnder(t, "/bin/dash", withoutSetsid(t), recordDeadline, "/bin/sh", "-c", "sleep 30 >/dev/null 2>&1 & echo $$ $! > \"$1\"; wait", "cmd", pidPath)
 	data, _ := os.ReadFile(pidPath)
 	var command, child int
 	fmt.Sscan(string(data), &command, &child)
@@ -765,6 +783,7 @@ func TestUnderSetsidTheCommandsGroupIsEndedWhole(t *testing.T) {
 func TestExecUnderDashWithoutSetsidIsShPID(t *testing.T) {
 	provider, _, target := runtimeProvider(t)
 	dashOrSkip(t)
+	t.Setenv("PATH", withoutSetsid(t))
 	provider.options.Executor = executorFunc(func(ctx context.Context, request StreamRequest) (StreamResult, error) {
 		argv := append([]string{"/bin/dash"}, request.Argv[1:]...)
 		return localExecutor{}.Stream(ctx, StreamRequest{Target: request.Target, Argv: argv, Stdin: request.Stdin, Stdout: request.Stdout, Stderr: request.Stderr})

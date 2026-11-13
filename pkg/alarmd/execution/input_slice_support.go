@@ -27,7 +27,9 @@ const (
 	// told from its facts.
 	InputSliceReasonStorageDialect = "storage_dialect"
 	// InputSliceReasonDimensionNotGrouped is a dimension sliced on that is
-	// not a raw group-by label of every physical query of the Slot.
+	// not a raw group-by label of every physical query of the Slot, or one
+	// the provider routes a query's result tables by (routedBy): no
+	// dimension the slices can rest on.
 	InputSliceReasonDimensionNotGrouped = "dimension_not_grouped"
 	// InputSliceReasonSupplement is a slice asked of a supplement, which
 	// replays a kept read of the whole Query Group and sends no query the
@@ -83,13 +85,15 @@ var sliceableSourceSemantics = map[string]bool{"bk_monitor/time_series": true, "
 // every one of them carries, as the store has them, in the order the first
 // clause groups by. It is an InputSliceUnsupportedError when the Slot cannot
 // be sliced at all: a PromQL query, a store outside the regex dialect the
-// slices' partition rests on, or no dimension every query groups by.
+// slices' partition rests on, or no dimension every query groups by that
+// the provider does not route by.
 //
 // A dimension has to be in every query's group-by because the conditions
 // filter before aggregating: grouped by it, filtering on it keeps whole
 // groups and changes no aggregated value. It has to be the store's own label
 // because the conditions are read by the store: a label renamed on the way
-// out names nothing the store has.
+// out names nothing the store has. And it cannot be one the provider routes
+// result tables by (routedBy): a slice on it can route to no table.
 func SliceableDimensions(facts ...QueryPlanFacts) ([]string, error) {
 	if len(facts) == 0 {
 		return nil, &InputSliceUnsupportedError{Reason: InputSliceReasonStorageDialect}
@@ -111,7 +115,7 @@ func SliceableDimensions(facts ...QueryPlanFacts) ([]string, error) {
 	}
 	var candidates []string
 	for _, dimension := range facts[0].QueryList[0].Dimensions {
-		if dimension != "" && !slices.Contains(candidates, dimension) && groupedByEvery(dimension, facts) {
+		if dimension != "" && !slices.Contains(candidates, dimension) && groupedByEvery(dimension, facts) && !routedBy(dimension, facts) {
 			candidates = append(candidates, dimension)
 		}
 	}
@@ -186,6 +190,61 @@ func sliceableDialect(facts QueryPlanFacts) bool {
 		}
 	}
 	return true
+}
+
+// The provider's routing dimensions: the query service compares a query's
+// conditions with these result table properties when it routes, before it
+// reads any series, and drops a table the conditions do not match. A slice
+// condition on one of them can leave no table at all, which the provider
+// answers SPACE_TABLE_ID_FIELD_IS_NOT_EXISTS - the query's target missing -
+// for a slice that is only empty. The slice is not read as empty here: the
+// dimension is not sliced on.
+//
+// A contract with the query service's routing (unify-query 3.9.4896,
+// query/structured/space.go and condition.go); a change there is a change
+// here:
+//   - bcs_cluster_id against each table's cluster, in the container route,
+//     which a query naming no table takes (space.go:155-180, isK8s at
+//     :386,410-412; ClusterID in condition_field.go:58). The empty slice's
+//     negated pattern drops every table with a cluster.
+//   - apm_application_name against each table's label, for the three APM
+//     relation metrics, whatever table is named (space.go:113-128;
+//     ApmApplicationName in condition_field.go:59).
+//
+// table_id_conditions, the third comparison (space.go:138-150,369-372),
+// reads a field this provider's requests never carry.
+const (
+	routingClusterDimension     = "bcs_cluster_id"
+	routingApplicationDimension = "apm_application_name"
+)
+
+// apmRelationMetrics are the metrics the query service routes by
+// apm_application_name (space.go:113-128).
+var apmRelationMetrics = map[string]bool{
+	"apm_service_with_apm_service_instance_relation": true,
+	"apm_service_instance_with_pod_relation":         true,
+	"apm_service_instance_with_system_relation":      true,
+}
+
+// routedBy is whether the provider routes any clause of facts by dimension:
+// bcs_cluster_id where the clause names no table (no database before its
+// first dot), apm_application_name where it reads an APM relation metric.
+func routedBy(dimension string, facts []QueryPlanFacts) bool {
+	for _, fact := range facts {
+		for _, clause := range fact.QueryList {
+			switch dimension {
+			case routingClusterDimension:
+				if database, _, _ := strings.Cut(clause.TableID, "."); database == "" {
+					return true
+				}
+			case routingApplicationDimension:
+				if apmRelationMetrics[clause.FieldName] {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // groupedByEvery is whether dimension is a raw group-by label of every

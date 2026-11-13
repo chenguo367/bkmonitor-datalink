@@ -119,6 +119,12 @@ type slicedSource struct {
 	plans        []execution.DuePlan
 	requirements []execution.DataRequirement
 	completeness func(read, held int) execution.Completeness
+	// targetMissing answers every read as the provider answers a query whose
+	// table routes nowhere in the space: no series, UNAVAILABLE, its one
+	// attempt failed QUERY_TARGET_MISSING, as access/uq's
+	// unavailableCompletion completes SPACE_TABLE_ID_FIELD_IS_NOT_EXISTS
+	// with no series.
+	targetMissing bool
 	// mu guards calls, partial and incomplete: the next slice is read on a
 	// goroutine of its own while the Slot completes the one before.
 	mu      sync.Mutex
@@ -247,7 +253,7 @@ func (source *slicedSource) answer(ctx context.Context, request execution.QueryE
 			}
 		}
 	}
-	unavailable := source.completeness != nil && source.completeness(reads, -1) == execution.CompletenessUnavailable
+	unavailable := source.targetMissing || source.completeness != nil && source.completeness(reads, -1) == execution.CompletenessUnavailable
 	var delivery execution.SeriesDelivery
 	for _, series := range source.series {
 		if unavailable {
@@ -328,6 +334,11 @@ func (source *slicedSource) answer(ctx context.Context, request execution.QueryE
 	if completeness == execution.CompletenessPartial {
 		physical.PartialEvidence = &execution.PartialEvidence{Kind: execution.PartialEvidenceOmissionStable, Version: 1,
 			EvidenceDigest: strings.Repeat("d", 64), OmissionOnly: true, ReturnedRecordsStable: true}
+	}
+	if source.targetMissing {
+		physical.RouteFacts = execution.ProviderRouteFacts{Attempts: []execution.RouteAttemptFact{{AttemptNo: 1,
+			Result: execution.RouteAttemptFailed, ReasonCode: execution.ReasonCode(contract.ReasonQueryTargetMissing),
+			Detail: "SPACE_TABLE_ID_FIELD_IS_NOT_EXISTS"}}}
 	}
 	if source.tooLong && !request.Slice.IsZero() {
 		physical.RouteFacts = execution.ProviderRouteFacts{Attempts: []execution.RouteAttemptFact{{AttemptNo: 1,
