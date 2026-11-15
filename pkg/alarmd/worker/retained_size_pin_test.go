@@ -56,7 +56,9 @@ func TestThePerSeriesRetainedStructsKeepTheirSize(t *testing.T) {
 		// section 2.2). The output charge below moves by twice that.
 		{"RuntimeLevelStateMutation", unsafe.Sizeof(execution.RuntimeLevelStateMutation{}), 88},
 		{"RuntimeLevelStateView", unsafe.Sizeof(execution.RuntimeLevelStateView{}), 88},
-		{"StateEvaluation", unsafe.Sizeof(execution.StateEvaluation{}), 304},
+		// 304 until Class and NoData, the write's series class and kind:
+		// two bytes in one word, a series in flight.
+		{"StateEvaluation", unsafe.Sizeof(execution.StateEvaluation{}), 312},
 		{"StateMutation", unsafe.Sizeof(execution.StateMutation{}), 256},
 		{"StateHistoryPoint", unsafe.Sizeof(execution.StateHistoryPoint{}), 48},
 		{"StateLevelFact", unsafe.Sizeof(execution.StateLevelFact{}), 40},
@@ -81,11 +83,13 @@ func TestThePerSeriesRetainedStructsKeepTheirSize(t *testing.T) {
 	// The same, as the output charge adds it up for a series after the
 	// Slot's first: 2528 bytes, what the release before the origin fields
 	// charged for this fixture, and 2544 since LastRealPointTime - 16 bytes,
-	// 0.6 percent, for its one Level.
+	// 0.6 percent, for its one Level - and 2560 since the series class, 16
+	// bytes, 0.6 percent: the word it takes, in the two copies the charge
+	// counts.
 	current := execution.EvaluationResult{Plans: []execution.PlanEvaluationResult{pinnedSeriesResult()}}
 	next := execution.EvaluationResult{Plans: []execution.PlanEvaluationResult{pinnedSeriesResult()}}
-	if got := newEffectBytes(current, next); got != 2544 {
-		t.Errorf("one series charges %d output bytes, pinned at 2544", got)
+	if got := newEffectBytes(current, next); got != 2560 {
+		t.Errorf("one series charges %d output bytes, pinned at 2560", got)
 	}
 }
 

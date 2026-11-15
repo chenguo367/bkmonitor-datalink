@@ -863,6 +863,13 @@ func openProductionPhaseTwoBundleAssembly(
 	if err := recorder.BindRetainedReservation(func() uint64 { return worker.RetainedReserved(coordinator) }); err != nil {
 		return nil, err
 	}
+	if err := recorder.BindSliceMemory(func() metric.SliceMemoryReading {
+		reading := worker.SliceMemory(coordinator)
+		return metric.SliceMemoryReading{Remembered: reading.Remembered, Unswept: reading.Unswept,
+			Leaves: reading.Leaves, LeafSeries: reading.LeafSeries, Deferred: reading.Deferred}
+	}); err != nil {
+		return nil, err
+	}
 	// Sized by what the owned Query Groups were measured to retain, once
 	// every one of them has been: the cost source reads the census for the
 	// Leader's heartbeat, and the reservation from the same reading.

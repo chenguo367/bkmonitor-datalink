@@ -76,6 +76,88 @@ type slotApply struct {
 	// renew, held for a Slot applied window by window (slotStateKeys); nil
 	// for a Slot applied whole.
 	keys slotStateKeys
+	// censused is set once this attempt's census is reported, by its
+	// completion or, for an attempt that failed, by the Slot's end
+	// (settleSlotCensus): one report per attempt, whichever way it ended.
+	censused bool
+}
+
+// slotCensusSink is the attempts of one Slot execution's writes, for the
+// Slot's end to report the census of any that did not complete: an attempt
+// that fails returns before its completion, and its census - the series it
+// admitted, and the ones of them it wrote before it failed - would otherwise
+// go unreported.
+type slotCensusSink struct{ applies []*slotApply }
+
+type slotCensusSinkKey struct{}
+
+func withSlotCensusSink(ctx context.Context) (context.Context, *slotCensusSink) {
+	sink := &slotCensusSink{}
+	return context.WithValue(ctx, slotCensusSinkKey{}, sink), sink
+}
+
+func registerSlotApply(ctx context.Context, apply *slotApply) {
+	if sink, _ := ctx.Value(slotCensusSinkKey{}).(*slotCensusSink); sink != nil {
+		sink.applies = append(sink.applies, apply)
+	}
+}
+
+// settledCensus is the attempt's census as reported: where its series went
+// (census), and the mutations it admitted by class with those of them it did
+// not write. On an attempt that failed (failed), what the named exits leave
+// is the failure's, slot_failed. On one that completed every admitted
+// mutation left by a named exit, and any rest is unaccounted, with a line of
+// its own: the reading then holds, and its gap is named rather than folded
+// into another reason. More counted than admitted, on either, is unaccounted
+// too, by the difference: the reading cannot hold then - the census itself
+// counted wrong - and the line says so.
+func (apply *slotApply) settledCensus(ctx context.Context, census seriesCensus, failed bool) observability.FrozenStateRenewalFacts {
+	apply.censused = true
+	facts := apply.frozenRenewals
+	facts.CloneSeriesWrites()
+	facts.RecordCensus(census.Due, census.Read, census.Written)
+	rest := facts.Admitted() - int64(census.Written) - facts.NotWrittenTotal()
+	switch {
+	case rest > 0 && failed:
+		facts.RecordNotWritten(observability.StateNotWrittenSlotFailed, int(rest))
+	case rest != 0:
+		facts.RecordNotWritten(observability.StateNotWrittenUnaccounted, int(max(rest, -rest)))
+		apply.coordinator.emitObservation(ctx, observability.Observation{
+			Component: observability.ComponentState, Stage: observability.StageFrozenStateRenewed,
+			Operation: observability.Operation(apply.request.Operation),
+			Err: fmt.Errorf("alarmd worker: State census unaccounted: admitted %d, written %d, not written %d",
+				facts.Admitted(), census.Written, facts.NotWrittenTotal()-max(rest, -rest)),
+		})
+	}
+	return facts
+}
+
+// settleSlotCensus reports the census of every attempt of the Slot that did
+// not reach its completion: what it wrote before it failed counts as written,
+// the rest it admitted as slot_failed.
+func (coordinator *SlotExecutionCoordinator) settleSlotCensus(ctx context.Context, operation execution.Operation,
+	sink *slotCensusSink, census seriesCensus) {
+	for _, apply := range sink.applies {
+		if apply.censused {
+			continue
+		}
+		attempt := census
+		attempt.Written += apply.written
+		coordinator.observeFrozenStateRenewal(ctx, operation, apply.settledCensus(ctx, attempt, true))
+	}
+}
+
+// seriesClassLabel and seriesKindLabel are a series' class and kind as the
+// census counts them.
+func seriesClassLabel(class execution.SeriesClass) observability.StateSeriesClass {
+	return observability.StateSeriesClass(class.String())
+}
+
+func seriesKindLabel(noData bool) observability.StateSeriesKind {
+	if noData {
+		return observability.StateSeriesNoData
+	}
+	return observability.StateSeriesReal
 }
 
 // beginSlotApply reads the activation facts the Slot's writes are guarded by
@@ -113,13 +195,15 @@ func (coordinator *SlotExecutionCoordinator) readSlotActivations(
 		return nil, false
 	}
 	changedPlans, changedActivations := changedDuePlanActivations(header.DuePlans, guardActivations)
-	return &slotApply{
+	apply := &slotApply{
 		coordinator: coordinator, request: request, header: header, loadedGaps: loadedGaps,
 		activationRequest: activationRequest, guardActivations: guardActivations,
 		changedPlans: changedPlans, changedActivations: changedActivations,
 		forced:         unsatisfiedForcedWarmingActivations(guardActivations, loadedGaps, changedPlans),
 		withheldNoData: make(map[execution.PlanIdentity]struct{}),
-	}, true
+	}
+	registerSlotApply(ctx, apply)
+	return apply, true
 }
 
 // judgeForced splits the forced Plans into the first-seen ones and the ones
@@ -281,6 +365,7 @@ func (apply *slotApply) applyPlanState(
 	// only has meaning for mutations that are actually about to be written.
 	var writeReuse observability.StateWriteReuseFacts
 	var alreadyApplied observability.StateAlreadyAppliedFacts
+	var admittedClasses []observability.StateSeriesClassKey
 	for _, stateResult := range stateResults {
 		statePosition, found := stateIndex[stateResult.Mutation.Identity]
 		if !found {
@@ -292,9 +377,14 @@ func (apply *slotApply) applyPlanState(
 		switch classified.Disposition {
 		case execution.StateProceed:
 			writeReuse.Record(
-				observability.StateWriteReuseClass(execution.ClassifyStateWriteReuse(view, stateResult.Mutation)),
+				observability.StateWriteReuseClass(execution.ClassifyStateWriteReuse(view, stateResult.Mutation, stateResult.Class)),
 				storedStateLabel(view.Status),
 			)
+			// Counted where write_reuse counts it, once per admitted
+			// mutation, and added to the census where write_reuse is
+			// emitted: the census settles each against how it left.
+			admittedClasses = append(admittedClasses, observability.StateSeriesClassKey{
+				Class: seriesClassLabel(stateResult.Class), Series: seriesKindLabel(stateResult.NoData)})
 			coordinator.observe(ctx, observability.ComponentState, observability.StageMutationCompared, request.Operation, started, observability.ResultSuccess, observability.ReasonNone, nil)
 			mutations = append(mutations, stateResult.Mutation)
 			eventsByState[stateResult.Mutation.Identity] = append([]contract.TriggerEventV1(nil), stateResult.Events...)
@@ -337,6 +427,9 @@ func (apply *slotApply) applyPlanState(
 		}
 	}
 
+	for _, admittedClass := range admittedClasses {
+		apply.frozenRenewals.RecordSeriesClass(admittedClass.Class, admittedClass.Series)
+	}
 	if !writeReuse.Empty() {
 		facts := writeReuse
 		coordinator.emitObservation(ctx, observability.Observation{
@@ -408,6 +501,7 @@ func (apply *slotApply) applyPlanState(
 			}
 			// Its series' events are not sent either.
 			apply.withheldNoData[plan] = struct{}{}
+			apply.frozenRenewals.RecordNotWritten(observability.StateNotWrittenAdmissionRejected, 1)
 			continue
 		}
 		accepted = append(accepted, mutation)
@@ -439,6 +533,7 @@ func (apply *slotApply) applyPlanState(
 				apply.deterministicTerminalReason = reason
 			}
 			apply.withheldNoData[plan] = struct{}{}
+			apply.frozenRenewals.RecordNotWritten(observability.StateNotWrittenOutputPartial, len(accepted)-len(kept))
 			accepted, acceptedBytes = kept, keptBytes
 			held.settle(acceptedBytes)
 			output = planOutputPartial
@@ -451,6 +546,7 @@ func (apply *slotApply) applyPlanState(
 				apply.retryPendingReason = reason
 			}
 			apply.withheldNoData[plan] = struct{}{}
+			apply.frozenRenewals.RecordNotWritten(observability.StateNotWrittenOutputWithheld, len(accepted))
 			held.release()
 			return planOutputWithheld, nil
 		} else if reason, rejected := outputRejectionReason(err); rejected {
@@ -466,6 +562,7 @@ func (apply *slotApply) applyPlanState(
 				apply.deterministicTerminalReason = reason
 			}
 			apply.withheldNoData[plan] = struct{}{}
+			apply.frozenRenewals.RecordNotWritten(observability.StateNotWrittenOutputWithheld, len(accepted))
 			held.release()
 			return planOutputWithheld, nil
 		} else {
@@ -479,6 +576,7 @@ func (apply *slotApply) applyPlanState(
 			// continue healthy sibling Plans, but do not apply this Plan's State
 			// or advance Progress until the stable event identity is replayed.
 			apply.withheldNoData[plan] = struct{}{}
+			apply.frozenRenewals.RecordNotWritten(observability.StateNotWrittenOutputWithheld, len(accepted))
 			held.release()
 			return planOutputWithheld, nil
 		}
@@ -486,6 +584,7 @@ func (apply *slotApply) applyPlanState(
 	if len(accepted) > 0 {
 		rejectedApply, err := coordinator.applyState(ctx, request.Operation, request.Contract, request.OwnerFence, request.ContentScope, retention, horizon, accepted, acceptedBytes)
 		if err != nil {
+			apply.frozenRenewals.RecordNotWritten(observability.StateNotWrittenApplyFailed, len(accepted))
 			coordinator.observeOutputUnapplied(planCtx, request.Operation, accepted, eventsByState, withoutMessageByState, err)
 			return 0, err
 		}
@@ -494,6 +593,7 @@ func (apply *slotApply) applyPlanState(
 		// life refreshed, and it belongs on the other side of the
 		// census.
 		apply.written += len(accepted) - len(rejectedApply)
+		apply.frozenRenewals.RecordNotWritten(observability.StateNotWrittenApplyFailed, len(rejectedApply))
 		for _, mutation := range accepted {
 			reason, terminal := rejectedApply[mutation.Identity]
 			if !terminal {
@@ -534,9 +634,7 @@ func (apply *slotApply) complete(
 ) (execution.SlotExecutionResult, error) {
 	coordinator, request, header := apply.coordinator, apply.request, apply.header
 	loadedGaps := apply.loadedGaps
-	frozenRenewals := apply.frozenRenewals
-	frozenRenewals.RecordCensus(census.Due, census.Read, census.Written)
-	coordinator.observeFrozenStateRenewal(ctx, request.Operation, frozenRenewals)
+	coordinator.observeFrozenStateRenewal(ctx, request.Operation, apply.settledCensus(ctx, census, false))
 	// After every Plan's state and gap, inside the same sequenced scope, and
 	// only for the Plans whose output landed. The memory decides which groups
 	// the next round expects and what it says about them, so it follows the

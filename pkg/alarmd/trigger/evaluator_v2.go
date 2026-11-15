@@ -489,6 +489,7 @@ func evaluateLevelV2(
 			// threshold is the miss an observation rather than an absence.
 			anomalies := history.CountAnomalies(windowStart, windowEnd)
 			if anomalies >= triggerPlan.RequiredAnomalies {
+				outcome.RecoveryOpen = true
 				break
 			}
 			observed := history.CountObserved(windowStart, windowEnd)
@@ -538,6 +539,9 @@ func evaluateLevelV2(
 			}
 			skippedWindows++
 		}
+		// Whether the positions the walk read hold an anomaly: the decision
+		// does not ask, the series' class does (LevelOutcomeV2.SpanAnomalous).
+		outcome.SpanAnomalous = history.CountAnomalies(oldestWindowStart, request.Record.SourceTime) > 0
 	}
 	// Python gives up on a time series only when its whole range holds no
 	// check result at all (recover.py:429-431); that range reaches one step

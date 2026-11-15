@@ -96,11 +96,11 @@ func TestAWriteThatDiffersOnlyInOriginIsDecisionStable(t *testing.T) {
 			HistoryCompleteness: stored.HistoryCompleteness, GapReasonCode: stored.GapReasonCode,
 			WarmupRequirementRef: stored.WarmupRequirementRef, LastProcessedEventTime: stored.LastProcessedEventTime,
 			GapReasonOriginSlot: 1_787_999_880}}}
-	if got := execution.ClassifyStateWriteReuse(view, mutation); got != execution.StateWriteReuseDecisionStable {
+	if got := execution.ClassifyStateWriteReuse(view, mutation, execution.SeriesClassStableNormal); got != execution.StateWriteReuseDecisionStable {
 		t.Fatalf("reuse = %s, want %s for a write differing only in origin", got, execution.StateWriteReuseDecisionStable)
 	}
 	view.Levels[0].GapReasonCode = contract.ReasonGapSkipped
-	if got := execution.ClassifyStateWriteReuse(view, mutation); got != execution.StateWriteReuseChanged {
+	if got := execution.ClassifyStateWriteReuse(view, mutation, execution.SeriesClassStableNormal); got != execution.StateWriteReuseChanged {
 		t.Fatalf("reuse = %s, want %s when the reason itself differs", got, execution.StateWriteReuseChanged)
 	}
 }

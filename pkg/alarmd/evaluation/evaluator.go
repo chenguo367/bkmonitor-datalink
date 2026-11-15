@@ -658,7 +658,8 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 		if err != nil {
 			return recordResult{}, err
 		}
-		result.state = &execution.StateEvaluation{Mutation: mutation, Events: events, WithoutMessage: withoutMessage}
+		result.state = &execution.StateEvaluation{Mutation: mutation, Events: events, WithoutMessage: withoutMessage,
+			Class: seriesClassOf(tr.LevelOutcomes)}
 	}
 	captureSampleDecision(sample, tr)
 	return result, nil
@@ -678,6 +679,64 @@ func keptEvents(tr trigger.EvaluationResultV2, record execution.RecordAnchor) ([
 	default:
 		return []contract.TriggerEventV1{*tr.TriggerEvent}, nil
 	}
+}
+
+// seriesClassOf is what one record decided, as its Levels decided it: the
+// highest class among them (execution.HigherSeriesClass), so the record is
+// stable_normal only when every Level is. Read off this round's results and
+// windows, never off the Level metadata the stored record keeps.
+func seriesClassOf(outcomes []trigger.LevelOutcomeV2) execution.SeriesClass {
+	var class execution.SeriesClass
+	for _, outcome := range outcomes {
+		class = execution.HigherSeriesClass(class, levelClassOf(outcome))
+	}
+	return class
+}
+
+// levelClassOf is one Level's class (execution.SeriesClass), from the windows
+// it decided on. A RECOVERY is classed as a NORMAL is: the recovery walk finds
+// its misses on every quiet series, round after round, so the decision alone
+// does not tell a series that just recovered from one that never triggered,
+// and the round that ends an alert is not told apart from the rounds after it
+// - the window that met the trigger has its oldest position past the Level's
+// retention by then. What is told apart exactly is the line a steady series
+// is drawn by: stable_normal holds no anomaly in any position the trigger or
+// the recovery walk read; any anomaly there is counting_trigger, an alert
+// still open by its own windows counting_recovery. A NORMAL whose recovery the
+// walk found due but withheld (a zero that is no observation, a source not
+// known alive) with anomalies still in reach has its alert open.
+func levelClassOf(outcome trigger.LevelOutcomeV2) execution.SeriesClass {
+	window := outcome.DecisionWindow
+	switch outcome.Result {
+	case contract.LevelResultAbnormal:
+		return execution.SeriesClassTransition
+	case contract.LevelResultRecovery, contract.LevelResultNormal:
+		withheld := window != nil && window.Recovery.Withheld != ""
+		switch {
+		case outcome.RecoveryOpen || withheld && outcome.SpanAnomalous:
+			return execution.SeriesClassCountingRecovery
+		case window != nil && window.Trigger.ObservedAnomalies > 0 || outcome.SpanAnomalous:
+			return execution.SeriesClassCountingTrigger
+		}
+		// A RECOVERY is decided before the completeness gate (decision-022),
+		// on a gapped or warming history too: quiet in what it read, it is
+		// still a history with holes, not a steady series.
+		switch outcome.HistoryCompleteness {
+		case trigger.HistoryGapped:
+			return execution.SeriesClassGapped
+		case trigger.HistoryWarming:
+			return execution.SeriesClassWarming
+		}
+		return execution.SeriesClassStableNormal
+	case "":
+		switch outcome.HistoryCompleteness {
+		case trigger.HistoryGapped:
+			return execution.SeriesClassGapped
+		case trigger.HistoryWarming:
+			return execution.SeriesClassWarming
+		}
+	}
+	return execution.SeriesClassOther
 }
 
 // appendKept adds one record's kept outputs to the series': its events and
@@ -797,6 +856,7 @@ func (e *Evaluator) evaluateSeriesWith(
 	var events []contract.TriggerEventV1
 	var withoutMessage []execution.EventWithoutMessage
 	var affected []execution.RecordAnchor
+	var class execution.SeriesClass
 	// The history as the store holds it, kept apart from the provisional view
 	// the records build on each other. A Slot with several records advances the
 	// view record by record, but the mutation that leaves the Slot describes one
@@ -857,6 +917,10 @@ func (e *Evaluator) evaluateSeriesWith(
 					return execution.PlanEvaluationResult{}, err
 				}
 			}
+			// One write for every record of the series this Slot read: it
+			// takes the highest class any of them decided, so a record that
+			// changed state is not hidden behind a later one that did not.
+			class = execution.HigherSeriesClass(class, one.state.Class)
 			final = one.state
 			events, withoutMessage = appendKept(events, withoutMessage, one.state)
 			affected = append(affected, execution.RecordAnchor{RecordID: record.RecordID(), SourceTime: record.SourceTime()})
@@ -871,6 +935,7 @@ func (e *Evaluator) evaluateSeriesWith(
 			return execution.PlanEvaluationResult{}, err
 		}
 		final.Mutation, final.Events, final.WithoutMessage = mutation, events, withoutMessage
+		final.Class, final.NoData = class, first.Kind == execution.SeriesKindNoData
 		result.StateResults = []execution.StateEvaluation{*final}
 	}
 	if gapMutation, gapErr := planGapRecoveryMutation(legacy, due, len(result.StateResults) > 0); gapErr != nil {

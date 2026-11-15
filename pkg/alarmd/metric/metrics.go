@@ -59,6 +59,8 @@ type Recorder struct {
 	capacityLoadBound bool
 	retainedMu        sync.Mutex
 	retainedBound     bool
+	sliceMemoryMu     sync.Mutex
+	sliceMemoryBound  bool
 	resourceMu        sync.Mutex
 	resourceBound     bool
 	observations      observationMetrics

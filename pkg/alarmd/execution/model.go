@@ -1552,12 +1552,14 @@ const (
 	StateWriteReuseUnobserved StateWriteReuse = "unobserved"
 	// StateWriteReuseIdentical means the whole blob reproduces what is stored.
 	StateWriteReuseIdentical StateWriteReuse = "identical"
-	// StateWriteReuseDecisionStable means every Level state and the series
-	// guard are unchanged while the rest of the blob moved. Both steady states
-	// a deployment spends its rounds in land here -- a series that keeps
-	// recovering and one that never leaves history warming -- rather than in
-	// identical, because the history window carries a RecordID and SourceTime
-	// that advance every round.
+	// StateWriteReuseDecisionStable means the series decided stable_normal
+	// this round (SeriesClass) and its stored Level metadata and series guard
+	// are unchanged but for the processed event time, which advances every
+	// round. It is the upper bound of the writes a path that leaves steady
+	// series alone could skip, judged by the decision: always a subset of
+	// stable_normal. Until this read the decision it compared the processed
+	// event time too, and so never held - every reading of it before then is
+	// zero for that reason, not for want of steady series.
 	StateWriteReuseDecisionStable StateWriteReuse = "decision_stable"
 	// StateWriteReuseChanged means a Level state or the series guard moved.
 	StateWriteReuseChanged StateWriteReuse = "changed"
@@ -1567,23 +1569,31 @@ const (
 // witnessed for the same key. It reports only what the comparison supports and
 // never that a write may be skipped: the two are not the same claim while the
 // stored window is the only source of the retention history.
-func ClassifyStateWriteReuse(view RuntimeStateView, mutation StateMutation) StateWriteReuse {
+//
+// class is what the series decided this round (StateEvaluation.Class): the
+// Level metadata a view holds cannot tell a steady series from one counting
+// towards a trigger or with an alert open, so decision_stable asks the
+// decision and the metadata both.
+func ClassifyStateWriteReuse(view RuntimeStateView, mutation StateMutation, class SeriesClass) StateWriteReuse {
 	if view.PersistedMutationDigest == "" {
 		return StateWriteReuseUnobserved
 	}
 	if view.PersistedMutationDigest == mutation.MutationDigest {
 		return StateWriteReuseIdentical
 	}
-	if decisionStateChanged(view, mutation) {
+	if class != SeriesClassStableNormal || decisionStateChanged(view, mutation) {
 		return StateWriteReuseChanged
 	}
 	return StateWriteReuseDecisionStable
 }
 
 // decisionStateChanged is whether the persisted Level state and the series
-// guard differ from the ones about to be written. It compares fields rather
-// than a digest because there is no digest over this subset: adding one would
-// be a second construction of the same fact, and the two could disagree.
+// guard differ from the ones about to be written, the processed event time
+// aside: it advances every round a Level is processed, whatever it decided,
+// and compared it made every series that was written before read as changed.
+// It compares fields rather than a digest because there is no digest over
+// this subset: adding one would be a second construction of the same fact,
+// and the two could disagree.
 func decisionStateChanged(view RuntimeStateView, mutation StateMutation) bool {
 	if len(view.Levels) != len(mutation.Levels) {
 		return true
@@ -1592,8 +1602,7 @@ func decisionStateChanged(view RuntimeStateView, mutation StateMutation) bool {
 		stored, found := findPersistedLevel(view.Levels, level.LevelID)
 		if !found || stored.LevelStateCompatibility != level.LevelStateCompatibility ||
 			stored.HistoryCompleteness != level.HistoryCompleteness || stored.GapReasonCode != level.GapReasonCode ||
-			stored.WarmupRequirementRef != level.WarmupRequirementRef ||
-			stored.LastProcessedEventTime != level.LastProcessedEventTime {
+			stored.WarmupRequirementRef != level.WarmupRequirementRef {
 			// The guard's reason origin is not compared: it describes the
 			// guard and changes nothing a later round decides on, as the
 			// digest leaves it out (digestLevelState).
@@ -1842,6 +1851,13 @@ type StateEvaluation struct {
 	// the write adds these back as events the protocol had no message for,
 	// which is what they are.
 	WithoutMessage []EventWithoutMessage
+	// Class is what the series decided this Slot, the highest of its records
+	// (SeriesClass), and NoData whether it is a synthetic no-data series,
+	// judged by its no-data Level alone. Neither is stored or digested: they
+	// are the write's reading, counted where it is admitted. Two bytes in one
+	// word, as every series in flight carries them.
+	Class  SeriesClass
+	NoData bool
 }
 
 // EventWithoutMessage is one decided event kept as its identity only: the

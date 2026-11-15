@@ -1145,12 +1145,24 @@ func TestSlotExecutionCoordinatorRejectsMismatchedStoreReceipts(t *testing.T) {
 			if result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal)); err == nil || result.Completed {
 				t.Fatalf("Execute() result=%+v error=%v", result, err)
 			}
-			last := (*fixture.observations)[len(*fixture.observations)-1]
+			last := lastBesideTheCensus(*fixture.observations)
 			if last.Result != observability.ResultFailed {
 				t.Fatalf("last observation=%+v, want failed", last)
 			}
 		})
 	}
+}
+
+// lastBesideTheCensus is the last observation that is not the census: a
+// failed attempt reports its census at the Slot's end, after the stage that
+// failed has said so.
+func lastBesideTheCensus(observations []observability.Observation) observability.Observation {
+	for index := len(observations) - 1; index >= 0; index-- {
+		if observations[index].Stage != observability.StageFrozenStateRenewed {
+			return observations[index]
+		}
+	}
+	return observability.Observation{}
 }
 
 func TestSlotExecutionCoordinatorAcceptsUnorderedStoreReceipts(t *testing.T) {
@@ -1196,7 +1208,7 @@ func TestSlotExecutionCoordinatorFailsClosedBeforeLaterSideEffects(t *testing.T)
 			}
 			assertTrace(t, fixture.trace, test.want)
 			if test.stage != "sequence" {
-				last := (*fixture.observations)[len(*fixture.observations)-1]
+				last := lastBesideTheCensus(*fixture.observations)
 				if last.Result != observability.ResultFailed || last.Operation != observability.OperationNormal {
 					t.Fatalf("last observation=%+v", last)
 				}

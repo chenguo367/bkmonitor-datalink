@@ -546,6 +546,37 @@ func (trees *sliceTrees) start(group execution.QueryGroupIdentity, now time.Time
 	}
 }
 
+// SliceMemoryReading is the sliced-input memory a coordinator keeps, as the
+// worker_slice_memory gauges report it (metric.SliceMemoryReading).
+type SliceMemoryReading struct {
+	Remembered, Unswept          uint64
+	Leaves, LeafSeries, Deferred uint64
+}
+
+// SliceMemory reads the coordinator's sliced-input memory, at the scrape.
+func SliceMemory(coordinator *SlotExecutionCoordinator) SliceMemoryReading {
+	return coordinator.slicedInput.reading()
+}
+
+// reading is what the memory holds: every Query Group remembered, those of
+// them the idle sweep in start cannot drop - it walks started only, and
+// passes over a Query Group whose period is not known - and the entries the
+// memories keep, summed.
+func (trees *sliceTrees) reading() SliceMemoryReading {
+	trees.mu.Lock()
+	defer trees.mu.Unlock()
+	reading := SliceMemoryReading{Remembered: uint64(len(trees.input))}
+	for group, remembered := range trees.input {
+		if last, walked := trees.started[group]; !walked || last.period <= 0 {
+			reading.Unswept++
+		}
+		reading.Leaves += uint64(remembered.shape.Leaves())
+		reading.LeafSeries += uint64(len(remembered.leafSeries))
+		reading.Deferred += uint64(len(remembered.deferred))
+	}
+	return reading
+}
+
 // takeEvicted is the Query Groups dropped as idle not yet counted, now
 // counted: taken as a Slot's usage is made, at the exits that report it
 // (budgetUsage), so an exit that reports none leaves them for the next.

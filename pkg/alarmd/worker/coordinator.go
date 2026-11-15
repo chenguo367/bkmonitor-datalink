@@ -573,6 +573,12 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	// Before the release: no read ahead outlives the Slot, and what it holds
 	// goes back with the rest.
 	defer stream.letGoReadAhead()
+	// An attempt that fails returns before its completion reports the census:
+	// reported here instead, at the Slot's end, with what it wrote before it
+	// failed as written and the rest it admitted as slot_failed. Deferred last
+	// so it runs first, before the release clears the census it reads.
+	ctx, censusSink := withSlotCensusSink(ctx)
+	defer func() { coordinator.settleSlotCensus(ctx, request.Operation, censusSink, stream.seriesCensus) }()
 	ctx = withRetainedOwner(ctx, stream)
 	queryRequest := execution.QueryExecutionRequest{
 		Contract: request.Contract, Operation: request.Operation, AttemptNo: request.AttemptNo,

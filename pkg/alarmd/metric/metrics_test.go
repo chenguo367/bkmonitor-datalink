@@ -360,6 +360,9 @@ func bindBudgetSources(t *testing.T, recorder *Recorder) {
 	if err := recorder.BindRetainedReservation(func() uint64 { return 1 }); err != nil {
 		t.Fatalf("BindRetainedReservation() error = %v", err)
 	}
+	if err := recorder.BindSliceMemory(func() SliceMemoryReading { return SliceMemoryReading{} }); err != nil {
+		t.Fatalf("BindSliceMemory() error = %v", err)
+	}
 	if err := recorder.BindQueryPermits(func() QueryPermitOccupancy {
 		return QueryPermitOccupancy{
 			Inflight: map[string]int{"normal": 1}, Waiting: map[string]int{"normal": 1},
@@ -565,6 +568,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("worker_no_data_groups_staged_ahead_total"):     1,
 		fqName("worker_no_data_stage_ahead_differs_total"):     len(nodata.StagedDiffersReasons),
 		fqName("state_write_reuse_total"):                      len(observability.AllStateWriteReuseClasses()) * len(observability.AllStateWriteReuseStored()),
+		fqName("state_series_class_total"):                     len(observability.AllStateSeriesClasses()) * len(observability.AllStateSeriesKinds()),
+		fqName("state_series_not_written_total"):               len(observability.AllStateNotWrittenReasons()),
 		fqName("state_already_applied_total"):                  len(observability.AllStateAlreadyAppliedSites()) * len(observability.AllStateAlreadyAppliedKinds()),
 		fqName("state_version_conflict_total"):                 len(observability.AllStateAlreadyAppliedSites()) * len(observability.AllStateVersionConflictKinds()),
 		fqName("source_observation_total"):                     len(observability.AllSourceKinds()) * len(phaseTwoSourceResults) * len(observability.AllReasons(observability.ComponentControlPlane)),
@@ -580,6 +585,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("ownership_refusals_total"):                     len(ownershipRefusalSites) * len(ownership.RefusalReasons),
 		fqName("capacity_budget"):                              len(phaseTwoBudgets) - 1,
 		fqName("capacity_reserved"):                            1,
+		fqName("worker_slice_memory_groups"):                   2,
+		fqName("worker_slice_memory_entries"):                  3,
 		fqName("container_memory_limit_bytes"):                 len(capacitySources) + 1,
 		fqName("container_cpu_cores"):                          len(capacitySources) + 1,
 		fqName("container_memory_used_bytes"):                  1,

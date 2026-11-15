@@ -296,6 +296,17 @@ type LevelOutcomeV2 struct {
 	// observation (EvaluationRequestV2.ZeroCountIsNoObservation). The
 	// series' last real point (LevelHistory.LastRealPoint) advances on it.
 	RealPoint bool
+	// RecoveryOpen says the recovery walk stopped on a window that still
+	// meets the trigger: by the Level's own windows its alert is open, and a
+	// NORMAL decided beside it is counting towards a recovery. Internal, and
+	// not on the decision window the wire carries.
+	RecoveryOpen bool
+	// SpanAnomalous says the positions the recovery walk read - every
+	// window it judged, back to the oldest - hold an anomaly. A RECOVERY is
+	// decided on every quiet series, round after round, so the decision does
+	// not say whether the series' retained history still holds anomalies;
+	// this does. Internal, as RecoveryOpen.
+	SpanAnomalous bool
 }
 
 type EvaluationCountsV2 struct {

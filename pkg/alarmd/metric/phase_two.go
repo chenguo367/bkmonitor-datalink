@@ -46,6 +46,8 @@ type phaseTwoMetrics struct {
 	lastProgress                   *prometheus.GaugeVec
 	capacity                       *prometheus.CounterVec
 	stateWriteReuse                *prometheus.CounterVec
+	stateSeriesClass               *prometheus.CounterVec
+	stateSeriesNotWritten          *prometheus.CounterVec
 	stateAlreadyApplied            *prometheus.CounterVec
 	stateVersionConflict           *prometheus.CounterVec
 	stateSuperseded                *prometheus.CounterVec
@@ -402,14 +404,55 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"refused at that budget. What the pool holds now is capacity_reserved; which Slot held what is " +
 				"the slot_budget_usage of its slot_completed line.",
 		}, []string{"budget", "result"}),
+		stateSeriesClass: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Subsystem: metricSubsystem, Name: "state_series_class_total",
+			Help: "Runtime State mutations admitted for writing, by what their series decided this round, " +
+				"one per mutation per attempt, counted where state_write_reuse_total counts them, so the two " +
+				"families sum alike. Each Level is classed from its own result and windows, never from the " +
+				"Level metadata the stored record keeps: transition decided ABNORMAL; a RECOVERY is classed as a " +
+				"NORMAL is, since the recovery walk decides one on every quiet series and the round that ends an " +
+				"alert is not told apart from the rounds after it. counting_recovery decided NORMAL while its " +
+				"recovery walk stopped on a window that still meets the trigger, or withheld a due recovery with " +
+				"anomalies still read, so its alert is open by its own windows; counting_trigger holds an anomaly " +
+				"in a position its trigger window or recovery walk read and no window meeting the trigger; " +
+				"gapped and warming decided nothing on an incomplete history; other decided nothing for any other " +
+				"reason, outside its effective time or on an unavailable fact; stable_normal holds no anomaly in " +
+				"any position it read, the line a series whose window need not be written is drawn by. A series " +
+				"takes the highest of its Levels, in the order transition, counting_recovery, " +
+				"counting_trigger, gapped, warming, other, stable_normal, and of its records when one Slot " +
+				"read several, so it is stable_normal only when every Level of every record is. series=no_data " +
+				"is a synthetic no-data series, classed by its no-data Level alone. Per attempt the family sums " +
+				"to worker_frozen_state_census_total{stage=written} plus state_series_not_written_total, all " +
+				"three reported in one observation, an attempt that failed included: a minute's three " +
+				"increments reconcile exactly.",
+		}, []string{"class", "series"}),
+		stateSeriesNotWritten: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Subsystem: metricSubsystem, Name: "state_series_not_written_total",
+			Help: "Runtime State mutations admitted for writing (state_series_class_total) that their attempt " +
+				"did not write, by the exit they left at. output_withheld is a Plan whose output did not start " +
+				"or did not land - a lease too short for a batch, a refusal decided in this process, an " +
+				"acknowledgement unknown - so none of its State was written; output_partial is a series whose " +
+				"events the sink would not represent; state_admission_rejected is a mutation the State " +
+				"admission refused by name; state_apply_failed is a write the store failed or refused; " +
+				"slot_failed is the rest the attempt admitted when it ended with an error by any other exit, " +
+				"its own Plan's or a later one's; unaccounted stays zero, each non-zero attempt saying so on a " +
+				"line with reason internal_unknown: admitted mutations no named exit counted on an attempt that " +
+				"completed, after which the classes sum to written plus this family again, or more counted than " +
+				"admitted, by the difference, when they cannot - the census itself counted wrong. Otherwise the " +
+				"classes sum to written plus this family, per attempt.",
+		}, []string{"reason"}),
 		stateWriteReuse: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: metricSubsystem, Name: "state_write_reuse_total",
 			Help: "Runtime State mutations admitted for writing, by how much of what the write carries was " +
 				"already stored. Nothing is skipped: this measures what a skip could save before the write " +
-				"path changes. identical is the whole blob reproduced; decision_stable is the Level state " +
-				"and series guard unchanged while the history window moved, which is where a steady series " +
-				"is expected because that window carries a record id and source time that advance every " +
-				"round; changed is a moved Level state; unobserved is a key with nothing stored yet, kept " +
+				"path changes. identical is the whole blob reproduced; decision_stable is a series that " +
+				"decided stable_normal this round (state_series_class_total) with its Level state and series " +
+				"guard unchanged but for the processed event time, which advances every round: the upper " +
+				"bound of what a path leaving steady series unwritten could skip, judged by the decision, and " +
+				"always a subset of stable_normal - what such a path does about the processed event time it " +
+				"no longer writes is that path's to settle. Before this read the decision it compared the " +
+				"processed event time too and never held, so every earlier reading of it is zero for that " +
+				"reason. changed is everything else that was compared; unobserved is a key with nothing stored yet, kept " +
 				"apart so a starting worker's warm-up does not depress the others. Read the classes " +
 				"separately: identical and decision_stable are what two different changes could save and do " +
 				"not add up. Their sum is the admitted population, so every class zero with a zero sum " +
@@ -825,7 +868,10 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		Help: "Where a Slot's series went, counted at the three places the decisions are made, over one " +
 			"population: the series the Slot prepared for evaluation, real and synthetic no-data alike. due " +
 			"is what it meant to evaluate, read is what it issued a Runtime State preflight for, written is " +
-			"what it actually wrote. due-read is the series skipped before the State read -- a PRIMARY " +
+			"what it actually wrote. An attempt that fails reports its census too, at the Slot's end, with " +
+			"written what it wrote before it failed, so a Slot retried is counted once per attempt; read " +
+			"written against state_series_class_total and state_series_not_written_total, reported in the " +
+			"same observation. due-read is the series skipped before the State read -- a PRIMARY " +
 			"input that was incomplete never reaches the preflight, so those keys age with nothing " +
 			"touching them and a renewal that hangs on the read cannot reach them. read-written is the " +
 			"population worker_frozen_state_renewals_total covers. What none of the three can count: a " +
@@ -2073,6 +2119,14 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			metrics.stateWriteReuse.WithLabelValues(string(class), string(stored))
 		}
 	}
+	for _, class := range observability.AllStateSeriesClasses() {
+		for _, series := range observability.AllStateSeriesKinds() {
+			metrics.stateSeriesClass.WithLabelValues(string(class), string(series))
+		}
+	}
+	for _, reason := range observability.AllStateNotWrittenReasons() {
+		metrics.stateSeriesNotWritten.WithLabelValues(string(reason))
+	}
 	for _, site := range observability.AllStateAlreadyAppliedSites() {
 		for _, kind := range observability.AllStateAlreadyAppliedKinds() {
 			metrics.stateAlreadyApplied.WithLabelValues(string(site), string(kind))
@@ -2237,7 +2291,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.queryCooldown,
 		m.slotReadiness.slack, m.slotReadiness.boundary,
 		m.slotTiming, m.slotWait,
-		m.work, m.busy, m.lastProgress, m.capacity, m.stateWriteReuse, m.stateAlreadyApplied, m.stateVersionConflict, m.stateSuperseded, m.sourceObservations, m.sourceRefreshes, m.sourceCompiles,
+		m.work, m.busy, m.lastProgress, m.capacity, m.stateWriteReuse, m.stateSeriesClass, m.stateSeriesNotWritten, m.stateAlreadyApplied, m.stateVersionConflict, m.stateSuperseded, m.sourceObservations, m.sourceRefreshes, m.sourceCompiles,
 		m.sourceReads, m.sourceRefreshBuilds, m.sourceStrategiesRead, m.sourceChangeSignalAge,
 		m.activationFailures, m.unmappedSeverity,
 		m.ownedQueryGroups, m.ownershipTransitions, m.leaseRenewals, m.ownershipRefusals,
@@ -2639,6 +2693,14 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		m.frozenStateCensus.WithLabelValues(frozenCensusDue).Add(float64(facts.Due))
 		m.frozenStateCensus.WithLabelValues(frozenCensusRead).Add(float64(facts.Read))
 		m.frozenStateCensus.WithLabelValues(frozenCensusWritten).Add(float64(facts.Written))
+		for series, counts := range facts.SeriesClasses {
+			for class, count := range counts {
+				m.stateSeriesClass.WithLabelValues(string(observability.NormalizeStateSeriesClass(class)), string(series)).Add(float64(count))
+			}
+		}
+		for reason, count := range facts.NotWritten {
+			m.stateSeriesNotWritten.WithLabelValues(string(observability.NormalizeStateNotWrittenReason(reason))).Add(float64(count))
+		}
 		// Added rather than incremented once: one observation carries a whole
 		// Slot's outcomes, and a Slot that renewed two hundred keys is not the
 		// same event as one that renewed one.

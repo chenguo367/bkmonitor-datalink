@@ -11,6 +11,7 @@ package observability
 
 import (
 	"context"
+	"maps"
 	"math"
 	"slices"
 	"sort"
@@ -746,6 +747,70 @@ type FrozenStateRenewalFacts struct {
 	Fresh   int `json:"fresh"`
 	Missing int `json:"missing"`
 	Failed  int `json:"failed"`
+	// SeriesClasses is the mutations this attempt admitted for writing, by
+	// what their series decided (StateSeriesClass), counted at the admission
+	// where state_write_reuse counts them; NotWritten is those of them the
+	// attempt did not write, by the exit it left at. They are here, beside
+	// Written, so that one observation carries all three and the Slot's
+	// reading holds by construction: the classes sum to Written plus every
+	// NotWritten, on an attempt that completed and on one that failed.
+	SeriesClasses map[StateSeriesKind]map[StateSeriesClass]int64 `json:"series_classes,omitempty"`
+	NotWritten    map[StateNotWrittenReason]int64                `json:"not_written,omitempty"`
+}
+
+// RecordSeriesClass counts one admitted mutation under its series' class.
+func (facts *FrozenStateRenewalFacts) RecordSeriesClass(class StateSeriesClass, series StateSeriesKind) {
+	if facts.SeriesClasses == nil {
+		facts.SeriesClasses = map[StateSeriesKind]map[StateSeriesClass]int64{}
+	}
+	if facts.SeriesClasses[series] == nil {
+		facts.SeriesClasses[series] = map[StateSeriesClass]int64{}
+	}
+	facts.SeriesClasses[series][NormalizeStateSeriesClass(class)]++
+}
+
+// CloneSeriesWrites gives the facts maps of their own, for a report that
+// must not move with the facts it was taken from.
+func (facts *FrozenStateRenewalFacts) CloneSeriesWrites() {
+	classes := make(map[StateSeriesKind]map[StateSeriesClass]int64, len(facts.SeriesClasses))
+	for series, counts := range facts.SeriesClasses {
+		classes[series] = maps.Clone(counts)
+	}
+	if facts.SeriesClasses == nil {
+		classes = nil
+	}
+	facts.SeriesClasses, facts.NotWritten = classes, maps.Clone(facts.NotWritten)
+}
+
+// RecordNotWritten counts admitted mutations the attempt did not write.
+func (facts *FrozenStateRenewalFacts) RecordNotWritten(reason StateNotWrittenReason, mutations int) {
+	if mutations <= 0 {
+		return
+	}
+	if facts.NotWritten == nil {
+		facts.NotWritten = map[StateNotWrittenReason]int64{}
+	}
+	facts.NotWritten[NormalizeStateNotWrittenReason(reason)] += int64(mutations)
+}
+
+// Admitted is every mutation counted under a class; NotWrittenTotal every one
+// counted as not written.
+func (facts FrozenStateRenewalFacts) Admitted() int64 {
+	total := int64(0)
+	for _, counts := range facts.SeriesClasses {
+		for _, count := range counts {
+			total += count
+		}
+	}
+	return total
+}
+
+func (facts FrozenStateRenewalFacts) NotWrittenTotal() int64 {
+	total := int64(0)
+	for _, count := range facts.NotWritten {
+		total += count
+	}
+	return total
 }
 
 // Record adds one Plan's renewal outcomes to the Slot's.
