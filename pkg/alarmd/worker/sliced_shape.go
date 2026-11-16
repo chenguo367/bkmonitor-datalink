@@ -104,8 +104,22 @@ func (coordinator *SlotExecutionCoordinator) shapeAfter(reading *sliceReading, b
 		reading.shape.kept = true
 		return shape, 0
 	}
+	// A leaf this round kept split for its size (keepSizedSplit) may be a
+	// leaf of the last split kept for time, read quick but large: taking
+	// that split back would leave the later one a split of no leaf. Nothing
+	// is taken back by time the round a split is kept, and the count starts
+	// again.
+	if reading.sizedKept {
+		return shape, 0
+	}
+	// A shape whose kept splits are all for a slice's size has nothing to
+	// take back by time: sizedDecay takes those back by their series.
+	lastKept := reading.tree.LastKept()
+	if len(lastKept) == 0 {
+		return shape, 0
+	}
 	quick := true
-	for _, leaf := range reading.tree.LastKept() {
+	for _, leaf := range lastKept {
 		took, read := reading.leafMillis[leaf]
 		quick = quick && read && took < sliceQueryTargetMillis/2
 	}
@@ -115,8 +129,59 @@ func (coordinator *SlotExecutionCoordinator) shapeAfter(reading *sliceReading, b
 	if rounds := before.shapeQuickRounds + 1; rounds < sliceDecayRounds {
 		return shape, rounds
 	}
+	return reading.merged(shape.Merged())
+}
+
+// merged is the shape a split taken back leaves, counted merged; or, when
+// the shape would not rebuild without it, the shape as it was, kept and
+// counted merge_refused, rather than every split in it lost.
+func (reading *sliceReading) merged(shape inputslice.Shape, rebuilt bool) (inputslice.Shape, int) {
+	if !rebuilt {
+		reading.shape.mergeRefused = true
+		return shape, 0
+	}
 	reading.shape.merged = true
-	return shape.Merged(), 0
+	return shape, 0
+}
+
+// sizedDecay is the shape a completed Slot leaves after its last split kept
+// for a slice's size (inputslice.Tree.SplitSized, KeepSizedSplit), and the
+// rounds it has counted towards taking it back. The split is taken back once
+// sliceDecayRounds reads in a row read every leaf it made, together at most
+// half a slice's series and at most half the input a slice may retain
+// (limit, wholeSliceLimit): merged, the slice is well under a slice's size
+// either way, and a split taken back sooner, or for less, would be made again
+// the round after - a split for the bytes of a few large series, its series
+// well under a slice's, would be taken back to be let go for its bytes again
+// every few rounds. A part that rose back over half either starts the count
+// again. A
+// round that has not read every leaf of it counts nothing yet, and one that
+// kept a split this round starts the count again: its leaves are the next
+// round's.
+func (reading *sliceReading) sizedDecay(shape inputslice.Shape, before slicedReading, limit uint64) (inputslice.Shape, int) {
+	if shape.IsZero() || reading.tree == nil || reading.sizedKept || reading.sizedSplit {
+		return shape, 0
+	}
+	leaves := reading.tree.LastSized()
+	if len(leaves) == 0 {
+		return shape, 0
+	}
+	together, retained := uint64(0), uint64(0)
+	for _, leaf := range leaves {
+		series, read := reading.leafSeriesByID[leaf]
+		if !read {
+			return shape, 0
+		}
+		together += series
+		retained += reading.leafBytesByID[leaf]
+	}
+	if together > sizedSplitSeries()/2 || retained > limit/2 {
+		return shape, 0
+	}
+	if rounds := before.shapeSizedRounds + 1; rounds < sliceDecayRounds {
+		return shape, rounds
+	}
+	return reading.merged(shape.MergedSized())
 }
 
 // keepTimedOutSplit splits the slice whose read ran out of time and failed
@@ -196,6 +261,7 @@ func (stream *streamedExecution) sliceShapeOutcomes() [len(observability.InputSl
 		case outcome == observability.InputSliceShapeStarted && usage.started,
 			outcome == observability.InputSliceShapeKept && usage.kept,
 			outcome == observability.InputSliceShapeMerged && usage.merged,
+			outcome == observability.InputSliceShapeMergeRefused && usage.mergeRefused,
 			outcome == usage.dropped:
 			counts[index] = 1
 		}

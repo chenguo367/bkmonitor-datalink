@@ -122,6 +122,23 @@ type SlotBudgetUsageFacts struct {
 	// algorithm family (AlgorithmFamily, or none): absent is none lost.
 	// In the order of SeriesNotEvaluatedFamilies.
 	SeriesNotEvaluated [SeriesNotEvaluatedFamilyCount]uint64 `json:"series_not_evaluated"`
+	// ReadAheadYields<Phase> is the reads ahead yielded by the phase of the
+	// reservation they yielded to (SliceReadAheadYieldPhases, in this order),
+	// together InputSlicesReadAheadYielded; ReadAheadYieldedBytes what they
+	// held, ReadAheadYieldDistanceMax the farthest of them from the slice
+	// read, in slices, ReadAheadWaitMillisMax the longest wait for room.
+	ReadAheadYieldsNormalInput  uint64 `json:"read_ahead_yields_normal_input,omitempty"`
+	ReadAheadYieldsNormalOutput uint64 `json:"read_ahead_yields_normal_output,omitempty"`
+	ReadAheadYieldsNormalGap    uint64 `json:"read_ahead_yields_normal_gap,omitempty"`
+	ReadAheadYieldsNormalNoData uint64 `json:"read_ahead_yields_normal_no_data,omitempty"`
+	ReadAheadYieldsSlotOutput   uint64 `json:"read_ahead_yields_slot_output,omitempty"`
+	ReadAheadYieldsFrames       uint64 `json:"read_ahead_yields_frames,omitempty"`
+	ReadAheadYieldsWindowBound  uint64 `json:"read_ahead_yields_window_bound,omitempty"`
+	ReadAheadYieldsQueryFree    uint64 `json:"read_ahead_yields_query_free,omitempty"`
+	ReadAheadYieldsOther        uint64 `json:"read_ahead_yields_other,omitempty"`
+	ReadAheadYieldedBytes       uint64 `json:"read_ahead_yielded_bytes,omitempty"`
+	ReadAheadYieldDistanceMax   uint64 `json:"read_ahead_yield_distance_max,omitempty"`
+	ReadAheadWaitMillisMax      uint64 `json:"read_ahead_wait_millis_max,omitempty"`
 	// InputSliceTimeouts is the slices that ran out of time and were split
 	// and read again, the Slot completing: at most one a Slot.
 	InputSliceTimeouts uint64 `json:"input_slice_timeouts,omitempty"`
@@ -137,6 +154,10 @@ type SlotBudgetUsageFacts struct {
 	InputSliceShapeRefusedNotAPartition uint64 `json:"input_slice_shape_refused_not_a_partition,omitempty"`
 	InputSliceShapeRefusedMaxLeaves     uint64 `json:"input_slice_shape_refused_max_leaves,omitempty"`
 	InputSliceShapeEvictedIdle          uint64 `json:"input_slice_shape_evicted_idle,omitempty"`
+	InputSliceShapeRefusedCondition     uint64 `json:"input_slice_shape_refused_condition_budget,omitempty"`
+	InputSliceShapeRefusedSingleValue   uint64 `json:"input_slice_shape_refused_single_value,omitempty"`
+	InputSliceShapeRefusedSplitError    uint64 `json:"input_slice_shape_refused_split_error,omitempty"`
+	InputSliceShapeMergeRefused         uint64 `json:"input_slice_shape_merge_refused,omitempty"`
 	// InputSliceCutOn is where the dimension the Slot's starting slices
 	// were cut on came from (InputSliceCutOnSources), empty for a Slot not
 	// started in slices counted: read whole, or in its Query Group's shape.
@@ -267,6 +288,14 @@ var SeriesNotEvaluatedFamilies = [SeriesNotEvaluatedFamilyCount]string{string(Al
 	string(AlgorithmFamilyRingRatioAmplitude), string(AlgorithmFamilyYearRoundAmplitude), string(AlgorithmFamilyYearRoundRange),
 	SeriesNotEvaluatedNoFamily}
 
+// SliceReadAheadYieldPhases are the phases of the Slot's reservations a read
+// ahead yields to, in the order of the SlotBudgetUsageFacts fields that count
+// them (ReadAheadYields<Phase>): the phases the share judges a reservation
+// in, window_bound a window cut to fit beside the reads ahead, and other one
+// named nowhere here.
+var SliceReadAheadYieldPhases = [9]string{"normal_input", "normal_output", "normal_gap", "normal_no_data",
+	"slot_output", "frames", "window_bound", "query_free", "other"}
+
 // How a slice's read that ran out of time ended, closed: split and read
 // again, the Slot's query completing; split and read again, the Slot's query
 // failing after; not split - the cooldown held, its time could not be put on
@@ -294,7 +323,13 @@ var NoDataStageAheadOutcomes = [4]string{"carried", "differs", "discarded", "sto
 // value (inputslice.FromShape: a split of no leaf, children that are no
 // partition, more leaves than a tree may have); evicted_idle, the memories
 // of other Query Groups not started for ten of their periods and ten
-// minutes at least, shape or none, that a Slot's start dropped.
+// minutes at least, shape or none, that a Slot's start dropped. Three more,
+// of the splits kept for a slice's size (inputslice.Tree.KeepSizedSplit):
+// refused_condition_budget, a split whose children's conditions would pass
+// the budget, kept nothing; refused_single_value, one whose sample told none
+// of its series apart, kept nothing; refused_split_error, a split that failed
+// otherwise, kept nothing; merge_refused, a split taken back whose shape
+// would not rebuild without it - the shape is kept as it was, not dropped.
 const (
 	InputSliceShapeStarted              = "started"
 	InputSliceShapeKept                 = "kept"
@@ -306,14 +341,19 @@ const (
 	InputSliceShapeRefusedNotAPartition = "refused_not_a_partition"
 	InputSliceShapeRefusedMaxLeaves     = "refused_max_leaves"
 	InputSliceShapeEvictedIdle          = "evicted_idle"
+	InputSliceShapeRefusedCondition     = "refused_condition_budget"
+	InputSliceShapeRefusedSingleValue   = "refused_single_value"
+	InputSliceShapeRefusedSplitError    = "refused_split_error"
+	InputSliceShapeMergeRefused         = "merge_refused"
 )
 
 // InputSliceShapeOutcomes is every outcome, in the order of the
 // SlotBudgetUsageFacts fields that count them.
-var InputSliceShapeOutcomes = [10]string{InputSliceShapeStarted, InputSliceShapeKept, InputSliceShapeMerged,
+var InputSliceShapeOutcomes = [14]string{InputSliceShapeStarted, InputSliceShapeKept, InputSliceShapeMerged,
 	InputSliceShapeVoidedRevision, InputSliceShapeVoidedDimensions, InputSliceShapeVoidedMaxLeaves,
 	InputSliceShapeRefusedNotALeaf, InputSliceShapeRefusedNotAPartition, InputSliceShapeRefusedMaxLeaves,
-	InputSliceShapeEvictedIdle}
+	InputSliceShapeEvictedIdle, InputSliceShapeRefusedCondition, InputSliceShapeRefusedSingleValue,
+	InputSliceShapeRefusedSplitError, InputSliceShapeMergeRefused}
 
 // Where the dimension a Slot's starting slices were cut on came from,
 // closed: root_split, the one its Query Group's last read had its root split

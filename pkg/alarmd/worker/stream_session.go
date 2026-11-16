@@ -166,6 +166,16 @@ type streamedExecution struct {
 	aheadAtRefusal atomic.Uint64
 	// readAheadEnds counts how the Slot's reads ahead ended (readAheadEnd).
 	readAheadEnds [readAheadEnds]uint64
+	// readAheadYields is the reads ahead yielded by the phase of the
+	// reservation they yielded to (observability.SliceReadAheadYieldPhases);
+	// readAheadYieldedBytes what they held, readAheadYieldDistanceMax the
+	// farthest of them from the slice being read, in slices; readAheadWaitMax
+	// the longest a read ahead waited for room, in milliseconds, written from
+	// the reads' goroutines.
+	readAheadYields           [len(observability.SliceReadAheadYieldPhases)]uint64
+	readAheadYieldedBytes     uint64
+	readAheadYieldDistanceMax uint64
+	readAheadWaitMax          atomic.Int64
 	// stageAheadEnds counts how the Slot's no-data first writes staged
 	// ahead ended (observability.NoDataStageAheadOutcomes), and
 	// groupsStagedAhead the groups they staged.
@@ -502,7 +512,7 @@ func (coordinator *SlotExecutionCoordinator) holdRetained(owner *streamedExecuti
 			coordinator.reservations.retainedBytes += bytes
 		}
 		coordinator.reservations.mu.Unlock()
-		if err == nil || !owner.yieldReadAhead() {
+		if err == nil || !owner.yieldReadAhead(phase) {
 			if err == nil && owner != nil {
 				owner.retainBytes(retainPhaseState, bytes)
 			}

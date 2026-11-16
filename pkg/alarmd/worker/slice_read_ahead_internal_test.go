@@ -12,6 +12,7 @@ package worker
 import (
 	"context"
 	"reflect"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/inputslice"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // heldReadAhead is a read ahead of the stream that has ended and keeps
@@ -284,12 +286,50 @@ func TestAReadAheadThatGaveBackSinceTheRefusalHasItJudgedAgain(t *testing.T) {
 			waiting.changed = sync.NewCond(&waiting.mu)
 			stream.aheads = []*sliceReadAhead{waiting}
 			stream.aheadAtRefusal.Store(test.refused)
-			if got := stream.yieldReadAhead(); got != test.again {
+			if got := stream.yieldReadAhead("normal_input"); got != test.again {
 				t.Fatalf("judge again = %t, want %t", got, test.again)
 			}
 			if len(stream.aheads) != 1 || stream.aheads[0] != waiting || stream.readAheadEnds[readAheadYielded] != 0 {
 				t.Fatalf("reads ahead %d, yielded %d: want the one keeping nothing kept", len(stream.aheads), stream.readAheadEnds[readAheadYielded])
 			}
 		})
+	}
+}
+
+// Each read ahead let go is counted under the phase of the reservation it
+// yielded to, with what it held and how far from the slice being read it
+// was; the counts by phase are the yielded count. The second and third reads
+// ahead - two and three slices on - hold 1,000 and 3,000 bytes and yield to a
+// gap reservation; the first keeps nothing and stays. A phase named nowhere
+// is counted as other.
+func TestAYieldIsCountedByThePhaseItYieldedTo(t *testing.T) {
+	stream := newWindowedFixture(t).stream
+	ahead := func(id int, held uint64) *sliceReadAhead {
+		done := make(chan struct{})
+		close(done)
+		read := &sliceReadAhead{coordinator: stream.coordinator, stream: stream, counter: &stream.aheadBytes,
+			leaf: inputslice.Leaf{ID: id}, limit: 1 << 20, cancel: func() {}, done: done, held: held}
+		read.changed = sync.NewCond(&read.mu)
+		return read
+	}
+	stream.aheadBytes.Store(4000)
+	stream.coordinator.reservations.retainedBytes = 4000
+	stream.aheads = []*sliceReadAhead{ahead(2, 0), ahead(3, 1000), ahead(4, 3000)}
+	if !stream.yieldReadAhead("normal_gap") {
+		t.Fatal("two reads ahead let go, and the reservation is not judged again")
+	}
+	gap := slices.Index(observability.SliceReadAheadYieldPhases[:], "normal_gap")
+	if stream.readAheadYields[gap] != 2 || stream.readAheadEnds[readAheadYielded] != 2 {
+		t.Fatalf("yields under normal_gap %d, yielded %d; want both 2", stream.readAheadYields[gap], stream.readAheadEnds[readAheadYielded])
+	}
+	if stream.readAheadYieldedBytes != 4000 || stream.readAheadYieldDistanceMax != 3 {
+		t.Fatalf("yielded %d bytes, farthest %d slices on; want 4000 and 3", stream.readAheadYieldedBytes, stream.readAheadYieldDistanceMax)
+	}
+	stream.aheadBytes.Store(500)
+	stream.coordinator.reservations.retainedBytes = 500
+	stream.aheads = []*sliceReadAhead{ahead(5, 500)}
+	stream.yieldReadAhead("a phase named nowhere")
+	if other := len(observability.SliceReadAheadYieldPhases) - 1; stream.readAheadYields[other] != 1 {
+		t.Fatalf("an unnamed phase counted %v, want it under other", stream.readAheadYields)
 	}
 }

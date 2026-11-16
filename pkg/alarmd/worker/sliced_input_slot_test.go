@@ -1963,12 +1963,14 @@ func TestASmallQueryGroupThatRanOutOfTimeIsReadWholeAgain(t *testing.T) {
 // started in, not what its tree landed. 24 numbered hosts of 45 KiB: the
 // first Slot, read whole, lets it go at the ninth over the slice limit (384
 // KiB, half the share) and cuts its root by that sample, last digits 0 to 8
-// - [012], [34], [56] and the rest, 9, 5, 4 and 6 hosts. Every round after
+// - [012], [34], [56] and the rest, 9, 5, 4 and 6 hosts. The round after
 // starts on that cut (three slices asked, 1,080 KiB over half the share),
-// and [012], 405 KiB, is past the limit and split as it streams: every round
-// lands more slices than it was started in, the tree asking the landed count
-// would hold more again. Five rounds in a row, reads answered without being
-// quick (no decay), land the same slices.
+// and [012], 405 KiB, is past the limit and split as it streams, the split
+// kept for its size (SplitSized): the rounds after start in its parts and
+// let nothing go, and are not taken back for their few series - their bytes
+// are over half the limit together (sizedDecay) - to be let go again. Four
+// rounds after it, reads answered without being quick (no decay), land the
+// same slices.
 func TestTheSlicesAQueryGroupIsReadInDoNotGrowRoundByRound(t *testing.T) {
 	fixture := newSlicedFixture(t, slicedHosts(24, 45<<10), sliceableFacts(), 200)
 	fixture.source.queryMillis = 10_000
@@ -1984,8 +1986,11 @@ func TestTheSlicesAQueryGroupIsReadInDoNotGrowRoundByRound(t *testing.T) {
 		if err != nil || !result.Completed {
 			t.Fatalf("round %d: result=%+v err=%v, want it completed", round, result, err)
 		}
-		if result.Usage.InputSlicesDiscarded == 0 {
-			t.Fatalf("round %d split no slice as it streamed, want the digits' slice past the limit: more landed than started", round)
+		if discarded := result.Usage.InputSlicesDiscarded; (round == 2) != (discarded > 0) {
+			t.Fatalf("round %d let %d slices go as they streamed, want the digits' slice let go in round 2 only", round, discarded)
+		}
+		if round == 2 {
+			continue
 		}
 		var slices []string
 		for _, call := range fixture.source.calls[before:] {
@@ -2002,7 +2007,7 @@ func TestTheSlicesAQueryGroupIsReadInDoNotGrowRoundByRound(t *testing.T) {
 			continue
 		}
 		if !reflect.DeepEqual(slices, first) {
-			t.Fatalf("round %d landed %d slices %v, round 2 %d %v: want the same slices every round", round, len(slices), slices, len(first), first)
+			t.Fatalf("round %d landed %d slices %v, round 3 %d %v: want the same slices every round", round, len(slices), slices, len(first), first)
 		}
 	}
 }

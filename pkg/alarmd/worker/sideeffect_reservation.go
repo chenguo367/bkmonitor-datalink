@@ -236,7 +236,7 @@ func (coordinator *SlotExecutionCoordinator) acquireEffects(delta effectCounts, 
 			break
 		}
 		reservation.mu.Unlock()
-		yielded := stream.yieldReadAhead()
+		yielded := stream.yieldReadAhead(phase)
 		reservation.mu.Lock()
 		if !yielded {
 			return err

@@ -2543,7 +2543,7 @@ One per held gap scope per round that read it, by status, by why it is held, and
 
 Labels: `outcome`
 
-Slots by what they did with their Query Group's shape, the leaves a slice that ran out of time for its size was split into, which the next Slot starts in: started, read in it; kept, a slice split for its time kept in it; merged, its last kept split taken back after three quick rounds; voided_revision, voided_dimensions, voided_max_leaves, dropped as the query revision or the dimensions changed or it grew past a starting tree's leaves; refused_not_a_leaf, refused_not_a_partition, refused_max_leaves, dropped as its leaves were not a partition of every value. A dropped shape's Slot starts in slices counted anew. evicted_idle counts the Query Groups whose slice memory, shape or none, was dropped for no Slot started on this replica for ten of their periods and ten minutes at least. Which Query Group is not a label here.
+Slots by what they did with their Query Group's shape, the leaves a slice that ran out of time for its size was split into, which the next Slot starts in: started, read in it; kept, a slice split for its time kept in it; merged, its last kept split taken back after three quick rounds; voided_revision, voided_dimensions, voided_max_leaves, dropped as the query revision or the dimensions changed or it grew past a starting tree's leaves; refused_not_a_leaf, refused_not_a_partition, refused_max_leaves, dropped as its leaves were not a partition of every value. A dropped shape's Slot starts in slices counted anew. evicted_idle counts the Query Groups whose slice memory, shape or none, was dropped for no Slot started on this replica for ten of their periods and ten minutes at least. A slice read whole past a slice's series is kept split for the next Slot: refused_max_leaves (as above), refused_condition_budget, refused_single_value (its sample told none of its series apart) and refused_split_error count such a split that kept nothing; merge_refused a split taken back whose shape would not rebuild without it, the shape kept as it was rather than dropped. Which Query Group is not a label here.
 
 ## alarmd_worker_input_slice_timeouts_total
 
@@ -2675,7 +2675,7 @@ PRIMARY series a completed Slot bound to a due Plan from what its queries answer
 
 Labels: `kind`
 
-What this worker's sliced-input memories hold, at the scrape, summed over them, by kind. leaves is the leaves of each kept shape; leaf_series the entries of each one's series by slice; deferred the slices each one defers for a timeout. Entries, not bytes: an estimate of what the memories retain, which grows with each entry, to read against the live heap.
+What this worker's sliced-input memories hold, at the scrape, summed over them, by kind. leaves is the leaves of each kept shape; leaf_series the entries of each one's series by slice, one a slice the last Slot to complete in the shape landed, kept through the Slots that fail after it: none, its leaves standing, when that Slot read no series or no Slot has completed in the shape since a failed one kept it; deferred the slices each one defers for a timeout. Entries, not bytes: an estimate of what the memories retain, which grows with each entry, to read against the live heap.
 
 ## alarmd_worker_slice_memory_groups
 
@@ -2688,6 +2688,12 @@ Query Groups this worker keeps a sliced-input memory for, at the scrape, by scop
 Labels: `outcome`
 
 How the slices read ahead - read while the slice before completed - ended, by outcome: replayed, handed to the Slot; other_leaf, let go because the next slice was another; yielded, let go for a reservation of the Slot's own the share or the pool would otherwise refuse; failed, let go because the read failed before it was handed on; context_ended, refused because its read ended with its context ended, what it answered then not taken for the slice - read again, or the Slot failed once its series were the Slot's. Every slice let go is read again on the Slot's goroutine. Counted from completed Slots.
+
+## alarmd_worker_slice_read_ahead_yields_total
+
+Labels: `phase`
+
+Slices read ahead that yielded - let go while they held bytes, for a reservation of the Slot's own the share would otherwise refuse - by the phase of that reservation: normal_input a slice's input, normal_output its State and events, normal_gap its gap facts, normal_no_data its no-data memory, slot_output and frames what a write keeps, window_bound a window cut to fit beside the reads ahead, query_free a Slot that runs no query, other a phase named nowhere here. Together they are worker_slice_read_ahead_total{outcome=yielded}. Each yielded slice is read again whole; which phase they yield to says which part of the share the reads ahead stand in. Counted from completed Slots, whose rows carry what the yielded reads held (read_ahead_yielded_bytes), the farthest from the slice being read (read_ahead_yield_distance_max) and the longest any read ahead waited for room (read_ahead_wait_millis_max).
 
 ## alarmd_worker_sliced_slots_total
 

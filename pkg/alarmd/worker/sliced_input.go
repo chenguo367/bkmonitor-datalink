@@ -18,6 +18,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
@@ -113,6 +114,7 @@ type sliceReading struct {
 	series, read, seriesRead, timedOutTook uint64
 	sample                                 inputslice.Sample
 	seen                                   map[string]map[string]int
+	keeps                                  map[string]*sampleKeep
 	// unsliceable is a Slot found, at its first overflow, to have nothing it
 	// can be sliced on: it is read whole and judged by its share alone, as
 	// before slicing.
@@ -159,6 +161,17 @@ type sliceReading struct {
 	// before at the time a series took then.
 	leafSeries  map[string]uint64
 	leafPlanned map[string]uint64
+	// leafSeriesByID is leafSeries by leaf, and leafBytesByID the input each
+	// slice read retained, for the decay of a split kept for a slice's size
+	// (sizedDecay); sizedKept is set once this read kept one for a leaf it
+	// read whole (keepSizedSplit).
+	leafSeriesByID map[int]uint64
+	leafBytesByID  map[int]uint64
+	sizedKept      bool
+	// sizedSplit is set once this read split a slice it started in for its
+	// size (SplitSized): a split the decay counts from its own first round,
+	// not on from the last one's (sizedDecay).
+	sizedSplit bool
 	// keptOnFailure is set once the slice of a Slot that failed for running
 	// out of time was split for its size into the tree (keepTimedOutSplit).
 	keptOnFailure bool
@@ -209,16 +222,66 @@ type sliceReading struct {
 // (one of voided and refused at most, the words of
 // observability.InputSliceShapeOutcomes).
 type sliceShapeUsage struct {
-	started, kept, merged bool
-	dropped               string
+	started, kept, merged, mergeRefused bool
+	dropped                             string
 }
 
 func (reading *sliceReading) noteLeafRead(leaf inputslice.Leaf, took uint64) {
 	if reading.leafMillis == nil {
 		reading.leafMillis, reading.leafSeries = map[int]uint64{}, map[string]uint64{}
+		reading.leafSeriesByID, reading.leafBytesByID = map[int]uint64{}, map[int]uint64{}
 	}
 	reading.leafMillis[leaf.ID] = took
 	reading.leafSeries[leaf.Slice.Digest()] = reading.series
+	reading.leafSeriesByID[leaf.ID] = reading.series
+	reading.leafBytesByID[leaf.ID] = reading.input
+	reading.keepSizedSplit(leaf)
+}
+
+// keepSizedSplit cuts a slice read whole that held more series than a slice
+// is meant to (sliceSeries) for the next Slot to start in its parts, by the
+// sample of what it read (inputslice.Tree.KeepSizedSplit): within its limit,
+// nothing split it this round, and the next would read it as large again,
+// alone at the head of the query span. Each part is planned at its share of
+// the slice's series, by the sample, so the next Slot times it as a slice it
+// read (leafPlanned) rather than at the target. A split the bounds refuse
+// keeps nothing, and is counted as refused by its reason (sizedSplitRefusal).
+func (reading *sliceReading) keepSizedSplit(leaf inputslice.Leaf) {
+	if reading.tree == nil || reading.series <= sizedSplitSeries() || len(reading.sample) == 0 {
+		return
+	}
+	children, sampled, err := reading.tree.KeepSizedSplit(leaf.ID, reading.sample)
+	if err != nil {
+		if reading.shape.dropped == "" {
+			reading.shape.dropped = sizedSplitRefusal(err)
+		}
+		return
+	}
+	reading.sizedKept = true
+	for _, child := range children {
+		if sampled > 0 {
+			reading.leafSeries[child.Slice.Digest()] = reading.series * uint64(child.Sampled) / uint64(sampled)
+		}
+	}
+}
+
+// sizedSplitRefusal is the shape outcome a split kept for a leaf's size
+// refused ends in: by the bound it would have passed, the leaves a Slot
+// starts in or the condition budget, and refused_split_error for any other
+// failure - a split that kept nothing is named, never passed over.
+func sizedSplitRefusal(err error) string {
+	var concentrated *inputslice.ValueConcentratedError
+	if errors.As(err, &concentrated) {
+		switch concentrated.Reason {
+		case inputslice.ReasonMaxLeaves:
+			return observability.InputSliceShapeRefusedMaxLeaves
+		case inputslice.ReasonConditionBudget:
+			return observability.InputSliceShapeRefusedCondition
+		case inputslice.ReasonSingleValue:
+			return observability.InputSliceShapeRefusedSingleValue
+		}
+	}
+	return observability.InputSliceShapeRefusedSplitError
 }
 
 // plannedLeafMillis is what the slice being read of a Slot read in a shape
@@ -241,6 +304,17 @@ func (stream *streamedExecution) slicing() bool { return stream.slices != nil }
 // path's to decide.
 func (stream *streamedExecution) readInSlices() bool {
 	return stream.slicing() && stream.slices.tree != nil
+}
+
+// wholeSliceLimit is sliceLimit with nothing else of the Slot held: half the
+// share, the most a slice may retain, for judging a slice's size apart from
+// any one Slot's moment (sizedDecay).
+func (coordinator *SlotExecutionCoordinator) wholeSliceLimit() uint64 {
+	share := coordinator.qgShareBytes()
+	if share == 0 {
+		return ^uint64(0)
+	}
+	return share / 2
 }
 
 // sliceLimit is what the slice being read may hold of the input phase: half
@@ -345,26 +419,19 @@ func (stream *streamedExecution) sampleSlice(batch execution.SeriesExecutionBatc
 	if reading.sample == nil {
 		reading.sample = make(inputslice.Sample, len(reading.dimensions))
 		reading.seen = make(map[string]map[string]int, len(reading.dimensions))
+		reading.keeps = make(map[string]*sampleKeep, len(reading.dimensions))
 	}
 	// Each value once, counted for every series sampled that carries it -
-	// a split is judged by the series its parts hold - the values past
-	// sliceSampleValues left out.
+	// a split is judged by the series its parts hold - and sliceSampleValues
+	// of them at most, the ones of the smallest hash (sampleKeep): a sample
+	// over the whole stream, not its start.
 	for _, dimension := range reading.dimensions {
-		value := sliceValue(dimensions[dimension])
-		seen := reading.seen[dimension]
+		seen, keep := reading.seen[dimension], reading.keeps[dimension]
 		if seen == nil {
-			seen = make(map[string]int)
-			reading.seen[dimension] = seen
+			seen, keep = make(map[string]int), &sampleKeep{}
+			reading.seen[dimension], reading.keeps[dimension] = seen, keep
 		}
-		if at, dup := seen[value]; dup {
-			reading.sample[dimension][at].Series++
-			continue
-		}
-		if len(reading.sample[dimension]) >= sliceSampleValues {
-			continue
-		}
-		seen[value] = len(reading.sample[dimension])
-		reading.sample[dimension] = append(reading.sample[dimension], inputslice.SampledValue{Value: value, Series: 1})
+		keep.note(&reading.sample, dimension, seen, sliceValue(dimensions[dimension]))
 	}
 }
 
@@ -388,7 +455,7 @@ func sliceValue(raw json.RawMessage) string {
 func (stream *streamedExecution) beginSlice(leaf inputslice.Leaf, last bool) {
 	reading := stream.slices
 	reading.leaf, reading.last = leaf, last
-	reading.input, reading.largest, reading.series, reading.sample, reading.seen = 0, 0, 0, nil, nil
+	reading.input, reading.largest, reading.series, reading.sample, reading.seen, reading.keeps = 0, 0, 0, nil, nil, nil
 	reading.sliceSeries = nil
 	if reading.index > 0 {
 		reading.leaveInput = stream.enter(slotPhaseInput)
@@ -408,7 +475,7 @@ func (stream *streamedExecution) abandonSlice() inputslice.Sample {
 	stream.series -= min(stream.series, reading.series)
 	stream.resetSliceStream()
 	sample := reading.sample
-	reading.input, reading.series, reading.sample, reading.seen = 0, 0, nil, nil
+	reading.input, reading.series, reading.sample, reading.seen, reading.keeps = 0, 0, nil, nil, nil
 	reading.sliceSeries = nil
 	return sample
 }
@@ -629,6 +696,10 @@ type slicedReading struct {
 	shape            inputslice.Shape
 	revision         execution.QueryRevision
 	shapeQuickRounds int
+	// shapeSizedRounds is how many completed reads in a row read every leaf
+	// of the shape's last split kept for a slice's size, together under half
+	// a slice's series (sizedDecay).
+	shapeSizedRounds int
 	// leafSeries is the series each slice of the last completed read held,
 	// by its digest, and seriesMicros the time a series of it took on its
 	// critical path: what the next Slot read in the shape plans each slice
@@ -685,6 +756,20 @@ func (trees *sliceTrees) remember(group execution.QueryGroupIdentity, reading sl
 // same slow answer once a slice, one after another. Read again when the line
 // reads UQ otherwise.
 const sliceSeries = 87_000
+
+// sizedSplitSeriesOverride, set only by tests (SetSizedSplitSeriesForTest),
+// is the series a slice read whole is kept split past, and a split for size
+// taken back under half of, in place of sliceSeries: a Slot of a slice that
+// large, whole, is past what a test's budget holds. Zero, as it is in every
+// process, is sliceSeries.
+var sizedSplitSeriesOverride atomic.Uint64
+
+func sizedSplitSeries() uint64 {
+	if series := sizedSplitSeriesOverride.Load(); series > 0 {
+		return series
+	}
+	return sliceSeries
+}
 
 // slicesBySeries is how many slices a read of that many series asks for.
 func slicesBySeries(series uint64) int {
@@ -1311,9 +1396,15 @@ func (stream *streamedExecution) splitSliceAs(leaf inputslice.Leaf, kept bool) e
 		reading.cutFrom = observability.InputSliceCutOnFirstDimension
 		leaf, sample = tree.Pending()[0], nil
 	}
+	// A slice the Slot started in, let go for its size, is split for the
+	// next Slot too (inputslice.Tree.SplitSized): started there again, it
+	// would be let go again, every round.
 	split := reading.tree.Split
-	if kept {
+	switch {
+	case kept:
 		split = reading.tree.SplitKept
+	case reading.starting[leaf.ID]:
+		split, reading.sizedSplit = reading.tree.SplitSized, true
 	}
 	if _, err := split(leaf.ID, sample); err != nil {
 		return fmt.Errorf("alarmd worker: split input slice: %w", err)
@@ -1420,6 +1511,7 @@ func (coordinator *SlotExecutionCoordinator) rememberSlotInput(request execution
 		// time in slices counted is read in more of them (slicesByTime) -
 		// until it completes or grows past a starting tree's leaves.
 		remembered.shape, remembered.shapeQuickRounds = before.shape, before.shapeQuickRounds
+		remembered.shapeSizedRounds = before.shapeSizedRounds
 		remembered.leafSeries, remembered.seriesMicros = before.leafSeries, before.seriesMicros
 		// A read that failed read none of its slices to the end: what the
 		// one before deferred is deferred still, with what this one did.
@@ -1467,6 +1559,7 @@ func (coordinator *SlotExecutionCoordinator) rememberSlotInput(request execution
 			remembered.series = max(remembered.series, before.series)
 		}
 		remembered.shape, remembered.shapeQuickRounds = coordinator.shapeAfter(reading, before, current, sliceable == nil)
+		remembered.shape, remembered.shapeSizedRounds = reading.sizedDecay(remembered.shape, before, coordinator.wholeSliceLimit())
 		if !remembered.shape.IsZero() && reading.seriesRead > 0 {
 			remembered.leafSeries = reading.leafSeries
 			remembered.seriesMicros = reading.queryMillis * 1000 / reading.seriesRead

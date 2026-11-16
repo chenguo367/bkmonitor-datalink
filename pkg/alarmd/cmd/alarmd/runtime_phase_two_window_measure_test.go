@@ -1087,7 +1087,9 @@ func windowMeasureShapesLine(usage observability.SlotBudgetUsageFacts) string {
 	counts := []uint64{usage.InputSliceShapeStarted, usage.InputSliceShapeKept, usage.InputSliceShapeMerged,
 		usage.InputSliceShapeVoidedRevision, usage.InputSliceShapeVoidedDimensions, usage.InputSliceShapeVoidedMaxLeaves,
 		usage.InputSliceShapeRefusedNotALeaf, usage.InputSliceShapeRefusedNotAPartition, usage.InputSliceShapeRefusedMaxLeaves,
-		usage.InputSliceShapeEvictedIdle}
+		usage.InputSliceShapeEvictedIdle, usage.InputSliceShapeRefusedCondition, usage.InputSliceShapeRefusedSingleValue,
+		usage.InputSliceShapeRefusedSplitError,
+		usage.InputSliceShapeMergeRefused}
 	parts := make([]string, 0, len(counts))
 	for index, outcome := range observability.InputSliceShapeOutcomes {
 		parts = append(parts, fmt.Sprintf("%s:%d", outcome, counts[index]))

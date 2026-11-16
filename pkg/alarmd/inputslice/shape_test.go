@@ -141,7 +141,10 @@ func TestAShapeMergedTakesItsLastKeptSplitBack(t *testing.T) {
 		t.Fatalf("last kept %v, want the leaves of the second kept split", got)
 	}
 	shape := tree.Shape()
-	merged := shape.Merged()
+	merged, rebuilt := shape.Merged()
+	if !rebuilt {
+		t.Fatal("the shape without its last kept split did not rebuild")
+	}
 	if want := shape.Leaves() - (len(second) - 1) - (len(bySize) - 1); merged.Leaves() != want {
 		t.Fatalf("merged %d leaves, want %d: the second kept split and the split for size it was under taken back", merged.Leaves(), want)
 	}
@@ -153,7 +156,7 @@ func TestAShapeMergedTakesItsLastKeptSplitBack(t *testing.T) {
 	if got := built.LastKept(); len(got) != len(first) {
 		t.Fatalf("last kept after the merge %v, want the first kept split's %d leaves", got, len(first))
 	}
-	if !merged.Merged().IsZero() {
+	if again, _ := merged.Merged(); !again.IsZero() {
 		t.Fatal("merging every kept split back left a shape")
 	}
 }

@@ -168,6 +168,10 @@ type Tree struct {
 	// splits is every split the tree was made by, in the order made: what
 	// its Shape is taken from (shape.go).
 	splits []treeSplit
+	// later is the splits of leaves read whole that the next Slot starts in
+	// (KeepSizedSplit): in the Shape after splits, never in this tree's
+	// pending leaves.
+	later []laterSplit
 }
 
 // New starts a tree that cuts on dimensions: each split on the one of them

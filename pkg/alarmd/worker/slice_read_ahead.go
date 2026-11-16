@@ -208,6 +208,16 @@ func (ahead *sliceReadAhead) ResolvedScopeGroups() execution.ScopeGroupMembershi
 // it go. Caller holds ahead.mu.
 func (ahead *sliceReadAhead) keep(ctx context.Context, bytes uint64) (*streamedExecution, error) {
 	var waitedFrom time.Time
+	defer func() {
+		if !waitedFrom.IsZero() && ahead.stream != nil {
+			waited := time.Since(waitedFrom).Milliseconds()
+			for longest := ahead.stream.readAheadWaitMax.Load(); waited > longest; longest = ahead.stream.readAheadWaitMax.Load() {
+				if ahead.stream.readAheadWaitMax.CompareAndSwap(longest, waited) {
+					break
+				}
+			}
+		}
+	}()
 	if note := readAheadWaitsForMeasurement.Load(); note != nil {
 		defer func() {
 			if !waitedFrom.IsZero() {
@@ -381,6 +391,10 @@ func (stream *streamedExecution) letGoReadAhead() {
 	}
 }
 
+// readAheadYieldWindowBound is the phase a window cut to fit beside the
+// reads ahead yields them in: no reservation was refused there.
+const readAheadYieldWindowBound = "window_bound"
+
 // yieldReadAhead lets go every read ahead that keeps bytes, for a
 // reservation they may stand in the way of, and says whether the caller
 // should judge the reservation again: one was let go, or what the reads
@@ -388,18 +402,28 @@ func (stream *streamedExecution) letGoReadAhead() {
 // keeps nothing - its query still waiting for an answer - stands in no
 // reservation's way and is kept: it waits for room when its answer comes
 // (keep). A reservation the Slot's own slice would get without the reads
-// ahead is never refused for them.
-func (stream *streamedExecution) yieldReadAhead() bool {
+// ahead is never refused for them. Each read let go is counted under phase,
+// the phase of the reservation it yielded to, with what it held and how many
+// slices it was from the one being read: which reservations the reads ahead
+// stand in the way of, and whether the far ones would have been enough.
+func (stream *streamedExecution) yieldReadAhead(phase string) bool {
 	if stream == nil || len(stream.aheads) == 0 {
 		return false
 	}
+	counted := slices.Index(observability.SliceReadAheadYieldPhases[:], phase)
+	if counted < 0 {
+		counted = len(observability.SliceReadAheadYieldPhases) - 1
+	}
 	var keeping, waiting []*sliceReadAhead
-	for _, ahead := range stream.aheads {
+	for index, ahead := range stream.aheads {
 		ahead.mu.Lock()
 		held := ahead.held
 		ahead.mu.Unlock()
 		if held > 0 {
 			keeping = append(keeping, ahead)
+			stream.readAheadYields[counted]++
+			stream.readAheadYieldedBytes += held
+			stream.readAheadYieldDistanceMax = max(stream.readAheadYieldDistanceMax, uint64(index+1))
 		} else {
 			waiting = append(waiting, ahead)
 		}

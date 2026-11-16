@@ -273,7 +273,7 @@ func (stream *streamedExecution) windowBeforeMerge(ctx context.Context, next exe
 		// refusal's aheadAtRefusal - is not used: full is worked out again
 		// from windowBound once, with no loop.
 		if measured.total() > stream.windowBound() {
-			stream.yieldReadAhead()
+			stream.yieldReadAhead(readAheadYieldWindowBound)
 		}
 		full = stream.windows.bytes+measured.total() > stream.windowBound()
 	}

@@ -53,7 +53,7 @@ func (stream *streamedExecution) loadGapFacts(ctx context.Context, request execu
 			// A refusal the read ahead may stand behind is judged again once
 			// it has yielded.
 			if err != nil {
-				yielded = stream.yieldReadAhead()
+				yielded = stream.yieldReadAhead(stream.reservationPhase("normal_gap"))
 			}
 		}
 		if err != nil {

@@ -15,15 +15,20 @@ import (
 )
 
 // splitKind is why a tree split a node: to start in the leaves asked
-// (New), for a slice past its limit (Split), or for a slice the Query
-// Group's next Slot is to be read split too (SplitKept).
+// (New), for a slice past its limit (Split), for a slice the Query Group's
+// next Slot is to be read split too for its time (SplitKept), or for its size
+// (SplitSized, KeepSizedSplit).
 type splitKind int
 
 const (
 	splitStarting splitKind = iota
 	splitRead
 	splitKept
+	splitSized
 )
+
+// keptForNext reports a split the Query Group's next Slot starts in.
+func (kind splitKind) keptForNext() bool { return kind == splitKept || kind == splitSized }
 
 // treeSplit is one split of a tree: the node split, the nodes made of it in
 // reading order, and why.
@@ -57,7 +62,7 @@ type shapeSplit struct {
 // started in the leaves asked, by New.
 func (shape Shape) IsZero() bool {
 	for _, split := range shape.splits {
-		if split.kind == splitKept {
+		if split.kind.keptForNext() {
 			return false
 		}
 	}
@@ -86,13 +91,20 @@ func (tree *Tree) Shape() Shape {
 		}
 	}
 	// A split for a slice's size under a kept split is in the shape: the
-	// kept split's node is one of its leaves.
+	// kept split's node is one of its leaves. So is one under a split kept
+	// for a leaf read whole (KeepSizedSplit), made after the tree's own.
 	under := map[int]bool{}
+	parents := make([]int, 0, len(tree.splits)+len(tree.later))
 	for _, split := range tree.splits {
-		if split.kind != splitKept {
-			continue
+		if split.kind.keptForNext() {
+			parents = append(parents, split.parent)
 		}
-		for node := split.parent; ; {
+	}
+	for _, later := range tree.later {
+		parents = append(parents, later.node)
+	}
+	for _, parent := range parents {
+		for node := parent; ; {
 			index, made := madeBy[node]
 			if !made {
 				break
@@ -112,6 +124,15 @@ func (tree *Tree) Shape() Shape {
 		}
 		shape.splits = append(shape.splits, shapeSplit{
 			parent: slices.Clone(tree.nodes[split.parent].segments), children: children, kind: split.kind,
+		})
+	}
+	for _, later := range tree.later {
+		children := make([][]segment, 0, len(later.children))
+		for _, child := range later.children {
+			children = append(children, slices.Clone(child))
+		}
+		shape.splits = append(shape.splits, shapeSplit{
+			parent: slices.Clone(tree.nodes[later.node].segments), children: children, kind: splitSized,
 		})
 	}
 	if shape.IsZero() {
@@ -205,7 +226,11 @@ func FromShape(dimensions []string, shape Shape) (*Tree, error) {
 // leaf again, the node they were split from. A split for a slice's size
 // that was in the shape only for that split goes with it. With no kept split
 // left it is the zero Shape.
-func (shape Shape) Merged() Shape {
+//
+// rebuilt is false when the shape without that split is no shape - a split
+// made after it of one of its leaves: the shape is returned as it was, for
+// the caller to keep and name, rather than every split in it lost.
+func (shape Shape) Merged() (merged Shape, rebuilt bool) {
 	last := -1
 	for index, split := range shape.splits {
 		if split.kind == splitKept {
@@ -213,15 +238,21 @@ func (shape Shape) Merged() Shape {
 		}
 	}
 	if last < 0 {
-		return Shape{}
+		return Shape{}, true
 	}
+	return shape.without(last)
+}
+
+// without is the shape with its split at index taken back, rebuilt; the
+// shape as it was and false when it does not rebuild.
+func (shape Shape) without(index int) (Shape, bool) {
 	kept := Shape{dimensions: shape.dimensions}
-	kept.splits = append(append(kept.splits, shape.splits[:last]...), shape.splits[last+1:]...)
+	kept.splits = append(append(kept.splits, shape.splits[:index]...), shape.splits[index+1:]...)
 	tree, err := FromShape(shape.dimensions, kept)
 	if err != nil {
-		return Shape{}
+		return shape, false
 	}
-	return tree.Shape()
+	return tree.Shape(), true
 }
 
 // LastKept is the leaves the tree's last kept split made, by ID, nil when

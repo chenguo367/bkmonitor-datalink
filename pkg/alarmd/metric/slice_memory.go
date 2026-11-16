@@ -51,7 +51,10 @@ func newSliceMemoryCollector(source SliceMemorySource) *sliceMemoryCollector {
 			[]string{"scope"}, nil),
 		entries: prometheus.NewDesc(prometheus.BuildFQName("", metricSubsystem, "worker_slice_memory_entries"),
 			"What this worker's sliced-input memories hold, at the scrape, summed over them, by kind. leaves "+
-				"is the leaves of each kept shape; leaf_series the entries of each one's series by slice; "+
+				"is the leaves of each kept shape; leaf_series the entries of each one's series by slice, "+
+				"one a slice the last Slot to complete in the shape landed, kept through the Slots that fail "+
+				"after it: none, its leaves standing, when that Slot read no series or no Slot has completed "+
+				"in the shape since a failed one kept it; "+
 				"deferred the slices each one defers for a timeout. Entries, not bytes: an estimate of what the "+
 				"memories retain, which grows with each entry, to read against the live heap.",
 			[]string{"kind"}, nil),

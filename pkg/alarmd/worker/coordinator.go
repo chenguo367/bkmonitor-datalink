@@ -261,7 +261,7 @@ func (coordinator *SlotExecutionCoordinator) acquireProvisional(series, retained
 			break
 		}
 		coordinator.reservations.mu.Unlock()
-		if !stream.yieldReadAhead() {
+		if !stream.yieldReadAhead(phase) {
 			return err
 		}
 		coordinator.reservations.mu.Lock()
@@ -883,7 +883,10 @@ func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 		FirstSeenUnseenSlices: stream.unseenSlices(), FirstSeenUnseenSeries: stream.unseenSeries(),
 		InputSlicesReadAhead: stream.readAheadEnds[readAheadReplayed], InputSlicesReadAheadOtherLeaf: stream.readAheadEnds[readAheadOtherLeaf],
 		InputSlicesReadAheadYielded: stream.readAheadEnds[readAheadYielded], InputSlicesReadAheadFailed: stream.readAheadEnds[readAheadFailed],
-		InputSlicesReadAheadContextEnded:    stream.readAheadEnds[readAheadContextEnded],
+		InputSlicesReadAheadContextEnded: stream.readAheadEnds[readAheadContextEnded],
+		ReadAheadYieldsNormalInput:       stream.readAheadYields[0], ReadAheadYieldsNormalOutput: stream.readAheadYields[1], ReadAheadYieldsNormalGap: stream.readAheadYields[2], ReadAheadYieldsNormalNoData: stream.readAheadYields[3], ReadAheadYieldsSlotOutput: stream.readAheadYields[4], ReadAheadYieldsFrames: stream.readAheadYields[5], ReadAheadYieldsWindowBound: stream.readAheadYields[6], ReadAheadYieldsQueryFree: stream.readAheadYields[7], ReadAheadYieldsOther: stream.readAheadYields[8],
+		ReadAheadYieldedBytes: stream.readAheadYieldedBytes, ReadAheadYieldDistanceMax: stream.readAheadYieldDistanceMax,
+		ReadAheadWaitMillisMax:              uint64(max(stream.readAheadWaitMax.Load(), 0)),
 		InputSliceTimeouts:                  stream.sliceTimeoutsSplit(),
 		InputSliceShapeStarted:              shapes[0],
 		InputSliceShapeKept:                 shapes[1],
@@ -895,6 +898,10 @@ func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 		InputSliceShapeRefusedNotAPartition: shapes[7],
 		InputSliceShapeRefusedMaxLeaves:     shapes[8],
 		InputSliceShapeEvictedIdle:          shapes[9],
+		InputSliceShapeRefusedCondition:     shapes[10],
+		InputSliceShapeRefusedSingleValue:   shapes[11],
+		InputSliceShapeRefusedSplitError:    shapes[12],
+		InputSliceShapeMergeRefused:         shapes[13],
 		InputSliceCutOn:                     stream.sliceCutFrom(),
 		InputSliceDimension:                 stream.sliceDimension(),
 		InputSlicesDeferred:                 stream.slicesDeferred(),

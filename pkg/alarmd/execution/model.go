@@ -4846,6 +4846,24 @@ type SlotBudgetUsage struct {
 	// Plan's algorithm family in the order of
 	// observability.SeriesNotEvaluatedFamilies: zero is the reading.
 	SeriesNotEvaluated [observability.SeriesNotEvaluatedFamilyCount]uint64
+	// ReadAheadYields<Phase> is the reads ahead yielded, by the phase of the
+	// Slot's reservation they yielded to (observability.SliceReadAheadYieldPhases),
+	// together InputSlicesReadAheadYielded; ReadAheadYieldedBytes what they
+	// held when they did, ReadAheadYieldDistanceMax the farthest of them from
+	// the slice being read, in slices, and ReadAheadWaitMillisMax the longest
+	// any read ahead of the Slot waited for room.
+	ReadAheadYieldsNormalInput  uint64
+	ReadAheadYieldsNormalOutput uint64
+	ReadAheadYieldsNormalGap    uint64
+	ReadAheadYieldsNormalNoData uint64
+	ReadAheadYieldsSlotOutput   uint64
+	ReadAheadYieldsFrames       uint64
+	ReadAheadYieldsWindowBound  uint64
+	ReadAheadYieldsQueryFree    uint64
+	ReadAheadYieldsOther        uint64
+	ReadAheadYieldedBytes       uint64
+	ReadAheadYieldDistanceMax   uint64
+	ReadAheadWaitMillisMax      uint64
 	// InputSliceTimeouts is the slices of a completed Slot that ran out of
 	// time and were split and read again (split_succeeded): at most one.
 	InputSliceTimeouts uint64
@@ -4861,6 +4879,10 @@ type SlotBudgetUsage struct {
 	InputSliceShapeRefusedNotAPartition uint64
 	InputSliceShapeRefusedMaxLeaves     uint64
 	InputSliceShapeEvictedIdle          uint64
+	InputSliceShapeRefusedCondition     uint64
+	InputSliceShapeRefusedSingleValue   uint64
+	InputSliceShapeRefusedSplitError    uint64
+	InputSliceShapeMergeRefused         uint64
 	// InputSliceCutOn is where the dimension this Slot's starting slices
 	// were cut on came from (observability.InputSliceCutOnSources), empty
 	// for a Slot not started in slices counted.
