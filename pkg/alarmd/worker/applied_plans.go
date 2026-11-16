@@ -104,6 +104,16 @@ func (recorder *appliedPlanRecorder) progressCommitted() {
 	recorder.mutex.Unlock()
 }
 
+// wasCommitted says whether this attempt wrote the Slot down.
+func (recorder *appliedPlanRecorder) wasCommitted() bool {
+	if recorder == nil {
+		return false
+	}
+	recorder.mutex.Lock()
+	defer recorder.mutex.Unlock()
+	return recorder.committed
+}
+
 // unrecorded is the Plans this attempt applied when it has something to leave
 // behind, and nothing when it has not.
 //

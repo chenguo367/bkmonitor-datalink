@@ -1332,6 +1332,13 @@ func (ports *recordingPorts) ResolveFinalization(
 		mode = execution.FinalizationQueryRequired
 	}
 	finalization := execution.QueryFreeFinalization{Contract: request.Contract, Mode: mode}
+	// The two modes that ask for the attempt again carry their own words.
+	switch mode {
+	case execution.FinalizationSnapshotRetry:
+		finalization.ReasonCode = execution.ReasonCode(contract.ReasonSnapshotRetryPending)
+	case execution.FinalizationExactSetBlocked:
+		finalization.ReasonCode = execution.ReasonBlockedExactSetUnavailable
+	}
 	if mode == execution.FinalizationGapSkipped || mode == execution.FinalizationSnapshotUnavailable {
 		// A query-free finalization carries the due Plans it is finalizing:
 		// that frozen set is the only thing the path has to work from.

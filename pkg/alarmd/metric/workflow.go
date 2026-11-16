@@ -17,15 +17,25 @@ type workflowMetrics struct {
 	permitWait             *prometheus.HistogramVec
 }
 
-// slotReasonWords are the cells a Slot's end is counted under from the
-// start: none for a Slot that ended whole, reason_not_reported for an end that
-// named no reason where one was due, _other for a word outside the contract
-// catalogue, and the words an edit's reading is made of. Any other word of
-// the catalogue is counted under its own name once a Slot ends with it; the
-// catalogue's exact words are not published as standing cells, which the
-// metrics keep to bounded classes (TestKnownM0ReasonMapsToBoundedMetricValue).
-var slotReasonWords = []string{string(observability.ReasonNone), string(observability.ReasonNotReported), string(observability.ReasonOther),
-	contract.ReasonPlanNotActive, contract.ReasonConfigDrift, contract.ReasonPlanReactivated}
+// slotReasonWords are the words a Slot's end is counted under beside the
+// contract catalogue's: none for a Slot that ended whole, reason_not_reported
+// for an end that named no reason where one was due, and _other for a word
+// outside the catalogue.
+var slotReasonWords = []string{string(observability.ReasonNone), string(observability.ReasonNotReported), string(observability.ReasonOther)}
+
+// slotReasonCells is every word a Slot's end can be counted under: the
+// words above and every code of the contract catalogue, each once. All of
+// them exist from the start, so a zero on any reason is a reading. The
+// catalogue is closed, so this is a bound and not a growth: 129 cells today.
+func slotReasonCells() []string {
+	catalogue := contract.ReasonCatalogV2()
+	cells := make([]string, 0, len(slotReasonWords)+len(catalogue))
+	cells = append(cells, slotReasonWords...)
+	for _, definition := range catalogue {
+		cells = append(cells, definition.Code)
+	}
+	return cells
+}
 
 // slotReasonWord is the word a Slot's end is counted under.
 func slotReasonWord(reason observability.ReasonCode, result observability.Result) string {
@@ -68,9 +78,9 @@ func newWorkflowMetrics() workflowMetrics {
 			Help: "Slots that ended, by the reason word their slot_completed line carries: one per Slot, counted once, " +
 				"when it ends - a round that retries it is not an end - whatever the log samples. none is a Slot that " +
 				"ended whole. The answer to how many Slots ended PLAN_NOT_ACTIVE is the PLAN_NOT_ACTIVE cell, whatever " +
-				"cause progress_completion_causes_total files them under. The none, PLAN_NOT_ACTIVE, CONFIG_DRIFT, " +
-				"PLAN_REACTIVATED, reason_not_reported and _other cells exist from the start, so a zero there is a " +
-				"reading; another word of the contract catalogue appears once a Slot ends with it."},
+				"cause progress_completion_causes_total files them under. The none, reason_not_reported and _other " +
+				"cells and one for every word of the contract catalogue exist from the start, so a zero on any of " +
+				"them is a reading."},
 			[]string{"reason"}),
 		abandonedSlots: prometheus.NewCounter(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "unfinished_slots_abandoned_total",
 			Help: "Unfinished Slots the Progress store dropped because a later Segment moved the cursor past them, counted when the write recording the skip applied. Each is one slot_skipped line with finalizing_path=progress_store; its Slot was never queried and only the Progress record's recent gap holds it."}),
@@ -82,7 +92,7 @@ func newWorkflowMetrics() workflowMetrics {
 		permitWait: prometheus.NewHistogramVec(prometheus.HistogramOpts{Subsystem: metricSubsystem, Name: "query_permit_wait_seconds", Help: "Actual query admission call wall duration including immediate grants and failures; parallel waits are not additive Slot time.", Buckets: []float64{0.001, 0.01, 0.1, 1, 5, 15, 30, 60}}, []string{"queue_kind"}),
 	}
 	// Every cell from the start, so a word that never happens reads zero.
-	for _, word := range slotReasonWords {
+	for _, word := range slotReasonCells() {
 		metrics.slotReasons.WithLabelValues(word)
 	}
 	return metrics

@@ -1628,6 +1628,9 @@ func (stream *streamedExecution) evaluateSeries(
 	}
 	for position, prepared := range preparedSeriesEvaluations {
 		if stream.supplement != nil && !stream.supplementTakes(prepared) {
+			// Not the supplement's to decide: taken up, by design, as
+			// nothing lost (seriesNotEvaluated).
+			stream.noteTakenUp(prepared.due.Identity)
 			continue
 		}
 		// Built as its batch takes it, and gone with the batch.
@@ -1641,6 +1644,9 @@ func (stream *streamedExecution) evaluateSeries(
 				return err
 			}
 			stream.beginEvaluating(due.Identity)
+			// Decided as an incomplete input rather than evaluated: taken
+			// up, not lost (seriesNotEvaluated).
+			stream.noteTakenUp(due.Identity)
 			if err := stream.mergePrimaryIncompleteSeries(ctx, due, incomplete); err != nil {
 				return err
 			}
@@ -2451,7 +2457,9 @@ func (stream *streamedExecution) evaluateReadBatch(ctx context.Context, batch []
 	for index, entry := range batch {
 		// Every real series is taken up here, whatever comes of it - the
 		// evaluation, its resume, its skip - and counted against those the
-		// Plan was bound (seriesNotEvaluated).
+		// Plan was bound (seriesNotEvaluated); a series decided incomplete
+		// or left to the Slot by its supplement is taken up where it is
+		// set aside, before it would reach here.
 		if entry.kind() == execution.SeriesKindReal {
 			stream.noteTakenUp(entry.due.Identity)
 		}
@@ -2663,23 +2671,36 @@ func (stream *streamedExecution) noteTakenUp(plan execution.PlanIdentity) {
 // Plan of several families counts its series under each; one of none that
 // AlgorithmFamily names under none; in the order of
 // observability.SeriesNotEvaluatedFamilies, all zero when every series was
-// taken up.
+// taken up. It is seriesNotEvaluatedPlans summed by family.
 func (stream *streamedExecution) seriesNotEvaluated() [observability.SeriesNotEvaluatedFamilyCount]uint64 {
 	var lost [observability.SeriesNotEvaluatedFamilyCount]uint64
+	for _, plan := range stream.seriesNotEvaluatedPlans() {
+		index := slices.Index(observability.SeriesNotEvaluatedFamilies[:], plan.Family)
+		if index < 0 {
+			index = slices.Index(observability.SeriesNotEvaluatedFamilies[:], observability.SeriesNotEvaluatedNoFamily)
+		}
+		lost[index] += plan.Missing
+	}
+	return lost
+}
+
+// seriesNotEvaluatedPlans is the same loss Plan by Plan, for the
+// series_not_evaluated line: each due Plan that lost series, once under each
+// of its families, in the order the header lists them. Empty when every
+// series was taken up.
+func (stream *streamedExecution) seriesNotEvaluatedPlans() []observability.SeriesNotEvaluatedPlan {
+	var plans []observability.SeriesNotEvaluatedPlan
 	for _, due := range stream.header.DuePlans {
 		missing := stream.planSeriesCount(due.Identity) - stream.takenUp[due.Identity]
 		if missing <= 0 {
 			continue
 		}
 		for _, family := range planAlgorithmFamilies(due) {
-			index := slices.Index(observability.SeriesNotEvaluatedFamilies[:], family)
-			if index < 0 {
-				index = slices.Index(observability.SeriesNotEvaluatedFamilies[:], observability.SeriesNotEvaluatedNoFamily)
-			}
-			lost[index] += uint64(missing)
+			plans = append(plans, observability.SeriesNotEvaluatedPlan{TenantID: due.Identity.TenantID,
+				BusinessID: due.Identity.BusinessID, StrategyID: due.Identity.StrategyID, Family: family, Missing: uint64(missing)})
 		}
 	}
-	return lost
+	return plans
 }
 
 // planAlgorithmFamilies is the distinct algorithm families of the Plan's

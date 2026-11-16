@@ -196,6 +196,16 @@ type ScheduleProgressReader interface {
 	LoadProgress(context.Context, execution.ProgressIdentity) (execution.ProgressLoadResult, error)
 }
 
+// OwnerProgressReader is the optional read a Progress reader may offer the
+// Query Group's owner: the record as the owner last read or wrote it under
+// the fence it holds, instead of the key read again each round
+// (progress.Store.LoadProgressFor). A reader without it is read with
+// LoadProgress every round, which is the behaviour before the owner's record
+// existed.
+type OwnerProgressReader interface {
+	LoadProgressFor(context.Context, execution.ProgressIdentity, execution.OwnerFence) (execution.ProgressLoadResult, error)
+}
+
 // PrunedCursorAdvancer is the optional write side a Progress reader may
 // offer: moving a cursor that points into a pruned part of the timeline to
 // the earliest retained Slot. A reader without it leaves such a cursor
@@ -545,7 +555,7 @@ func (source *ProductionSlotSource) Next(
 	source.takeovers.Anchor(queryGroup, initialFence, at)
 	decision = "progress_load"
 	identity := execution.ProgressIdentity{QueryGroup: source.queryGroup}
-	load, err := source.progress.LoadProgress(ctx, identity)
+	load, err := source.loadOwnedProgress(ctx, identity, initialFence)
 	if err != nil {
 		var deterministic interface{ DeterministicControlFact() }
 		if errors.As(err, &deterministic) {
@@ -1743,6 +1753,20 @@ func (source *ProductionSlotSource) CloseRetiredReadHold(ctx context.Context) (b
 		counter.RetireCloseFailed(err)
 	}
 	return closed, err
+}
+
+// loadOwnedProgress is the round's read of the Query Group's Progress, under
+// the fence the round holds: from the owner's record when the reader keeps
+// one (OwnerProgressReader), from the key otherwise. Only the stored record
+// is kept there; the Slot the round runs is still navigated from it and the
+// timeline as it is now, so a timeline the Leader rewrote is run the next
+// round either way.
+func (source *ProductionSlotSource) loadOwnedProgress(ctx context.Context, identity execution.ProgressIdentity,
+	fence execution.OwnerFence) (execution.ProgressLoadResult, error) {
+	if owner, ok := source.progress.(OwnerProgressReader); ok {
+		return owner.LoadProgressFor(ctx, identity, fence)
+	}
+	return source.progress.LoadProgress(ctx, identity)
 }
 
 func (source *ProductionSlotSource) closeRetiredReadHold(ctx context.Context) (bool, error) {

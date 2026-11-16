@@ -1581,6 +1581,12 @@ Labels: `completion_kind`, `cause`, `reason`, `origin`
 
 Acknowledged Slots that completed short of whole - COMPLETED_WITH_UNAVAILABLE, COMPLETED_WITH_PARTIAL_GAP - by the cause the completion carried (the most actionable of what the round hit) and that cause's reason: which Plan, Level or query it was and when are on the progress_committed line (completion_strategy, completion_level, completion_query). NONE is a completion that carried no cause. origin says whose the reason is: physical for what the round met itself - a primary input's reason always is - and carried for a stored guard's reason a Level outcome repeated on a later round (LEVEL_OUTCOME_UNKNOWN, GAP_GUARD_WARMING); the guard's origin Slot is on the progress_committed line (evaluation_reason_origin_slot). reason=QUERY_TIMEOUT,origin=physical is a timeout this round. A Slot is filed here by its cause, so one that ended PLAN_NOT_ACTIVE while its primary input was unavailable is under PRIMARY_INPUT_UNAVAILABLE: how many Slots ended PLAN_NOT_ACTIVE is slot_completed_reasons_total{reason="PLAN_NOT_ACTIVE"}, and the two families are not summed.
 
+## alarmd_progress_reads_total
+
+Labels: `caller`, `source`
+
+Reads of a Query Group's Progress record by its owner, by caller - next (the slot source choosing the round's Slot), begin, commit, skip (a pruned cursor's skip), range (an expired range's begin or commit) - and by source: redis (the key was read) or cache (the record as the owner last read or wrote it under the same fence answered). A Slot whose record nothing else wrote reads the key at most once every ten rounds or five minutes; a redis read beside a begin or commit is a cold start, a new fence, or a write that met a record changed behind the owner and read it again. The Leader's, the CLI's and a diagnosis's reads are not counted here.
+
 ## alarmd_query_cooldown_events_total
 
 Labels: `event`
@@ -2005,11 +2011,17 @@ Labels: `cohort`, `completion_kind`
 
 Duration of the committed executor call, excluding SlotSource preparation and earlier attempts, by the completion kind it committed.
 
+## alarmd_slot_begin_total
+
+Labels: `result`
+
+Slot attempts' BeginSlot calls that returned a status, by it: committed (the Slot is begun), conflict (the record is not at this Slot), stale_owner and content_moved (the fence refused the write), retryable_io (the store did not answer). A BeginSlot that failed outright is counted by its slot_completed line only.
+
 ## alarmd_slot_completed_reasons_total
 
 Labels: `reason`
 
-Slots that ended, by the reason word their slot_completed line carries: one per Slot, counted once, when it ends - a round that retries it is not an end - whatever the log samples. none is a Slot that ended whole. The answer to how many Slots ended PLAN_NOT_ACTIVE is the PLAN_NOT_ACTIVE cell, whatever cause progress_completion_causes_total files them under. The none, PLAN_NOT_ACTIVE, CONFIG_DRIFT, PLAN_REACTIVATED, reason_not_reported and _other cells exist from the start, so a zero there is a reading; another word of the contract catalogue appears once a Slot ends with it.
+Slots that ended, by the reason word their slot_completed line carries: one per Slot, counted once, when it ends - a round that retries it is not an end - whatever the log samples. none is a Slot that ended whole. The answer to how many Slots ended PLAN_NOT_ACTIVE is the PLAN_NOT_ACTIVE cell, whatever cause progress_completion_causes_total files them under. The none, reason_not_reported and _other cells and one for every word of the contract catalogue exist from the start, so a zero on any of them is a reading.
 
 ## alarmd_slot_decision_lag_seconds
 
@@ -2020,6 +2032,12 @@ Seconds from a Slot's data being readable (its evaluation time plus the read hol
 Labels: `reason`
 
 Slots of Query Groups this process holds that were sent to replay before their normal read started, by reason, counted once per Slot: readiness_late, the Slot's readiness - its settling wait and read hold - landed so near its query deadline that less time was left than its query takes (the group's own reading, the previous owner's as the group's read-hold record keeps it, or the configured floor), so a normal read would have been cut off at the deadline with no data; replay reads it late but whole under a deadline of its own. A Slot due before a takeover is counted under replay_takeover_slots_total{outcome="diverted"} instead. Read with progress_completion_causes_total{cause="PRIMARY_INPUT_UNAVAILABLE",reason="QUERY_TIMEOUT"}: the rounds counted here are the ones that no longer appear there.
+
+## alarmd_slot_not_committed_total
+
+Labels: `reason`
+
+Slot attempts that began their Slot (slot_begin_total{result="committed"}) and returned without writing it down, once each, by why: QUERY_NOT_READY (a readiness deferral, the data not in yet), SNAPSHOT_RETRY and EXACT_SET_BLOCKED (the finalization asked for the attempt again), other (every other return: a failed query, State write or Progress commit among them). Begun less these is the attempts that committed.
 
 ## alarmd_slot_operation_duration_seconds
 

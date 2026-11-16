@@ -1285,6 +1285,10 @@ type productionPhaseTwoOwnershipDependencies struct {
 	// Query Group left in the execution store, up to the last Slot the
 	// releasing session ran. Nil drops none: they leave by the cache's bounds.
 	DropRuntimeWitnesses func(execution.QueryGroupIdentity, execution.EvaluationTime)
+	// ForgetQueryGroup lets go of what the Slot coordinator keeps of a
+	// released Query Group (worker.ForgetQueryGroup).
+	// Nil forgets nothing.
+	ForgetQueryGroup func(execution.QueryGroupIdentity)
 	// Traces exports the spans of the Slots it samples; nil exports none.
 	Traces *tracing.Exporter
 	// DecisionLag hears each decided Slot's lag (the flow's evaluate
@@ -2729,6 +2733,10 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 		previousRelease := release
 		release = func() { previousRelease(); drop(queryGroup, ran.last()) }
 	}
+	if forget := runtime.dependencies.ForgetQueryGroup; forget != nil {
+		previousRelease := release
+		release = func() { previousRelease(); forget(queryGroup) }
+	}
 	executor = &observedProductionSlotExecutor{next: executor, observer: runtime.dependencies.Observer, readHolds: runtime.dependencies.ReadHolds,
 		decisionLag: runtime.dependencies.DecisionLag, traces: runtime.dependencies.Traces}
 	var readHolds scheduler.ReadHolds
@@ -2773,6 +2781,7 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 	return &productionPhaseTwoQueryGroup{
 		session: session, runner: runner, observer: runtime.dependencies.Observer, now: runtime.dependencies.Now,
 		release: release, flights: runtime.flights, queryGroup: queryGroup, viewGate: runtime.viewGate, source: source,
+		progress: runtime.dependencies.Progress,
 	}, nil
 }
 
@@ -2880,6 +2889,16 @@ type productionPhaseTwoQueryGroup struct {
 	// source closes a retired and drained Query Group's read hold before the
 	// lease goes (CloseRetiredReadHold).
 	source *scheduler.ProductionSlotSource
+	// progress is the Progress store the Query Group's Slots read and write;
+	// one that keeps the owner's record (progressOwnerRecords) forgets the
+	// Query Group's at release.
+	progress productionPhaseTwoProgressReader
+}
+
+// progressOwnerRecords is a Progress store that keeps each owned Query
+// Group's record in memory (progress.Store.Forget).
+type progressOwnerRecords interface {
+	Forget(execution.QueryGroupIdentity)
 }
 
 type observedProductionSlotSource struct {
@@ -3403,6 +3422,12 @@ func (runtime *productionPhaseTwoQueryGroup) Release(ctx context.Context) error 
 	}
 	if runtime.release != nil {
 		runtime.release()
+	}
+	// After the read hold's close, the last read of the Query Group under
+	// this lease: the owner's record of its Progress goes with the lease,
+	// and whoever owns it next reads the key.
+	if records, ok := runtime.progress.(progressOwnerRecords); ok {
+		records.Forget(runtime.queryGroup)
 	}
 	return runtime.session.Release(ctx)
 }

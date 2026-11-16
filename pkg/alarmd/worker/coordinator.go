@@ -109,6 +109,10 @@ type Ports struct {
 	// needs it; the coordinator lends it that room when it is built.
 	// Optional: without it the pool has no borrower.
 	RetainedBorrower execution.RetainedBytesBorrower
+	// SlotCounts is told how each BeginSlot went and why an attempt that
+	// began its Slot did not write it down (SlotCounter). Optional: nil counts
+	// nothing.
+	SlotCounts SlotCounter
 }
 
 // ScopeGroupResolver reads one dynamic group a target scope names for one
@@ -138,6 +142,9 @@ type SlotExecutionCoordinator struct {
 	// slicedInput is each Query Group's last read on this replica, for its
 	// next Slot's first slices (sliced_input.go).
 	slicedInput sliceTrees
+	// notEvaluatedLines is when each Query Group last wrote its
+	// series_not_evaluated line (slot_counts.go).
+	notEvaluatedLines seriesNotEvaluatedLines
 	// noDataSkips is how long each Plan's no-data detection has been skipping.
 	// One per process, because a streak is about rounds rather than about one
 	// Slot. See no_data_skip_streak.go.
@@ -494,7 +501,7 @@ func (held *heldFrames) release() {
 func (coordinator *SlotExecutionCoordinator) Execute(
 	ctx context.Context,
 	request execution.SlotExecutionRequest,
-) (execution.SlotExecutionResult, error) {
+) (_ execution.SlotExecutionResult, executeErr error) {
 	if coordinator == nil {
 		return execution.SlotExecutionResult{}, errors.New("alarmd worker: initialized coordinator is required")
 	}
@@ -534,6 +541,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	if err != nil {
 		return coordinator.progressBeginFailure(ctx, request, beginStarted, err), nil
 	}
+	coordinator.countSlotBegin(begin.Status)
 	if err := begin.Validate(); err != nil {
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: invalid Progress BeginSlot result: %w", err)
 	}
@@ -547,6 +555,10 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 		}
 		return activationRetry(reason), nil
 	}
+	// The Slot is begun: from here every return that did not write it down
+	// is counted once, by the reason it returned on.
+	var finalizationMode execution.FinalizationMode
+	defer func() { coordinator.countNotCommitted(applied, finalizationMode, executeErr) }()
 	finalizationStarted := time.Now()
 	finalization, err := coordinator.ports.Finalization.ResolveFinalization(ctx, request)
 	// This step reads the frozen Plan, and so the Segment's content objects.
@@ -561,6 +573,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	if err := finalization.Validate(request); err != nil {
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: invalid finalization: %w", err)
 	}
+	finalizationMode = finalization.Mode
 	if finalization.Mode == execution.FinalizationSnapshotRetry || finalization.Mode == execution.FinalizationExactSetBlocked {
 		return activationRetry(finalization.ReasonCode), nil
 	}
@@ -811,6 +824,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	// Only a Slot that took its every series up the way through says what
 	// it bound and never took up: one that ended before is short of it.
 	result.Usage.SeriesNotEvaluated = stream.seriesNotEvaluated()
+	coordinator.reportSeriesNotEvaluated(ctx, request, stream, result.Usage.SeriesNotEvaluated)
 	result.Timing = stream.timing()
 	result.InPlaceWait = completion.InPlaceWait
 	result.PhysicalQueryLoss = physicalLoss

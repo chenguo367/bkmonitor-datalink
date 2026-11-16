@@ -697,6 +697,16 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		// that has something to explain.
 		attributes = append(attributes, slog.String("slot_wait", facts.Wait))
 	}
+	if facts := observation.SeriesNotEvaluated; facts != nil {
+		attributes = append(attributes, slog.Any("series_not_evaluated_plans", facts.Plans))
+		if facts.PlansTruncated > 0 {
+			attributes = append(attributes, slog.Int("series_not_evaluated_plans_truncated", facts.PlansTruncated))
+		}
+		if facts.SuppressedSlots > 0 {
+			attributes = append(attributes, slog.Uint64("series_not_evaluated_suppressed_slots", facts.SuppressedSlots),
+				slog.Uint64("series_not_evaluated_suppressed_series", facts.SuppressedSeries))
+		}
+	}
 	if facts := observation.RangeGate; facts != nil {
 		// The word plus the values it was derived from. Without the values the
 		// word cannot be checked, and this word exists precisely because the
@@ -1431,6 +1441,11 @@ func mandatoryLogStage(stage Stage) bool {
 	case StageAssignmentApplied:
 		// One line per assignment change in place of one per Query Group
 		// acquired, lost or taken over: about 2,100 a Pod at every start.
+		return true
+	case StageSeriesNotEvaluated:
+		// One line per completed Slot that lost series, at most one per Slot
+		// per Query Group: bounded by the Slot rate, and a sampled line would
+		// name the first Query Group and Plan it met and none after.
 		return true
 	case StageSlotSkipped:
 		// Every Slot finalised as skipped, one line each: the gap guard a

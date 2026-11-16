@@ -109,13 +109,14 @@ func TestReleasingAQueryGroupDropsItsWitnessesFromReleaseOnly(t *testing.T) {
 		leaseReleased int
 	}
 	var drops []drop
+	progressRecords := &forgettingScheduleProgress{leaseReleased: func() int { return store.releaseCalls }}
 	production, err := newProductionPhaseTwoOwnership(productionPhaseTwoOwnershipDependencies{
 		QueryCooldowns: &countingCooldownStore{},
 		DropRuntimeWitnesses: func(queryGroup execution.QueryGroupIdentity, upTo execution.EvaluationTime) {
 			drops = append(drops, drop{queryGroup, upTo, store.releaseCalls})
 		},
 		Store: store, WorkerID: "worker-1", Catalog: unavailableSlotCatalog{},
-		Progress: unavailableScheduleProgress{}, Executor: rejectingSlotExecutor{}, Now: func() time.Time { return now },
+		Progress: progressRecords, Executor: rejectingSlotExecutor{}, Now: func() time.Time { return now },
 		ControlLeaderTTL: time.Minute, Observer: observability.ObserverFunc(func(context.Context, observability.Observation) {}),
 		Reconcile: reconciler, Flights: flights, RecoveryLimits: limits, PostRecoveryTerminalDelay: time.Minute, QueryDeadlineReserve: 5 * time.Second,
 		SnapshotRetention: time.Hour, PublicationDelayAllowance: time.Minute, SettlingWait: 30 * time.Second, LeaseTTL: 30 * time.Second, ReconcileInterval: 5 * time.Second, ContentScopes: noContentScopes,
@@ -149,6 +150,30 @@ func TestReleasingAQueryGroupDropsItsWitnessesFromReleaseOnly(t *testing.T) {
 	if want := []drop{{"query-group-1", 0, 0}}; !reflect.DeepEqual(drops, want) {
 		t.Fatalf("drops = %+v, want %+v: once, for this Query Group, before the lease went", drops, want)
 	}
+	// The owner's record of its Progress goes with the release too, before
+	// the lease: whoever owns the Query Group next reads the key.
+	if want := []forgotten{{"query-group-1", 0}}; !reflect.DeepEqual(progressRecords.forgot, want) {
+		t.Fatalf("Progress records forgotten = %+v, want %+v: once, for this Query Group, before the lease went", progressRecords.forgot, want)
+	}
+}
+
+type forgotten struct {
+	queryGroup    execution.QueryGroupIdentity
+	leaseReleased int
+}
+
+// forgettingScheduleProgress is a Progress store that keeps owners' records
+// (progressOwnerRecords) and says which it was told to forget, and how many
+// leases had been released by then. Its reads fail, as
+// unavailableScheduleProgress's do.
+type forgettingScheduleProgress struct {
+	unavailableScheduleProgress
+	leaseReleased func() int
+	forgot        []forgotten
+}
+
+func (progress *forgettingScheduleProgress) Forget(queryGroup execution.QueryGroupIdentity) {
+	progress.forgot = append(progress.forgot, forgotten{queryGroup, progress.leaseReleased()})
 }
 
 // How far a session ran is the latest Slot it took to execution, failed ones

@@ -335,12 +335,19 @@ func TestProductionSlotSourceReloadsContinuousNextSlotAfterInflightCutover(t *te
 		t.Fatalf("LoadProgress() after cutover = (%+v, %v), want next Slot 90", loaded, err)
 	}
 
+	reads := control.reads
 	nextSlot, due, _, err := source.Next(context.Background(), "query-group-1")
 	if err != nil || !due {
 		t.Fatalf("Next() after cutover due=%v error=%v", due, err)
 	}
 	if nextSlot.Contract.Slot.EvaluationTime != 90 || nextSlot.Contract.ScheduleRevision != newSchedule.Segment.ScheduleRevision {
 		t.Fatalf("next Slot after cutover = %+v, want new Segment Slot 90", nextSlot)
+	}
+	// Navigated across the cutover from the record the owner wrote and the
+	// timeline as it is now, without reading the key again: the owner's
+	// record holds the bytes only, and the new Segment is the catalog's.
+	if control.reads != reads {
+		t.Fatalf("the round after the cutover read the Progress key %d times, want none", control.reads-reads)
 	}
 }
 
@@ -1191,6 +1198,8 @@ func (reader *fakeProgressReader) LoadProgress(
 type slotProgressControlStore struct {
 	value   []byte
 	missing bool
+	// reads counts the key's reads.
+	reads int
 }
 
 type slotProgressResolver struct {
@@ -1228,6 +1237,7 @@ func (store *slotProgressControlStore) ReadControl(
 	execution.QueryGroupIdentity,
 	string,
 ) ([]byte, bool, error) {
+	store.reads++
 	return append([]byte(nil), store.value...), store.missing, nil
 }
 

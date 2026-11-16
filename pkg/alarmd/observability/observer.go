@@ -2986,6 +2986,7 @@ type Observation struct {
 	SlotSkipped         *SlotSkippedFacts
 	RangeGate           *RangeGateFacts
 	SlotWait            *SlotWaitFacts
+	SeriesNotEvaluated  *SeriesNotEvaluatedFacts
 	ObjectCatalog       *ObjectCatalogFacts
 	ObjectRead          *ObjectReadFacts
 	StateGenerationSkew *StateGenerationSkewFacts
@@ -4099,6 +4100,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentScheduler, StageSlotSkipped},
 	{ComponentScheduler, StageRangeGateDecided},
 	{ComponentScheduler, StageSlotWait},
+	{ComponentScheduler, StageSeriesNotEvaluated},
 	{ComponentAccess, StageQueryCompleted},
 	{ComponentAccess, StageQueryBudgetResolved},
 	{ComponentAccess, StageSlotReadinessArrival},
@@ -4389,10 +4391,11 @@ var SchedulerDecisionReasons = func() []ReasonCode {
 // and the refusal a store found against skipping a pruned cursor
 // (CursorRefusals), which said retrying with none; and a slow wait inside a
 // Slot attempt, which said degraded with none; and an execution declined as
-// hung, which said failed with none.
+// hung, which said failed with none; and a completed Slot that bound series
+// it never took up.
 var SlotPathReasons = func() []ReasonCode {
-	reasons := make([]ReasonCode, 0, len(RunOutcomes)+len(CursorRefusals)+2)
-	reasons = append(reasons, ReasonSlotWaitSlow, ReasonExecutionHung)
+	reasons := make([]ReasonCode, 0, len(RunOutcomes)+len(CursorRefusals)+3)
+	reasons = append(reasons, ReasonSlotWaitSlow, ReasonExecutionHung, ReasonSeriesNotEvaluated)
 	for _, outcome := range RunOutcomes {
 		reasons = append(reasons, ReasonCode(outcome))
 	}

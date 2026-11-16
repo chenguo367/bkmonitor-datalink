@@ -95,9 +95,11 @@ var warnCursorRefusals = makeReasonSet([]ReasonCode{
 })
 
 // warnSlotPathReasons are the Slot path's own words for a Slot attempt held
-// up: a wait inside it that outlasted a settling wait. It was written at
-// WARN as reason_not_reported and keeps it.
-var warnSlotPathReasons = makeReasonSet([]ReasonCode{ReasonSlotWaitSlow})
+// up: a wait inside it that outlasted a settling wait, written at WARN as
+// reason_not_reported before it had a word and keeping it; and a completed
+// Slot that bound series to a Plan and never took them up, a defect of this
+// deployment's own.
+var warnSlotPathReasons = makeReasonSet([]ReasonCode{ReasonSlotWaitSlow, ReasonSeriesNotEvaluated})
 
 // warnDecisionReasons are the scheduler decisions that say it could not
 // decide or could not do what it decided; the others are a replay or range

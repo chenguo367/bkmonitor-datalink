@@ -19,6 +19,11 @@ import (
 type rangeControl struct {
 	raw           []byte
 	failAt, calls int
+	// failTimes is how many calls from failAt on conflict: the store's
+	// record a write conflicts against is one the owner reads again and
+	// writes once more within the same call, so a conflict the call returns
+	// is two in a row. Zero is one.
+	failTimes int
 	// staleAt is the call the store answers as a stale owner: the Query
 	// Group moved while the Slot ran. movedAt is the call it answers as a
 	// moved content scope. Both come back as the store returns them, the
@@ -37,7 +42,7 @@ func (c *rangeControl) FencedCompareAndSet(_ context.Context, r ownership.Fenced
 	if c.calls == c.movedAt {
 		return ownership.FencedCASContentMoved, ownership.FencedCASRefusalError(ownership.FencedCASContentMoved)
 	}
-	if c.calls == c.failAt || !bytes.Equal(c.raw, r.Expected) {
+	if c.calls >= c.failAt && c.calls < c.failAt+max(c.failTimes, 1) || !bytes.Equal(c.raw, r.Expected) {
 		return ownership.FencedCASConflict, nil
 	}
 	c.raw = append([]byte(nil), r.Value...)
@@ -160,7 +165,9 @@ func testRangeTailGuardCommitConflict(t *testing.T, distance, committedFirst boo
 		}
 		return c
 	}
-	control.failAt = control.calls + 2 // Begin succeeds, Guard writes, Commit CAS conflicts.
+	// Begin succeeds, Guard writes, Commit CAS conflicts, and again when the
+	// commit reads the record again and writes it once more.
+	control.failAt, control.failTimes = control.calls+2, 2
 	result, err := newCoordinator(store).Execute(ctx, request)
 	if err == nil || result.Completed || len(fixture.ports.mutations) != 1 {
 		t.Fatalf("first result=%+v err=%v guards=%d", result, err, len(fixture.ports.mutations))

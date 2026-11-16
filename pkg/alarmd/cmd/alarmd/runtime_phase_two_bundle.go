@@ -827,6 +827,8 @@ func openProductionPhaseTwoBundleAssembly(
 		NoData: executionStore, NoDataEnds: executionStore, NoDataManualCloses: executionStore, Hosts: hostBusiness, State: executionStore, Progress: progressStore, Observer: observer,
 		SourceLiveness:    sourceLiveness,
 		ExecutionEvidence: slotAppliedMarks,
+		// How each BeginSlot went, and why a begun Slot was not written down.
+		SlotCounts: recorder,
 		// Linked only with the link's control plane: without it the copy is
 		// never refreshed and can never judge, and the worker keeps no
 		// no-data end index.
@@ -937,6 +939,7 @@ func openProductionPhaseTwoBundleAssembly(
 		QueryCooldowns:       newProductionQueryCooldownStore(cfg, redisForCaller(runtimeClient, redisfailure.CallerQueryCooldown), recorder, observer),
 		ReadHolds:            readHolds,
 		DropRuntimeWitnesses: dropWitnesses,
+		ForgetQueryGroup:     func(queryGroup execution.QueryGroupIdentity) { worker.ForgetQueryGroup(coordinator, queryGroup) },
 		Traces:               traces,
 		DecisionLag:          recorder.RecordDecisionLag,
 		Store:                ownershipStore, WorkerID: cfg.PhaseTwo.Worker.ID, Catalog: catalog, Progress: progressStore,

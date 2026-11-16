@@ -39,6 +39,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openepisodes"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/progress"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisscript"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scopeclose"
@@ -188,8 +189,42 @@ func TestKnownM0ReasonMapsToBoundedMetricValue(t *testing.T) {
 	if !strings.Contains(got, `reason_code="contract_deterministic"`) {
 		t.Fatalf("known M0 reason was not mapped to the bounded metric value:\n%s", got)
 	}
-	if strings.Contains(got, contract.ReasonRecordIdentityConflict) {
+	// The observation's reason_code label carries the class; the exact word
+	// stands only as slot_completed_reasons_total's own cell.
+	if strings.Contains(got, `reason_code="`+contract.ReasonRecordIdentityConflict+`"`) {
 		t.Fatalf("exact M0 reason leaked into metric labels:\n%s", got)
+	}
+}
+
+// Every word a Slot's end can be counted under is a cell at zero from the
+// start: the three words beside the catalogue and each catalogue code, none
+// twice.
+func TestEverySlotCompletedReasonIsACellFromTheStart(t *testing.T) {
+	t.Parallel()
+
+	recorder := NewRecorder(BuildInfo{})
+	got := scrape(t, recorder)
+	catalogue := contract.ReasonCatalogV2()
+	want := append(append([]string(nil), slotReasonWords...), func() []string {
+		codes := make([]string, 0, len(catalogue))
+		for _, definition := range catalogue {
+			codes = append(codes, definition.Code)
+		}
+		return codes
+	}()...)
+	seen := map[string]bool{}
+	for _, word := range want {
+		if seen[word] {
+			t.Fatalf("slot_completed reason %q is both a standing word and a catalogue code", word)
+		}
+		seen[word] = true
+		if line := `alarmd_slot_completed_reasons_total{reason="` + word + `"} 0`; !strings.Contains(got, line) {
+			t.Errorf("scrape lacks %s", line)
+		}
+	}
+	if len(want) != 129 || len(slotReasonCells()) != len(want) {
+		t.Fatalf("slot_completed reason cells = %d (built %d), want 129: three words and the catalogue's 126",
+			len(want), len(slotReasonCells()))
 	}
 }
 
@@ -864,10 +899,9 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		// that threw away a Slot in flight under every reason: all created at
 		// construction.
 		fqName("schedule_cursor_advance_total"): (len(observability.CursorAdvanceStatuses) - 1 + len(observability.CursorRefusals) + 1) * len(execution.ForwardSkipReasons),
-		// Every word of the contract catalogue, none, reason_not_reported and
-		// _other, created at construction.
-		// The standing cells, and every word of the contract catalogue a Slot
-		// may end with.
+		// none, reason_not_reported and _other, and every word of the
+		// contract catalogue, created at construction: none of the three is
+		// a catalogue code, so the two lists add up.
 		fqName("slot_completed_reasons_total"):    len(slotReasonWords) + len(contract.ReasonCatalogV2()),
 		fqName("activation_held_query_groups"):    1,
 		fqName("activation_held_age_seconds_max"): 1,
@@ -898,6 +932,11 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("state_cache_departures_total")] = len(state.StateCacheDepartureReasons)
 	bounds[fqName("state_cache_restored_total")] = len(state.StateCacheRestoreCauses)
 	bounds[fqName("state_cache_restore_declined_total")] = len(state.StateCacheDeclineReasons)
+	// Every caller by both sources; every BeginSlot status; every reason a
+	// begun Slot is not written down: all created at construction.
+	bounds[fqName("progress_reads_total")] = len(progress.ProgressReadCallers) * len(progress.ProgressReadSources)
+	bounds[fqName("slot_begin_total")] = len(execution.SlotBeginResults)
+	bounds[fqName("slot_not_committed_total")] = len(execution.SlotNotCommittedReasons)
 	bounds[fqName("state_cache_bytes")] = 1
 	bounds[fqName("state_cache_budget_bytes")] = 1
 	bounds[fqName("state_cache_query_groups")] = 1

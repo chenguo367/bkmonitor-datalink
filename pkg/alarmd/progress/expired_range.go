@@ -25,17 +25,24 @@ func (store *Store) changeRange(ctx context.Context, request execution.ExpiredRa
 	if err := request.Validate(); err != nil {
 		return execution.ExpiredRangeResult{}, err
 	}
-	p := request.Projection
-	kind, reason := p.CompletionKind(), p.CompletionReason()
-	identity := execution.ProgressIdentity{QueryGroup: p.First.Contract.Slot.QueryGroup}
+	identity := execution.ProgressIdentity{QueryGroup: request.Projection.First.Contract.Slot.QueryGroup}
 	name, err := store.namespace(identity)
 	if err != nil {
 		return execution.ExpiredRangeResult{}, err
 	}
-	raw, missing, err := store.options.Control.ReadControl(ctx, identity.QueryGroup, name)
-	if err != nil {
-		return rangeIO(), nil
-	}
+	return fencedWrite(ctx, store, ProgressReadRange, identity.QueryGroup, name, request.OwnerFence, rangeIO(),
+		func(result execution.ExpiredRangeResult) bool { return result.Status == execution.ProgressConflict },
+		func(raw []byte, missing bool) (execution.ExpiredRangeResult, error) {
+			return store.changeRangeOn(ctx, request, commit, identity, name, raw, missing)
+		})
+}
+
+// changeRangeOn is changeRange on the record raw (missing when there is
+// none).
+func (store *Store) changeRangeOn(ctx context.Context, request execution.ExpiredRangeRequest, commit bool,
+	identity execution.ProgressIdentity, name string, raw []byte, missing bool) (execution.ExpiredRangeResult, error) {
+	p := request.Projection
+	kind, reason := p.CompletionKind(), p.CompletionReason()
 	// A range only starts from an actually persisted NextSlot; cold starts
 	// retain the existing single Slot path.
 	if missing {
@@ -111,6 +118,7 @@ func (store *Store) changeRange(ctx context.Context, request execution.ExpiredRa
 		Fence: request.OwnerFence, Namespace: name, ContentScope: request.ContentScope,
 		Expected: raw, Value: value, TTL: 0,
 	})
+	store.settleWrite(identity.QueryGroup, request.OwnerFence, status, false, raw, value)
 	switch status {
 	case ownership.FencedCASApplied:
 		return execution.ExpiredRangeResult{Status: execution.ProgressCommitted}, nil

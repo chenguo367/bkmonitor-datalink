@@ -1017,6 +1017,13 @@ func (fake *controlFake) FencedCompareAndSet(_ context.Context, request ownershi
 	if status == "" {
 		status = ownership.FencedCASApplied
 	}
+	// Compared as the production script compares: a record written behind
+	// the owner (fake.value set by a test) is a conflict, which the owner
+	// reads again and writes over once more.
+	if status == ownership.FencedCASApplied &&
+		(request.ExpectedMissing != fake.missing || !fake.missing && !bytes.Equal(request.Expected, fake.value)) {
+		status = ownership.FencedCASConflict
+	}
 	if status == ownership.FencedCASApplied {
 		fake.value, fake.missing = append([]byte(nil), request.Value...), false
 	}

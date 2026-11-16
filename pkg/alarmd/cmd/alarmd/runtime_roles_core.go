@@ -373,6 +373,9 @@ func openPhaseTwoCoreResources(ctx context.Context, cfg config.Config, recorder 
 	progressStore, err := progress.NewStore(progress.StoreOptions{
 		Prefix: productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "schedule"), Control: ownershipStore,
 		Slots: catalog, Now: now, Observer: observer,
+		// The owner's reads of the record, by caller and by whether the
+		// key or the owner's record answered.
+		Reads: recorder.RecordProgressRead,
 	})
 	if err != nil {
 		return nil, err

@@ -55,9 +55,18 @@ type StoreOptions struct {
 	// Observer is optional. It receives observation-only facts about Progress
 	// decisions that replace a persisted value, such as a superseded projection.
 	Observer observability.Observer
+	// Reads is optional. It is told of every read the owner's calls make of
+	// the record, by caller and by whether the key or the owner's record
+	// answered it (progress_reads_total).
+	Reads func(caller, source string)
 }
 
-type Store struct{ options StoreOptions }
+type Store struct {
+	options StoreOptions
+	// owned is each Query Group's record as its owner last read or wrote it
+	// (owner_record.go).
+	owned ownerRecords
+}
 
 type envelope struct {
 	Schema   string                     `json:"schema"`
@@ -244,10 +253,35 @@ func (store *Store) BeginSlot(ctx context.Context, request execution.ProgressBeg
 	if err != nil {
 		return execution.ProgressBeginResult{}, err
 	}
-	raw, missing, err := store.options.Control.ReadControl(ctx, request.Identity.QueryGroup, name)
-	if err != nil {
-		return execution.ProgressBeginResult{Status: execution.ProgressRetryableIO, ReasonCode: execution.ReasonCode(contract.ReasonRedisUnavailable)}, nil
+	unread := execution.ProgressBeginResult{Status: execution.ProgressRetryableIO, ReasonCode: execution.ReasonCode(contract.ReasonRedisUnavailable)}
+	// A projection the attempt supersedes is reported once, from the record
+	// the write ended on: a write that conflicts on the owner's record and is
+	// made again would otherwise report it twice (fencedWrite).
+	var superseded func()
+	result, err := fencedWrite(ctx, store, ProgressReadBegin, request.Identity.QueryGroup, name, request.OwnerFence, unread,
+		func(result execution.ProgressBeginResult) bool {
+			// Judged on the owner's record, now read again: what that pass
+			// would have reported goes with it, though the read fails.
+			if result.Status == execution.ProgressConflict {
+				superseded = nil
+				return true
+			}
+			return false
+		},
+		func(raw []byte, missing bool) (execution.ProgressBeginResult, error) {
+			superseded = nil
+			return store.beginSlotOn(ctx, request, name, raw, missing, &superseded)
+		})
+	if superseded != nil {
+		superseded()
 	}
+	return result, err
+}
+
+// beginSlotOn is BeginSlot on the record raw (missing when there is none).
+func (store *Store) beginSlotOn(ctx context.Context, request execution.ProgressBeginRequest, name string, raw []byte, missing bool,
+	superseded *func()) (execution.ProgressBeginResult, error) {
+	var err error
 	current := execution.ScheduleProgress{Identity: request.Identity, NextSlot: request.Projection.Contract.Slot.EvaluationTime}
 	// abandoned is the unfinished Slot a later Segment skipped, reported once
 	// the write that records the skip applies.
@@ -273,7 +307,9 @@ func (store *Store) BeginSlot(ctx context.Context, request execution.ProgressBeg
 				// committed for it, so its projection replaces the persisted one,
 				// whether the Segment is the same or a later one now owns the time.
 				if !persisted.Equal(request.Projection) {
-					store.observeSupersededProjection(ctx, request.Identity.QueryGroup, persisted, request.Projection)
+					*superseded = func() {
+						store.observeSupersededProjection(ctx, request.Identity.QueryGroup, persisted, request.Projection)
+					}
 				}
 			case current.NextSlot != requested && newerSegment:
 				// A later Segment owns the unfinished Slot's time and moves the
@@ -318,6 +354,7 @@ func (store *Store) BeginSlot(ctx context.Context, request execution.ProgressBeg
 		Fence: request.OwnerFence, Namespace: name, ContentScope: request.ContentScope,
 		ExpectedMissing: missing, Expected: raw, Value: encoded, TTL: 0,
 	})
+	store.settleWrite(request.Identity.QueryGroup, request.OwnerFence, status, missing, raw, encoded)
 	switch status {
 	case ownership.FencedCASApplied:
 		if abandoned != nil {
@@ -347,10 +384,17 @@ func (store *Store) CommitProgress(ctx context.Context, request execution.Progre
 	if err != nil {
 		return execution.ProgressCommitResult{}, err
 	}
-	raw, missing, err := store.options.Control.ReadControl(ctx, request.Identity.QueryGroup, name)
-	if err != nil {
-		return retryable(), nil
-	}
+	return fencedWrite(ctx, store, ProgressReadCommit, request.Identity.QueryGroup, name, request.OwnerFence, retryable(),
+		func(result execution.ProgressCommitResult) bool { return result.Status == execution.ProgressConflict },
+		func(raw []byte, missing bool) (execution.ProgressCommitResult, error) {
+			return store.commitProgressOn(ctx, request, name, raw, missing)
+		})
+}
+
+// commitProgressOn is CommitProgress on the record raw (missing when there
+// is none).
+func (store *Store) commitProgressOn(ctx context.Context, request execution.ProgressCommitRequest, name string, raw []byte, missing bool) (
+	execution.ProgressCommitResult, error) {
 	var current execution.ScheduleProgress
 	if !missing {
 		var decodeErr error
@@ -422,6 +466,7 @@ func (store *Store) CommitProgress(ctx context.Context, request execution.Progre
 		Fence: request.OwnerFence, Namespace: name, ContentScope: request.ContentScope,
 		ExpectedMissing: missing, Expected: raw, Value: encoded, TTL: 0,
 	})
+	store.settleWrite(request.Identity.QueryGroup, request.OwnerFence, status, missing, raw, encoded)
 	switch status {
 	case ownership.FencedCASApplied:
 		return execution.ProgressCommitResult{Status: execution.ProgressCommitted}, nil
@@ -838,10 +883,18 @@ func (store *Store) SkipPrunedRange(ctx context.Context, request execution.Progr
 	if err != nil {
 		return execution.ProgressSkipResult{}, err
 	}
-	raw, missing, err := store.options.Control.ReadControl(ctx, request.Identity.QueryGroup, name)
-	if err != nil {
-		return execution.ProgressSkipResult{Status: execution.ProgressRetryableIO}, nil
-	}
+	return fencedWrite(ctx, store, ProgressReadSkip, request.Identity.QueryGroup, name, request.OwnerFence,
+		execution.ProgressSkipResult{Status: execution.ProgressRetryableIO},
+		func(result execution.ProgressSkipResult) bool { return result.Status == execution.ProgressConflict },
+		func(raw []byte, missing bool) (execution.ProgressSkipResult, error) {
+			return store.skipPrunedRangeOn(ctx, request, name, raw, missing)
+		})
+}
+
+// skipPrunedRangeOn is SkipPrunedRange on the record raw (missing when there
+// is none).
+func (store *Store) skipPrunedRangeOn(ctx context.Context, request execution.ProgressSkipPrunedRequest, name string, raw []byte,
+	missing bool) (execution.ProgressSkipResult, error) {
 	if missing {
 		return execution.ProgressSkipResult{Status: execution.ProgressConflict, Refusal: execution.SkipRefusalProgressMissing}, nil
 	}
@@ -881,6 +934,7 @@ func (store *Store) SkipPrunedRange(ctx context.Context, request execution.Progr
 		Fence: request.OwnerFence, Namespace: name,
 		ExpectedMissing: false, Expected: raw, Value: encoded, TTL: 0,
 	})
+	store.settleWrite(request.Identity.QueryGroup, request.OwnerFence, status, false, raw, encoded)
 	switch status {
 	case ownership.FencedCASApplied:
 		return execution.ProgressSkipResult{Status: execution.ProgressCommitted, InFlightSlot: inFlight}, nil
