@@ -86,7 +86,11 @@ func sliceableFacts() *execution.QueryPlanFacts {
 
 // slicedCall is what one query of the Slot asked and was answered.
 type slicedCall struct {
-	slice     execution.InputSlice
+	slice execution.InputSlice
+	// ctx is the context the read ran under, and readAhead whether a read
+	// ahead of the Slot's made it (its consumer the read ahead's).
+	ctx       context.Context
+	readAhead bool
 	delivered []string
 	padding   int
 	completed bool
@@ -167,7 +171,7 @@ func (source *slicedSource) holding(slice execution.InputSlice) int {
 func (source *slicedSource) Execute(ctx context.Context, request execution.QueryExecutionRequest, consumer execution.QueryExecutionConsumer) (execution.QueryExecutionCompletion, error) {
 	source.started.Add(1)
 	source.ports.record("query")
-	call := slicedCall{slice: request.Slice}
+	call := slicedCall{slice: request.Slice, ctx: ctx, readAhead: fmt.Sprintf("%T", consumer) == "*worker.sliceReadAhead"}
 	if source.timeoutWhole && request.Slice.IsZero() || source.timeoutBySize && source.holding(request.Slice) >= source.timeoutHolding {
 		completion, err := source.timedOutRead(ctx, request, consumer, &call)
 		source.mu.Lock()

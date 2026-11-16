@@ -49,7 +49,7 @@ func TestABudgetHitAfterWindowsKeepsTheMemoryOfAFullyLandedPlanAndWritesNoneForA
 			{Plan: landed.Identity, Disposition: execution.PlanDecided}, {Plan: cut.Identity, Disposition: execution.PlanDecided}}}
 	stream.windows.started = true
 	stream.windows.apply = &slotApply{coordinator: stream.coordinator, request: stream.request, header: stream.header,
-		withheldNoData: make(map[execution.PlanIdentity]struct{})}
+		withheldNoData: make(map[execution.PlanIdentity]struct{}), attemptCensus: &attemptCensus{}}
 	// Judged in Plan order, as evaluateNoData judges them, each with its
 	// memory; the evaluation is on the second's synthetic series.
 	for _, due := range stream.header.DuePlans {

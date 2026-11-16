@@ -56,7 +56,7 @@ func TestTheSlotsEndSettlesOnlyAnAttemptItsCompletionDidNot(t *testing.T) {
 		}
 	})
 	ctx, sink := withSlotCensusSink(context.Background())
-	settled, failed := &slotApply{coordinator: coordinator}, &slotApply{coordinator: coordinator}
+	settled, failed := &slotApply{coordinator: coordinator, attemptCensus: &attemptCensus{}}, &slotApply{coordinator: coordinator, attemptCensus: &attemptCensus{}}
 	registerSlotApply(ctx, settled)
 	registerSlotApply(ctx, failed)
 	for _, apply := range []*slotApply{settled, failed} {
@@ -89,7 +89,7 @@ func TestACompletedAttemptsRestIsUnaccountedEitherWay(t *testing.T) {
 		coordinator.ports.Observer = observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
 			lines = append(lines, observation)
 		})
-		apply := &slotApply{coordinator: coordinator}
+		apply := &slotApply{coordinator: coordinator, attemptCensus: &attemptCensus{}}
 		for range 3 {
 			apply.frozenRenewals.RecordSeriesClass(observability.StateSeriesClassStableNormal, observability.StateSeriesReal)
 		}

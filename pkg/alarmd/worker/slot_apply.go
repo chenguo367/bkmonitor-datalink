@@ -56,10 +56,9 @@ type slotApply struct {
 	// the rule every terminal completion follows. Neither waits on anything,
 	// so neither is retried.
 	deterministicTerminalReason execution.ReasonCode
-	// frozenRenewals is one reading per Slot rather than per Plan: the
-	// question is how many of this Slot's keys were read and not written,
-	// and a Plan is not a population anyone reads that against.
-	frozenRenewals observability.FrozenStateRenewalFacts
+	// attemptCensus is this attempt's census, shared with the Slot's
+	// census sink (registerSlotApply).
+	*attemptCensus
 	// withheldNoData is the Plans whose output did not all land this
 	// attempt. Their no-data memory is not applied: the memory follows the
 	// output exactly as State does (output acknowledged, then State and
@@ -69,25 +68,40 @@ type slotApply struct {
 	// the next round finds no group and says nothing, and the alert stays
 	// open.
 	withheldNoData map[execution.PlanIdentity]struct{}
-	// written is how many State keys this attempt's applies wrote, for the
-	// census the frozen renewals are read against.
-	written int
 	// keys is every State key this Slot has asked the store to write or
 	// renew, held for a Slot applied window by window (slotStateKeys); nil
 	// for a Slot applied whole.
 	keys slotStateKeys
+}
+
+// attemptCensus is what one attempt's census is reported from, counts only:
+// the Slot's census sink holds it, and nothing else of the attempt.
+type attemptCensus struct {
+	// frozenRenewals is one reading per Slot rather than per Plan: the
+	// question is how many of this Slot's keys were read and not written,
+	// and a Plan is not a population anyone reads that against.
+	frozenRenewals observability.FrozenStateRenewalFacts
+	// written is how many State keys this attempt's applies wrote, for the
+	// census the frozen renewals are read against.
+	written int
 	// censused is set once this attempt's census is reported, by its
 	// completion or, for an attempt that failed, by the Slot's end
 	// (settleSlotCensus): one report per attempt, whichever way it ended.
 	censused bool
 }
 
-// slotCensusSink is the attempts of one Slot execution's writes, for the
-// Slot's end to report the census of any that did not complete: an attempt
-// that fails returns before its completion, and its census - the series it
-// admitted, and the ones of them it wrote before it failed - would otherwise
-// go unreported.
-type slotCensusSink struct{ applies []*slotApply }
+// slotCensusSink is the censuses of one Slot execution's attempts, for the
+// Slot's end to report any that did not complete: an attempt that fails
+// returns before its completion, and its census - the series it admitted,
+// and the ones of them it wrote before it failed - would otherwise go
+// unreported.
+//
+// It is on the Slot's context, and holds the counts alone: a context kept
+// past the Slot - a child of it never cancelled stays among its runner's
+// children - keeps what the sink holds, and an attempt's State keys, the
+// identities of every series it wrote, are a Slot's worth of memory. The
+// Slot's end empties it.
+type slotCensusSink struct{ attempts []*attemptCensus }
 
 type slotCensusSinkKey struct{}
 
@@ -98,7 +112,7 @@ func withSlotCensusSink(ctx context.Context) (context.Context, *slotCensusSink) 
 
 func registerSlotApply(ctx context.Context, apply *slotApply) {
 	if sink, _ := ctx.Value(slotCensusSinkKey{}).(*slotCensusSink); sink != nil {
-		sink.applies = append(sink.applies, apply)
+		sink.attempts = append(sink.attempts, apply.attemptCensus)
 	}
 }
 
@@ -112,8 +126,13 @@ func registerSlotApply(ctx context.Context, apply *slotApply) {
 // too, by the difference: the reading cannot hold then - the census itself
 // counted wrong - and the line says so.
 func (apply *slotApply) settledCensus(ctx context.Context, census seriesCensus, failed bool) observability.FrozenStateRenewalFacts {
-	apply.censused = true
-	facts := apply.frozenRenewals
+	return apply.attemptCensus.settled(ctx, apply.coordinator, apply.request.Operation, census, failed)
+}
+
+func (attempt *attemptCensus) settled(ctx context.Context, coordinator *SlotExecutionCoordinator, operation execution.Operation,
+	census seriesCensus, failed bool) observability.FrozenStateRenewalFacts {
+	attempt.censused = true
+	facts := attempt.frozenRenewals
 	facts.CloneSeriesWrites()
 	facts.RecordCensus(census.Due, census.Read, census.Written)
 	rest := facts.Admitted() - int64(census.Written) - facts.NotWrittenTotal()
@@ -122,9 +141,9 @@ func (apply *slotApply) settledCensus(ctx context.Context, census seriesCensus, 
 		facts.RecordNotWritten(observability.StateNotWrittenSlotFailed, int(rest))
 	case rest != 0:
 		facts.RecordNotWritten(observability.StateNotWrittenUnaccounted, int(max(rest, -rest)))
-		apply.coordinator.emitObservation(ctx, observability.Observation{
+		coordinator.emitObservation(ctx, observability.Observation{
 			Component: observability.ComponentState, Stage: observability.StageFrozenStateRenewed,
-			Operation: observability.Operation(apply.request.Operation),
+			Operation: observability.Operation(operation),
 			Err: fmt.Errorf("alarmd worker: State census unaccounted: admitted %d, written %d, not written %d",
 				facts.Admitted(), census.Written, facts.NotWrittenTotal()-max(rest, -rest)),
 		})
@@ -137,13 +156,15 @@ func (apply *slotApply) settledCensus(ctx context.Context, census seriesCensus, 
 // the rest it admitted as slot_failed.
 func (coordinator *SlotExecutionCoordinator) settleSlotCensus(ctx context.Context, operation execution.Operation,
 	sink *slotCensusSink, census seriesCensus) {
-	for _, apply := range sink.applies {
-		if apply.censused {
+	attempts := sink.attempts
+	sink.attempts = nil
+	for _, attempt := range attempts {
+		if attempt.censused {
 			continue
 		}
-		attempt := census
-		attempt.Written += apply.written
-		coordinator.observeFrozenStateRenewal(ctx, operation, apply.settledCensus(ctx, attempt, true))
+		failed := census
+		failed.Written += attempt.written
+		coordinator.observeFrozenStateRenewal(ctx, operation, attempt.settled(ctx, coordinator, operation, failed, true))
 	}
 }
 
@@ -201,6 +222,7 @@ func (coordinator *SlotExecutionCoordinator) readSlotActivations(
 		changedPlans: changedPlans, changedActivations: changedActivations,
 		forced:         unsatisfiedForcedWarmingActivations(guardActivations, loadedGaps, changedPlans),
 		withheldNoData: make(map[execution.PlanIdentity]struct{}),
+		attemptCensus:  &attemptCensus{},
 	}
 	registerSlotApply(ctx, apply)
 	return apply, true

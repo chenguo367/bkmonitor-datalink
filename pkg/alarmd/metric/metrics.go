@@ -98,6 +98,10 @@ func NewRecorder(build BuildInfo) *Recorder {
 		collectors.NewGoCollector(collectors.WithGoCollectorRuntimeMetrics(
 			collectors.GoRuntimeMetricsRule{Matcher: regexp.MustCompile(`^/cpu/classes/`)},
 			collectors.GoRuntimeMetricsRule{Matcher: regexp.MustCompile(`^/sched/latencies:seconds$`)},
+			// The memory limit and GC percent the process runs under, as the
+			// runtime holds them: set in the process from the container's
+			// limit (applyPhaseTwoGoRuntime), with no other reading of them.
+			collectors.GoRuntimeMetricsRule{Matcher: regexp.MustCompile(`^/gc/(gogc:percent|gomemlimit:bytes)$`)},
 		)),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		// Where the live heap comes from, by allocating function; see heap_sites.go.

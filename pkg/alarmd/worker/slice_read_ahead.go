@@ -150,6 +150,12 @@ func (stream *streamedExecution) startSliceReadAhead(ctx context.Context, reques
 	query := stream.coordinator.ports.Query
 	go func() {
 		defer close(ahead.done)
+		// The read's context ends with the read, however the Slot takes it
+		// on - replayed, failed or let go (stop). It is a child of the
+		// Slot's, which is the Query Group's runner's: one never cancelled
+		// stays among the runner's children, and with it everything the
+		// Slot's context carries, for as long as the runner runs.
+		defer cancel()
 		completion, err := query.Execute(readCtx, request, ahead)
 		ahead.mu.Lock()
 		ahead.completion, ahead.err = completion, err
