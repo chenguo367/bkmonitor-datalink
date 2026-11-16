@@ -31,9 +31,20 @@ func TestEveryBudgetUsageNumberReachesTheRowItIsReportedOn(t *testing.T) {
 			field.SetUint(uint64(index) + 1)
 		case reflect.String:
 			field.SetString(strconv.Itoa(index + 1))
+		case reflect.Array:
+			// A count by a closed set (SeriesNotEvaluated, by family): each
+			// element a value of its own, so one copied to another's place
+			// fails as a field copied from another field does.
+			if field.Type().Elem().Kind() != reflect.Uint64 {
+				t.Fatalf("%s is an array of %s; this case only knows arrays of uint64",
+					source.Type().Field(index).Name, field.Type().Elem().Kind())
+			}
+			for element := range field.Len() {
+				field.Index(element).SetUint(uint64(index+1)*1000 + uint64(element) + 1)
+			}
 		default:
 			t.Fatalf("%s is a %s; this case gives every field a distinct value and only knows how to do that "+
-				"for uint64 and string", source.Type().Field(index).Name, field.Kind())
+				"for uint64, string and arrays of uint64", source.Type().Field(index).Name, field.Kind())
 		}
 	}
 
