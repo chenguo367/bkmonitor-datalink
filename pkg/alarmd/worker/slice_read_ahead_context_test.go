@@ -48,3 +48,41 @@ func TestEveryReadAheadsContextIsCancelledByTheSlotsEnd(t *testing.T) {
 		t.Fatalf("%d reads ahead, runner ended %v: want reads ahead under a live runner", aheads, runner.Err())
 	}
 }
+
+// A read ahead replayed - handed to the Slot as its slice's read - keeps its
+// context for as long as the Slot goes on, as a read the Slot made itself
+// does: what it handed on is the Slot's, and the Slot goes on with it after
+// the read has ended - it reads the slices after it. Its context ends with
+// the Slot. Each read asked looks at the reads ahead completed before it.
+func TestAReplayedReadsContextLivesUntilTheSlotEnds(t *testing.T) {
+	fixture, request := shapedFixture(t)
+	var ended []string
+	fixture.source.beforeRead = func() {
+		fixture.source.mu.Lock()
+		defer fixture.source.mu.Unlock()
+		for _, call := range fixture.source.calls {
+			if call.readAhead && call.completed && call.ctx.Err() != nil {
+				ended = append(ended, call.slice.Digest())
+			}
+		}
+	}
+	runner, stop := context.WithCancel(context.Background())
+	defer stop()
+	fixture.source.mu.Lock()
+	fixture.source.calls = nil
+	fixture.source.mu.Unlock()
+	result, err := fixture.coordinator.Execute(runner, request)
+	fixture.source.beforeRead = nil
+	if err != nil || !result.Completed || result.Usage.InputSlicesReadAhead < 2 {
+		t.Fatalf("result=%+v err=%v, want it completed, slices read ahead and replayed before others read", result, err)
+	}
+	if let := result.Usage.InputSlicesReadAheadOtherLeaf + result.Usage.InputSlicesReadAheadYielded + result.Usage.InputSlicesReadAheadFailed; let != 0 {
+		t.Fatalf("%d reads ahead let go, want every one replayed", let)
+	}
+	if len(ended) != 0 {
+		t.Fatalf("slices were read after replayed reads %v had their contexts ended, want them live until the Slot ends", ended)
+	}
+	if lost := result.Usage.SeriesNotEvaluated; lost != ([len(lost)]uint64{}) {
+		t.Fatalf("series bound and not taken up %v, want every series the slices answered taken up", lost)
+	}
+}

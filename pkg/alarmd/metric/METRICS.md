@@ -2665,6 +2665,12 @@ Labels: `queue`
 
 Callers queued for a permit at the moment of the scrape, by queue. Non-zero means the budget is the constraint right now; zero does NOT mean it has spare room, because a caller that is admitted immediately never appears here.
 
+## alarmd_worker_series_not_evaluated_total
+
+Labels: `algorithm_family`, `reason`
+
+PRIMARY series a completed Slot bound to a due Plan from what its queries answered that reached no evaluation, no resume and no skip, by the Plan's algorithm family (none: no family the algorithm counters name; a Plan of several counts under each) and reason. Zero is the reading: a series answered and never decided is lost without any other count. reason is delivered_not_taken_up, the one reason.
+
 ## alarmd_worker_slice_memory_entries
 
 Labels: `kind`
@@ -2681,7 +2687,7 @@ Query Groups this worker keeps a sliced-input memory for, at the scrape, by scop
 
 Labels: `outcome`
 
-How the slices read ahead - read while the slice before completed - ended, by outcome: replayed, handed to the Slot; other_leaf, let go because the next slice was another; yielded, let go for a reservation of the Slot's own the share or the pool would otherwise refuse; failed, let go because the read failed before it was handed on. Every slice let go is read again on the Slot's goroutine. Counted from completed Slots.
+How the slices read ahead - read while the slice before completed - ended, by outcome: replayed, handed to the Slot; other_leaf, let go because the next slice was another; yielded, let go for a reservation of the Slot's own the share or the pool would otherwise refuse; failed, let go because the read failed before it was handed on; context_ended, refused because its read ended with its context ended, what it answered then not taken for the slice - read again, or the Slot failed once its series were the Slot's. Every slice let go is read again on the Slot's goroutine. Counted from completed Slots.
 
 ## alarmd_worker_sliced_slots_total
 

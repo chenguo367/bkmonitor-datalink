@@ -354,6 +354,11 @@ var failureFacets = map[string]facets{
 	// or a partial answer does not say where the time went.
 	"QUERY_TIMEOUT":     {StageQuery, ClassTimeout, ""},
 	"QUERY_UNAVAILABLE": {StageQuery, ClassUnavailable, ""},
+	// A read ahead answered as if whole after its context ended (the runner
+	// stopping the Slot): no usable answer, as QUERY_UNAVAILABLE, its
+	// dependency the evidence's (finding.go's codeChecks says why it is not
+	// this deployment's defect).
+	"READ_AHEAD_CONTEXT_ENDED": {StageQuery, ClassUnavailable, ""},
 	// Answered and refused as written: the provider read the query and will
 	// not run it (a client error other than 408 and 429). The strategy's,
 	// not the storage's.

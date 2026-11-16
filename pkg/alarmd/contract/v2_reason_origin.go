@@ -105,6 +105,7 @@ var reasonSourcesV2 = map[string]ReasonSourceV2{
 	ReasonInputSliceUnsupported:       ReasonSourceMet,
 	ReasonInputSliceValueConcentrated: ReasonSourceMet,
 	ReasonInputSliceQueryTooLong:      ReasonSourceMet,
+	ReasonReadAheadContextEnded:       ReasonSourceMet,
 	ReasonResourceHardStop:            ReasonSourceMet,
 	ReasonResourcePoolHeldByOthers:    ReasonSourceMet,
 	ReasonSlotBudgetExceeded:          ReasonSourceMet,

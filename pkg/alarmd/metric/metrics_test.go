@@ -562,6 +562,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("worker_sliced_slots_total"):                    1,
 		fqName("worker_first_seen_unseen_total"):               2,
 		fqName("worker_slice_read_ahead_total"):                len(observability.SliceReadAheadOutcomes),
+		fqName("worker_series_not_evaluated_total"):            len(observability.SeriesNotEvaluatedFamilies),
 		fqName("worker_input_slice_timeouts_total"):            len(observability.InputSliceTimeoutOutcomes),
 		fqName("worker_input_slice_shapes_total"):              len(observability.InputSliceShapeOutcomes),
 		fqName("worker_no_data_stage_ahead_total"):             len(observability.NoDataStageAheadOutcomes),

@@ -3579,6 +3579,7 @@ func slotBudgetUsageFacts(usage execution.SlotBudgetUsage) *observability.SlotBu
 		FirstSeenUnseenSlices: usage.FirstSeenUnseenSlices, FirstSeenUnseenSeries: usage.FirstSeenUnseenSeries,
 		InputSlicesReadAhead: usage.InputSlicesReadAhead, InputSlicesReadAheadOtherLeaf: usage.InputSlicesReadAheadOtherLeaf,
 		InputSlicesReadAheadYielded: usage.InputSlicesReadAheadYielded, InputSlicesReadAheadFailed: usage.InputSlicesReadAheadFailed,
+		InputSlicesReadAheadContextEnded: usage.InputSlicesReadAheadContextEnded, SeriesNotEvaluated: usage.SeriesNotEvaluated,
 		InputSliceTimeouts:                  usage.InputSliceTimeouts,
 		InputSliceShapeStarted:              usage.InputSliceShapeStarted,
 		InputSliceShapeKept:                 usage.InputSliceShapeKept,

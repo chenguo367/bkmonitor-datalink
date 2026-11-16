@@ -107,6 +107,7 @@ type phaseTwoMetrics struct {
 	slicedSlots                    prometheus.Counter
 	firstSeenUnseen                *prometheus.CounterVec
 	sliceReadAhead                 *prometheus.CounterVec
+	seriesNotEvaluated             *prometheus.CounterVec
 	inputSliceTimeouts             *prometheus.CounterVec
 	inputSliceShapes               *prometheus.CounterVec
 	noDataStagesAhead              *prometheus.CounterVec
@@ -970,8 +971,19 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		Name: "worker_slice_read_ahead_total", Help: "How the slices read ahead - read while the slice before completed - ended, by outcome: replayed, " +
 			"handed to the Slot; other_leaf, let go because the next slice was another; yielded, let go for a " +
 			"reservation of the Slot's own the share or the pool would otherwise refuse; failed, let go because " +
-			"the read failed before it was handed on. Every slice let go is read again on the Slot's goroutine. " +
+			"the read failed before it was handed on; context_ended, refused because its read ended with its context " +
+			"ended, what it answered then not taken for the slice - read again, or the Slot failed once its series " +
+			"were the Slot's. Every slice let go is read again on the Slot's goroutine. " +
 			"Counted from completed Slots."}, []string{"outcome"})
+	metrics.seriesNotEvaluated = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem,
+		Name: "worker_series_not_evaluated_total", Help: "PRIMARY series a completed Slot bound to a due Plan from what its " +
+			"queries answered that reached no evaluation, no resume and no skip, by the Plan's algorithm family (none: no " +
+			"family the algorithm counters name; a Plan of several counts under each) and reason. Zero is the reading: a " +
+			"series answered and never decided is lost without any other count. reason is delivered_not_taken_up, the " +
+			"one reason."}, []string{"algorithm_family", "reason"})
+	for _, family := range observability.SeriesNotEvaluatedFamilies {
+		metrics.seriesNotEvaluated.WithLabelValues(family, "delivered_not_taken_up")
+	}
 	for _, outcome := range []string{"landed", "discarded"} {
 		metrics.inputSlices.WithLabelValues(outcome)
 	}
@@ -2298,7 +2310,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.queryAdmission, m.queryDownstreamDistress,
 		m.noDataSlotPlans, m.noDataAbsences, m.noDataManualCloseDropped, m.noDataManualCloseReadFailures, m.targetPlanResolutions, m.targetSelectorResolutions, m.targetExcludedAbsentMembers, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.inPlaceWaits, m.inPlaceHeldInputBytes, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetRedis,
-		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.retainedShareApproaching, m.inputSlices, m.slicedSlots, m.firstSeenUnseen, m.sliceReadAhead, m.inputSliceTimeouts, m.inputSliceShapes, m.noDataStagesAhead, m.noDataStageAheadDiffers, m.noDataGroupsStagedAhead, m.schedulePruneSkipped, m.scheduleCutoverDuration,
+		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.retainedShareApproaching, m.inputSlices, m.slicedSlots, m.firstSeenUnseen, m.sliceReadAhead, m.seriesNotEvaluated, m.inputSliceTimeouts, m.inputSliceShapes, m.noDataStagesAhead, m.noDataStageAheadDiffers, m.noDataGroupsStagedAhead, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
 		m.scheduleCutoverQueryGroups, m.scheduleCutoverReadHoldLinks, m.fleetOverdueEpisodes, m.fleetRestoreUnread, m.scheduleCutoverTimelinesRead, m.scheduleCutoverFirstDuration,
 		m.scheduleCutoverFirstTimelines, m.replayExpiries, m.replayTakeovers, m.slotDiversions, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
@@ -3547,8 +3559,11 @@ func (m phaseTwoMetrics) observeSlicing(usage *observability.SlotBudgetUsageFact
 	m.firstSeenUnseen.WithLabelValues("slices").Add(float64(usage.FirstSeenUnseenSlices))
 	m.firstSeenUnseen.WithLabelValues("series").Add(float64(usage.FirstSeenUnseenSeries))
 	for outcome, count := range [...]uint64{usage.InputSlicesReadAhead, usage.InputSlicesReadAheadOtherLeaf,
-		usage.InputSlicesReadAheadYielded, usage.InputSlicesReadAheadFailed} {
+		usage.InputSlicesReadAheadYielded, usage.InputSlicesReadAheadFailed, usage.InputSlicesReadAheadContextEnded} {
 		m.sliceReadAhead.WithLabelValues(observability.SliceReadAheadOutcomes[outcome]).Add(float64(count))
+	}
+	for index, count := range usage.SeriesNotEvaluated {
+		m.seriesNotEvaluated.WithLabelValues(observability.SeriesNotEvaluatedFamilies[index], "delivered_not_taken_up").Add(float64(count))
 	}
 	m.inputSliceTimeouts.WithLabelValues(observability.InputSliceTimeoutSplitSucceeded).Add(float64(usage.InputSliceTimeouts))
 	for outcome, count := range [...]uint64{usage.InputSliceShapeStarted, usage.InputSliceShapeKept, usage.InputSliceShapeMerged, usage.InputSliceShapeVoidedRevision, usage.InputSliceShapeVoidedDimensions, usage.InputSliceShapeVoidedMaxLeaves, usage.InputSliceShapeRefusedNotALeaf, usage.InputSliceShapeRefusedNotAPartition, usage.InputSliceShapeRefusedMaxLeaves, usage.InputSliceShapeEvictedIdle} {

@@ -311,6 +311,12 @@ const (
 	ReasonInputSliceUnsupported       = "INPUT_SLICE_UNSUPPORTED"
 	ReasonInputSliceValueConcentrated = "INPUT_SLICE_VALUE_CONCENTRATED"
 	ReasonInputSliceQueryTooLong      = "INPUT_SLICE_QUERY_TOO_LONG"
+	// ReasonReadAheadContextEnded names a Slot that took on a slice read
+	// ahead whose read then ended with its context ended: its series were
+	// the Slot's already, and what came after them may be missing, so the
+	// Slot fails rather than complete on part of a slice. Retryable: the
+	// retry reads the slice again.
+	ReasonReadAheadContextEnded = "READ_AHEAD_CONTEXT_ENDED"
 	// ReasonSupplementKeptReadAbsent names a supplement of a Slot whose
 	// queries, planned again from the Slot's frozen plan, are not all the
 	// query the lookback kept the late read of. Nothing is run and nothing

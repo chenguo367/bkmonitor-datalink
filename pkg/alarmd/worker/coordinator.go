@@ -808,6 +808,9 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	// that produced it. A Slot that ends any other way has no usage to report
 	// rather than a usage of zero, and the two must not arrive as one number.
 	result.Usage = stream.budgetUsage()
+	// Only a Slot that took its every series up the way through says what
+	// it bound and never took up: one that ended before is short of it.
+	result.Usage.SeriesNotEvaluated = stream.seriesNotEvaluated()
 	result.Timing = stream.timing()
 	result.InPlaceWait = completion.InPlaceWait
 	result.PhysicalQueryLoss = physicalLoss
@@ -880,6 +883,7 @@ func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 		FirstSeenUnseenSlices: stream.unseenSlices(), FirstSeenUnseenSeries: stream.unseenSeries(),
 		InputSlicesReadAhead: stream.readAheadEnds[readAheadReplayed], InputSlicesReadAheadOtherLeaf: stream.readAheadEnds[readAheadOtherLeaf],
 		InputSlicesReadAheadYielded: stream.readAheadEnds[readAheadYielded], InputSlicesReadAheadFailed: stream.readAheadEnds[readAheadFailed],
+		InputSlicesReadAheadContextEnded:    stream.readAheadEnds[readAheadContextEnded],
 		InputSliceTimeouts:                  stream.sliceTimeoutsSplit(),
 		InputSliceShapeStarted:              shapes[0],
 		InputSliceShapeKept:                 shapes[1],

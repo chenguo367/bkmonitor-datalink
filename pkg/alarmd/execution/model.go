@@ -4838,6 +4838,14 @@ type SlotBudgetUsage struct {
 	InputSlicesReadAheadOtherLeaf uint64
 	InputSlicesReadAheadYielded   uint64
 	InputSlicesReadAheadFailed    uint64
+	// InputSlicesReadAheadContextEnded is the reads ahead refused for their
+	// read having ended with its context ended.
+	InputSlicesReadAheadContextEnded uint64
+	// SeriesNotEvaluated is the series the Slot bound to a Plan, PRIMARY,
+	// that never reached its evaluation, its resume or its skip, by the
+	// Plan's algorithm family in the order of
+	// observability.SeriesNotEvaluatedFamilies: zero is the reading.
+	SeriesNotEvaluated [observability.SeriesNotEvaluatedFamilyCount]uint64
 	// InputSliceTimeouts is the slices of a completed Slot that ran out of
 	// time and were split and read again (split_succeeded): at most one.
 	InputSliceTimeouts uint64

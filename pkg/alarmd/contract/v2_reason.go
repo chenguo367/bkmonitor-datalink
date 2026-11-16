@@ -179,6 +179,8 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	ReasonInputSliceUnsupported:       {ReasonInputSliceUnsupported, ReasonClassDeterministic, ReasonDomainObservation},
 	ReasonInputSliceValueConcentrated: {ReasonInputSliceValueConcentrated, ReasonClassDeterministic, ReasonDomainObservation},
 	ReasonInputSliceQueryTooLong:      {ReasonInputSliceQueryTooLong, ReasonClassDeterministic, ReasonDomainObservation},
+	// Retryable: the retry reads the slice on its own.
+	ReasonReadAheadContextEnded: {ReasonReadAheadContextEnded, ReasonClassRetryable, ReasonDomainObservation},
 	// Deterministic: the kept read is the one the lookback made, and a retry
 	// of the supplement asks it for the same query it does not hold.
 	ReasonSupplementKeptReadAbsent: {ReasonSupplementKeptReadAbsent, ReasonClassDeterministic, ReasonDomainObservation},

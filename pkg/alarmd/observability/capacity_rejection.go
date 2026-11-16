@@ -113,6 +113,15 @@ type SlotBudgetUsageFacts struct {
 	InputSlicesReadAheadOtherLeaf uint64 `json:"input_slices_read_ahead_other_leaf,omitempty"`
 	InputSlicesReadAheadYielded   uint64 `json:"input_slices_read_ahead_yielded,omitempty"`
 	InputSlicesReadAheadFailed    uint64 `json:"input_slices_read_ahead_failed,omitempty"`
+	// InputSlicesReadAheadContextEnded is the reads ahead refused, their read
+	// having ended with its context ended (SliceReadAheadOutcomes'
+	// context_ended).
+	InputSlicesReadAheadContextEnded uint64 `json:"input_slices_read_ahead_context_ended,omitempty"`
+	// SeriesNotEvaluated is the PRIMARY series the Slot bound to a Plan that
+	// never reached its evaluation, its resume or its skip, by the Plan's
+	// algorithm family (AlgorithmFamily, or none): absent is none lost.
+	// In the order of SeriesNotEvaluatedFamilies.
+	SeriesNotEvaluated [SeriesNotEvaluatedFamilyCount]uint64 `json:"series_not_evaluated"`
 	// InputSliceTimeouts is the slices that ran out of time and were split
 	// and read again, the Slot completing: at most one a Slot.
 	InputSliceTimeouts uint64 `json:"input_slice_timeouts,omitempty"`
@@ -239,8 +248,24 @@ type SlotTimingFacts struct {
 
 // SliceReadAheadOutcomes are the words for how a slice read ahead ended, in
 // the order of the SlotBudgetUsageFacts fields that count them: replayed
-// (InputSlicesReadAhead), other_leaf, yielded and failed.
-var SliceReadAheadOutcomes = [4]string{"replayed", "other_leaf", "yielded", "failed"}
+// (InputSlicesReadAhead), other_leaf, yielded, failed and context_ended.
+var SliceReadAheadOutcomes = [5]string{"replayed", "other_leaf", "yielded", "failed", "context_ended"}
+
+// SeriesNotEvaluatedNoFamily is the family of a Plan none of whose
+// algorithms is one AlgorithmFamily names, for SeriesNotEvaluated.
+const SeriesNotEvaluatedNoFamily = "none"
+
+// SeriesNotEvaluatedFamilyCount is how many families SeriesNotEvaluated
+// counts under.
+const SeriesNotEvaluatedFamilyCount = 12
+
+// SeriesNotEvaluatedFamilies is every family SeriesNotEvaluated counts
+// under: the algorithm families, and none.
+var SeriesNotEvaluatedFamilies = [SeriesNotEvaluatedFamilyCount]string{string(AlgorithmFamilyThreshold), string(AlgorithmFamilySimpleRingRatio),
+	string(AlgorithmFamilyOsRestart), string(AlgorithmFamilyProcPort), string(AlgorithmFamilyPingUnreachable),
+	string(AlgorithmFamilySimpleYearRound), string(AlgorithmFamilyAdvancedRingRatio), string(AlgorithmFamilyAdvancedYearRound),
+	string(AlgorithmFamilyRingRatioAmplitude), string(AlgorithmFamilyYearRoundAmplitude), string(AlgorithmFamilyYearRoundRange),
+	SeriesNotEvaluatedNoFamily}
 
 // How a slice's read that ran out of time ended, closed: split and read
 // again, the Slot's query completing; split and read again, the Slot's query

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -152,7 +153,13 @@ type streamedExecution struct {
 	// ahead is the next slice read while this one completes, and aheadBytes
 	// what it holds (slice_read_ahead.go): counted in retainedTotal, so the
 	// share, the slice limit and the windows see it.
-	aheads     []*sliceReadAhead
+	aheads []*sliceReadAhead
+	// replayedCancels ends the contexts of the reads ahead replayed, as the
+	// Slot ends (letGoReadAhead).
+	replayedCancels []context.CancelFunc
+	// takenUp is the real series each Plan took up, evaluated, resumed or
+	// skipped, against planSeriesCount (seriesNotEvaluated).
+	takenUp    map[execution.PlanIdentity]int
 	aheadBytes atomic.Uint64
 	// aheadAtRefusal is aheadBytes when a reservation of the stream's was
 	// last refused (judgeRetainedLocked), for yieldReadAhead.
@@ -772,7 +779,7 @@ func (stream *streamedExecution) releaseProvisional() {
 	stream.prepared = preparedNamedInputIndex{}
 	stream.streamed, stream.planSeries, stream.completionOnly, stream.effective = nil, nil, nil, nil
 	stream.inputHolds, stream.keysHeld, stream.summaryHeld = nil, 0, 0
-	stream.planSeriesCounts = nil
+	stream.planSeriesCounts, stream.takenUp = nil, nil
 	stream.bindings, stream.stateItems, stream.gapItems, stream.delivered = nil, nil, nil, nil
 	stream.state, stream.gaps = execution.StatePreflightResult{}, execution.GapLoadResult{}
 	stream.shared, stream.completionInputs, stream.primaryRecords = sharedBindings{}, completionInputs{}, 0
@@ -2432,6 +2439,12 @@ func (stream *streamedExecution) evaluateReadBatch(ctx context.Context, batch []
 		return err
 	}
 	for index, entry := range batch {
+		// Every real series is taken up here, whatever comes of it - the
+		// evaluation, its resume, its skip - and counted against those the
+		// Plan was bound (seriesNotEvaluated).
+		if entry.kind() == execution.SeriesKindReal {
+			stream.noteTakenUp(entry.due.Identity)
+		}
 		// The batch stops pointing at the series' inputs as it is taken: a
 		// window applied part way through the batch lets the inputs of the
 		// series before go, and the batch is not to keep them alive past it.
@@ -2624,6 +2637,58 @@ func (stream *streamedExecution) planSeriesCount(plan execution.PlanIdentity) in
 		return 0
 	}
 	return len(stream.planSeries[plan])
+}
+
+// noteTakenUp counts one real series of the Plan taken up.
+func (stream *streamedExecution) noteTakenUp(plan execution.PlanIdentity) {
+	if stream.takenUp == nil {
+		stream.takenUp = make(map[execution.PlanIdentity]int)
+	}
+	stream.takenUp[plan]++
+}
+
+// seriesNotEvaluated is, by algorithm family, the PRIMARY series the Slot
+// bound to each due Plan (planSeriesCount) beyond those it took up: series
+// a query answered that reached no evaluation, no resume and no skip. A
+// Plan of several families counts its series under each; one of none that
+// AlgorithmFamily names under none; in the order of
+// observability.SeriesNotEvaluatedFamilies, all zero when every series was
+// taken up.
+func (stream *streamedExecution) seriesNotEvaluated() [observability.SeriesNotEvaluatedFamilyCount]uint64 {
+	var lost [observability.SeriesNotEvaluatedFamilyCount]uint64
+	for _, due := range stream.header.DuePlans {
+		missing := stream.planSeriesCount(due.Identity) - stream.takenUp[due.Identity]
+		if missing <= 0 {
+			continue
+		}
+		for _, family := range planAlgorithmFamilies(due) {
+			index := slices.Index(observability.SeriesNotEvaluatedFamilies[:], family)
+			if index < 0 {
+				index = slices.Index(observability.SeriesNotEvaluatedFamilies[:], observability.SeriesNotEvaluatedNoFamily)
+			}
+			lost[index] += uint64(missing)
+		}
+	}
+	return lost
+}
+
+// planAlgorithmFamilies is the distinct algorithm families of the Plan's
+// Levels, as the algorithm counters name them, or none.
+func planAlgorithmFamilies(due execution.DuePlan) []string {
+	var families []string
+	if due.CompiledPlan != nil {
+		for _, level := range due.CompiledPlan.Levels().All() {
+			for _, algorithm := range level.Algorithms().All() {
+				if observed, ok := observeAlgorithm(algorithm); ok && !slices.Contains(families, string(observed.family)) {
+					families = append(families, string(observed.family))
+				}
+			}
+		}
+	}
+	if len(families) == 0 {
+		families = append(families, observability.SeriesNotEvaluatedNoFamily)
+	}
+	return families
 }
 
 // planSeriesMatched is how many PRIMARY series the Slot bound to the Plan,

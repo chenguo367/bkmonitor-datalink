@@ -111,6 +111,8 @@ type slicedCall struct {
 // nothing. partial is filled with the series every read that did not
 // complete delivered.
 type slicedSource struct {
+	// beforeRead, when set, runs as each read is asked, before anything of it.
+	beforeRead  func()
 	t           *testing.T
 	ports       *recordingPorts
 	series      []slicedSeries
@@ -169,6 +171,9 @@ func (source *slicedSource) holding(slice execution.InputSlice) int {
 }
 
 func (source *slicedSource) Execute(ctx context.Context, request execution.QueryExecutionRequest, consumer execution.QueryExecutionConsumer) (execution.QueryExecutionCompletion, error) {
+	if source.beforeRead != nil {
+		source.beforeRead()
+	}
 	source.started.Add(1)
 	source.ports.record("query")
 	call := slicedCall{slice: request.Slice, ctx: ctx, readAhead: fmt.Sprintf("%T", consumer) == "*worker.sliceReadAhead"}

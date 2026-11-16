@@ -956,6 +956,13 @@ var codeChecks = map[string]verdict{
 	// The backend was asked and did not answer usefully.
 	"QUERY_TIMEOUT":     lands(CheckBackendNotAnswering),
 	"QUERY_UNAVAILABLE": lands(CheckBackendNotAnswering),
+	// A slice read ahead whose read ended with its context ended and was
+	// answered as if whole: in practice the runner stopped the Slot - a
+	// rollout, a handover - and the provider said it had finished. Its
+	// answer is not one to take, as a backend's that did not answer usefully;
+	// filed as this deployment's defect it would count a provider's word
+	// after its cancellation as ours, every rollout. The retry reads again.
+	"READ_AHEAD_CONTEXT_ENDED": lands(CheckBackendNotAnswering),
 	// The backend answered and refused the query as written: the strategy's
 	// query is what to look at, not whether the backend is up.
 	"QUERY_REJECTED": lands(CheckQueryRefused),

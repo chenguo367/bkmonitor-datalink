@@ -16,13 +16,17 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/inputslice"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // readAheadEnd is how a read ahead ended: handed to the Slot, or let go
 // because the next slice was another, because it yielded to a reservation of
-// the Slot's own, or because it failed before it was handed on.
+// the Slot's own, or because it failed before it was handed on; or refused,
+// its read having ended with its context ended (context_ended): what it
+// answered then may be short of the read, and is not taken for it.
 type readAheadEnd int
 
 const (
@@ -30,8 +34,26 @@ const (
 	readAheadOtherLeaf
 	readAheadYielded
 	readAheadFailed
+	readAheadContextEnded
 	readAheadEnds
 )
+
+// ErrReadAheadContextEnded is a read ahead the Slot had taken on whose read
+// ended with its context ended: its series are the Slot's already, and what
+// came after them may be missing, so the Slot fails rather than complete on
+// part of a slice - by its own name, READ_AHEAD_CONTEXT_ENDED, on the query
+// line and the Slot's alike (QueryFailure).
+var ErrReadAheadContextEnded error = readAheadContextEndedError{}
+
+type readAheadContextEndedError struct{}
+
+func (readAheadContextEndedError) Error() string {
+	return "alarmd worker: a slice read ahead ended with its context ended"
+}
+
+func (readAheadContextEndedError) QueryFailure() (string, string) {
+	return observability.QueryFailureCategoryDelivery, contract.ReasonReadAheadContextEnded
+}
 
 // sliceReadAheadOff, set only by the alarmd_measure build, reads every slice
 // on the Slot's goroutine: the measurement's reading without the read ahead.
@@ -95,6 +117,9 @@ type sliceReadAhead struct {
 	held       uint64
 	completion execution.QueryExecutionCompletion
 	err        error
+	// contextEnded is a read that ended with its context ended: what it
+	// answered may be short of the read (readAheadContextEnded).
+	contextEnded bool
 }
 
 // startSliceReadAheads reads ahead the slices after the one the Slot is on,
@@ -150,15 +175,10 @@ func (stream *streamedExecution) startSliceReadAhead(ctx context.Context, reques
 	query := stream.coordinator.ports.Query
 	go func() {
 		defer close(ahead.done)
-		// The read's context ends with the read, however the Slot takes it
-		// on - replayed, failed or let go (stop). It is a child of the
-		// Slot's, which is the Query Group's runner's: one never cancelled
-		// stays among the runner's children, and with it everything the
-		// Slot's context carries, for as long as the runner runs.
-		defer cancel()
 		completion, err := query.Execute(readCtx, request, ahead)
 		ahead.mu.Lock()
 		ahead.completion, ahead.err = completion, err
+		ahead.contextEnded = readCtx.Err() != nil
 		ahead.mu.Unlock()
 	}()
 }
@@ -344,8 +364,16 @@ func (stream *streamedExecution) letGoReadAheads(end readAheadEnd) {
 }
 
 // letGoReadAhead lets every read ahead go as the Slot ends, uncounted: a
-// Slot that ends reports no usage.
+// Slot that ends reports no usage. The contexts of the reads replayed end
+// here too: each is a child of the Slot's, which is the Query Group's
+// runner's - the scheduler gives a Slot no context of its own to cancel -
+// and one never cancelled stays among the runner's children, with all the
+// Slot's context carries, for as long as the runner runs.
 func (stream *streamedExecution) letGoReadAhead() {
+	for _, cancel := range stream.replayedCancels {
+		cancel()
+	}
+	stream.replayedCancels = nil
 	aheads := stream.aheads
 	stream.aheads = nil
 	for _, ahead := range aheads {
@@ -403,12 +431,16 @@ func (stream *streamedExecution) replayReadAhead(ctx context.Context, leaf input
 	}
 	ahead := stream.aheads[index]
 	ahead.mu.Lock()
-	failed := ahead.err != nil
+	failed, ended := ahead.err != nil, ahead.err == nil && ahead.contextEnded
 	ahead.mu.Unlock()
 	stream.aheads = slices.Delete(stream.aheads, index, index+1)
-	if failed {
+	if failed || ended {
 		ahead.stop()
-		stream.readAheadEnds[readAheadFailed]++
+		end := readAheadFailed
+		if ended {
+			end = readAheadContextEnded
+		}
+		stream.readAheadEnds[end]++
 		return execution.QueryExecutionCompletion{}, nil, false
 	}
 	stream.readAheadEnds[readAheadReplayed]++
@@ -447,8 +479,17 @@ func (stream *streamedExecution) replayReadAhead(ctx context.Context, leaf input
 	// the input the Slot is reading.
 	execution.MarkStage(ctx, execution.SlotStageQuery)
 	<-ahead.done
+	// Its context ends with the Slot (letGoReadAhead), as a read the Slot
+	// made itself ends with the Slot's: what the read handed on is the
+	// Slot's now, and nothing of it is judged against a context that ended
+	// before the Slot did.
+	stream.replayedCancels = append(stream.replayedCancels, ahead.cancel)
 	ahead.mu.Lock()
 	defer ahead.mu.Unlock()
 	ahead.give(ahead.held)
+	if ahead.err == nil && ahead.contextEnded {
+		stream.readAheadEnds[readAheadContextEnded]++
+		return execution.QueryExecutionCompletion{}, ErrReadAheadContextEnded, true
+	}
 	return ahead.completion, ahead.err, true
 }

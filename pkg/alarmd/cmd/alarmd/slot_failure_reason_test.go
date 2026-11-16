@@ -15,6 +15,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/trigger"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/worker"
 )
 
 // Two failures that named themselves and were not asked. Both reached the
@@ -66,6 +67,11 @@ func TestASlotFailureThatNamesItselfIsNotReportedAsUnnamed(t *testing.T) {
 			name: "the query's deadline passed while alarmd delivered its answer",
 			err:  fmt.Errorf("alarmd worker: query: %w", deliveryTimeout{}),
 			want: observability.ReasonCode(contract.ReasonQueryDeliveryTimeout),
+		},
+		{
+			name: "a slice read ahead and taken on ended with its context ended",
+			err:  fmt.Errorf("alarmd worker: query: %w", worker.ErrReadAheadContextEnded),
+			want: observability.ReasonCode(contract.ReasonReadAheadContextEnded),
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
