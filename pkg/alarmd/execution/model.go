@@ -4821,6 +4821,14 @@ type SlotBudgetUsage struct {
 	// that no PRIMARY input of the same Plan named, let go at the
 	// completion: nothing evaluates a dependency without its series.
 	DependencySeriesDiscarded uint64
+	// PointsDropped is the points the Slot's answers' normalization let go
+	// rather than evaluate, by reason (observability.PointDropReasons).
+	PointsDropped observability.PointDrops
+	// QueryWaitMillis and QueryBodyMillis are the Slot's physical queries'
+	// time before their answers' first byte (the provider running them) and
+	// after it (read and decoded), summed; the Max fields the longest one's.
+	QueryWaitMillis, QueryBodyMillis       uint64
+	QueryWaitMillisMax, QueryBodyMillisMax uint64
 	// InputSlices is the slices the Slot's input was read in (one for a Slot
 	// read whole), InputSlicesDiscarded the ones let go and split while they
 	// streamed, and FirstSeenUnseenSlices and FirstSeenUnseenSeries the

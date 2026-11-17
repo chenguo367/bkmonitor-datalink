@@ -61,13 +61,17 @@ type Recorder struct {
 	retainedBound     bool
 	sliceMemoryMu     sync.Mutex
 	sliceMemoryBound  bool
-	// segmentShadowMemory* guard the shadow books' binding.
-	segmentShadowMemoryMu    sync.Mutex
-	segmentShadowMemoryBound bool
-	resourceMu               sync.Mutex
-	resourceBound            bool
-	observations             observationMetrics
-	phaseTwo                 phaseTwoMetrics
+	// segmentStore* guard the Plans' segments' binding (segment_store.go).
+	segmentStoreMu    sync.Mutex
+	segmentStoreBound bool
+	// computeCost* guard the owned Query Groups' compute cost binding
+	// (compute_cost.go).
+	computeCostMu    sync.Mutex
+	computeCostBound bool
+	resourceMu       sync.Mutex
+	resourceBound    bool
+	observations     observationMetrics
+	phaseTwo         phaseTwoMetrics
 }
 
 func NewRecorder(build BuildInfo) *Recorder {

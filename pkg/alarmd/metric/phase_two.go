@@ -223,6 +223,7 @@ type phaseTwoMetrics struct {
 	queryCooldownSaves              *prometheus.CounterVec
 	controlFactsWrites              *prometheus.CounterVec
 	planCarriesReads                *prometheus.CounterVec
+	planSegmentsReads               *prometheus.CounterVec
 	linkdFilterCloseRequests        *prometheus.HistogramVec
 	queryCooldownLoads              *prometheus.CounterVec
 	eventBusinessAttribution        *prometheus.CounterVec
@@ -1426,8 +1427,8 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			metrics.assignmentMoves.WithLabelValues(reason, holder)
 		}
 	}
-	metrics.byteOverloadedWorkers = newLoadedGauge(prometheus.GaugeOpts{Subsystem: metricSubsystem, Name: "rebalance_byte_overloaded_workers", Help: "Ready workers whose Query Groups' retained-byte peaks sum past their share of the pool, as the latest round on this Control Leader judged them; each gives one Query Group away per round (assignment_moves_total{reason=\"bytes\"}). Meaningful on the Control Leader only; aggregate replicas with max, not sum."})
-	metrics.byteMostLoadedShare = newLoadedGauge(prometheus.GaugeOpts{Subsystem: metricSubsystem, Name: "rebalance_byte_most_loaded_share", Help: "The largest judged worker's sum of retained-byte peaks over the share of its pool the byte constraint allows, as the latest round on this Control Leader read it; above one is overloaded. A lower bound while rebalance_byte_unread_groups is not zero. Meaningful on the Control Leader only; aggregate replicas with max, not sum."})
+	metrics.byteOverloadedWorkers = newLoadedGauge(prometheus.GaugeOpts{Subsystem: metricSubsystem, Name: "rebalance_byte_overloaded_workers", Help: "Ready workers whose retained-byte load - concurrent occupancy, or the sum of peaks while a ready worker reports no high-water - is past their share of the pool in the latest round; each gives one Query Group away per round (assignment_moves_total{reason=\"bytes\"}). Meaningful on the Control Leader only; aggregate with max."})
+	metrics.byteMostLoadedShare = newLoadedGauge(prometheus.GaugeOpts{Subsystem: metricSubsystem, Name: "rebalance_byte_most_loaded_share", Help: "The largest judged worker's retained-byte load - concurrent occupancy, or the sum of peaks while a ready worker reports no high-water (a lower bound while rebalance_byte_unread_groups is not zero) - over its share of the pool, in the latest round; above one is overloaded. Control Leader only; aggregate with max."})
 	metrics.placementUnfit = prometheus.NewCounter(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "placement_unfit_total", Help: "Placements the Control Leader made although the Query Group fit no eligible ready worker under the byte constraint's projection (retained-byte peaks reported, each unread Query Group at the round's estimate), so it went to its rendezvous choice: a placement cannot wait on a fit, and the byte constraint moves it on a later round if the worker is then overloaded. Not counted while the round has no estimate, when nothing is judged."})
 	metrics.byteUnreadGroups = newLoadedGauge(prometheus.GaugeOpts{Subsystem: metricSubsystem, Name: "rebalance_byte_unread_groups", Help: "Query Groups with no reported retained-byte peak in the latest round on this Control Leader: they count nothing toward their worker's sum, so the byte readings beside it are lower bounds. Meaningful on the Control Leader only; aggregate replicas with max, not sum."})
 	metrics.rebalancePaused.WithLabelValues("set_unstable")
@@ -1747,6 +1748,14 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	}, []string{"result"})
 	for _, result := range PlanCarriesReadResults {
 		metrics.planCarriesReads.WithLabelValues(result)
+	}
+	metrics.planSegmentsReads = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: metricSubsystem, Name: "fleet_plan_segments_reads_total",
+		Help: "Reads of an object's Plans' segment marks (plan_segments on an object detail), on request only, by " +
+			"result: read; no_open_segment (no open Segment, no Plan runs); failed (the timeline or a mark's MGET did not answer).",
+	}, []string{"result"})
+	for _, result := range PlanCarriesReadResults {
+		metrics.planSegmentsReads.WithLabelValues(result)
 	}
 	metrics.queryCooldownLoads = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: metricSubsystem, Name: "query_cooldown_loads_total",
@@ -2354,7 +2363,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 	return append(append(m.workflow.collectors(), []prometheus.Collector{
 		m.shortPeriod.completed, m.shortPeriod.duration, m.shortPeriod.lag,
 		m.queryStatus.responses,
-		m.flow.queryDuration, m.flow.answerBytes, m.flow.answerSeries, m.flow.answerRecords, m.flow.answerSeconds, m.flow.queryFailures, m.flow.decisionLag, m.flow.outputRejectedAll,
+		m.flow.queryDuration, m.flow.answerBytes, m.flow.answerSeries, m.flow.answerRecords, m.flow.answerSeconds, m.flow.answerPhaseSeconds, m.flow.queryFailures, m.flow.decisionLag, m.flow.outputRejectedAll, m.flow.pointsDropped,
 		m.queryCodec.responses,
 		m.queryTruncation.truncated,
 		m.queryUnavailable.attributions,
@@ -2377,7 +2386,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.byteOverloadedWorkers, m.byteMostLoadedShare, m.byteUnreadGroups, m.placementUnfit, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlRecordReads, m.controlRecordMismatches, m.controlRecordConflicts, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.recoveryWithheld, m.noDataEnd, m.openAlertGate,
 	}...), append(append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), append(append(m.handover.collectors(), m.slotProgress.collectors()...), m.sreActions.actions, m.sreActions.rollouts, m.sreActions.watched, m.sreActions.receipts, m.cliAuth.total, m.cliAuth.rosterApplied)...), append(append(m.controlFacts.collectors(), m.traceExport.collectors()...), m.segmentShadow.collectors()...)...),
-		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.activeCopy, m.fleetTracker, m.effectiveTimeRefresh, m.activationRebuild, m.timelineRepair, m.activationSkippedTimelines, m.timelineUnreadableReports, m.activationHeader, m.activationBlocked, m.liveReserve, m.roundMemory, m.stateSeriesHeld, m.targetGroup, m.effectiveClose, m.logLines, m.observerPanics, m.absentClose, m.editClose, m.noDataCloseAPI, m.linkdFilterClose, m.linkdFilterCloseRequests, m.openEpisodeRecord, m.newOpens, m.frontRefused, m.processMemory, m.strategyScopeClose, m.targetScopeClose, m.controlSourceRounds, m.apmCarried, m.apmCarriedBytes, m.sourceLivenessChecks, m.sourceLivenessSeconds, m.sourceLivenessDeferred, m.sourceLivenessEvicted, m.sourceLivenessHeldEvicted, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.controlFactsWrites, m.planCarriesReads, m.queryCooldownLoads, m.eventBusinessAttribution, m.detectionSnapshots, m.detectionSnapshotStates, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
+		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.activeCopy, m.fleetTracker, m.effectiveTimeRefresh, m.activationRebuild, m.timelineRepair, m.activationSkippedTimelines, m.timelineUnreadableReports, m.activationHeader, m.activationBlocked, m.liveReserve, m.roundMemory, m.stateSeriesHeld, m.targetGroup, m.effectiveClose, m.logLines, m.observerPanics, m.absentClose, m.editClose, m.noDataCloseAPI, m.linkdFilterClose, m.linkdFilterCloseRequests, m.openEpisodeRecord, m.newOpens, m.frontRefused, m.processMemory, m.strategyScopeClose, m.targetScopeClose, m.controlSourceRounds, m.apmCarried, m.apmCarriedBytes, m.sourceLivenessChecks, m.sourceLivenessSeconds, m.sourceLivenessDeferred, m.sourceLivenessEvicted, m.sourceLivenessHeldEvicted, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.controlFactsWrites, m.planCarriesReads, m.planSegmentsReads, m.queryCooldownLoads, m.eventBusinessAttribution, m.detectionSnapshots, m.detectionSnapshotStates, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
 		m.controlSourceRetainedStale, m.controlSourceLastGoodIdentity, m.platformSettings,
 		m.redisPool, m.renewalGate, m.stateCache, m.stateWitness, m.canonicalEncoding, m.datasetRecordIDs, m.legacyPodCache,
 		m.seriesAdmission, m.cmdbAddressDiffers, m.cmdbPlacedByHostID, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.cmdbIndexBusinessMappings, m.cmdbIndexRecordsRefused, m.hostDisableMonitorStates, m.cmdbIndexAge, m.cmdbIndexPublish,
@@ -3424,6 +3433,21 @@ func (r *Recorder) ObservePlanCarriesRead(result string) {
 	for _, known := range PlanCarriesReadResults {
 		if result == known {
 			r.phaseTwo.planCarriesReads.WithLabelValues(result).Inc()
+			return
+		}
+	}
+}
+
+// ObservePlanSegmentsRead counts one plan segments read by its result, the
+// words of PlanCarriesReadResults; another is dropped rather than creating a
+// series.
+func (r *Recorder) ObservePlanSegmentsRead(result string) {
+	if r == nil || r.phaseTwo.planSegmentsReads == nil {
+		return
+	}
+	for _, known := range PlanCarriesReadResults {
+		if result == known {
+			r.phaseTwo.planSegmentsReads.WithLabelValues(result).Inc()
 			return
 		}
 	}

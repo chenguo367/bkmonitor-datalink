@@ -1320,6 +1320,9 @@ func (ports *recordingPorts) ResolveFinalization(
 	_ context.Context,
 	request execution.SlotExecutionRequest,
 ) (execution.QueryFreeFinalization, error) {
+	if err := ports.fail("finalization"); err != nil {
+		return execution.QueryFreeFinalization{}, err
+	}
 	// A Slot the Runner gave up for its share, as the production source
 	// finalizes it (cmd/alarmd productionFrozenExecution).
 	if request.ShareExceeded {
@@ -1449,6 +1452,9 @@ type recordingPorts struct {
 	// eventFailureKind is the kind a failed write's dependency error says,
 	// as the sink's errors do; empty says none.
 	eventFailureKind string
+	// eventAckPlain makes a failed event_ack a plain error: neither a
+	// retryable dependency nor the sink's rejection.
+	eventAckPlain bool
 	// outputWrite, when set, is the count the fake sink reports for every
 	// batch, the way the real sink counts what a batch became.
 	outputWrite *observability.OutputWriteFacts
@@ -2156,6 +2162,9 @@ func (ports *recordingPorts) WriteBatch(ctx context.Context, events []contract.T
 		observability.ReportOutputWrite(ctx, int(ports.outputWrite.Published), int(ports.outputWrite.WithoutMessage), ports.outputWrite.WithoutMessageBy)
 	}
 	if err := ports.fail("event_ack"); err != nil {
+		if ports.eventAckPlain {
+			return err
+		}
 		if ports.eventRejection != nil {
 			// The sink refusing to write, as the sink states it: not a
 			// retryable dependency, and named by reason word and sentence.

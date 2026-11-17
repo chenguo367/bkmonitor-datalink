@@ -42,9 +42,20 @@ func TestEveryBudgetUsageNumberReachesTheRowItIsReportedOn(t *testing.T) {
 			for element := range field.Len() {
 				field.Index(element).SetUint(uint64(index+1)*1000 + uint64(element) + 1)
 			}
+		case reflect.Struct:
+			// Counts by a closed set held as named fields (PointsDropped, by
+			// reason): each inner field a value of its own, so a reason
+			// copied to another's place fails here too.
+			for inner := range field.NumField() {
+				if field.Field(inner).Kind() != reflect.Uint64 {
+					t.Fatalf("%s.%s is a %s; this case only knows structs of uint64",
+						source.Type().Field(index).Name, field.Type().Field(inner).Name, field.Field(inner).Kind())
+				}
+				field.Field(inner).SetUint(uint64(index+1)*1000 + uint64(inner) + 1)
+			}
 		default:
 			t.Fatalf("%s is a %s; this case gives every field a distinct value and only knows how to do that "+
-				"for uint64, string and arrays of uint64", source.Type().Field(index).Name, field.Kind())
+				"for uint64, string, arrays of uint64 and structs of uint64", source.Type().Field(index).Name, field.Kind())
 		}
 	}
 

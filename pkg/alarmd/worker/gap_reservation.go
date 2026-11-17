@@ -48,6 +48,7 @@ func (stream *streamedExecution) loadGapFacts(ctx context.Context, request execu
 			} else if err = stream.coordinator.judgeRetainedLocked(stream, retained, stream.reservationPhase("normal_gap")); err == nil {
 				reservations.gapFacts++
 				reservations.retainedBytes += retained
+				stream.coordinator.noteRetainedHighLocked()
 			}
 			reservations.mu.Unlock()
 			// A refusal the read ahead may stand behind is judged again once

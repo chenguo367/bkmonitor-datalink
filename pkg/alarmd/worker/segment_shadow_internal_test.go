@@ -10,18 +10,203 @@
 package worker
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/segment"
 )
 
 var shadowDue = execution.DuePlan{Identity: execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "9"},
-	StateGeneration: "g", ScheduleSpec: execution.ScheduleSpec{EvaluationIntervalSeconds: 60}}
+	StateGeneration: "g", StateApplyEpoch: 1, ScheduleSpec: execution.ScheduleSpec{EvaluationIntervalSeconds: 60}}
+
+// memorySegments is a segment.Store keeping the Plans' marks and pages in
+// memory as the State store keeps them in Redis: a round reads its book from
+// what the round before wrote, and nothing else.
+type memorySegments struct {
+	marks map[segment.PlanKey][]byte
+	pages map[segment.PlanKey]map[int][]byte
+	at    int64
+	// ttl is the life a read says the Plan's keys are written with; an
+	// hour unless set.
+	ttl time.Duration
+	// expiry is, by Plan and series, when its State key expires on the
+	// wall clock wall reads, in milliseconds: written by writeState, renewed
+	// by RenewSegments while it has not expired. Nil, renewals touch nothing.
+	expiry map[segment.PlanKey]map[execution.SeriesIdentityDigest]int64
+	wall   func() int64
+	// failPage, when set, is the pages whose renewal fails: none of their
+	// keys renewed, the page answered not renewed.
+	failPage func(segment.PlanKey, int) bool
+	renewals int
+}
+
+func newMemorySegments() *memorySegments {
+	return &memorySegments{marks: map[segment.PlanKey][]byte{}, pages: map[segment.PlanKey]map[int][]byte{}}
+}
+
+// writeState writes series' State keys, at the wall clock, for the store's
+// life.
+func (store *memorySegments) writeState(key segment.PlanKey, series []execution.SeriesIdentityDigest) {
+	if store.expiry == nil {
+		store.expiry = map[segment.PlanKey]map[execution.SeriesIdentityDigest]int64{}
+	}
+	if store.expiry[key] == nil {
+		store.expiry[key] = map[execution.SeriesIdentityDigest]int64{}
+	}
+	for _, digest := range series {
+		store.expiry[key][digest] = store.wall() + store.life().Milliseconds()
+	}
+}
+
+func (store *memorySegments) life() time.Duration {
+	if store.ttl > 0 {
+		return store.ttl
+	}
+	return time.Hour
+}
+
+func (store *memorySegments) RenewSegments(_ context.Context, request segment.RenewRequest) (segment.RenewResult, error) {
+	var result segment.RenewResult
+	for _, plan := range request.Plans {
+		renewed := segment.PlanRenewed{Renewed: make([]bool, len(plan.Pages))}
+		for position, page := range plan.Pages {
+			store.renewals++
+			if store.failPage != nil && store.failPage(plan.Key, page.Page) {
+				continue
+			}
+			renewed.Renewed[position] = true
+			if store.expiry == nil {
+				continue
+			}
+			for _, digest := range page.Members {
+				if expires, ok := store.expiry[plan.Key][digest]; ok && expires > store.wall() {
+					store.expiry[plan.Key][digest] = store.wall() + store.life().Milliseconds()
+					continue
+				}
+				renewed.Missing++
+			}
+		}
+		result.Plans = append(result.Plans, renewed)
+	}
+	return result, nil
+}
+
+func (store *memorySegments) ReadSegments(_ context.Context, request segment.ReadRequest) (segment.ReadResult, error) {
+	var result segment.ReadResult
+	for _, plan := range request.Plans {
+		stored := segment.Stored{Key: plan.Key, Mark: store.marks[plan.Key], Source: segment.SourceRedis,
+			Reason: segment.ReadCold, TTL: store.life()}
+		if stored.Mark != nil {
+			mark, err := segment.DecodeMark(stored.Mark)
+			if err != nil {
+				return segment.ReadResult{}, err
+			}
+			for page := 0; page < mark.Pages; page++ {
+				stored.Pages = append(stored.Pages, store.pages[plan.Key][page])
+			}
+		}
+		result.Plans = append(result.Plans, stored)
+	}
+	return result, nil
+}
+
+func (store *memorySegments) WriteSegments(_ context.Context, request segment.WriteRequest) (segment.WriteResult, error) {
+	var result segment.WriteResult
+	for _, plan := range request.Plans {
+		if store.pages[plan.Key] == nil {
+			store.pages[plan.Key] = map[int][]byte{}
+		}
+		for page, raw := range plan.Pages {
+			store.pages[plan.Key][page] = raw
+		}
+		for page := plan.PageCount; page < plan.PriorCount; page++ {
+			delete(store.pages[plan.Key], page)
+		}
+		store.marks[plan.Key] = plan.Mark
+		result.Plans = append(result.Plans, segment.WriteApplied)
+	}
+	return result, nil
+}
+
+// book is a Plan's book as stored.
+func (store *memorySegments) book(t *testing.T, plan execution.PlanIdentity, generation execution.StateGeneration) *segment.Book {
+	t.Helper()
+	key := segment.PlanKey{Plan: plan, Generation: generation}
+	stored, _ := store.ReadSegments(context.Background(), segment.ReadRequest{Plans: []segment.ReadPlan{{Key: key}}})
+	book, mark, _, err := stored.Plans[0].Book()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The mark names every page's size as stored: a cold read cuts its
+	// MGETs by them.
+	for page, raw := range stored.Plans[0].Pages {
+		if mark.Sizes[page] != len(raw) {
+			t.Fatalf("the mark says page %d is %d bytes, it is %d", page, mark.Sizes[page], len(raw))
+		}
+	}
+	return book
+}
+
+// reading is the Plans stored and their open and closed members.
+func (store *memorySegments) reading(t *testing.T) (plans, open, closed int) {
+	t.Helper()
+	for key := range store.marks {
+		store.book(t, key.Plan, key.Generation).Each(func(entry segment.Entry) {
+			if entry.Open() {
+				open++
+			} else {
+				closed++
+			}
+		})
+		plans++
+	}
+	return plans, open, closed
+}
+
+func shadowContract(at int64) execution.FrozenExecutionContractRef {
+	return execution.FrozenExecutionContractRef{Slot: execution.SlotIdentity{QueryGroup: "q", EvaluationTime: execution.EvaluationTime(at)},
+		SnapshotRevision: "snapshot-v1", QueryRevision: "query-v1", ScheduleRevision: "schedule-v1",
+		ScheduleSegmentStart: 60, DuePlanSetDigest: "due-set-v1"}
+}
+
+func shadowRequest(operation execution.Operation, at int64) execution.SlotExecutionRequest {
+	return execution.SlotExecutionRequest{Operation: operation, Contract: shadowContract(at)}
+}
+
+// shadowSlot is a Slot's segments read from store, the Plan due with a
+// five-point window.
+func shadowSlot(t *testing.T, store *memorySegments, request execution.SlotExecutionRequest, due execution.DuePlan) *segmentSlot {
+	t.Helper()
+	slot := loadSegmentSlot(context.Background(), store, request, []segmentDue{{due: due, retention: 5,
+		lifetime: segment.Lifetime{Interval: time.Minute}}})
+	if slot == nil {
+		t.Fatal("no segments read")
+	}
+	return slot
+}
+
+// foldShadow folds a round and writes what it leaves to store.
+func foldShadow(t *testing.T, store *memorySegments, round *segmentShadowRound, request execution.SlotExecutionRequest,
+	due execution.DuePlan, withheld map[execution.PlanIdentity]struct{}) observability.SegmentShadowFacts {
+	t.Helper()
+	clock := func() time.Time { return time.Unix(int64(request.Contract.Slot.EvaluationTime), 0) }
+	if store.wall != nil {
+		clock = func() time.Time { return time.UnixMilli(store.wall()) }
+	}
+	facts, folded := foldSegmentShadowRound(round, []execution.DuePlan{due}, withheld, nil)
+	writes := settleSegmentShadow(context.Background(), store, request, folded, &facts, clock)
+	if _, err := store.WriteSegments(context.Background(), segment.WriteRequest{Contract: request.Contract, Plans: writes}); err != nil {
+		t.Fatal(err)
+	}
+	return facts
+}
 
 func shadowSeries(index int) execution.SeriesIdentityDigest {
 	sum := sha256.Sum256([]byte(fmt.Sprint("shadow-series-", index)))
@@ -76,27 +261,30 @@ func steady(t *testing.T, series execution.SeriesIdentityDigest, at int64) shado
 	return shadowRoundOf{view: shadowView(t, series, at-60), write: shadowWrite(t, series, at), class: execution.SeriesClassStableNormal}
 }
 
-// runShadow is one completed Slot of the Query Group "q": every series written,
-// folded into the books, the Slot at a round after its writes' latest point.
-func runShadow(shadow *segmentShadow, written []shadowRoundOf, withheld bool) observability.SegmentShadowFacts {
-	return runShadowFor(shadow, shadowDue, written, withheld)
+// runShadow is one completed Slot of the Query Group "q": the Plan's book
+// read from store, every series written, folded and written back, the Slot
+// at a round after its writes' latest point.
+func runShadow(t *testing.T, store *memorySegments, written []shadowRoundOf, withheld bool) observability.SegmentShadowFacts {
+	return runShadowFor(t, store, shadowDue, written, withheld)
 }
 
-func runShadowFor(shadow *segmentShadow, due execution.DuePlan, written []shadowRoundOf, withheld bool) observability.SegmentShadowFacts {
-	at := int64(0)
+func runShadowFor(t *testing.T, store *memorySegments, due execution.DuePlan, written []shadowRoundOf, withheld bool) observability.SegmentShadowFacts {
+	t.Helper()
+	at := store.at + 60
 	for _, series := range written {
 		at = max(at, series.write.Points[len(series.write.Points)-1].SourceTime+60)
 	}
-	round := newSegmentShadowRound(execution.SlotExecutionRequest{Operation: execution.OperationNormal,
-		Contract: execution.FrozenExecutionContractRef{Slot: execution.SlotIdentity{QueryGroup: "q", EvaluationTime: execution.EvaluationTime(at)}}})
+	store.at = at
+	request := shadowRequest(execution.OperationNormal, at)
+	round := newSegmentShadowRound(request, shadowSlot(t, store, request, due))
 	for _, series := range written {
-		round.observe(shadow, due, series.view, series.write, series.class, series.eventsSent)
+		round.observe(due, series.view, series.write, series.class, series.eventsSent)
 	}
 	notLanded := map[execution.PlanIdentity]struct{}{}
 	if withheld {
 		notLanded[due.Identity] = struct{}{}
 	}
-	return foldSegmentShadowRound(shadow, round, []execution.DuePlan{due}, notLanded)
+	return foldShadow(t, store, round, request, due, notLanded)
 }
 
 func outcome(facts observability.SegmentShadowFacts, outcome observability.SegmentShadowOutcome) int64 {
@@ -132,14 +320,14 @@ func mismatches(facts observability.SegmentShadowFacts) map[observability.Segmen
 // points, then a normal point to the mark - is the round's write: a match,
 // and no page rewritten while the membership holds.
 func TestASteadySeriesJoinsAtTheMarkAndMatchesEveryRoundAfter(t *testing.T) {
-	shadow := &segmentShadow{}
+	shadow := newMemorySegments()
 	round := func(at int64) observability.SegmentShadowFacts {
-		return runShadow(shadow, []shadowRoundOf{steady(t, shadowSeries(0), at), steady(t, shadowSeries(1), at), steady(t, shadowSeries(2), at)}, false)
+		return runShadow(t, shadow, []shadowRoundOf{steady(t, shadowSeries(0), at), steady(t, shadowSeries(1), at), steady(t, shadowSeries(2), at)}, false)
 	}
 	// A series that decided otherwise is written and joins nothing.
 	counting := steady(t, shadowSeries(9), 1200)
 	counting.class = execution.SeriesClassCountingTrigger
-	first := runShadow(shadow, []shadowRoundOf{steady(t, shadowSeries(0), 1200), steady(t, shadowSeries(1), 1200),
+	first := runShadow(t, shadow, []shadowRoundOf{steady(t, shadowSeries(0), 1200), steady(t, shadowSeries(1), 1200),
 		steady(t, shadowSeries(2), 1200), counting}, false)
 	if member(first, observability.SegmentShadowJoined) != 3 || outcome(first, observability.SegmentShadowMatch) != 0 {
 		t.Fatalf("first round %+v, want the three steady joined and nothing compared", first)
@@ -156,9 +344,8 @@ func TestASteadySeriesJoinsAtTheMarkAndMatchesEveryRoundAfter(t *testing.T) {
 			t.Fatalf("round at %d rewrote pages with the membership unchanged", at)
 		}
 	}
-	if reading := shadow.reading(); reading != (SegmentShadowReading{Plans: 1, Open: 3,
-		Bytes: 3*segmentShadowEntryBytes + segmentShadowPlanBytes}) {
-		t.Fatalf("the books read %+v, want one Plan's three members", reading)
+	if plans, open, closed := shadow.reading(t); plans != 1 || open != 3 || closed != 0 {
+		t.Fatalf("the books stored %d Plans, %d open, %d closed, want one Plan's three members", plans, open, closed)
 	}
 }
 
@@ -167,7 +354,7 @@ func TestASteadySeriesJoinsAtTheMarkAndMatchesEveryRoundAfter(t *testing.T) {
 // decision_stable, a point off the grid. A steady series rejoins the round
 // after.
 func TestWhatTheSkipWouldWriteWholeIsAnExceptionAndLeavesItsPage(t *testing.T) {
-	shadow := &segmentShadow{}
+	shadow := newMemorySegments()
 	all := func(at int64) []shadowRoundOf {
 		written := make([]shadowRoundOf, 6)
 		for index := range written {
@@ -175,8 +362,8 @@ func TestWhatTheSkipWouldWriteWholeIsAnExceptionAndLeavesItsPage(t *testing.T) {
 		}
 		return written
 	}
-	runShadow(shadow, all(1200), false)
-	if facts := runShadow(shadow, all(1260), false); outcome(facts, observability.SegmentShadowMatch) != 6 {
+	runShadow(t, shadow, all(1200), false)
+	if facts := runShadow(t, shadow, all(1260), false); outcome(facts, observability.SegmentShadowMatch) != 6 {
 		t.Fatalf("second round %+v, want six matches", facts)
 	}
 	written := all(1320)
@@ -189,7 +376,7 @@ func TestWhatTheSkipWouldWriteWholeIsAnExceptionAndLeavesItsPage(t *testing.T) {
 	// Its last point at the mark, one between off the grid: only the grid
 	// rule makes it an exception rather than a mismatch.
 	written[3].write.Points = []execution.StateHistoryPoint{shadowPoint(t, shadowSeries(3), 1290, "f"), shadowPoint(t, shadowSeries(3), 1320, "f")}
-	facts := runShadow(shadow, written, false)
+	facts := runShadow(t, shadow, written, false)
 	if exceptions(facts) != 4 || outcome(facts, observability.SegmentShadowMatch) != 2 || len(mismatches(facts)) != 0 {
 		t.Fatalf("round with four exceptions: %+v, want four exceptions and two matches", facts)
 	}
@@ -200,11 +387,11 @@ func TestWhatTheSkipWouldWriteWholeIsAnExceptionAndLeavesItsPage(t *testing.T) {
 		}
 	}
 	for index := 0; index < 4; index++ {
-		if _, isMember := shadow.byGroup["q"][segmentShadowKey{plan: shadowDue.Identity, generation: "g"}].book.Entry(shadowSeries(index)); isMember {
+		if _, isMember := shadow.book(t, shadowDue.Identity, "g").Entry(shadowSeries(index)); isMember {
 			t.Fatalf("exception %d is still a member", index)
 		}
 	}
-	if facts := runShadow(shadow, all(1380), false); member(facts, observability.SegmentShadowJoined) != 4 || outcome(facts, observability.SegmentShadowMatch) != 2 {
+	if facts := runShadow(t, shadow, all(1380), false); member(facts, observability.SegmentShadowJoined) != 4 || outcome(facts, observability.SegmentShadowMatch) != 2 {
 		t.Fatalf("the round after %+v, want the four rejoined and two matches", facts)
 	}
 }
@@ -215,17 +402,17 @@ func TestWhatTheSkipWouldWriteWholeIsAnExceptionAndLeavesItsPage(t *testing.T) {
 // exception there, as the mark would read it normal where it has no point;
 // the one at the mark is compared over both its points.
 func TestAMemberShortOfTheRoundsMarkIsAnException(t *testing.T) {
-	shadow := &segmentShadow{}
-	runShadow(shadow, []shadowRoundOf{steady(t, shadowSeries(0), 1200), steady(t, shadowSeries(1), 1200)}, false)
+	shadow := newMemorySegments()
+	runShadow(t, shadow, []shadowRoundOf{steady(t, shadowSeries(0), 1200), steady(t, shadowSeries(1), 1200)}, false)
 	ahead := steady(t, shadowSeries(0), 1260)
 	ahead.write.Points = []execution.StateHistoryPoint{shadowPoint(t, shadowSeries(0), 1260, "f"), shadowPoint(t, shadowSeries(0), 1320, "f")}
 	ahead.write.Levels[0].LastProcessedEventTime, ahead.write.Levels[0].LastRealPointTime = 1320, 1320
 	ahead.view = shadowView(t, shadowSeries(0), 1200)
-	facts := runShadow(shadow, []shadowRoundOf{ahead, steady(t, shadowSeries(1), 1260)}, false)
+	facts := runShadow(t, shadow, []shadowRoundOf{ahead, steady(t, shadowSeries(1), 1260)}, false)
 	if outcome(facts, observability.SegmentShadowMatch) != 1 || outcome(facts, observability.SegmentShadowExceptionShortOfMark) != 1 || len(mismatches(facts)) != 0 {
 		t.Fatalf("a round marked at 1320: %+v, want the one at it matched and the one short of it an exception", facts)
 	}
-	if _, isMember := shadow.byGroup["q"][segmentShadowKey{plan: shadowDue.Identity, generation: "g"}].book.Entry(shadowSeries(1)); isMember {
+	if _, isMember := shadow.book(t, shadowDue.Identity, "g").Entry(shadowSeries(1)); isMember {
 		t.Fatal("the member short of the mark is still a member")
 	}
 }
@@ -234,13 +421,13 @@ func TestAMemberShortOfTheRoundsMarkIsAnException(t *testing.T) {
 // each field it differs in: a skip would read the series otherwise than the
 // round wrote it.
 func TestAWriteTheMadeReadDoesNotReproduceIsAMismatchByField(t *testing.T) {
-	shadow := &segmentShadow{}
-	runShadow(shadow, []shadowRoundOf{steady(t, shadowSeries(0), 1200), steady(t, shadowSeries(1), 1200), steady(t, shadowSeries(2), 1200)}, false)
+	shadow := newMemorySegments()
+	runShadow(t, shadow, []shadowRoundOf{steady(t, shadowSeries(0), 1200), steady(t, shadowSeries(1), 1200), steady(t, shadowSeries(2), 1200)}, false)
 	written := []shadowRoundOf{steady(t, shadowSeries(0), 1260), steady(t, shadowSeries(1), 1260), steady(t, shadowSeries(2), 1260)}
 	written[0].write.Levels[0].LastRealPointTime = 1200 // the last real point did not move
 	written[1].write.Points[0].Levels[0].DetectFingerprint = "f2"
 	written[2].write.Points[0].RecordID = "legacy"
-	facts := runShadow(shadow, written, false)
+	facts := runShadow(t, shadow, written, false)
 	want := map[observability.SegmentShadowOutcome]int64{observability.SegmentShadowMismatchLastReal: 1,
 		observability.SegmentShadowMismatchFacts: 1, observability.SegmentShadowMismatchRecordIDs: 1}
 	if got := mismatches(facts); fmt.Sprint(got) != fmt.Sprint(want) || outcome(facts, observability.SegmentShadowMatch) != 0 {
@@ -253,24 +440,24 @@ func TestAWriteTheMadeReadDoesNotReproduceIsAMismatchByField(t *testing.T) {
 // past its window and its key's life; a round with no series at all closes
 // every member.
 func TestAnAbsentMemberClosesAtTheMarkBeforeAndExpiresPastItsReach(t *testing.T) {
-	shadow := &segmentShadow{}
-	runShadow(shadow, []shadowRoundOf{steady(t, shadowSeries(0), 1200), steady(t, shadowSeries(1), 1200)}, false)
-	if facts := runShadow(shadow, []shadowRoundOf{steady(t, shadowSeries(0), 1260)}, false); member(facts, observability.SegmentShadowDeparted) != 1 {
+	shadow := newMemorySegments()
+	runShadow(t, shadow, []shadowRoundOf{steady(t, shadowSeries(0), 1200), steady(t, shadowSeries(1), 1200)}, false)
+	if facts := runShadow(t, shadow, []shadowRoundOf{steady(t, shadowSeries(0), 1260)}, false); member(facts, observability.SegmentShadowDeparted) != 1 {
 		t.Fatalf("a member absent: %+v, want it departed", facts)
 	}
-	book := shadow.byGroup["q"][segmentShadowKey{plan: shadowDue.Identity, generation: "g"}].book
+	book := shadow.book(t, shadowDue.Identity, "g")
 	if entry, _ := book.Entry(shadowSeries(1)); entry.Closed != 1200 {
 		t.Fatalf("closed at %d, want the mark before, 1200", entry.Closed)
 	}
-	if reading := shadow.reading(); reading.Open != 1 || reading.Closed != 1 {
-		t.Fatalf("the books read %+v, want one open member and one closed", reading)
+	if _, open, closed := shadow.reading(t); open != 1 || closed != 1 {
+		t.Fatalf("the books stored %d open and %d closed, want one of each", open, closed)
 	}
-	if facts := runShadow(shadow, nil, false); member(facts, observability.SegmentShadowDeparted) != 1 {
+	if facts := runShadow(t, shadow, nil, false); member(facts, observability.SegmentShadowDeparted) != 1 {
 		t.Fatalf("a round with no series: %+v, want the last open member departed", facts)
 	}
 	// 2 x 5 points x 60 s + 600 s past the later close, 1260.
 	reachedAt := int64(1260 + 2*5*60 + segmentShadowHorizon + 60)
-	if facts := runShadow(shadow, []shadowRoundOf{steady(t, shadowSeries(7), reachedAt)}, false); member(facts, observability.SegmentShadowExpired) != 2 {
+	if facts := runShadow(t, shadow, []shadowRoundOf{steady(t, shadowSeries(7), reachedAt)}, false); member(facts, observability.SegmentShadowExpired) != 2 {
 		t.Fatalf("a mark past both members' reach: %+v, want both expired", facts)
 	}
 }
@@ -279,77 +466,153 @@ func TestAnAbsentMemberClosesAtTheMarkBeforeAndExpiresPastItsReach(t *testing.T)
 // Plan's shadow over, its members counted; a Plan whose output did not land
 // and a round at or before the last folded leave the book as it was.
 func TestARetryStartsOverAndAWithheldOrReplayedRoundChangesNothing(t *testing.T) {
-	shadow := &segmentShadow{}
-	runShadow(shadow, []shadowRoundOf{steady(t, shadowSeries(0), 1200), steady(t, shadowSeries(1), 1200)}, false)
-	if facts := runShadow(shadow, []shadowRoundOf{steady(t, shadowSeries(0), 1260)}, true); !facts.Empty() {
+	shadow := newMemorySegments()
+	runShadow(t, shadow, []shadowRoundOf{steady(t, shadowSeries(0), 1200), steady(t, shadowSeries(1), 1200)}, false)
+	if facts := runShadow(t, shadow, []shadowRoundOf{steady(t, shadowSeries(0), 1260)}, true); !facts.Empty() {
 		t.Fatalf("a withheld Plan counted %+v", facts)
 	}
-	if facts := runShadow(shadow, []shadowRoundOf{steady(t, shadowSeries(0), 1200), steady(t, shadowSeries(1), 1200)}, false); !facts.Empty() {
+	if facts := runShadow(t, shadow, []shadowRoundOf{steady(t, shadowSeries(0), 1200), steady(t, shadowSeries(1), 1200)}, false); !facts.Empty() {
 		t.Fatalf("a replay of the round folded counted %+v", facts)
 	}
-	round := newSegmentShadowRound(execution.SlotExecutionRequest{Operation: execution.OperationRetry,
-		Contract: execution.FrozenExecutionContractRef{Slot: execution.SlotIdentity{QueryGroup: "q"}}})
-	round.retried(shadow, shadowDue)
+	shadow.at += 60
+	request := shadowRequest(execution.OperationRetry, shadow.at)
+	round := newSegmentShadowRound(request, shadowSlot(t, shadow, request, shadowDue))
+	round.retried(shadowDue)
 	written := steady(t, shadowSeries(1), 1260)
-	round.observe(shadow, shadowDue, written.view, written.write, written.class, false)
-	if facts := foldSegmentShadowRound(shadow, round, []execution.DuePlan{shadowDue}, nil); member(facts, observability.SegmentShadowReset) != 2 {
+	round.observe(shadowDue, written.view, written.write, written.class, false)
+	if facts := foldShadow(t, shadow, round, request, shadowDue, nil); member(facts, observability.SegmentShadowReset) != 2 {
 		t.Fatalf("a retry: %+v, want the Plan reset with its two members", facts)
 	}
-	if facts := runShadow(shadow, []shadowRoundOf{steady(t, shadowSeries(0), 1320)}, false); member(facts, observability.SegmentShadowJoined) != 1 {
+	if _, open, closed := shadow.reading(t); open != 0 || closed != 0 {
+		t.Fatalf("the reset stored %d open and %d closed, want an empty book", open, closed)
+	}
+	if facts := runShadow(t, shadow, []shadowRoundOf{steady(t, shadowSeries(0), 1320)}, false); member(facts, observability.SegmentShadowJoined) != 1 {
 		t.Fatalf("after the reset: %+v, want the series to join anew", facts)
 	}
 	for _, operation := range []execution.Operation{execution.OperationSupplement, execution.OperationProbe} {
-		if newSegmentShadowRound(execution.SlotExecutionRequest{Operation: operation}) != nil {
+		if newSegmentShadowRound(execution.SlotExecutionRequest{Operation: operation}, &segmentSlot{}) != nil {
 			t.Fatalf("a %s has a shadow round", operation)
 		}
 	}
-	coordinator := &SlotExecutionCoordinator{}
-	runShadow(&coordinator.segmentShadow, []shadowRoundOf{steady(t, shadowSeries(0), 1200)}, false)
-	if reading := SegmentShadowMemory(coordinator); reading.Open != 1 || reading.Plans != 1 {
-		t.Fatalf("the books read %+v before the release, want the one member", reading)
-	}
-	ForgetQueryGroup(coordinator, "q")
-	if _, held := coordinator.segmentShadow.byGroup["q"]; held || SegmentShadowMemory(coordinator) != (SegmentShadowReading{}) {
-		t.Fatal("the Query Group's release kept its shadow")
+	if newSegmentShadowRound(execution.SlotExecutionRequest{Operation: execution.OperationNormal}, nil) != nil {
+		t.Fatal("a Slot that read no segments has a shadow round")
 	}
 }
 
-// A book no round will fold again goes: a Plan's older generation once a
-// newer one of it is folded - an edit moves a Plan to a new generation, and
-// its old book's members would stay open for good - and a Plan no longer
-// folded for longer than its reach, by its own grid.
-func TestABookNoRoundFoldsAgainIsDropped(t *testing.T) {
-	shadow := &segmentShadow{}
-	runShadow(shadow, []shadowRoundOf{steady(t, shadowSeries(0), 1200), steady(t, shadowSeries(1), 1200)}, false)
+// A Plan's book is its generation's: an edit moves the Plan to a new
+// generation, whose round reads a book of its own, empty, and the old one's
+// members are not carried into it - the old book's keys are left to their
+// life. A stored book that does not read starts the Plan over, its members
+// that did read counted reset.
+func TestANewGenerationReadsItsOwnBookAndAnUnreadableOneStartsOver(t *testing.T) {
+	shadow := newMemorySegments()
+	runShadow(t, shadow, []shadowRoundOf{steady(t, shadowSeries(0), 1200), steady(t, shadowSeries(1), 1200)}, false)
 	edited := shadowDue
 	edited.StateGeneration = "g2"
 	moved := func(round shadowRoundOf) shadowRoundOf {
 		round.view.Identity.StateGeneration, round.write.Identity.StateGeneration = "g2", "g2"
 		return round
 	}
-	runShadowFor(shadow, edited, []shadowRoundOf{moved(steady(t, shadowSeries(0), 1260))}, false)
-	if _, kept := shadow.byGroup["q"][segmentShadowKey{plan: shadowDue.Identity, generation: "g"}]; kept {
-		t.Fatal("the old generation's book stayed after the new one was folded")
+	facts := runShadowFor(t, shadow, edited, []shadowRoundOf{moved(steady(t, shadowSeries(0), 1260))}, false)
+	if outcome(facts, observability.SegmentShadowMatch) != 0 || member(facts, observability.SegmentShadowJoined) != 1 {
+		t.Fatalf("the new generation's first round: %+v, want its series joined and nothing compared", facts)
 	}
-	if reading := shadow.reading(); reading.Plans != 1 || reading.Open != 1 {
-		t.Fatalf("books read %+v, want the new generation's one member", reading)
+	if book := shadow.book(t, edited.Identity, "g2"); book.Len() != 1 {
+		t.Fatalf("the new generation's book holds %d, want its one member", book.Len())
 	}
-	other := shadowDue
-	other.Identity.StrategyID = "10"
-	otherRound := func(at int64) shadowRoundOf {
-		round := steady(t, shadowSeries(5), at)
-		round.view.Identity.Plan, round.write.Identity.Plan = other.Identity, other.Identity
-		return round
+	if book := shadow.book(t, shadowDue.Identity, "g"); book.Len() != 2 {
+		t.Fatalf("the old generation's book holds %d, want it left as it was", book.Len())
 	}
-	// The edited Plan no longer due: within its reach it stays; past it,
-	// the next round of another Plan of the Query Group drops it.
-	reach := int64(2*5*60 + segmentShadowHorizon)
-	runShadowFor(shadow, other, []shadowRoundOf{otherRound(1260 + reach - 60)}, false)
-	if _, kept := shadow.byGroup["q"][segmentShadowKey{plan: shadowDue.Identity, generation: "g2"}]; !kept {
-		t.Fatal("a book within its reach was dropped")
+	key := segment.PlanKey{Plan: edited.Identity, Generation: "g2"}
+	shadow.pages[key][0] = []byte("not a page")
+	facts = runShadowFor(t, shadow, edited, []shadowRoundOf{moved(steady(t, shadowSeries(0), 1320))}, false)
+	if member(facts, observability.SegmentShadowReset) != 0 || member(facts, observability.SegmentShadowJoined) != 1 {
+		t.Fatalf("a book that does not read: %+v, want the Plan started over and its series joined anew", facts)
 	}
-	runShadowFor(shadow, other, []shadowRoundOf{otherRound(1260 + reach + 60)}, false)
-	if _, kept := shadow.byGroup["q"][segmentShadowKey{plan: shadowDue.Identity, generation: "g2"}]; kept {
-		t.Fatal("a book past its reach that no round folds stayed")
+	delete(shadow.pages[key], 0)
+	facts = runShadowFor(t, shadow, edited, []shadowRoundOf{moved(steady(t, shadowSeries(0), 1380))}, false)
+	if member(facts, observability.SegmentShadowJoined) != 1 {
+		t.Fatalf("a book with its page gone: %+v, want the Plan started over", facts)
+	}
+	if book := shadow.book(t, edited.Identity, "g2"); book.Len() != 1 {
+		t.Fatalf("after starting over the book holds %d", book.Len())
+	}
+}
+
+// A Plan's first round writes every page of its book, a page no member
+// joined among them: the mark names its pages, and a page it names that was
+// never written would not read.
+func TestAPlansFirstRoundWritesEveryPageItsMarkNames(t *testing.T) {
+	shadow := newMemorySegments()
+	counting := steady(t, shadowSeries(9), 1200)
+	counting.class = execution.SeriesClassCountingTrigger
+	facts := runShadow(t, shadow, []shadowRoundOf{counting}, false)
+	if member(facts, observability.SegmentShadowJoined) != 0 || facts.PageWrites[observability.SegmentPeriodMinute] != 1 {
+		t.Fatalf("a first round with no steady series: %+v, want nothing joined and its one page written", facts)
+	}
+	if book := shadow.book(t, shadowDue.Identity, "g"); book.Len() != 0 {
+		t.Fatalf("the stored book holds %d", book.Len())
+	}
+	if facts := runShadow(t, shadow, []shadowRoundOf{steady(t, shadowSeries(0), 1260)}, false); member(facts, observability.SegmentShadowJoined) != 1 ||
+		member(facts, observability.SegmentShadowReset) != 0 {
+		t.Fatalf("the round after: %+v, want its steady series joined on the page as read", facts)
+	}
+}
+
+// segmentStateStore is a State port whose store keeps segments in memory;
+// nothing else of it is called.
+type segmentStateStore struct {
+	execution.StateStore
+	*memorySegments
+}
+
+// shadowObservations keeps what the coordinator observed.
+type shadowObservations struct {
+	observed []observability.Observation
+}
+
+func (observations *shadowObservations) Observe(_ context.Context, observation observability.Observation) {
+	observations.observed = append(observations.observed, observation)
+}
+
+// A Slot reserves the books it decoded as it reserves the State it holds,
+// for its whole run; the pool refusing them runs the Slot without its
+// shadow, counted book_refused - and only there: no capacity rejection is
+// observed, as nothing the Slot needs was refused.
+func TestASlotReservesItsBooksAndRunsWithoutTheShadowWhenThePoolRefusesThem(t *testing.T) {
+	store := newMemorySegments()
+	var written []shadowRoundOf
+	for index := 0; index < 40; index++ {
+		written = append(written, steady(t, shadowSeries(index), 1200))
+	}
+	runShadow(t, store, written, false)
+	books := segment.BookBytes(40)
+	for _, room := range []uint64{1 << 30, books - 1} {
+		observations := &shadowObservations{}
+		coordinator := &SlotExecutionCoordinator{ports: Ports{State: segmentStateStore{memorySegments: store}, Observer: observations},
+			budget: ProvisionalBudget{MaxSeries: 1000, MaxRetainedBytes: room}}
+		request := shadowRequest(execution.OperationNormal, 1260)
+		stream := &streamedExecution{coordinator: coordinator, request: request, began: true}
+		held := stream.holdSegments(context.Background(), shadowSlot(t, store, request, shadowDue), "")
+		var skipped, rejected int
+		for _, observation := range observations.observed {
+			if observation.SegmentShadow != nil {
+				skipped += int(observation.SegmentShadow.Skipped[observability.SegmentShadowSkippedBookRefused])
+			}
+			if observation.Component == observability.ComponentResource {
+				rejected++
+			}
+		}
+		if room > books {
+			if held == nil || stream.retainedByPhase[retainPhaseState] != books || coordinator.reservations.retainedBytes != books || skipped != 0 {
+				t.Fatalf("with room: held %v, State phase %d, pool %d, skipped %d; want the books' %d reserved as State",
+					held != nil, stream.retainedByPhase[retainPhaseState], coordinator.reservations.retainedBytes, skipped, books)
+			}
+			continue
+		}
+		if held != nil || skipped != 1 || rejected != 0 || coordinator.reservations.retainedBytes != 0 {
+			t.Fatalf("without room: held %v, skipped %d, capacity rejections %d, pool %d; want no shadow, one book_refused, none",
+				held != nil, skipped, rejected, coordinator.reservations.retainedBytes)
+		}
 	}
 }

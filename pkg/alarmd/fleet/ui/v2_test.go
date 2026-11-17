@@ -58,10 +58,7 @@ func TestTheSecondPageHoldsNoWordTable(t *testing.T) {
 // sends, so the shapes cannot drift; and the rendered text carries no
 // English constant -- the code words stay in titles and JSON.
 func TestTheSecondPageRendersWithoutThrowingOrLeakingCodes(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node is not on PATH, so the second page's logic is NOT executed by this run")
-	}
+	node := pageNode(t, "the second page's logic is NOT executed by this run")
 	at := time.Date(2026, 9, 22, 10, 0, 0, 0, time.UTC)
 	since := at.Add(-2 * time.Hour)
 	lastGood := at.Add(-90 * time.Minute)

@@ -965,7 +965,7 @@ func (apply *slotApply) windowedTail(ctx context.Context, stream *streamedExecut
 	// segment shadow cannot tell their Plans' membership this round.
 	for plan, resumed := range stream.windows.resumed {
 		if due, ok := duePlan(apply.header.DuePlans, plan); ok && resumed > 0 {
-			apply.shadow.retried(&apply.coordinator.segmentShadow, due)
+			apply.shadow.retried(due)
 		}
 	}
 	census := stream.seriesCensus

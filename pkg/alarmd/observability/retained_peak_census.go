@@ -250,7 +250,8 @@ func (c *RetainedPeakCensus) RetainedPeaks() []CostRetainedPeak {
 		reading := CostRetainedPeak{QueryGroupKey: key,
 			RetainedBytesPeak:  max(g.current.retainedBytesPeak, g.previous.retainedBytesPeak, c.heldPeak(g.slot, now)),
 			ComputeWallNS:      g.current.computeWallNS + g.previous.computeWallNS,
-			ComputeWallUnknown: g.current.computeWallUnknown + g.previous.computeWallUnknown}
+			ComputeWallUnknown: g.current.computeWallUnknown + g.previous.computeWallUnknown,
+			Interval:           g.slot.interval}
 		if reading.RetainedBytesPeak > 0 || reading.ComputeWallNS > 0 {
 			peaks = append(peaks, reading)
 		}

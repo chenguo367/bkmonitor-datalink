@@ -22,4 +22,6 @@ var (
 	_ = redisscript.Register("state_stage_hash_segment", stageHashSegmentScript)
 	_ = redisscript.Register("state_swap_staged_hash", swapStagedHashScript)
 	_ = redisscript.Register("state_discard_staged_hash", discardStagedHashScript)
+	_ = redisscript.Register("state_segment_write", segmentWriteScript)
+	_ = redisscript.Register("state_segment_renew", segmentRenewScript)
 )

@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/tracing"
 	"io"
 	"net/http"
@@ -59,6 +60,8 @@ type RangeResult struct {
 	Code    string
 	Message string
 	Partial bool
+	// Dropped is the rows let go for missing the time or the value column.
+	Dropped observability.PointDrops
 }
 
 // RangeSeries is one series of a range answer: its group labels, as the
@@ -196,6 +199,7 @@ func (client *Client) Range(ctx context.Context, request RangeRequest) (RangeRes
 		}
 		for _, values := range series.Values {
 			if timeColumn >= len(values) || valueColumn >= len(values) {
+				result.Dropped.RowMissingColumns++
 				continue
 			}
 			point := RangePoint{AtUnixMilli: int64(values[timeColumn]), Value: values[valueColumn]}
@@ -204,6 +208,7 @@ func (client *Client) Range(ctx context.Context, request RangeRequest) (RangeRes
 		}
 		result.Series = append(result.Series, kept)
 	}
+	client.notePointsDropped(result.Dropped)
 	return result, nil
 }
 

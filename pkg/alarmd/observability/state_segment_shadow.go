@@ -100,6 +100,45 @@ func AllSegmentShadowEvents() []SegmentShadowEvent {
 		SegmentShadowEventOther}
 }
 
+// Why a Slot ran without the shadow, closed: read_failed, its Plans'
+// segments could not be read; book_refused, the retained pool did not take
+// the books it read (their bytes reserved as the Slot's State is).
+const (
+	SegmentShadowSkippedReadFailed  = "read_failed"
+	SegmentShadowSkippedBookRefused = "book_refused"
+	SegmentShadowSkippedOther       = "other"
+)
+
+// AllSegmentShadowSkips is every reason, the cells the counter has from the
+// start.
+func AllSegmentShadowSkips() []string {
+	return []string{SegmentShadowSkippedReadFailed, SegmentShadowSkippedBookRefused, SegmentShadowSkippedOther}
+}
+
+// The renewals of the pages due (014 B3 3.5), closed
+// (state_segment_renewal_total): renewed and failed, pages whose renewal
+// answered whole or did not - their time does not move on, and the page is
+// renewed whole next round; missing, member keys a renewal found gone;
+// over_budget, renewal scripts that ran longer than their 2.5 ms; and
+// fallback_write, pages unrenewed for half their lifetime, whose members
+// are written whole - in the second stage counted only, every State being
+// written.
+const (
+	SegmentRenewalRenewed       = "renewed"
+	SegmentRenewalFailed        = "failed"
+	SegmentRenewalMissing       = "missing"
+	SegmentRenewalOverBudget    = "over_budget"
+	SegmentRenewalFallbackWrite = "fallback_write"
+	SegmentRenewalOther         = "other"
+)
+
+// AllSegmentRenewalResults is every result, the cells the counter has from
+// the start.
+func AllSegmentRenewalResults() []string {
+	return []string{SegmentRenewalRenewed, SegmentRenewalFailed, SegmentRenewalMissing, SegmentRenewalOverBudget,
+		SegmentRenewalFallbackWrite, SegmentRenewalOther}
+}
+
 // Period classes, closed: the band a Plan's evaluation interval falls in, so
 // a reading of the shadow says which kinds of Plan it covered.
 const (
@@ -158,6 +197,41 @@ type SegmentShadowFacts struct {
 	Members    map[SegmentShadowMemberKey]int64 `json:"members,omitempty"`
 	PageWrites map[string]int64                 `json:"page_writes,omitempty"`
 	PageBytes  map[string]int64                 `json:"page_bytes,omitempty"`
+	// Skipped is the Slot run without the shadow, by why.
+	Skipped map[string]int64 `json:"skipped,omitempty"`
+	// Renewals is the round's page renewals, by result.
+	Renewals map[string]int64 `json:"renewals,omitempty"`
+}
+
+// Renewal adds count to a renewal result's cell, its word normalised.
+func (facts *SegmentShadowFacts) Renewal(result string, count int64) {
+	if count == 0 {
+		return
+	}
+	known := SegmentRenewalOther
+	for _, word := range AllSegmentRenewalResults() {
+		if result == word {
+			known = result
+		}
+	}
+	if facts.Renewals == nil {
+		facts.Renewals = map[string]int64{}
+	}
+	facts.Renewals[known] += count
+}
+
+// Skip counts the Slot run without the shadow, its reason normalised.
+func (facts *SegmentShadowFacts) Skip(reason string) {
+	known := SegmentShadowSkippedOther
+	for _, word := range AllSegmentShadowSkips() {
+		if reason == word {
+			known = reason
+		}
+	}
+	if facts.Skipped == nil {
+		facts.Skipped = map[string]int64{}
+	}
+	facts.Skipped[known]++
 }
 
 // Outcome adds count to an outcome's cell, every label normalised.
@@ -197,7 +271,8 @@ func (facts *SegmentShadowFacts) Pages(class string, pages, bytes int64) {
 
 // Empty is whether nothing was counted, so the facts are left off.
 func (facts SegmentShadowFacts) Empty() bool {
-	return len(facts.Outcomes) == 0 && len(facts.Members) == 0 && len(facts.PageWrites) == 0
+	return len(facts.Outcomes) == 0 && len(facts.Members) == 0 && len(facts.PageWrites) == 0 && len(facts.Skipped) == 0 &&
+		len(facts.Renewals) == 0
 }
 
 func normalizeSegmentShadowOutcome(outcome SegmentShadowOutcome) SegmentShadowOutcome {

@@ -15,6 +15,7 @@ import (
 	"slices"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // The APM application a series belongs to is asked of the provider
@@ -102,6 +103,24 @@ func (client *Client) WithAPMObserver(observe func(APMCarriedResponse)) *Client 
 		client.observeAPM = observe
 	}
 	return client
+}
+
+// WithPointsDroppedObserver hears the points each answer's normalization
+// let go rather than hand on, by reason, for a query and a range read alike;
+// nil keeps none.
+func (client *Client) WithPointsDroppedObserver(observe func(observability.PointDrops)) *Client {
+	if client != nil {
+		client.observeDropped = observe
+	}
+	return client
+}
+
+// notePointsDropped hands the points an answer let go to the observer, when
+// it let any go.
+func (client *Client) notePointsDropped(dropped observability.PointDrops) {
+	if client != nil && client.observeDropped != nil && dropped.Total() > 0 {
+		client.observeDropped(dropped)
+	}
 }
 
 // executeCarryingAPMApp reads a query with the APM application carried and

@@ -371,6 +371,12 @@ type PhysicalQueryAnswer struct {
 	Outcome                string
 	Elapsed                time.Duration
 	Bytes, Series, Records uint64
+	// Wait and Body split Elapsed of a query whose response's headers came
+	// back (Answered), whatever its outcome: the time before them, the
+	// provider computing the query, and after them, the answer carried, read
+	// and decoded.
+	Answered   bool
+	Wait, Body time.Duration
 }
 
 // How a physical query ended, closed. A timeout is split by whose deadline

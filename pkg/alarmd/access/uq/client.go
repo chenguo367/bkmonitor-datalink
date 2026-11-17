@@ -115,6 +115,9 @@ type Client struct {
 	// observeAPM hears each response read with the APM application carried
 	// (WithAPMObserver); nil hears nothing.
 	observeAPM func(APMCarriedResponse)
+	// observeDropped hears the points every answer's normalization let go
+	// (WithPointsDroppedObserver); nil hears nothing.
+	observeDropped func(observability.PointDrops)
 }
 
 // markReplayable lets the transport send a query again, once, when the
@@ -355,6 +358,7 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 		}
 		completion := client.unavailableCompletion(attempt, reason, execution.TransportRouteDetail(execution.ClassifyTransportFailure(err)))
 		completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
+		completion.Stats.WaitMillis = completion.Stats.QueryMillis
 		completion.RouteFacts.Attempts[0].Timing = attemptTiming(attempt.Budget, started, client.now(), 0)
 		// Which deadline was on the request, which ran out, and what failed:
 		// a deadline error from the transport names none of them.
@@ -404,6 +408,8 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 		}
 		completion.RouteFacts.Attempts[0].Request = request
 		completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
+		completion.Stats.Answered = true
+		completion.Stats.WaitMillis, completion.Stats.BodyMillis = answerPhases(started, answered, client.now())
 		completion.RouteFacts.Attempts[0].Timing = attemptTiming(attempt.Budget, started, client.now(), 0)
 		return completion, nil
 	}
@@ -445,6 +451,8 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 	}
 	completion.Stats.Bytes = counted.bytes
 	completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
+	completion.Stats.Answered = true
+	completion.Stats.WaitMillis, completion.Stats.BodyMillis = answerPhases(started, answered, client.now())
 	completion.Stats.ResponseCodec = "legacy_json"
 	if shared {
 		completion.Stats.ResponseCodec = "shared_json_v1"
@@ -1066,17 +1074,25 @@ var nullDimension = json.RawMessage("null")
 // where None is the value in both cases. Series that carry the field keep
 // their previous identity unchanged.
 func normalizeSeries(spec execution.PhysicalQuerySpec, ref execution.ProviderResultRef, source responseSeries, receivedAt int64) (execution.ProviderSeriesBatch, uint64, error) {
-	batch, nullFields, _, err := normalizeSeriesKeeping(spec, ref, source, receivedAt, false)
-	return batch, nullFields, err
+	batch, facts, _, err := normalizeSeriesKeeping(spec, ref, source, receivedAt, false)
+	return batch, facts.nullIdentityFields, err
+}
+
+// normalizedFacts is what normalizing one series counted beside its batch:
+// the identity fields bound to null, and the points let go.
+type normalizedFacts struct {
+	nullIdentityFields uint64
+	dropped            observability.PointDrops
 }
 
 // normalizeSeriesKeeping is normalizeSeries, and with keepIDs the record ids
 // it derived, in the Dataset's order: a named-outputs query keeps them for
 // its legacy points (noteDelivered) from this derivation, as the Dataset
 // keeps none.
-func normalizeSeriesKeeping(spec execution.PhysicalQuerySpec, ref execution.ProviderResultRef, source responseSeries, receivedAt int64, keepIDs bool) (execution.ProviderSeriesBatch, uint64, []string, error) {
+func normalizeSeriesKeeping(spec execution.PhysicalQuerySpec, ref execution.ProviderResultRef, source responseSeries, receivedAt int64, keepIDs bool) (execution.ProviderSeriesBatch, normalizedFacts, []string, error) {
+	var none normalizedFacts
 	if len(source.Columns) == 0 || len(source.Columns) != len(source.Types) || (spec.PlanFacts.Normalization.Version != "uq-polling-normalization-v1" && len(source.GroupKeys) != len(source.GroupValues)) {
-		return execution.ProviderSeriesBatch{}, 0, nil, errors.New("alarmd access uq: invalid series schema")
+		return execution.ProviderSeriesBatch{}, none, nil, errors.New("alarmd access uq: invalid series schema")
 	}
 	dimensions := make(map[string]json.RawMessage, len(source.GroupKeys))
 	for index, key := range source.GroupKeys {
@@ -1085,7 +1101,7 @@ func normalizeSeriesKeeping(spec execution.PhysicalQuerySpec, ref execution.Prov
 			key = alias
 		}
 		if _, exists := dimensions[key]; exists {
-			return execution.ProviderSeriesBatch{}, 0, nil, errors.New("alarmd access uq: duplicate normalized group key")
+			return execution.ProviderSeriesBatch{}, none, nil, errors.New("alarmd access uq: duplicate normalized group key")
 		}
 		encoded := nullDimension
 		if index < len(source.GroupValues) {
@@ -1093,12 +1109,12 @@ func normalizeSeriesKeeping(spec execution.PhysicalQuerySpec, ref execution.Prov
 		}
 		var scalar any
 		if err := json.Unmarshal(encoded, &scalar); err != nil {
-			return execution.ProviderSeriesBatch{}, 0, nil, err
+			return execution.ProviderSeriesBatch{}, none, nil, err
 		}
 		switch scalar.(type) {
 		case nil, string, float64, bool:
 		default:
-			return execution.ProviderSeriesBatch{}, 0, nil, errors.New("alarmd access uq: nonscalar group value")
+			return execution.ProviderSeriesBatch{}, none, nil, errors.New("alarmd access uq: nonscalar group value")
 		}
 		dimensions[key] = encoded
 	}
@@ -1133,36 +1149,44 @@ func normalizeSeriesKeeping(spec execution.PhysicalQuerySpec, ref execution.Prov
 	// encoding from here rather than making it again.
 	identity, err := contract.EncodeDimensionIdentityV2(spec.PlanFacts.TenantID, spec.PlanFacts.BusinessID, identityFields)
 	if err != nil {
-		return execution.ProviderSeriesBatch{}, 0, nil, err
+		return execution.ProviderSeriesBatch{}, none, nil, err
 	}
 	dimensionDigest := identity.Digest
+	var dropped observability.PointDrops
 	records := make([]contract.CanonicalRecordV2, 0, len(source.Values))
 	lastTime := int64(-1)
 	for _, row := range source.Values {
 		if len(row) != len(source.Columns) {
-			return execution.ProviderSeriesBatch{}, 0, nil, errors.New("alarmd access uq: row width differs from columns")
+			return execution.ProviderSeriesBatch{}, none, nil, errors.New("alarmd access uq: row width differs from columns")
 		}
 		timestamp, value, err := rowFacts(source.Columns, row, spec.PlanFacts.QueryList)
 		if err != nil {
-			return execution.ProviderSeriesBatch{}, 0, nil, err
+			return execution.ProviderSeriesBatch{}, none, nil, err
 		}
 		sourceTime, err := spec.PlanFacts.Normalization.NormalizeSourceTime(timestamp)
 		if err != nil {
-			return execution.ProviderSeriesBatch{}, 0, nil, err
+			return execution.ProviderSeriesBatch{}, none, nil, err
 		}
 		if sourceTime <= lastTime {
-			return execution.ProviderSeriesBatch{}, 0, nil, errors.New("alarmd access uq: source order contract broken")
+			return execution.ProviderSeriesBatch{}, none, nil, errors.New("alarmd access uq: source order contract broken")
 		}
 		lastTime = sourceTime
-		if sourceTime < spec.AcceptedRange.Start || sourceTime >= spec.AcceptedRange.End {
+		// A point outside the range the query accepts is not this window's:
+		// let go, and counted by the side it fell on - never silently.
+		if sourceTime < spec.AcceptedRange.Start {
+			dropped.OutsideRangeBefore++
+			continue
+		}
+		if sourceTime >= spec.AcceptedRange.End {
+			dropped.OutsideRangeAfter++
 			continue
 		}
 		if spec.PlanFacts.NotTimeAlign && !onRequestGrid(spec, sourceTime) {
-			return execution.ProviderSeriesBatch{}, 0, nil, errOffRequestGrid
+			return execution.ProviderSeriesBatch{}, none, nil, errOffRequestGrid
 		}
 		recordID, err := contract.DeriveRecordIDV2(dimensionDigest, sourceTime)
 		if err != nil {
-			return execution.ProviderSeriesBatch{}, 0, nil, err
+			return execution.ProviderSeriesBatch{}, none, nil, err
 		}
 		records = append(records, contract.CanonicalRecordV2{RecordID: recordID, SourceTime: sourceTime,
 			BusinessID:        spec.PlanFacts.BusinessID,
@@ -1176,7 +1200,7 @@ func normalizeSeriesKeeping(spec execution.PhysicalQuerySpec, ref execution.Prov
 	dataset := execution.NewDatasetOfDerivedRecordIDs(records)
 	digest, err := contract.DeriveSeriesRecordsDigestV2("alarmd-provider-series-delivery-v1", records, identity)
 	if err != nil {
-		return execution.ProviderSeriesBatch{}, 0, nil, err
+		return execution.ProviderSeriesBatch{}, none, nil, err
 	}
 	var recordIDs []string
 	if keepIDs {
@@ -1187,7 +1211,7 @@ func normalizeSeriesKeeping(spec execution.PhysicalQuerySpec, ref execution.Prov
 	}
 	return execution.ProviderSeriesBatch{PhysicalQuery: spec.Digest, CompletionRef: ref, Dataset: dataset,
 		Delivery: execution.SeriesDelivery{PhysicalQuery: spec.Digest, QueryRevision: spec.PlanFacts.QueryRevision,
-			Series: 1, Records: uint64(len(records)), Digest: digest}}, nullIdentityFields, recordIDs, nil
+			Series: 1, Records: uint64(len(records)), Digest: digest}}, normalizedFacts{nullIdentityFields: nullIdentityFields, dropped: dropped}, recordIDs, nil
 }
 
 func rowFacts(columns []string, row []json.RawMessage, queries []execution.QueryClause) (int64, json.RawMessage, error) {
@@ -1261,4 +1285,11 @@ func onRequestGrid(spec execution.PhysicalQuerySpec, sourceTime int64) bool {
 		return true
 	}
 	return (sourceTime-spec.AcceptedRange.Start)%step == 0
+}
+
+// answerPhases splits a query answered at answered - its response's headers
+// in - into the wait before them, the provider's, and the body after, read
+// and decoded, alarmd's.
+func answerPhases(started, answered, done time.Time) (wait, body uint64) {
+	return uint64(answered.Sub(started).Milliseconds()), uint64(done.Sub(answered).Milliseconds())
 }

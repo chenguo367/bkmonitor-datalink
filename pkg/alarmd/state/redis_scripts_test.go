@@ -16,6 +16,8 @@ import (
 func TestTheDigestsSentByHandReadAsTheirScripts(t *testing.T) {
 	for _, test := range []struct{ name, digest string }{
 		{"state_fenced_batch_write", fencedBatchWriteSHA},
+		{"state_segment_write", segmentWriteSHA},
+		{"state_segment_renew", segmentRenewSHA},
 		{"state_apply_hash_delta", applyHashDeltaSHA},
 		{"state_record_hash_field", recordHashFieldSHA},
 		{"state_stage_hash_segment", stageHashSegmentSHA},

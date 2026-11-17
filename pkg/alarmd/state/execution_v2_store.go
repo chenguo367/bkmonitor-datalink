@@ -122,6 +122,12 @@ type SegmentCoverage interface {
 type ExecutionStore struct {
 	options   ExecutionStoreOptions
 	witnesses *runtimeWitnessCache
+	// segments are the counts of the Plans' segments' reads and writes
+	// (segment_store.go); what is kept of them is the cache's.
+	segments *segmentStats
+	// uses is what this process last did with each Plan's segments, for a
+	// reader of the object (segment_reading.go).
+	uses *segmentUses
 	// cache is the write-through State cache, nil when it is off.
 	cache *stateCache
 	// renewals is what this process already asked Redis about the life of the
@@ -178,6 +184,7 @@ func NewExecutionStore(options ExecutionStoreOptions) (*ExecutionStore, error) {
 		options.Now = time.Now
 	}
 	return &ExecutionStore{options: options, witnesses: newRuntimeWitnessCache(),
+		segments: newSegmentStats(), uses: newSegmentUses(),
 		renewals: newRenewalGate(), frozenRenewals: newRenewalGate(),
 		cache: newStateCache(options.StateCacheBudgetBytes, options.StateCacheReplayAge, options.Now)}, nil
 }

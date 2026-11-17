@@ -29,6 +29,9 @@ type Mark struct {
 	Position int64
 	Pages    int
 	Renewed  []Renewal
+	// Sizes is each page's bytes as written: what a cold read cuts its
+	// MGETs by, rather than by the largest a page can be.
+	Sizes []int
 }
 
 // Renewal is a page's last renewal: At, the wall clock in milliseconds the
@@ -51,6 +54,7 @@ type markJSON struct {
 	Position int64                  `json:"position"`
 	Pages    int                    `json:"pages"`
 	Renewed  []Renewal              `json:"renewed"`
+	Sizes    []int                  `json:"sizes"`
 }
 
 // EncodeMark is a mark's bytes.
@@ -59,7 +63,7 @@ func EncodeMark(mark Mark) ([]byte, error) {
 		return nil, err
 	}
 	return json.Marshal(markJSON{Schema: markSchema, Version: mark.Version, Position: mark.Position,
-		Pages: mark.Pages, Renewed: mark.Renewed})
+		Pages: mark.Pages, Renewed: mark.Renewed, Sizes: mark.Sizes})
 }
 
 // DecodeMark reads a mark back.
@@ -71,7 +75,8 @@ func DecodeMark(raw []byte) (Mark, error) {
 	if decoded.Schema != markSchema {
 		return Mark{}, fmt.Errorf("%w: schema %q", ErrMark, decoded.Schema)
 	}
-	mark := Mark{Version: decoded.Version, Position: decoded.Position, Pages: decoded.Pages, Renewed: decoded.Renewed}
+	mark := Mark{Version: decoded.Version, Position: decoded.Position, Pages: decoded.Pages, Renewed: decoded.Renewed,
+		Sizes: decoded.Sizes}
 	if err := mark.check(); err != nil {
 		return Mark{}, err
 	}
@@ -84,6 +89,14 @@ func (mark Mark) check() error {
 	}
 	if len(mark.Renewed) != mark.Pages {
 		return fmt.Errorf("%w: %d renewals for %d pages", ErrMark, len(mark.Renewed), mark.Pages)
+	}
+	if len(mark.Sizes) != mark.Pages {
+		return fmt.Errorf("%w: %d sizes for %d pages", ErrMark, len(mark.Sizes), mark.Pages)
+	}
+	for page, size := range mark.Sizes {
+		if size < 0 {
+			return fmt.Errorf("%w: page %d of %d bytes", ErrMark, page, size)
+		}
 	}
 	if mark.Position < 0 {
 		return fmt.Errorf("%w: position %d", ErrMark, mark.Position)

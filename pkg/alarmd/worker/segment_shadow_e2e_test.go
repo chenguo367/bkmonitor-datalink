@@ -17,8 +17,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/go-redis/redis/v8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
@@ -26,6 +29,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/evaluation"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/segment"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/state"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/trigger"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/worker"
@@ -35,8 +39,14 @@ import (
 // own entry, on the real evaluator and a real State store over redis-server,
 // the Plan's provider told each round which hosts answer and with what.
 type shadowRig struct {
-	t           *testing.T
-	store       *lateLandingStore
+	t     *testing.T
+	store *lateLandingStore
+	// redis reads the store's keys with no cache: what Redis holds;
+	// client is a plain client of the same server.
+	redis  *state.ExecutionStore
+	client *redis.Client
+	// wallAhead is how far the worker's wall clock runs ahead of the real.
+	wallAhead   atomic.Int64
 	ports       *recordingPorts
 	provider    *shadowProvider
 	frozen      *shadowFrozen
@@ -68,6 +78,15 @@ type shadowObserved struct {
 	applied map[observability.StateAlreadyAppliedSite]int64
 	// classes is the series written, by kind and class (the census).
 	classes map[string]int64
+	// renewals is the page renewals, by result.
+	renewals map[string]int64
+}
+
+// renewal is the page renewals counted under result.
+func (observed *shadowObserved) renewal(result string) int64 {
+	observed.mu.Lock()
+	defer observed.mu.Unlock()
+	return observed.renewals[result]
 }
 
 func (observed *shadowObserved) Observe(_ context.Context, observation observability.Observation) {
@@ -104,6 +123,12 @@ func (observed *shadowObserved) Observe(_ context.Context, observation observabi
 	}
 	for key, count := range facts.Members {
 		observed.members[key.Event] += count
+	}
+	for result, count := range facts.Renewals {
+		if observed.renewals == nil {
+			observed.renewals = map[string]int64{}
+		}
+		observed.renewals[result] += count
 	}
 }
 
@@ -228,11 +253,14 @@ const shadowRecoveryOff = `{"enabled":false,"consecutive_windows":1}`
 
 func newShadowRig(t *testing.T, hosts, padding int, recovery string) *shadowRig {
 	t.Helper()
-	return newShadowRigWith(t, hosts, padding, recovery, 0, nil)
+	return newShadowRigWith(t, hosts, padding, recovery, 0, nil, 0)
 }
 
+// newShadowRigWith is the rig with a Plan of its own snapshot revision and
+// no-data detection, and a store whose State cache holds cacheBudget bytes,
+// none at zero.
 func newShadowRigWith(t *testing.T, hosts, padding int, recovery string, snapshotRevision int64,
-	noData *contract.NoDataConfigV1) *shadowRig {
+	noData *contract.NoDataConfigV1, cacheBudget int64) *shadowRig {
 	t.Helper()
 	facts := ringRatioQueryFacts(t)
 	ref := execution.LogicalQueryRef(facts.QueryRevision)
@@ -269,10 +297,37 @@ func newShadowRigWith(t *testing.T, hosts, padding int, recovery string, snapsho
 	if err != nil {
 		t.Fatal(err)
 	}
-	real, backend := openG3AStateStore(t, startG3ARedis(t), "alarmd-shadow")
+	address := startG3ARedis(t)
+	real, backend := openG3AStateStore(t, address, "alarmd-shadow")
+	rig.client = redis.NewClient(&redis.Options{Addr: address})
+	t.Cleanup(func() { _ = rig.client.Close() })
 	t.Cleanup(func() { _ = backend.Close() })
+	if cacheBudget > 0 {
+		router, err := state.NewFixedRouter("shadow-cached", backend)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The lifetimes in production's relation: the replay age, the
+		// restart margin and the shortest lifetime all ten minutes.
+		real, err = state.NewExecutionStore(state.ExecutionStoreOptions{Prefix: "alarmd-shadow", Router: router,
+			MaxValueBytes: 1 << 20, MaxItemsPerCall: 16, MinTTL: 10 * time.Minute, MaxTTL: time.Hour,
+			RestartMargin: 10 * time.Minute, StateCacheBudgetBytes: cacheBudget, StateCacheReplayAge: 10 * time.Minute,
+			Now: time.Now})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	store := &lateLandingStore{ExecutionStore: real}
 	rig.store = store
+	direct, err := state.NewFixedRouter("shadow-direct", backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rig.redis, err = state.NewExecutionStore(state.ExecutionStoreOptions{Prefix: "alarmd-shadow", Router: direct,
+		MaxValueBytes: 1 << 20, MaxItemsPerCall: 16, MinTTL: time.Minute, MaxTTL: time.Hour, RestartMargin: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
 	trace := make([]string, 0)
 	// No gap marker: the fake's default holds every round WARMING, which no
 	// Plan of a live Query Group stays.
@@ -280,12 +335,57 @@ func newShadowRigWith(t *testing.T, hosts, padding int, recovery string, snapsho
 	rig.coordinator, err = worker.NewSlotExecutionCoordinator(worker.Ports{OpenAlerts: rig.ports, Finalization: rig.ports,
 		Activation: rig.ports, Query: source, Sequencer: rig.ports, Evaluator: evaluator, Admission: rig.ports,
 		GapGuard: rig.ports, NoData: worker.SharedNoDataStore, Hosts: worker.SharedHostBusiness,
-		Events: rig.ports, State: store, Progress: rig.ports, Observer: rig.observed},
+		Events: rig.ports, State: store, Progress: rig.ports, Observer: rig.observed,
+		// The worker's wall clock, which renewals are judged and timed by,
+		// run ahead of the real one by wallAhead.
+		Now: func() time.Time { return time.Now().Add(time.Duration(rig.wallAhead.Load())) }},
 		worker.ProvisionalBudget{MaxSeries: 400, MaxRetainedBytes: slicedPool, MaxStateMutations: 400, MaxEvents: 400, MaxGapMutations: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return rig
+}
+
+// storedMark is the Plan's mark as the store holds it in Redis.
+func (rig *shadowRig) storedMark(at execution.EvaluationTime) segment.Mark {
+	rig.t.Helper()
+	contract := rig.base.Contract
+	contract.Slot.EvaluationTime = at
+	read, err := rig.redis.ReadSegments(context.Background(), segment.ReadRequest{Contract: contract,
+		Plans: []segment.ReadPlan{{Key: segment.PlanKey{Plan: planIdentity(), Generation: "state-v1"}}}})
+	if err != nil {
+		rig.t.Fatal(err)
+	}
+	_, mark, stored, err := read.Plans[0].Book()
+	if err != nil || !stored {
+		rig.t.Fatalf("the Plan's mark: stored %v, %v", stored, err)
+	}
+	return mark
+}
+
+// storedMembers is the Plan's book as the store holds it in Redis after the
+// Slot at at: its open and closed members.
+func (rig *shadowRig) storedMembers(at execution.EvaluationTime) (open, closed int) {
+	rig.t.Helper()
+	contract := rig.base.Contract
+	contract.Slot.EvaluationTime = at
+	read, err := rig.redis.ReadSegments(context.Background(), segment.ReadRequest{Contract: contract,
+		Plans: []segment.ReadPlan{{Key: segment.PlanKey{Plan: planIdentity(), Generation: "state-v1"}}}})
+	if err != nil {
+		rig.t.Fatal(err)
+	}
+	book, _, stored, err := read.Plans[0].Book()
+	if err != nil || !stored {
+		rig.t.Fatalf("the Plan's book: stored %v, %v", stored, err)
+	}
+	book.Each(func(entry segment.Entry) {
+		if entry.Open() {
+			open++
+		} else {
+			closed++
+		}
+	})
+	return open, closed
 }
 
 // run executes the Slot at evaluation, the hosts given absent and the values
@@ -388,7 +488,7 @@ func (store *lateLandingStore) ApplyRuntimeFenced(ctx context.Context, request e
 // after the write, retried at an applied series, the fold after Progress -
 // are on the path, or the counts would be zeros that read as a pass.
 func TestTheSegmentShadowThroughExecuteMatchesEveryWriteItWouldHaveLeft(t *testing.T) {
-	rig := newShadowRig(t, 6, 0, shadowRecoveryOff)
+	rig := newShadowRigWith(t, 6, 0, shadowRecoveryOff, 0, nil, 16<<20)
 	at := frozenContract().Slot.EvaluationTime
 	step := func(absent []string, value map[string]string, partial bool) {
 		t.Helper()
@@ -417,10 +517,16 @@ func TestTheSegmentShadowThroughExecuteMatchesEveryWriteItWouldHaveLeft(t *testi
 		step(nil, nil, false)
 	}
 	// A Slot whose Progress fails after its State is written, then its retry.
+	before := rig.storedMark(at).Position
 	at += 60
 	rig.ports.failStage = "progress_commit"
 	if completed, _ := rig.run(at, nil, nil, false); completed {
 		t.Fatal("the Slot completed with its Progress failing")
+	}
+	// Written before the Progress that failed: the round's mark is its own,
+	// one interval on.
+	if mark := rig.storedMark(at); mark.Position != before+60 {
+		t.Fatalf("after a failed Progress the stored mark is at %d, want the round's own, %d", mark.Position, before+60)
 	}
 	rig.ports.failStage = ""
 	if completed, err := rig.run(at, nil, nil, false); !completed {
@@ -448,6 +554,33 @@ func TestTheSegmentShadowThroughExecuteMatchesEveryWriteItWouldHaveLeft(t *testi
 		if members[event] == 0 {
 			t.Errorf("no %s: the round's membership did not do what it was run to", event)
 		}
+	}
+	// The book lives in the store: written every round before Progress, read
+	// once a Slot before its State - from Redis the first time, from the
+	// State cache under the same fence after, a retry's among them - and
+	// never read back other than it was written.
+	stats := rig.store.SegmentStats()
+	t.Logf("segment reads %v writes %v drift %d cache plans %d pages %d bytes %d", stats.Reads, stats.Writes, stats.Drift,
+		stats.Plans, stats.Pages, stats.Bytes)
+	for _, result := range segment.WriteResults {
+		if result != segment.WriteApplied && stats.Writes[result] != 0 {
+			t.Errorf("%d segment writes %s", stats.Writes[result], result)
+		}
+	}
+	if stats.Writes[segment.WriteApplied] < 60 {
+		t.Errorf("%d segment writes applied over more than 60 Slots, want one a round", stats.Writes[segment.WriteApplied])
+	}
+	for _, reason := range segment.ReadReasons {
+		if want := uint64(map[bool]int{true: 1}[reason == segment.ReadCold]); stats.Reads[[2]string{segment.SourceRedis, reason}] != want {
+			t.Errorf("%d segment reads from Redis %s, want %d", stats.Reads[[2]string{segment.SourceRedis, reason}], reason, want)
+		}
+	}
+	if stats.Reads[[2]string{segment.SourceCache, segment.ReadHit}] < 60 || stats.Drift != 0 || stats.Plans != 1 {
+		t.Errorf("segment reads %v drift %d plans %d: want every Slot after the first served from the cache", stats.Reads,
+			stats.Drift, stats.Plans)
+	}
+	if open, _ := rig.storedMembers(at); open == 0 {
+		t.Error("the book in Redis has no open member")
 	}
 }
 
@@ -617,7 +750,7 @@ func TestARetryMeetingItsEarlierAttemptsLateWriteKeepsTheRoundsMembers(t *testin
 func TestANoDataSeriesStaysOffTheShadowsBooksBesideThePlansRealSeries(t *testing.T) {
 	const hosts = 3
 	rig := newShadowRigWith(t, hosts, 0, `{"enabled":true,"consecutive_windows":1}`, 1,
-		&contract.NoDataConfigV1{Continuous: 1, Level: 2})
+		&contract.NoDataConfigV1{Continuous: 1, Level: 2}, 0)
 	at := frozenContract().Slot.EvaluationTime
 	for round := 0; round < 4; round++ {
 		at += 60
@@ -629,16 +762,61 @@ func TestANoDataSeriesStaysOffTheShadowsBooksBesideThePlansRealSeries(t *testing
 	classes := rig.observed.classes
 	rig.observed.mu.Unlock()
 	outcomes, members := rig.observed.snapshot()
-	reading := worker.SegmentShadowMemory(rig.coordinator)
-	t.Logf("classes %v outcomes %v members %v books %+v", classes, outcomes, members, reading)
+	open, closed := rig.storedMembers(at)
+	t.Logf("classes %v outcomes %v members %v stored open %d closed %d", classes, outcomes, members, open, closed)
 	if classes[fmt.Sprint(observability.StateSeriesNoData, "/", observability.StateSeriesClassStableNormal)] == 0 {
 		t.Fatal("no no-data series was written steady and normal: the case does not have the series it guards against")
 	}
-	if reading.Open != hosts || members[observability.SegmentShadowJoined] != hosts {
-		t.Fatalf("books %+v, joined %d: want the %d real hosts on the page and no no-data series", reading,
+	if open != hosts || members[observability.SegmentShadowJoined] != hosts {
+		t.Fatalf("stored %d open members, joined %d: want the %d real hosts on the page and no no-data series", open,
 			members[observability.SegmentShadowJoined], hosts)
 	}
 	if outcomes[observability.SegmentShadowMatch] == 0 {
 		t.Fatalf("outcomes %v: the real series beside the no-data one did not match", outcomes)
+	}
+}
+
+// A page due by the worker's wall clock is renewed through the production
+// wiring: Execute on the real store, its lifetimes in production's relation,
+// the worker's clock past the page's quarter lifetime. Every member key the
+// renewal names is one the State write path wrote - none is found gone -
+// so the names the renewal builds are the State's. In the second stage the
+// round writes those keys whole as well, so their lifetime cannot tell the
+// renewal reached them; that it found every one of them can.
+func TestAPageDueByTheWorkersClockIsRenewedOnTheKeysTheStateWrote(t *testing.T) {
+	const hosts = 4
+	rig := newShadowRigWith(t, hosts, 0, shadowRecoveryOff, 0, nil, 16<<20)
+	at := frozenContract().Slot.EvaluationTime
+	for round := 0; round < 3; round++ {
+		at += 60
+		if completed, err := rig.run(at, nil, nil, false); !completed {
+			t.Fatalf("Slot at %d: err=%v", at, err)
+		}
+	}
+	mark := rig.storedMark(at)
+	if open, _ := rig.storedMembers(at); open != hosts {
+		t.Fatalf("%d open members before the page falls due, want %d", open, hosts)
+	}
+	if renewed := rig.observed.renewal(observability.SegmentRenewalRenewed); renewed != 0 {
+		t.Fatalf("%d renewals before the page fell due", renewed)
+	}
+	if keys := rig.client.Keys(context.Background(), "alarmd-shadow:runtime3:*").Val(); len(keys) < hosts {
+		t.Fatalf("%d State keys in Redis, want the %d members' at least", len(keys), hosts)
+	}
+	// Past the page's quarter lifetime by the worker's clock: its new page's
+	// time is no later than when it was made.
+	ahead := time.Duration(mark.Renewed[0].TTL/4)*time.Millisecond + time.Minute
+	rig.wallAhead.Store(int64(ahead))
+	at += 60
+	if completed, err := rig.run(at, nil, nil, false); !completed {
+		t.Fatalf("the Slot the page fell due in: err=%v", err)
+	}
+	renewed, missing, failed := rig.observed.renewal(observability.SegmentRenewalRenewed),
+		rig.observed.renewal(observability.SegmentRenewalMissing), rig.observed.renewal(observability.SegmentRenewalFailed)
+	if renewed != 1 || missing != 0 || failed != 0 {
+		t.Fatalf("renewals renewed %d, missing %d, failed %d: want the page renewed with every member key found", renewed, missing, failed)
+	}
+	if after := rig.storedMark(at); after.Renewed[0].At < time.Now().Add(ahead-time.Minute).UnixMilli() {
+		t.Fatalf("the page's renewal time %d did not move to the worker's clock", after.Renewed[0].At)
 	}
 }

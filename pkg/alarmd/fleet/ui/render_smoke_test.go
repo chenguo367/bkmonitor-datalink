@@ -34,13 +34,10 @@ import (
 // The fixture is built from the Go types rather than written as JSON, so the
 // shapes cannot drift from what the API sends without this failing to compile.
 func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		// Loudly. A skipped check is no check, and the failure it exists for is
-		// invisible to everything else here.
-		t.Skip("node is not on PATH, so the page's logic is NOT executed by this run -- " +
-			"only the static checks above ran, and a ReferenceError would pass all of them")
-	}
+	// Loudly. A skipped check is no check, and the failure it exists for is
+	// invisible to everything else here; a gate sets ALARMD_REQUIRE_NODE=1.
+	node := pageNode(t, "the page's logic is NOT executed by this run -- "+
+		"only the static checks above ran, and a ReferenceError would pass all of them")
 
 	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
 	anomaly := func(id string, mutate func(*fleet.Anomaly)) fleet.Anomaly {

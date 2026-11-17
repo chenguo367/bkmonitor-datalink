@@ -1725,6 +1725,17 @@ type ByteConstraintFacts struct {
 	// Worker's sum of peaks over its limit, above one overloaded.
 	PublishedFromSessionHolders int     `json:"published_from_session_holders"`
 	MostLoadedShare             float64 `json:"most_loaded_share"`
+	// Judgement is what the round judged by: occupancy, each Worker's
+	// concurrent occupancy, or peak_sum, the sum of its peaks - then
+	// NotReporting names the ready Workers whose missing high-water made it
+	// so. AllOver is every judged Worker over the line, moves made only where
+	// they relieve; Held a new Leader's first hour, no byte move made.
+	// OverShare is how many Query Groups no other Worker's share would hold.
+	Judgement    string   `json:"judgement"`
+	NotReporting []string `json:"not_reporting,omitempty"`
+	AllOver      bool     `json:"all_over,omitempty"`
+	Held         bool     `json:"held,omitempty"`
+	OverShare    int      `json:"over_share,omitempty"`
 }
 
 // ByteMoveSample is one byte-constraint move with the peak it was judged by.
@@ -2936,7 +2947,10 @@ type Observation struct {
 	QueryTruncation []QueryTruncationFacts
 	// QueryRanges is every primary physical query of the completion with the
 	// range it asked and accepts.
-	QueryRanges           []QueryRangeFacts
+	QueryRanges []QueryRangeFacts
+	// QueryPointsDropped is the points the completion's answers'
+	// normalization let go, by reason; nil when none.
+	QueryPointsDropped    *PointDrops
 	QueryUnavailable      []QueryUnavailableFacts
 	QueryTiming           *QueryTimingFacts
 	SlotReadiness         *SlotReadinessFacts

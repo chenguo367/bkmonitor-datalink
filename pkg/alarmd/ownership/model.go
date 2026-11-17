@@ -194,6 +194,30 @@ type WorkerLoad struct {
 	// section 5.7). Zero from a Worker that does not report it, which the
 	// Leader reads as "not judged", not as "no pool".
 	RetainedPoolBytes uint64 `json:"retained_pool_bytes,omitempty"`
+	// RetainedHigh is this Worker's concurrent retained-byte occupancy as it
+	// measured it (014 C1 section 8): what the Control Leader judges the byte
+	// constraint by in place of the sum of its Query Groups' peaks, which
+	// read four times what was ever held at once. Nil from a Worker that does
+	// not report it, read as "not reported" - and then the whole fleet is
+	// judged by the sum, as before. A reading of zero is a reading.
+	RetainedHigh *RetainedHighReading `json:"retained_high,omitempty"`
+	// RetainedShareBytes is the most one Query Group may hold on this Worker,
+	// as the Worker derived it (its own per-Query-Group share): the Leader
+	// does not place a Query Group whose peak is past it. Zero from a Worker
+	// that does not report it, which is not checked.
+	RetainedShareBytes uint64 `json:"retained_share_bytes,omitempty"`
+}
+
+// RetainedHighReading is a Worker's retained-byte occupancy over the window
+// it covers: Bytes, the most its Slots held reserved at once, taken at every
+// reservation; WindowSeconds, how much of the hour the reading spans - less
+// than an hour after a start; LongPeriodBytes, the peaks of the Query Groups
+// it holds whose period is longer than the window, whose Slots the window
+// may not have seen.
+type RetainedHighReading struct {
+	Bytes           uint64 `json:"bytes"`
+	WindowSeconds   int64  `json:"window_seconds"`
+	LongPeriodBytes uint64 `json:"long_period_bytes"`
 }
 
 func (load *WorkerLoad) validate() error {
@@ -203,6 +227,9 @@ func (load *WorkerLoad) validate() error {
 	if load.OwnedQueryGroups < 0 || load.PermitsHeld < 0 || load.PermitBudget < 0 || load.Waiting < 0 ||
 		load.PermitSeconds < 0 || load.PermitSeconds != load.PermitSeconds {
 		return errors.New("alarmd ownership: invalid worker load")
+	}
+	if load.RetainedHigh != nil && load.RetainedHigh.WindowSeconds < 0 {
+		return errors.New("alarmd ownership: invalid retained high-water window")
 	}
 	return nil
 }

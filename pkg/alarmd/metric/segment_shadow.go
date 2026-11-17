@@ -18,7 +18,7 @@ import (
 // The shadow of the Plans' stable segments (014 B3, first stage): every cell
 // of every family exists from the start, so a zero is a reading.
 type segmentShadowMetrics struct {
-	outcomes, members, pageWrites, pageBytes *prometheus.CounterVec
+	outcomes, members, pageWrites, pageBytes, skipped, renewals *prometheus.CounterVec
 }
 
 func newSegmentShadowMetrics() segmentShadowMetrics {
@@ -57,6 +57,31 @@ func newSegmentShadowMetrics() segmentShadowMetrics {
 			Help: "Bytes of the member pages a round of the shadow would have rewritten, each page encoded whole " +
 				"as it would be written, by the Plan's period class.",
 		}, []string{"period_class"}),
+		skipped: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Subsystem: metricSubsystem, Name: "state_segment_shadow_skipped_total",
+			Help: "Slots run without the shadow of their Plans' stable segments, their State written as ever, by " +
+				"reason: read_failed (the Plans' segments could not be read: state_segment_read_total" +
+				"{reason=\"failed\"} counts the Plans), book_refused (the retained pool did not take the books " +
+				"the Slot read, reserved as its State is, or the members a Plan's round would join, who then join " +
+				"a later round; refused quietly, the Slot itself goes on).",
+		}, []string{"reason"}),
+		renewals: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Subsystem: metricSubsystem, Name: "state_segment_renewal_total",
+			Help: "The renewals of a Plan's member pages due - a quarter of the shorter of the lifetime their last " +
+				"renewal gave and this round's since it (014 B3 3.5) - by result: renewed and failed, pages whose " +
+				"scripts all answered or not (a failed page's renewal time stays, and it is renewed whole next " +
+				"round); missing, member State keys a renewal found gone (not made again: they read " +
+				"MISSING_WARMING); over_budget, renewal scripts of at most 256 keys that ran past 2.5 ms by the " +
+				"server's clock; fallback_write, pages unrenewed for half their lifetime, whose members are written " +
+				"whole - in the second stage counted only, every State being written. missing, over_budget and " +
+				"fallback_write all zero over every lifetime tier is the third stage's bar.",
+		}, []string{"result"}),
+	}
+	for _, result := range observability.AllSegmentRenewalResults() {
+		metrics.renewals.WithLabelValues(result)
+	}
+	for _, reason := range observability.AllSegmentShadowSkips() {
+		metrics.skipped.WithLabelValues(reason)
 	}
 	for _, class := range observability.AllSegmentPeriodClasses() {
 		for _, outcome := range observability.AllSegmentShadowOutcomes() {
@@ -72,7 +97,7 @@ func newSegmentShadowMetrics() segmentShadowMetrics {
 }
 
 func (m segmentShadowMetrics) collectors() []prometheus.Collector {
-	return []prometheus.Collector{m.outcomes, m.members, m.pageWrites, m.pageBytes}
+	return []prometheus.Collector{m.outcomes, m.members, m.pageWrites, m.pageBytes, m.skipped, m.renewals}
 }
 
 func (m segmentShadowMetrics) observe(facts *observability.SegmentShadowFacts) {
@@ -88,5 +113,11 @@ func (m segmentShadowMetrics) observe(facts *observability.SegmentShadowFacts) {
 	for class, count := range facts.PageWrites {
 		m.pageWrites.WithLabelValues(class).Add(float64(count))
 		m.pageBytes.WithLabelValues(class).Add(float64(facts.PageBytes[class]))
+	}
+	for reason, count := range facts.Skipped {
+		m.skipped.WithLabelValues(reason).Add(float64(count))
+	}
+	for result, count := range facts.Renewals {
+		m.renewals.WithLabelValues(result).Add(float64(count))
 	}
 }

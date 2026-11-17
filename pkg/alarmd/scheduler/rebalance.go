@@ -207,10 +207,11 @@ func (router *Router) PlanRebalanceWithin(
 		if destination.Declines(queryGroup) {
 			continue
 		}
-		if !projection.fits(least, queryGroup) {
+		if !projection.fits(least, queryGroup) && !projection.relieves(least, most, queryGroup) {
 			continue
 		}
 		projection.land(queryGroup, least)
+		projection.leave(queryGroup, most)
 		plan.Moves = append(plan.Moves, RebalanceMove{QueryGroup: queryGroup, From: most, To: least})
 	}
 	return plan

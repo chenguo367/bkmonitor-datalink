@@ -280,3 +280,44 @@ type recordingCensusMeter struct {
 func (m *recordingCensusMeter) SetRetainedPeakCensus(groups int, overflow uint64) {
 	m.groups, m.overflow, m.calls = groups, overflow, m.calls+1
 }
+
+// The owned Query Groups' compute cost is published by band at every ask -
+// every owned one, a cost the heartbeat reports or none yet - so a worker's
+// whole is readable beside its CPU without a label a Query Group.
+func TestTheOwnedQueryGroupsComputeCostIsPublishedByBand(t *testing.T) {
+	now := time.Unix(600, 0)
+	census := observability.NewRetainedPeakCensus(time.Hour, func() time.Time { return now })
+	walls := map[string]time.Duration{"qg-light": 50 * time.Millisecond, "qg-heavy": 6 * time.Second}
+	observe := func() {
+		for group, wall := range walls {
+			census.Observe(context.Background(), observability.Observation{Stage: observability.StageEvaluationCompleted,
+				Trace: observability.TraceFields{QueryGroupKey: group}, Duration: wall, DurationKnown: true})
+			census.Observe(context.Background(), observability.Observation{Stage: observability.StageSlotCompleted,
+				Trace: observability.TraceFields{QueryGroupKey: group}, SlotBudgetUsage: &observability.SlotBudgetUsageFacts{RetainedBytes: 4096}})
+		}
+	}
+	source := newWorkerCostSource(census, nil, func() time.Time { return now })
+	source.boundByOwned(func() []execution.QueryGroupIdentity {
+		return []execution.QueryGroupIdentity{"qg-light", "qg-heavy", "qg-unrun"}
+	})
+	if reading := source.ComputeCost(); len(reading.Groups) != 0 {
+		t.Fatalf("before any ask: %+v", reading)
+	}
+	observe()
+	source.Costs()
+	if reading := source.ComputeCost(); reading.Groups["none"] != 3 {
+		t.Fatalf("the first ask derives no rate: %+v, want the three owned under none", reading)
+	}
+	// Ten seconds on, each spent its wall once more: the light one 5 ms a
+	// second, the heavy one 600.
+	now = now.Add(10 * time.Second)
+	observe()
+	source.Costs()
+	reading := source.ComputeCost()
+	if reading.Groups["lt_10ms"] != 1 || reading.Groups["lt_1s"] != 1 || reading.Groups["none"] != 1 {
+		t.Fatalf("bands %+v, want the light one under 10 ms, the heavy under a second, the unrun none", reading.Groups)
+	}
+	if seconds := reading.Seconds["lt_1s"] + reading.Seconds["lt_10ms"]; seconds < 0.6 || seconds > 0.61 {
+		t.Fatalf("the owned whole is %.3f s a second, want 0.605", seconds)
+	}
+}

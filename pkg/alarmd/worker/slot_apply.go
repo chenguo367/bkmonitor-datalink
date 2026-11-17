@@ -226,7 +226,7 @@ func (coordinator *SlotExecutionCoordinator) readSlotActivations(
 		forced:         unsatisfiedForcedWarmingActivations(guardActivations, loadedGaps, changedPlans),
 		withheldNoData: make(map[execution.PlanIdentity]struct{}),
 		attemptCensus:  &attemptCensus{},
-		shadow:         newSegmentShadowRound(request),
+		shadow:         newSegmentShadowRound(request, segmentsOf(ctx)),
 	}
 	registerSlotApply(ctx, apply)
 	return apply, true
@@ -637,7 +637,7 @@ func (apply *slotApply) applyPlanState(
 				// A no-data series is written as today, its presence the
 				// no-data memory's (014 B3 3.7): no member of a page.
 				if written := shadowedByState[mutation.Identity]; !written.noData {
-					apply.shadow.observe(&coordinator.segmentShadow, due, written.view, mutation, written.class, written.eventsSent)
+					apply.shadow.observe(due, written.view, mutation, written.class, written.eventsSent)
 				}
 				continue
 			}
@@ -768,6 +768,11 @@ func (apply *slotApply) complete(
 			guardReason:       guardReasonFor(header.DuePlans, changedSelected, loadedGaps, unseenPlansFrom(ctx)),
 		}
 	}
+	// The Plans' segments are written before Progress, the round's last
+	// write beside its State (014 B3 3.3): an attempt whose Progress does not
+	// land is retried, and the retry finds its series applied and starts
+	// their Plans over.
+	coordinator.foldSegmentShadow(ctx, request, apply.shadow, header.DuePlans, apply.withheldNoData)
 	// The activation facts are read again before Progress; the owner fence is
 	// not, because the commit's script runs it at the moment of the write
 	// (02 §7.5), and nothing between here and there is a side effect.
@@ -778,7 +783,6 @@ func (apply *slotApply) complete(
 	coordinator.markOutOfHours(ctx, header, &attribution.Coverage)
 	result, err := coordinator.commitProgress(ctx, request, completion, attribution)
 	if err == nil && result.Completed {
-		coordinator.foldSegmentShadow(ctx, request, apply.shadow, header.DuePlans, apply.withheldNoData)
 		result.QueryAvailability, result.QueryUnavailableReason = query.availability(), query.unavailableReason()
 		result.QueryUnknownReason = query.unknownReason()
 		result.PrimaryQueryClock = query.clock

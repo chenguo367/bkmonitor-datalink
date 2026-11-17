@@ -48,10 +48,11 @@ func newSlotProgressMetrics() slotProgressMetrics {
 		notCommitted: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: metricSubsystem, Name: "slot_not_committed_total",
 			Help: "Slot attempts that began their Slot (slot_begin_total{result=\"committed\"}) and returned without " +
-				"writing it down, once each, by why: QUERY_NOT_READY (a readiness deferral, the data not in yet), " +
-				"SNAPSHOT_RETRY and EXACT_SET_BLOCKED (the finalization asked for the attempt again), other " +
-				"(every other return: a failed query, State write or Progress commit among them). Begun less " +
-				"these is the attempts that committed.",
+				"writing it down, once each, by why: QUERY_NOT_READY, SNAPSHOT_RETRY; a result by its reason or kind " +
+				"(activation_read_failed, activation_changed, output_retry_pending, retry_pending, incomplete, " +
+				"no_result: a panic); an error by what it is (finalization_failed, owner_refused, query_permit_failed, cancelled, " +
+				"deadline_exceeded, declined, capacity_refused, store_conflict) or else the step it failed in " +
+				"(query_, complete_, apply_, output_, progress_commit_, query_free_failed); other, none of these.",
 		}, []string{"reason"}),
 		superseded: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: metricSubsystem, Name: "progress_projection_superseded_total",

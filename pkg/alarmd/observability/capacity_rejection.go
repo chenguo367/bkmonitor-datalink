@@ -97,6 +97,19 @@ type SlotBudgetUsageFacts struct {
 	// that no PRIMARY input of the same Plan named, let go at the completion
 	// (input_series_discarded_total{reason="dependency_without_primary"}).
 	DependencySeriesDiscarded uint64 `json:"dependency_series_discarded"`
+	// PointsDropped is the points the Slot's answers' normalization let go
+	// rather than evaluate, by reason - the Query Group's own share of
+	// access_query_points_dropped_total. {} is none let go.
+	PointsDropped PointDrops `json:"points_dropped"`
+	// QueryWaitMillis and QueryBodyMillis are the Slot's physical queries'
+	// time before their answers' first byte - the provider running them -
+	// and after it - read and decoded by alarmd - summed over the queries;
+	// the Max fields the longest query's. The Query Group's own share of
+	// access_query_answer_phase_seconds.
+	QueryWaitMillis    uint64 `json:"query_wait_millis"`
+	QueryBodyMillis    uint64 `json:"query_body_millis"`
+	QueryWaitMillisMax uint64 `json:"query_wait_millis_max"`
+	QueryBodyMillisMax uint64 `json:"query_body_millis_max"`
 	// InputSlices is the slices the Slot's input was read in, one for a Slot
 	// read whole, and InputSlicesDiscarded the ones let go and split while
 	// they streamed. FirstSeenUnseenSlices and FirstSeenUnseenSeries are the

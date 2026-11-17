@@ -2384,6 +2384,20 @@ type ByteConstraintFacts struct {
 	// ReadPeaks is the distribution of the peaks read this round, which the
 	// estimate for an unread Query Group is its ninetieth percentile of.
 	ReadPeaks *BytePeakDistribution `json:"read_peaks,omitempty"`
+	// Judgement is what the round judged each Worker by (014 C1 section 8):
+	// occupancy, its concurrent occupancy as the Sums break it down, or
+	// peak_sum, the sum of its Query Groups' peaks - and then NotReporting
+	// names the ready Workers whose missing high-water made it so. AllOver
+	// is every judged Worker over the line, a move made only where the
+	// destination ends below the source; Held is the term's first hour
+	// (TermAgeSeconds), no byte move made. OverShare names the Query Groups
+	// past every other Worker's share: theirs to split, not to move.
+	Judgement      string   `json:"judgement"`
+	NotReporting   []string `json:"not_reporting,omitempty"`
+	AllOver        bool     `json:"all_over,omitempty"`
+	Held           bool     `json:"held,omitempty"`
+	TermAgeSeconds int64    `json:"term_age_seconds"`
+	OverShare      []string `json:"over_share,omitempty"`
 }
 
 // ByteSumSample is one judged Worker's sum of peaks before the round's moves.
@@ -2395,6 +2409,31 @@ type ByteSumSample struct {
 	// Worker from being a destination.
 	Unread       int      `json:"unread,omitempty"`
 	UnreadSample []string `json:"unread_sample,omitempty"`
+	// Occupancy is the Worker's concurrent occupancy as the round judged it,
+	// under occupancy: nil under peak_sum.
+	Occupancy *ByteOccupancy `json:"occupancy,omitempty"`
+}
+
+// ByteOccupancy is what a Worker's occupancy was made of: Bytes = HighBytes
+// + LongPeriodBytes + ArrivingBytes - LeavingBytes. HighBytes is the
+// retained high-water the Worker reported over WindowSeconds;
+// LongPeriodBytes the peaks of its Query Groups whose period the window may
+// not have seen; ArrivingBytes the Query Groups landing on it (Arriving,
+// Waiting of them past the hour and not yet reported by it, a few named in
+// WaitingSample); LeavingBytes
+// the ones gone from it that its window still holds.
+type ByteOccupancy struct {
+	Bytes           uint64 `json:"bytes"`
+	HighBytes       uint64 `json:"high_bytes"`
+	WindowSeconds   int64  `json:"window_seconds"`
+	LongPeriodBytes uint64 `json:"long_period_bytes"`
+	ArrivingBytes   uint64 `json:"arriving_bytes"`
+	Arriving        int    `json:"arriving"`
+	Waiting         int    `json:"waiting,omitempty"`
+	LeavingBytes    uint64 `json:"leaving_bytes"`
+	Leaving         int    `json:"leaving"`
+	// WaitingSample names up to five of the Waiting, lowest first.
+	WaitingSample []string `json:"waiting_sample,omitempty"`
 }
 
 // BytePeakDistribution is the peaks read in the round the estimate for an

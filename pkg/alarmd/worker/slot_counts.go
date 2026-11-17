@@ -11,11 +11,14 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 )
 
 // SlotCounter is told how each Slot attempt's BeginSlot went, and why an
@@ -38,23 +41,128 @@ func (coordinator *SlotExecutionCoordinator) countSlotBegin(status execution.Pro
 
 // countNotCommitted counts an attempt that began its Slot, once, as it
 // returns: nothing when its Progress commit went through, and otherwise the
-// reason it returned on. mode is the finalization the attempt resolved, empty
-// when it returned before resolving one; err is what the attempt returned.
-func (coordinator *SlotExecutionCoordinator) countNotCommitted(applied *appliedPlanRecorder, mode execution.FinalizationMode, err error) {
+// reason it returned on (notCommittedReason). mode is the finalization the
+// attempt resolved, empty when it returned before resolving one; result and
+// err are what the attempt returned.
+func (coordinator *SlotExecutionCoordinator) countNotCommitted(applied *appliedPlanRecorder, mode execution.FinalizationMode,
+	result execution.SlotExecutionResult, err error) {
 	counter := coordinator.ports.SlotCounts
 	if counter == nil || applied.wasCommitted() {
 		return
 	}
-	reason := execution.SlotNotCommittedOther
-	switch {
-	case err != nil && isReadinessDeferred(err):
-		reason = execution.SlotNotCommittedQueryNotReady
-	case err == nil && mode == execution.FinalizationSnapshotRetry:
-		reason = execution.SlotNotCommittedSnapshotRetry
-	case err == nil && mode == execution.FinalizationExactSetBlocked:
-		reason = execution.SlotNotCommittedExactSetBlocked
+	counter.RecordSlotNotCommitted(notCommittedReason(mode, result, err))
+}
+
+// notCommittedReason is the word of execution.SlotNotCommittedReasons an
+// attempt that did not write its Slot down returned on: with an error, by
+// what the error is and then by the step it failed in (slotStepError); with
+// none, by its finalization and its result.
+func notCommittedReason(mode execution.FinalizationMode, result execution.SlotExecutionResult, err error) string {
+	if err != nil {
+		var exceeded *provisionalBudgetExceededError
+		_, refused := ownership.RefusalReason(err)
+		_, shared := execution.ShareRefusalOf(err)
+		_, sliced := InputSliceRefusal(err)
+		_, stateConflict := StateConflictReason(err)
+		_, gapRefused := GapApplyReason(err)
+		_, guardConflict := GapGuardConflictReason(err)
+		_, guardDisagree := GapGuardDisagreeReason(err)
+		// A cancellation or a deadline is read before the finalization: the
+		// process stopping or the Query Group leaving while the frozen Plan
+		// is read is a cancellation, not a finalization that did not
+		// resolve - a rollout would otherwise read as a burst of those.
+		switch {
+		case isReadinessDeferred(err):
+			return execution.SlotNotCommittedQueryNotReady
+		case refused:
+			return execution.SlotNotCommittedOwnerRefused
+		case queryAdmissionFailed(err):
+			return execution.SlotNotCommittedQueryPermitFailed
+		case errors.Is(err, context.Canceled):
+			return execution.SlotNotCommittedCancelled
+		case errors.Is(err, context.DeadlineExceeded):
+			return execution.SlotNotCommittedDeadlineExceeded
+		case mode == "":
+			return execution.SlotNotCommittedFinalizationFailed
+		case errors.Is(err, execution.ErrExecutionDeclined):
+			return execution.SlotNotCommittedDeclined
+		case PoolHeldByOthers(err) || shared || sliced || errors.As(err, &exceeded):
+			return execution.SlotNotCommittedCapacityRefused
+		case stateConflict || gapRefused || guardConflict || guardDisagree:
+			return execution.SlotNotCommittedStoreConflict
+		}
+		if step := innermostSlotStep(err); step != "" {
+			return step
+		}
+		return execution.SlotNotCommittedOther
 	}
-	counter.RecordSlotNotCommitted(reason)
+	switch {
+	case mode == execution.FinalizationSnapshotRetry:
+		return execution.SlotNotCommittedSnapshotRetry
+	case result.Result == "":
+		return execution.SlotNotCommittedNoResult
+	}
+	switch string(result.ReasonCode) {
+	case contract.ReasonActivationReadFailed:
+		return execution.SlotNotCommittedActivationReadFailed
+	case contract.ReasonConfigDrift, contract.ReasonPlanReactivated, contract.ReasonPlanNotActive:
+		return execution.SlotNotCommittedActivationChanged
+	case contract.ReasonOutputACKUnknown, contract.ReasonOutputLeaseExpiring:
+		return execution.SlotNotCommittedOutputRetryPending
+	}
+	switch result.Result {
+	case observability.ResultRetrying:
+		return execution.SlotNotCommittedRetryPending
+	case observability.ResultSuccess:
+		return execution.SlotNotCommittedOther
+	}
+	return execution.SlotNotCommittedIncomplete
+}
+
+// queryAdmissionFailed is whether the error is the query admission's, a
+// physical query permit not had, at whatever depth it was wrapped: a permit
+// wait that reached the query's deadline wraps the deadline, and is the
+// permit's before it is a deadline.
+func queryAdmissionFailed(err error) bool {
+	for ; err != nil; err = errors.Unwrap(err) {
+		if failure, ok := err.(interface{ QueryFailure() (string, string) }); ok {
+			if category, _ := failure.QueryFailure(); category == observability.QueryFailureCategoryAdmission {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// slotStepError is an attempt's error with the step of Execute it failed in,
+// a word of execution.SlotNotCommittedReasons; its text is the error's own.
+type slotStepError struct {
+	step string
+	err  error
+}
+
+func (e *slotStepError) Error() string { return e.err.Error() }
+func (e *slotStepError) Unwrap() error { return e.err }
+
+// inSlotStep is err failed in step; nil stays nil.
+func inSlotStep(step string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &slotStepError{step: step, err: err}
+}
+
+// innermostSlotStep is the step the error failed in, the innermost one named:
+// a Progress commit inside the frozen Slot's apply names the commit.
+func innermostSlotStep(err error) string {
+	step := ""
+	for err != nil {
+		if named, ok := err.(*slotStepError); ok {
+			step = named.step
+		}
+		err = errors.Unwrap(err)
+	}
+	return step
 }
 
 // seriesNotEvaluatedLineEvery is how often a Query Group's
@@ -109,7 +217,6 @@ func ForgetQueryGroup(coordinator *SlotExecutionCoordinator, queryGroup executio
 	coordinator.notEvaluatedLines.mu.Lock()
 	delete(coordinator.notEvaluatedLines.byGroup, queryGroup)
 	coordinator.notEvaluatedLines.mu.Unlock()
-	coordinator.segmentShadow.forget(queryGroup)
 }
 
 // reportSeriesNotEvaluated names, for a completed Slot that bound series it

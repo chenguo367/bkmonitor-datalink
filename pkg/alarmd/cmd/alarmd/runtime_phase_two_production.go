@@ -1649,6 +1649,9 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 	if err := runtime.records.prepareRound(ctx, authority, ordered); err != nil {
 		return err
 	}
+	// The account of the Query Groups changing holder is the term's: a new
+	// term starts it over, and reads its landings from the records below.
+	runtime.dependencies.Costs.Lead(authority.Fence.OwnerEpoch)
 	settlement, err := runtime.reconciler.ReconcileRoundSettlingWithBytes(ctx, authority, ordered, workers, at, scopes,
 		func(owners map[execution.QueryGroupIdentity]string) scheduler.ByteReadings {
 			return runtime.dependencies.Costs.Readings(owners, workers)
@@ -1662,6 +1665,7 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 		return err
 	}
 	round.done(fleet.LeaderRoundStageReconcileRecords)
+	runtime.dependencies.Costs.Settle(records)
 	// The round's census of the content scope on the records it settled,
 	// for the page: the same read, counted once, so how far the contract
 	// has reached the records is not a question for a script in a Pod.
@@ -1709,7 +1713,9 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 	// live, ineligible holders spent of it is not the count correction's
 	// to spend again (design 02 §6.2).
 	within := max(scheduler.HandoverBatch(len(ordered))-settlement.Replaced, 0)
-	plan := runtime.reconciler.PlanRebalanceWithin(owners, workers, readings, at, within)
+	// Under occupancy the byte moves just published land on and leave
+	// their Workers before the count correction judges them.
+	plan := runtime.reconciler.PlanRebalanceWithin(owners, workers, readings.Moved(byteOutcome.applied), at, within)
 	outcome, err := runtime.publishMoves(ctx, authority, plan.Moves, records, stable, remaining, at)
 	for _, move := range outcome.applied {
 		owners[move.QueryGroup] = move.To
@@ -2123,6 +2129,7 @@ func byteConstraintFacts(plan scheduler.BytePlan, outcome rebalanceOutcome) *obs
 		Overloaded: plan.Overloaded, Unplaceable: plan.Unplaceable, PlannedMoves: len(plan.Moves),
 		PublishedMoves: len(outcome.applied), Conflicts: outcome.conflicts, Paused: outcome.paused,
 		PublishedFromSessionHolders: outcome.fromSessionHolders, MostLoadedShare: plan.MostLoadedShare,
+		Judgement: plan.Judgement, NotReporting: plan.NotReporting, AllOver: plan.AllOver, Held: plan.Held, OverShare: len(plan.OverShare),
 	}
 	for _, move := range plan.Moves {
 		facts.Moves = append(facts.Moves, observability.ByteMoveSample{QueryGroup: string(move.QueryGroup), From: move.From, To: move.To, Bytes: move.Bytes})
@@ -2136,6 +2143,11 @@ func fleetByteConstraintFacts(plan scheduler.BytePlan, outcome rebalanceOutcome)
 		SharePercent: scheduler.ByteConstraintPercent, Judged: plan.Judged, PoolUnknown: plan.PoolUnknown, Unread: plan.Unread, Unsettled: plan.Unsettled, UnreadEstimate: plan.UnreadEstimate,
 		Overloaded: plan.Overloaded, Unplaceable: plan.Unplaceable, PlannedMoves: len(plan.Moves),
 		PublishedMoves: len(outcome.applied), Conflicts: outcome.conflicts, Paused: outcome.paused,
+		Judgement: plan.Judgement, NotReporting: plan.NotReporting, AllOver: plan.AllOver, Held: plan.Held,
+		TermAgeSeconds: int64(plan.TermAge / time.Second),
+	}
+	for _, queryGroup := range plan.OverShare {
+		facts.OverShare = append(facts.OverShare, string(queryGroup))
 	}
 	workerIDs := make([]string, 0, len(plan.Sum))
 	for workerID := range plan.Sum {
@@ -2143,7 +2155,18 @@ func fleetByteConstraintFacts(plan scheduler.BytePlan, outcome rebalanceOutcome)
 	}
 	sort.Strings(workerIDs)
 	for _, workerID := range workerIDs {
+		// Under the sum of peaks Sum is the sum; under occupancy it is the
+		// occupancy, and the sum is kept beside it for the comparison.
 		sample := fleet.ByteSumSample{WorkerID: workerID, PeakSumBytes: plan.Sum[workerID], Unread: plan.UnreadBy[workerID]}
+		if part, judged := plan.Parts[workerID]; judged && plan.Judgement == scheduler.ByteJudgementOccupancy {
+			sample.PeakSumBytes = plan.PeakSum[workerID]
+			sample.Occupancy = &fleet.ByteOccupancy{Bytes: plan.Sum[workerID], HighBytes: part.HighBytes, WindowSeconds: part.WindowSeconds,
+				LongPeriodBytes: part.LongPeriodBytes, ArrivingBytes: part.ArrivingBytes, Arriving: part.Arriving, Waiting: part.Waiting,
+				LeavingBytes: part.LeavingBytes, Leaving: part.Leaving}
+			for _, queryGroup := range part.WaitingSample {
+				sample.Occupancy.WaitingSample = append(sample.Occupancy.WaitingSample, string(queryGroup))
+			}
+		}
 		for _, queryGroup := range plan.UnreadSample[workerID] {
 			sample.UnreadSample = append(sample.UnreadSample, string(queryGroup))
 		}
@@ -3600,7 +3623,10 @@ func slotBudgetUsageFacts(usage execution.SlotBudgetUsage) *observability.SlotBu
 		EventsWithoutMessage: usage.EventsWithoutMessage,
 		RetainedBytes:        usage.RetainedBytes, Series: usage.Series,
 		DependencySeriesDiscarded: usage.DependencySeriesDiscarded,
-		InputSlices:               usage.InputSlices, InputSlicesDiscarded: usage.InputSlicesDiscarded,
+		PointsDropped:             usage.PointsDropped,
+		QueryWaitMillis:           usage.QueryWaitMillis, QueryBodyMillis: usage.QueryBodyMillis,
+		QueryWaitMillisMax: usage.QueryWaitMillisMax, QueryBodyMillisMax: usage.QueryBodyMillisMax,
+		InputSlices: usage.InputSlices, InputSlicesDiscarded: usage.InputSlicesDiscarded,
 		FirstSeenUnseenSlices: usage.FirstSeenUnseenSlices, FirstSeenUnseenSeries: usage.FirstSeenUnseenSeries,
 		InputSlicesReadAhead: usage.InputSlicesReadAhead, InputSlicesReadAheadOtherLeaf: usage.InputSlicesReadAheadOtherLeaf,
 		InputSlicesReadAheadYielded: usage.InputSlicesReadAheadYielded, InputSlicesReadAheadFailed: usage.InputSlicesReadAheadFailed,

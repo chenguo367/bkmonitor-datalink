@@ -7,6 +7,9 @@ package redistest
 
 import (
 	"context"
+	"fmt"
+	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -86,5 +89,52 @@ func TestAStartedServerTakesTheExtraArguments(t *testing.T) {
 	got, err := server.Client().ConfigGet(context.Background(), "timeout").Result()
 	if err != nil || len(got) != 2 || got[1] != "7" {
 		t.Fatalf("CONFIG GET timeout = %v, %v; want 7", got, err)
+	}
+}
+
+// loggingTB keeps the lines a start writes to the test's log, and passes them on.
+type loggingTB struct {
+	testing.TB
+	lines []string
+}
+
+func (tb *loggingTB) Logf(format string, args ...any) {
+	tb.lines = append(tb.lines, fmt.Sprintf(format, args...))
+	tb.TB.Logf(format, args...)
+}
+
+// A server that answers says so on the test's log, in one fixed line with the
+// version the executable itself reports, its address and the executable, once
+// for each start, Restart included; a start that never answers writes no such
+// line. A gate counts the tests that ran a real Redis, and on which version,
+// by this line.
+func TestEveryStartedServerSaysSoOnTheTestLogWithItsVersion(t *testing.T) {
+	executable := Server(t)
+	if executable == "" {
+		return
+	}
+	output, err := exec.Command(executable, "--version").CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s --version: %v: %s", executable, err, output)
+	}
+	reported := regexp.MustCompile(` v=([0-9][0-9.]*) `).FindStringSubmatch(string(output))
+	if reported == nil {
+		t.Fatalf("%s --version wrote no version: %q", executable, output)
+	}
+	tb := &loggingTB{TB: t}
+	server := Start(tb)
+	want := fmt.Sprintf("%s version=%s addr=%s executable=%s", StartedMarker, reported[1], server.Addr, executable)
+	if len(tb.lines) != 1 || tb.lines[0] != want {
+		t.Fatalf("a start logged %q, want the one line %q", tb.lines, want)
+	}
+	server.Restart()
+	if len(tb.lines) != 2 || tb.lines[1] != want {
+		t.Fatalf("after a restart the log is %q, want a second %q", tb.lines, want)
+	}
+	if instance, reason := TryStartAt(tb, FreeAddress(t), "--no-such-option", "x"); instance != nil || reason == "" {
+		t.Fatalf("TryStartAt with a bad option = %v, %q; want refused", instance, reason)
+	}
+	if len(tb.lines) != 2 {
+		t.Fatalf("a start that never answered logged %q", tb.lines[2:])
 	}
 }

@@ -203,11 +203,7 @@ func TestThePageOffersTheOneOperationsSession(t *testing.T) {
 // document and fetch, and returns every run's result by name.
 func runLoginPage(t *testing.T) map[string]json.RawMessage {
 	t.Helper()
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node is not on PATH, so the authorization page's script is NOT executed by this run -- " +
-			"only its source was read")
-	}
+	node := pageNode(t, "the authorization page's script is NOT executed by this run -- only its source was read")
 	w := httptest.NewRecorder()
 	Handler().ServeHTTP(w, httptest.NewRequest("GET", "/cli", nil))
 	dir := t.TempDir()

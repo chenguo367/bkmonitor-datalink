@@ -24,6 +24,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/filterclose"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/state"
 )
 
 // removedFamilies are families taken out because nothing read them: their
@@ -183,6 +184,17 @@ var removedLabelValues = []struct {
 	// at zero regardless. Both now run, and nothing is noted.
 	{"catalog_withheld_objects", "reason", "RECOVERY_CLOSE_UNSUPPORTED", false},
 	{"catalog_withheld_objects", "reason", "RECOVERY_NODATA_UNSUPPORTED", false},
+	// The segment shadow's books left the process (014 B3, second stage):
+	// the gauge reads the page cache, plans, pages and bytes, and no book
+	// is kept to count open and closed entries of or estimate.
+	{"worker_segment_shadow_memory", "kind", "entries_open", false},
+	{"worker_segment_shadow_memory", "kind", "entries_closed", false},
+	{"worker_segment_shadow_memory", "kind", "bytes_estimated", false},
+	// No finalization in production resolves EXACT_SET_BLOCKED: its cell of
+	// the not-committed count only ever read zero, which reads as "did not
+	// happen". The word stays a finalization mode, so only its emission is
+	// guarded.
+	{"slot_not_committed_total", "reason", "EXACT_SET_BLOCKED", true},
 }
 
 // A removed label value is emitted by no family, whatever its source
@@ -213,6 +225,9 @@ func TestARemovedLabelValueIsNotEmitted(t *testing.T) {
 		}
 		if removed.family == "series_admission_total" {
 			r.RecordSeriesAdmission("target_scope", "admitted", removed.value)
+		}
+		if removed.family == "slot_not_committed_total" {
+			r.RecordSlotNotCommitted(removed.value)
 		}
 	}
 	// The target group store's states and the selector reasons are closed
@@ -275,6 +290,11 @@ func TestARemovedLabelValueIsNotEmitted(t *testing.T) {
 		}
 		return verdict
 	}); err != nil {
+		t.Fatal(err)
+	}
+	// The page cache's gauge reads the store: bound to one that holds
+	// something, so every kind it has is emitted.
+	if err := r.BindSegmentStore(func() state.SegmentStats { return state.SegmentStats{Plans: 1, Pages: 1, Bytes: 1} }); err != nil {
 		t.Fatal(err)
 	}
 	families, err := r.registry.Gather()

@@ -148,6 +148,11 @@ func queryElapsed(completion execution.ProviderCompletion, err error, called tim
 func queryAnswerOf(completion execution.ProviderCompletion, err error, elapsed time.Duration, failure string) observability.PhysicalQueryAnswer {
 	answer := observability.PhysicalQueryAnswer{Elapsed: elapsed, Bytes: completion.Stats.Bytes,
 		Series: completion.Stats.Series, Records: completion.Stats.Records}
+	if completion.Stats.Answered {
+		answer.Answered = true
+		answer.Wait = time.Duration(completion.Stats.WaitMillis) * time.Millisecond
+		answer.Body = time.Duration(completion.Stats.BodyMillis) * time.Millisecond
+	}
 	switch failure {
 	case "":
 		answer.Outcome = observability.PhysicalQueryOK

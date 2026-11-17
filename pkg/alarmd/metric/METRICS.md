@@ -41,6 +41,12 @@ Labels: `outcome`
 
 Bytes of each physical query's answer as read. By outcome: ok, timeout_alarmd_deadline (alarmd's own deadline: the round's, its transport, its body read or its delivery), upstream_504 (the provider answered that its backend ran out of time, 504 or 408), unavailable (no usable answer for another reason) and rejected (the provider refused the query). Counted where access_query_duration_seconds is.
 
+## alarmd_access_query_answer_phase_seconds
+
+Labels: `outcome`, `phase`
+
+Seconds of each physical query whose response's headers came back, by its outcome (as answer_seconds) and phase: wait, until the headers - the query service writes them once the query is computed; body, after them - the answer carried, read and decoded (a shared-schema answer's encoding past its first frame among it). Within one outcome a query's two phases add up to its answer_seconds; a query no response came back to is in neither.
+
 ## alarmd_access_query_answer_records
 
 Labels: `outcome`
@@ -68,6 +74,12 @@ Each physical query a Slot runs, every attempt including retries, by the time it
 Labels: `reason`
 
 Physical queries that did not answer, by what their last failed attempt says: timeout, refused (the backend answered no), not_found (its status names something that does not exist), transport, decode (the answer broke the wire contract), other, sample_limit (the backend refused the query as reading more samples than it serves in one query, VM_SAMPLE_LIMIT; which Query Group it was is on the fleet's page). Closed set.
+
+## alarmd_access_query_points_dropped_total
+
+Labels: `reason`
+
+Points the normalization of a query's answer let go rather than evaluate, by reason: outside_range_before and outside_range_after, a point before the range the query accepts or at or after its end; row_missing_columns, a trends range row without the time or value column. Not zero where the provider looks back further than asked: read its baseline, and each Slot's own on its completion line (points_dropped).
 
 ## alarmd_access_response_codec_total
 
@@ -834,6 +846,12 @@ Objects by which column of the split they are in. Unlike fleet_objects these DO 
 Labels: `result`
 
 Reads of where an object's Plans' Runtime State comes from (plan_carries on an object detail), from the Query Group's timeline, by result: read; no_open_segment (the timeline holds no open Segment, so the object runs no Plan here now); failed (the timeline or an output context it names did not read back: the detail answers plan_carries_unavailable read_failed). Made on request only.
+
+## alarmd_fleet_plan_segments_reads_total
+
+Labels: `result`
+
+Reads of an object's Plans' segment marks (plan_segments on an object detail), on request only, by result: read; no_open_segment (no open Segment, no Plan runs); failed (the timeline or a mark's MGET did not answer).
 
 ## alarmd_fleet_query_cooldown_objects
 
@@ -1751,11 +1769,11 @@ The Query Groups this replica holds that are waiting on a predecessor's read hol
 
 ## alarmd_rebalance_byte_most_loaded_share
 
-The largest judged worker's sum of retained-byte peaks over the share of its pool the byte constraint allows, as the latest round on this Control Leader read it; above one is overloaded. A lower bound while rebalance_byte_unread_groups is not zero. Meaningful on the Control Leader only; aggregate replicas with max, not sum.
+The largest judged worker's retained-byte load - concurrent occupancy, or the sum of peaks while a ready worker reports no high-water (a lower bound while rebalance_byte_unread_groups is not zero) - over its share of the pool, in the latest round; above one is overloaded. Control Leader only; aggregate with max.
 
 ## alarmd_rebalance_byte_overloaded_workers
 
-Ready workers whose Query Groups' retained-byte peaks sum past their share of the pool, as the latest round on this Control Leader judged them; each gives one Query Group away per round (assignment_moves_total{reason="bytes"}). Meaningful on the Control Leader only; aggregate replicas with max, not sum.
+Ready workers whose retained-byte load - concurrent occupancy, or the sum of peaks while a ready worker reports no high-water - is past their share of the pool in the latest round; each gives one Query Group away per round (assignment_moves_total{reason="bytes"}). Meaningful on the Control Leader only; aggregate with max.
 
 ## alarmd_rebalance_byte_unread_groups
 
@@ -2043,7 +2061,7 @@ Slots of Query Groups this process holds that were sent to replay before their n
 
 Labels: `reason`
 
-Slot attempts that began their Slot (slot_begin_total{result="committed"}) and returned without writing it down, once each, by why: QUERY_NOT_READY (a readiness deferral, the data not in yet), SNAPSHOT_RETRY and EXACT_SET_BLOCKED (the finalization asked for the attempt again), other (every other return: a failed query, State write or Progress commit among them). Begun less these is the attempts that committed.
+Slot attempts that began their Slot (slot_begin_total{result="committed"}) and returned without writing it down, once each, by why: QUERY_NOT_READY, SNAPSHOT_RETRY; a result by its reason or kind (activation_read_failed, activation_changed, output_retry_pending, retry_pending, incomplete, no_result: a panic); an error by what it is (finalization_failed, owner_refused, query_permit_failed, cancelled, deadline_exceeded, declined, capacity_refused, store_conflict) or else the step it failed in (query_, complete_, apply_, output_, progress_commit_, query_free_failed); other, none of these.
 
 ## alarmd_slot_operation_duration_seconds
 
@@ -2231,6 +2249,22 @@ Times this process forgot every generation-scoped key life it had remembered, be
 
 Slots whose retained bytes reached at least 95 percent of the one-object share of the retained pool they were admitted under: completed Slots at or past the threshold, and Slots given up because the share refused them (RESOURCE_SHARE_EXCEEDED), which are past it. The objects are listed by name under RETAINED_SHARE_APPROACHING on the page and in fleet.get, except a completed Slot applied in more than one window: its windows are bounded by the share, so it reaches the share by construction and is counted here but not listed.
 
+## alarmd_state_segment_cache_drift_total
+
+Segment keys a read from Redis under the fence the State cache kept them under found other than kept - other bytes, or gone with no write or renewal saying so - beyond what a write in doubt tried to leave. The cache's claim that its owner is the keys' only writer, read against the store: zero is the second stage's bar.
+
+## alarmd_state_segment_read_total
+
+Labels: `source`, `reason`
+
+A Plan's stable segments (014 B3: its mark and member pages) read once a Slot before its State, a Plan a read, by source and reason: cache/hit, served from the State cache under the Slot's owner fence; redis and why - cold (nothing kept: a first read, a restart, a cache off), fence_changed (kept under another fence), evicted (let go for the cache's budget, the pool's room or its life), unknown_result (a write of it did not apply whole: in doubt, refused, or refused by the fence after its first chunk landed), renew_missing (a write or renewal found one of its keys gone), failed (the read failed and the Slot ran without its shadow). Steady, every read is a hit; the cold ones of a Slot cost two round trips a storage target.
+
+## alarmd_state_segment_renewal_total
+
+Labels: `result`
+
+The renewals of a Plan's member pages due - a quarter of the shorter of the lifetime their last renewal gave and this round's since it (014 B3 3.5) - by result: renewed and failed, pages whose scripts all answered or not (a failed page's renewal time stays, and it is renewed whole next round); missing, member State keys a renewal found gone (not made again: they read MISSING_WARMING); over_budget, renewal scripts of at most 256 keys that ran past 2.5 ms by the server's clock; fallback_write, pages unrenewed for half their lifetime, whose members are written whole - in the second stage counted only, every State being written. missing, over_budget and fallback_write all zero over every lifetime tier is the third stage's bar.
+
 ## alarmd_state_segment_shadow_members_total
 
 Labels: `event`, `period_class`
@@ -2249,11 +2283,23 @@ Labels: `period_class`
 
 Member pages a round of the shadow would have rewritten - a join, a close, a removal or an expiry on them, or their count changed - by the Plan's period class: the page write the skip adds, read beside state_segment_shadow_page_bytes_total.
 
+## alarmd_state_segment_shadow_skipped_total
+
+Labels: `reason`
+
+Slots run without the shadow of their Plans' stable segments, their State written as ever, by reason: read_failed (the Plans' segments could not be read: state_segment_read_total{reason="failed"} counts the Plans), book_refused (the retained pool did not take the books the Slot read, reserved as its State is, or the members a Plan's round would join, who then join a later round; refused quietly, the Slot itself goes on).
+
 ## alarmd_state_segment_shadow_total
 
 Labels: `outcome`, `period_class`
 
 Open members of a Plan's stable segments present in a round, as the shadow kept in process compared them - every State still written - by outcome and the Plan's period class (lt_1m, 1m, le_5m, le_1h, le_1d, gt_1d). match: the points the segment makes and the Level state it reads as are what the round wrote. exception_*: a member the skip would have written whole and taken off its page, by the first reason - events (it sent events), unsteady (not decided steady and normal with its stored Levels unchanged), level (a Level not FULL), off_grid (its points off the mark's grid), returned (a closed member back), short_of_mark (its last point short of the round's mark): read exception_events for whether quiet members send events. mismatch_*: a member the skip would have left unwritten, once each field the made read differs in from the write: a skip would read it otherwise than written. mismatch_unmade: the points could not be made. Zero mismatches over every period class is the shadow stage's evidence.
+
+## alarmd_state_segment_write_total
+
+Labels: `result`
+
+A Plan's round of its segments written before its Progress - the pages it changed, then the mark, the pages it did not carry renewed - a Plan a write, by result: applied, stale_owner and content_moved (the owner fence refused a chunk of it: the first, nothing written, or a later one, the earlier landed), failed (refused otherwise or not sent), unknown (its outcome not known). In the second stage a write that did not apply is counted and lets the Plan's cache go; the Slot goes on, its State written whole.
 
 ## alarmd_state_series_class_total
 
@@ -2563,6 +2609,18 @@ Labels: `stage`
 
 Phase-two worker busy time by coarse workflow stage.
 
+## alarmd_worker_compute_cost
+
+Labels: `band`
+
+The Query Groups this worker owns, their compute cost summed by band: evaluation and State wall per second of schedule, smoothed, as each heartbeat reports a Query Group's cost to the Leader (CostPerSecondMilli; query wall, which is the backend waiting, is not in it). In seconds a second; the bands' sum is the worker's whole, read against its CPU to judge the cost as a placement weight (014 C1). Bands: none (no rate yet: no Slot measured here), lt_10ms, lt_100ms, lt_1s, ge_1s, by the Query Group's own cost. As of the last heartbeat, ten seconds.
+
+## alarmd_worker_compute_cost_query_groups
+
+Labels: `band`
+
+The Query Groups this worker owns, counted by the band of their compute cost (worker_compute_cost): how many carry the whole, and how many have no rate yet.
+
 ## alarmd_worker_first_seen_unseen_total
 
 Labels: `unit`
@@ -2717,7 +2775,7 @@ Callers queued for a permit at the moment of the scrape, by queue. Non-zero mean
 
 Labels: `kind`
 
-The books the shadow of the Plans' stable segments keeps in process on this worker (014 B3, first stage), at the scrape, by kind: plans, the Plans with a book; entries_open and entries_closed, their members by whether the segment is open, as each Plan's last fold left them; bytes_estimated, entries at about 160 bytes each - the digest as the key and in the entry, its two times, the map's share - and a Plan's book at 256: an estimate, to read against the live heap. plans rising with the owned Query Groups standing still is books no round folds; entries_closed rising, closed members that do not expire.
+What the State cache holds of the Plans' stable segments on this worker, at the scrape, by kind: plans, the marks; pages, the member pages; bytes, their charge (value and key at their size classes plus the entry overhead), a share of state_cache_bytes under its budget. A Plan's book is decoded from these for the Slot that reads it and not kept past it.
 
 ## alarmd_worker_series_not_evaluated_total
 

@@ -647,6 +647,10 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		attributes = append(attributes, slog.String("answer_truncation", "terms_cut_suspected"),
 			slog.String("truncation_source", cut.Source), slog.String("truncation_dimension", cut.Dimension))
 	}
+	// The points the answers' normalization let go, by reason.
+	if dropped := observation.QueryPointsDropped; dropped != nil {
+		attributes = append(attributes, slog.Any("points_dropped", dropped))
+	}
 	if observation.RuntimeConfig != nil {
 		attributes = append(attributes, slog.Any("runtime_config", observation.RuntimeConfig))
 	}
@@ -992,6 +996,17 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 				slog.Any("byte_constraint_overloaded", bytes.Overloaded),
 				slog.Int("byte_constraint_planned_moves", bytes.PlannedMoves),
 				slog.Int("byte_constraint_published_moves", bytes.PublishedMoves),
+				// How the round judged and why (014 C1 section 8): by
+				// occupancy or the sum of peaks, the ready Workers whose
+				// missing high-water made it the sum, every Worker over the
+				// line, a new Leader's first hour, and the Query Groups past
+				// every other share. Zeros included: false and none are the
+				// readings a lost field would fake.
+				slog.String("byte_constraint_judgement", bytes.Judgement),
+				slog.Any("byte_constraint_not_reporting", bytes.NotReporting),
+				slog.Bool("byte_constraint_all_over", bytes.AllOver),
+				slog.Bool("byte_constraint_held", bytes.Held),
+				slog.Int("byte_constraint_over_share", bytes.OverShare),
 			)
 		}
 		if gate := facts.ShardAware; gate != nil {

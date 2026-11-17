@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/segment"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategycache"
 )
 
@@ -878,6 +879,20 @@ type DetailResponse struct {
 	// carried_from. PlanCarriesUnavailable names why it could not be read.
 	PlanCarries            *controlplane.PlanCarriesReading `json:"plan_carries,omitempty"`
 	PlanCarriesUnavailable string                           `json:"plan_carries_unavailable,omitempty"`
+	// PlanSegments is each of the object's Plans' stable segments: its mark
+	// as Redis holds it - the round that wrote it, the position its open
+	// segments are read up to, its page count and page renewals, no member -
+	// and what the answering replica last did with them, the read's source
+	// (the cache hit or not) and the write's result. Read on this request
+	// only. PlanSegmentsUnavailable names why it could not be read.
+	PlanSegments            *segment.PlansReading `json:"plan_segments,omitempty"`
+	PlanSegmentsUnavailable string                `json:"plan_segments_unavailable,omitempty"`
+	// Wake is where the object stands in its cycle by the answering
+	// replica's due index - its next Slot, when that is due, its period -
+	// for an object it runs: the facts a listed row carries, here for a
+	// healthy object too, which no column lists. Absent on a replica that
+	// neither tracks the object nor holds a due entry for it.
+	Wake *WakeFacts `json:"wake,omitempty"`
 	// TrackedBy is the replica whose latest snapshot lists the object as
 	// owned, when the answering replica does not track it, and
 	// TrackedByAsOf that snapshot's time. Best effort: right after the
@@ -1441,6 +1456,16 @@ func objectDetail(response http.ResponseWriter, request *http.Request, service *
 	if ranges, known := service.LocalQueryRanges(queryGroup); known {
 		body.LastQueryRanges = &ranges
 	}
+	if segments, bound, err := service.PlanSegments(request.Context(), queryGroup); bound {
+		switch {
+		case errors.Is(err, controlplane.ErrScheduleUnavailable):
+			body.PlanSegmentsUnavailable = "no_open_segment"
+		case err != nil:
+			body.PlanSegmentsUnavailable = "read_failed"
+		default:
+			body.PlanSegments = &segments
+		}
+	}
 	if carries, bound, err := service.PlanCarries(request.Context(), queryGroup); bound {
 		switch {
 		case errors.Is(err, controlplane.ErrScheduleUnavailable):
@@ -1453,9 +1478,17 @@ func objectDetail(response http.ResponseWriter, request *http.Request, service *
 	}
 	// A healthy object has a row in no snapshot. The replica that tracks it
 	// builds one on request; another replica says which one does.
+	if wake, bound := service.LocalWake(queryGroup); bound && wake.Known {
+		body.Wake = &wake
+	}
 	if len(body.Facts) == 0 && check == "" {
 		if row, tracked := service.LocalRow(queryGroup); tracked {
 			body.Tracked = &row
+			if body.Wake == nil {
+				if wake, bound := service.LocalWake(queryGroup); bound {
+					body.Wake = &wake
+				}
+			}
 		} else if owner, at, owned := view.OwnerOf(queryGroup); owned {
 			body.TrackedBy = owner
 			if !at.IsZero() {

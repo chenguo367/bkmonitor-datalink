@@ -281,7 +281,7 @@ func openProductionControlRoleBundle(
 	if err != nil {
 		return nil, err
 	}
-	trends, err := controlTrends(cfg, external)
+	trends, err := controlTrends(cfg, external, recorder)
 	if err != nil {
 		return nil, err
 	}
@@ -403,7 +403,7 @@ func openProductionControlRoleBundle(
 // and trends.get reads them from the handler it binds. The client is the
 // trends' own, at the UQ client's default limits; a control process builds
 // no query execution. Without a UQ endpoint there are no trends.
-func controlTrends(cfg config.Config, external phaseTwoProductionExternalDependencies) (*fleet.Trends, error) {
+func controlTrends(cfg config.Config, external phaseTwoProductionExternalDependencies, recorder *metric.Recorder) (*fleet.Trends, error) {
 	if cfg.PhaseTwo.Access.UQEndpoint == "" {
 		return nil, nil
 	}
@@ -413,5 +413,6 @@ func controlTrends(cfg config.Config, external phaseTwoProductionExternalDepende
 		return nil, err
 	}
 	client.WithNow(external.QueryClock)
+	client.WithPointsDroppedObserver(recorder.RecordQueryPointsDropped)
 	return fleetTrends(client, config.ProcessNamespace(), external.Now), nil
 }

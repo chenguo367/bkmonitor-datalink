@@ -146,6 +146,15 @@ func TestEveryPointOfUseAssertionIsProbedAtOpen(t *testing.T) {
 		// alone and a manual close is refused as store_unavailable, so the
 		// gap is a named refusal at the caller, never a silent stop.
 		"NoDataManualCloseBackend": true,
+		// Optional by design: without it a Plan's segment writes come back
+		// failed, counted state_segment_write_total{result="failed"}, and
+		// their reads stay cold; the second stage writes State whole, so
+		// the gap is counted and changes no read.
+		"SegmentBackend": true,
+		// Optional by design, for the same reason: without it a Plan's pages
+		// are counted failed and renewed again next round, and the second
+		// stage writes State whole.
+		"SegmentRenewBackend": true,
 	}
 	// The names above are the ones backendHas maps to capabilities; a name
 	// added here without a backendHas branch would pass the scan and probe

@@ -736,8 +736,15 @@ func testProductionFullTargetFlow(t *testing.T, diagnostic, split bool) {
 		if len(payload["query_list"].([]any)) != 1 {
 			t.Errorf("UQ request query_list = %#v", payload["query_list"])
 		}
+		// The provider's own time to run the query, before the answer's first
+		// byte: the Slot's usage carries it apart from the reading.
+		time.Sleep(50 * time.Millisecond) // fixed-wait: the provider's run time, the reading under test
+		// The window's point, with one a day before the range the query
+		// accepts and one an hour after it: the provider's own, let go and
+		// counted, never evaluated.
 		_, _ = writer.Write([]byte(`{"series":[{"name":"_result0","columns":["_time","_result"],"types":["int64","float64"],"group_keys":["host"],"group_values":["127.0.0.1"],"values":[[` +
-			strconv.FormatInt((base-1)*1000, 10) + `,95]]}],"status":null,"trace_id":"g1-full-uq","is_partial":false,"result_table_id":["system.cpu"]}`))
+			strconv.FormatInt((base-86400)*1000, 10) + `,1],[` + strconv.FormatInt((base-1)*1000, 10) + `,95],[` +
+			strconv.FormatInt((base+3600)*1000, 10) + `,2]]}],"status":null,"trace_id":"g1-full-uq","is_partial":false,"result_table_id":["system.cpu"]}`))
 	}))
 	defer uqServer.Close()
 
@@ -776,8 +783,9 @@ func testProductionFullTargetFlow(t *testing.T, diagnostic, split bool) {
 		cfg.HTTP.Listen = reserveBundleAddress()
 	}
 	workerRuntime := openRoleRuntimeForTest(t, cfg)
+	recorder := metric.NewRecorder(metric.BuildInfo{})
 	bundle, err := openProductionPhaseTwoBundleWithDependencies(
-		ctx, cfg, metric.NewRecorder(metric.BuildInfo{}), observability.Discard(observability.ComponentRuntime),
+		ctx, cfg, recorder, observability.Discard(observability.ComponentRuntime),
 		newPhaseTwoApplicationHealth(),
 		func(client redis.Cmdable, prefix string) (controlplane.StrategySource, error) {
 			return controlplane.NewLegacyRedisStrategySource(client, prefix)
@@ -895,7 +903,38 @@ func testProductionFullTargetFlow(t *testing.T, diagnostic, split bool) {
 
 	observationsMu.Lock()
 	stages := observedStages(observations)
+	// The two points outside the range are the Slot's own on its completion
+	// line and its query's, by side, and the worker's counter's.
+	var completedDrops, queryDrops *observability.PointDrops
+	var completedUsage *observability.SlotBudgetUsageFacts
+	for _, observation := range observations {
+		if observation.Stage == observability.StageSlotCompleted && observation.SlotBudgetUsage != nil {
+			drops := observation.SlotBudgetUsage.PointsDropped
+			completedDrops = &drops
+			completedUsage = observation.SlotBudgetUsage
+		}
+		if observation.Stage == observability.StageQueryCompleted && observation.QueryPointsDropped != nil {
+			queryDrops = observation.QueryPointsDropped
+		}
+	}
 	observationsMu.Unlock()
+	// The Slot's one query waited the provider's 50 ms before its answer's
+	// first byte, on its completion line apart from reading the answer.
+	if completedUsage == nil || completedUsage.QueryWaitMillis < 50 || completedUsage.QueryWaitMillisMax < 50 ||
+		completedUsage.QueryWaitMillisMax > completedUsage.QueryWaitMillis || completedUsage.QueryBodyMillisMax > completedUsage.QueryBodyMillis {
+		t.Fatalf("the Slot's usage %+v, want its query's 50 ms wait apart from its body", completedUsage)
+	}
+	want := observability.PointDrops{OutsideRangeBefore: 1, OutsideRangeAfter: 1}
+	if completedDrops == nil || *completedDrops != want || queryDrops == nil || *queryDrops != want {
+		t.Fatalf("points dropped: on the Slot's completion %+v, on its query %+v; want %+v on each", completedDrops, queryDrops, want)
+	}
+	if before, after := counterValue(t, recorder, "alarmd_access_query_points_dropped_total", map[string]string{"reason": "outside_range_before"}),
+		counterValue(t, recorder, "alarmd_access_query_points_dropped_total", map[string]string{"reason": "outside_range_after"}); before < 1 || after < 1 || before != after {
+		t.Fatalf("points dropped counted %v before and %v after, want each answer's one of each", before, after)
+	}
+	if missing := counterValue(t, recorder, "alarmd_access_query_points_dropped_total", map[string]string{"reason": "row_missing_columns"}); missing != 0 {
+		t.Fatalf("row_missing_columns = %v, want the reason built at zero", missing)
+	}
 	assertObservedOrder(t, stages, []observability.Stage{
 		observability.StageSnapshotRefreshed, observability.StageAssignmentAcquired,
 		observability.StageScheduleDue, observability.StageSlotStarted, observability.StageEvaluationCompleted,
@@ -903,6 +942,17 @@ func testProductionFullTargetFlow(t *testing.T, diagnostic, split bool) {
 		observability.StageEventACKed, observability.StageStateApplied,
 		observability.StageProgressCommitted, observability.StageSlotCompleted,
 	})
+	// Read on the bundle's own object route. The split fixture's public
+	// surface serves that route only inside a CLI session; the wiring read
+	// is the same bundle code either way.
+	if !split {
+		// A return with nothing due, as every return between two rounds is:
+		// the bound it leaves names the Slot it waits for.
+		if err := runScheduledOnceSettled(ctx, bundle); err != nil {
+			t.Fatal(err)
+		}
+		assertTheObjectReadsItsPlanSegmentsAndNextSlot(t, bundle, queryGroup, stateIdentity.Plan, stateIdentity.StateGeneration, firstSlot)
+	}
 	if err := bundle.Shutdown(ctx); err != nil {
 		t.Fatalf("phase-two production Shutdown() error = %v", err)
 	}

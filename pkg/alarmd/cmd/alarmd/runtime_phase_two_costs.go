@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
 )
@@ -79,6 +80,35 @@ type workerCostSource struct {
 	reservationAt time.Time
 	// reservationMeasured is whether the last answer came from a reading.
 	reservationMeasured bool
+	// banded is the owned Query Groups' compute cost by band as the last
+	// report derived it, and computed what the last ask published of it:
+	// every owned Query Group, the ones the census has no reading of yet
+	// counted under none.
+	banded   metric.ComputeCostReading
+	computed atomic.Pointer[metric.ComputeCostReading]
+	// periods is the owned Query Groups' peaks and periods as the last ask
+	// read them, for LongPeriodPeaks.
+	periods atomic.Pointer[[]observability.CostRetainedPeak]
+}
+
+// LongPeriodPeaks is the peaks of the owned Query Groups whose period is
+// longer than window - or not yet known - as the last ask read them: the
+// ones a high-water over window may not have seen run (014 C1 section 8).
+func (source *workerCostSource) LongPeriodPeaks(window time.Duration) uint64 {
+	if source == nil {
+		return 0
+	}
+	peaks := source.periods.Load()
+	if peaks == nil {
+		return 0
+	}
+	var sum uint64
+	for _, peak := range *peaks {
+		if peak.Interval <= 0 || peak.Interval > window {
+			sum += peak.RetainedBytesPeak
+		}
+	}
+	return sum
 }
 
 // rosterRetainedPeak is the owned Query Groups' retained peaks summed, at
@@ -271,7 +301,34 @@ func (source *workerCostSource) Costs() []viewstream.QueryGroupCost {
 		// roster rather than what it held before it was cut to it.
 		source.meter.SetRetainedPeakCensus(len(peaks), source.census.Overflow())
 	}
-	return source.report(peaks)
+	kept := append([]observability.CostRetainedPeak(nil), peaks...)
+	source.periods.Store(&kept)
+	costs := source.report(peaks)
+	source.mu.Lock()
+	reading := metric.ComputeCostReading{Groups: map[string]uint64{}, Seconds: map[string]float64{}}
+	for band, count := range source.banded.Groups {
+		reading.Groups[band] = count
+	}
+	for band, seconds := range source.banded.Seconds {
+		reading.Seconds[band] = seconds
+	}
+	source.mu.Unlock()
+	if unread := roster - len(peaks); unread > 0 {
+		reading.Groups["none"] += uint64(unread)
+	}
+	source.computed.Store(&reading)
+	return costs
+}
+
+// ComputeCost is the owned Query Groups' compute cost by band as the last
+// heartbeat's ask read it; every band at zero before the first.
+func (source *workerCostSource) ComputeCost() metric.ComputeCostReading {
+	if source != nil {
+		if reading := source.computed.Load(); reading != nil {
+			return *reading
+		}
+	}
+	return metric.ComputeCostReading{Groups: map[string]uint64{}, Seconds: map[string]float64{}}
 }
 
 // report decides what to send from one set of readings. Separate from Costs so
@@ -289,9 +346,14 @@ func (source *workerCostSource) report(peaks []observability.CostRetainedPeak) [
 	source.lastAsked = at
 
 	costs := make([]viewstream.QueryGroupCost, 0, len(peaks))
+	banded := metric.ComputeCostReading{Groups: map[string]uint64{}, Seconds: map[string]float64{}}
+	defer func() { source.banded = banded }()
 	for _, peak := range peaks {
 		group := execution.QueryGroupIdentity(peak.QueryGroupKey)
 		milli := source.advanceCost(group, peak, elapsed)
+		band := metric.ComputeCostBand(milli)
+		banded.Groups[band]++
+		banded.Seconds[band] += float64(milli) / 1000
 		last, sent := source.reported[group]
 		if sent && !costReadingMoved(last.peak, peak.RetainedBytesPeak) &&
 			!costReadingMoved(last.milli, milli) {

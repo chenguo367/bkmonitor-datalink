@@ -48,6 +48,9 @@ type CostLedger struct {
 	mu      sync.Mutex
 	now     func() time.Time
 	entries map[string]map[execution.QueryGroupIdentity]CostEntry
+	// moving is the term's account of the Query Groups landing on and gone
+	// from each Worker (014 C1 section 8.3).
+	moving inFlight
 }
 
 func NewCostLedger(now func() time.Time) *CostLedger {
@@ -91,6 +94,9 @@ func (ledger *CostLedger) Retain(owners map[execution.QueryGroupIdentity]string)
 	}
 	ledger.mu.Lock()
 	defer ledger.mu.Unlock()
+	// The holders that changed, before the carry-over below takes the old
+	// holder's entry: whether it had run the Query Group is read from it.
+	ledger.recordMovesLocked(owners)
 	for workerID, byGroup := range ledger.entries {
 		for queryGroup, entry := range byGroup {
 			holder := owners[queryGroup]
@@ -126,10 +132,13 @@ func (ledger *CostLedger) Readings(
 	owners map[execution.QueryGroupIdentity]string,
 	workers []ownership.WorkerRegistration,
 ) ByteReadings {
-	readings := ByteReadings{Pool: map[string]uint64{}, Peak: map[execution.QueryGroupIdentity]uint64{}}
+	readings := ByteReadings{Pool: map[string]uint64{}, Peak: map[execution.QueryGroupIdentity]uint64{}, Share: map[string]uint64{}}
 	for _, worker := range workers {
 		if worker.Load != nil && worker.Load.RetainedPoolBytes > 0 {
 			readings.Pool[worker.WorkerID] = worker.Load.RetainedPoolBytes
+		}
+		if worker.Load != nil && worker.Load.RetainedShareBytes > 0 {
+			readings.Share[worker.WorkerID] = worker.Load.RetainedShareBytes
 		}
 	}
 	if ledger == nil {
@@ -142,6 +151,7 @@ func (ledger *CostLedger) Readings(
 			readings.Peak[queryGroup] = entry.RetainedBytesPeak
 		}
 	}
+	ledger.occupancyLocked(&readings, owners, workers)
 	return readings
 }
 

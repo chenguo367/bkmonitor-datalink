@@ -1536,4 +1536,8 @@ type CostRetainedPeak struct {
 	// numerator is short by an unknown amount, and a rate that is quietly low
 	// is the one that leaves an object where it is.
 	ComputeWallUnknown uint64
+	// Interval is the Query Group's period as its Slots said it, zero while
+	// it has not said: which Query Groups a high-water over a window may not
+	// have seen run.
+	Interval time.Duration
 }

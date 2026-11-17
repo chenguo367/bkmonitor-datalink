@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // normalizeWorkersBusy is how many goroutines every answer of this process
@@ -43,6 +44,7 @@ type normalizing struct {
 	encodedBytes uint64
 	batch        execution.ProviderSeriesBatch
 	nullFields   uint64
+	dropped      observability.PointDrops
 	// recordIDs is the ids the normalization derived, in the Dataset's
 	// order, for a query with named outputs; nil for every other.
 	recordIDs []string
@@ -57,7 +59,9 @@ func normalizeSideBySide(jobs []normalizing, spec execution.PhysicalQuerySpec, r
 	normalize := func(chunk []normalizing) {
 		for index := range chunk {
 			job := &chunk[index]
-			job.batch, job.nullFields, job.recordIDs, job.err = normalizeSeriesKeeping(spec, ref, job.series, receivedAt, spec.PlanFacts.NamedOutputs != nil)
+			var facts normalizedFacts
+			job.batch, facts, job.recordIDs, job.err = normalizeSeriesKeeping(spec, ref, job.series, receivedAt, spec.PlanFacts.NamedOutputs != nil)
+			job.nullFields, job.dropped = facts.nullIdentityFields, facts.dropped
 		}
 	}
 	chunks := 1

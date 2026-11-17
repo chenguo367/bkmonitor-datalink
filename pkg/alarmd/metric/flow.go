@@ -50,10 +50,15 @@ type flowMetrics struct {
 	// The answers of the same queries, by how each ended (outcome): what
 	// came back and how long it took.
 	answerBytes, answerSeries, answerRecords, answerSeconds *prometheus.HistogramVec
-	queryFailures                                           *prometheus.CounterVec
-	failures                                                map[string]prometheus.Counter
-	decisionLag                                             prometheus.Histogram
-	outputRejectedAll                                       prometheus.Counter
+	// answerPhaseSeconds splits an answered query's seconds by phase.
+	answerPhaseSeconds *prometheus.HistogramVec
+	queryFailures      *prometheus.CounterVec
+	failures           map[string]prometheus.Counter
+	// pointsDropped is the points the answers' normalization let go, by
+	// reason, each reason built at zero.
+	pointsDropped     *prometheus.CounterVec
+	decisionLag       prometheus.Histogram
+	outputRejectedAll prometheus.Counter
 	// backend is the query backend's last answer and last failure, the
 	// dependency entry's health for the role (QueryBackendHealth).
 	backend *queryBackendBook
@@ -127,6 +132,26 @@ func newFlowMetrics(work *prometheus.CounterVec) flowMetrics {
 	m.answerSeconds = answer("access_query_answer_seconds", "Seconds each physical query's provider took, to 60 s: "+
 		"a query read past 30 s is in it, as its round's window on a one-minute period runs to about 45."+outcomes,
 		QueryAnswerBuckets)
+	m.answerPhaseSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{Subsystem: metricSubsystem,
+		Name: "access_query_answer_phase_seconds",
+		Help: "Seconds of each physical query whose response's headers came back, by its outcome (as answer_seconds) and " +
+			"phase: wait, until the headers - the query service writes them once the query is computed; body, after them - " +
+			"the answer carried, read and decoded (a shared-schema answer's encoding past its first frame among it). Within " +
+			"one outcome a query's two phases add up to its answer_seconds; a query no response came back to is in neither.",
+		Buckets: QueryAnswerBuckets}, []string{"outcome", "phase"})
+	for _, outcome := range observability.PhysicalQueryOutcomes {
+		for _, phase := range QueryAnswerPhases {
+			m.answerPhaseSeconds.WithLabelValues(outcome, phase)
+		}
+	}
+	m.pointsDropped = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "access_query_points_dropped_total",
+		Help: "Points the normalization of a query's answer let go rather than evaluate, by reason: outside_range_before and " +
+			"outside_range_after, a point before the range the query accepts or at or after its end; row_missing_columns, a " +
+			"trends range row without the time or value column. Not zero where the provider looks back further than asked: " +
+			"read its baseline, and each Slot's own on its completion line (points_dropped)."}, []string{"reason"})
+	for _, reason := range observability.PointDropReasons {
+		m.pointsDropped.WithLabelValues(reason)
+	}
 	m.backend = &queryBackendBook{}
 	m.failures = make(map[string]prometheus.Counter, len(queryFailureReasons))
 	for _, reason := range queryFailureReasons {
@@ -157,6 +182,19 @@ func (r *Recorder) RecordPhysicalQuery(elapsed time.Duration, failure string) {
 	flow.backend.note(time.Now(), failure)
 }
 
+// RecordQueryPointsDropped counts the points an answer's normalization let
+// go, by reason.
+func (r *Recorder) RecordQueryPointsDropped(dropped observability.PointDrops) {
+	if r == nil {
+		return
+	}
+	for _, reason := range observability.PointDropReasons {
+		if count := dropped.Of(reason); count > 0 {
+			r.phaseTwo.flow.pointsDropped.WithLabelValues(reason).Add(float64(count))
+		}
+	}
+}
+
 // RecordPhysicalQueryAnswer counts one physical query's answer in the
 // per-query histograms, by how it ended.
 func (r *Recorder) RecordPhysicalQueryAnswer(answer observability.PhysicalQueryAnswer) {
@@ -172,7 +210,21 @@ func (r *Recorder) RecordPhysicalQueryAnswer(answer observability.PhysicalQueryA
 	flow.answerSeries.WithLabelValues(outcome).Observe(float64(answer.Series))
 	flow.answerRecords.WithLabelValues(outcome).Observe(float64(answer.Records))
 	flow.answerSeconds.WithLabelValues(outcome).Observe(answer.Elapsed.Seconds())
+	if answer.Answered {
+		flow.answerPhaseSeconds.WithLabelValues(outcome, QueryAnswerPhaseWait).Observe(answer.Wait.Seconds())
+		flow.answerPhaseSeconds.WithLabelValues(outcome, QueryAnswerPhaseBody).Observe(answer.Body.Seconds())
+	}
 }
+
+// The phases of an answered query's seconds, closed: wait, before the
+// answer's first byte; body, after it.
+const (
+	QueryAnswerPhaseWait = "wait"
+	QueryAnswerPhaseBody = "body"
+)
+
+// QueryAnswerPhases lists them.
+var QueryAnswerPhases = []string{QueryAnswerPhaseWait, QueryAnswerPhaseBody}
 
 func (book *queryBackendBook) note(at time.Time, failure string) {
 	if book == nil {

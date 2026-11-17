@@ -782,6 +782,9 @@ type phaseTwoWorkerBundle struct {
 	// carries neither, which readers take as unknown.
 	applied  func() uint64
 	capacity func() *fleet.Capacity
+	// retained is the coordinator's retained high-water, the window it
+	// covers and its per-Query-Group share, for the heartbeat's load.
+	retained func() (uint64, time.Duration, uint64)
 
 	registrationMu sync.Mutex
 	mu             sync.RWMutex
@@ -3047,7 +3050,7 @@ func (bundle *phaseTwoWorkerBundle) loadFacts() *ownership.WorkerLoad {
 	if capacity == nil {
 		return nil
 	}
-	return &ownership.WorkerLoad{
+	load := &ownership.WorkerLoad{
 		OwnedQueryGroups: len(bundle.ownedQueryGroups()),
 		PermitsHeld:      capacity.PermitsHeld, PermitBudget: capacity.PermitBudget,
 		PermitSeconds: capacity.PermitSeconds, Waiting: capacity.Waiting,
@@ -3058,6 +3061,17 @@ func (bundle *phaseTwoWorkerBundle) loadFacts() *ownership.WorkerLoad {
 		// limit with a divisor of its own.
 		RetainedPoolBytes: bundle.dependencies.Config.PhaseTwo.Coordinator.MaxRetainedBytes,
 	}
+	if bundle.retained != nil {
+		// What the Slots held reserved at once over the hour, and the peaks
+		// of the Query Groups whose period the hour may not have seen (014 C1
+		// section 8), and the share a Query Group is held to here: the Leader
+		// judges the byte constraint by these, as this replica measured them.
+		high, window, share := bundle.retained()
+		load.RetainedHigh = &ownership.RetainedHighReading{Bytes: high, WindowSeconds: int64(window / time.Second),
+			LongPeriodBytes: bundle.workerCosts.LongPeriodPeaks(window)}
+		load.RetainedShareBytes = share
+	}
+	return load
 }
 
 func phaseTwoWorkerRegistration(

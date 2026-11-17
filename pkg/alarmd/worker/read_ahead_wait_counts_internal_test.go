@@ -74,8 +74,9 @@ func waitingReadAhead(t *testing.T, stream *streamedExecution, ctx context.Conte
 	return ahead
 }
 
-// A wait is counted as it ends, however the read ends - let go while the
-// Slot runs (another leaf), let go as the Slot ends, its context ended - and
+// A wait is counted as it ends, however the read ends - room came (kept),
+// the Slot took the read on (passed), let go while the Slot runs (another
+// leaf), let go as the Slot ends, its context ended - and
 // the Slot time with one waiting as the last of them ends: none of it waits
 // for a usage the Slot computes before it lets its reads ahead go, or has
 // none of when it fails.
@@ -95,6 +96,21 @@ func TestEveryReadAheadWaitIsCountedAsItEndsHoweverTheReadEnds(t *testing.T) {
 			cancel() // a canceled context wakes no wait
 			stream.letGoReadAhead()
 		}, "stopped"},
+		{"room came, and it took the bytes", func(_ *streamedExecution, _ context.CancelFunc, ahead *sliceReadAhead) {
+			ahead.mu.Lock()
+			ahead.limit = 1 << 20
+			ahead.changed.Broadcast()
+			ahead.mu.Unlock()
+			<-ahead.done
+		}, "kept"},
+		{"the Slot took the read on while it waited", func(stream *streamedExecution, _ context.CancelFunc, ahead *sliceReadAhead) {
+			// As adopting a read ahead ends: the stream is its pass.
+			ahead.mu.Lock()
+			ahead.pass = stream
+			ahead.changed.Broadcast()
+			ahead.mu.Unlock()
+			<-ahead.done
+		}, "passed"},
 		{"its context ended, woken by room changing", func(_ *streamedExecution, cancel context.CancelFunc, ahead *sliceReadAhead) {
 			cancel()
 			ahead.mu.Lock()

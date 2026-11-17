@@ -148,9 +148,6 @@ type SlotExecutionCoordinator struct {
 	// notEvaluatedLines is when each Query Group last wrote its
 	// series_not_evaluated line (slot_counts.go).
 	notEvaluatedLines seriesNotEvaluatedLines
-	// segmentShadow is each Query Group's Plans' stable segments as the
-	// shadow keeps them in process (segment_shadow.go).
-	segmentShadow segmentShadow
 	// noDataSkips is how long each Plan's no-data detection has been skipping.
 	// One per process, because a streak is about rounds rather than about one
 	// Slot. See no_data_skip_streak.go.
@@ -177,6 +174,58 @@ type processProvisionalReservations struct {
 	events        uint64
 	gaps          uint64
 	gapFacts      uint64
+	// high is the most the Slots held reserved at once, a minute a bucket
+	// over the last hour, taken at every reservation (014 C1 section 8):
+	// the occupancy the Leader judges the byte constraint by. highSince is
+	// when the coordinator began, the start of the window it can cover.
+	high      [retainedHighBuckets]retainedHighBucket
+	highSince time.Time
+}
+
+// retainedHighBuckets is the hour the high-water spans, a minute a bucket.
+const retainedHighBuckets = 60
+
+type retainedHighBucket struct {
+	minute int64
+	bytes  uint64
+}
+
+// noteRetainedHighLocked folds what is reserved now into its minute's
+// bucket. Under reservations.mu, after every reservation that added bytes:
+// a reading taken once a minute would miss the short peaks a Slot makes.
+func (coordinator *SlotExecutionCoordinator) noteRetainedHighLocked() {
+	minute := coordinator.now().Unix() / 60
+	bucket := &coordinator.reservations.high[minute%retainedHighBuckets]
+	if bucket.minute != minute {
+		bucket.minute, bucket.bytes = minute, 0
+	}
+	bucket.bytes = max(bucket.bytes, coordinator.reservations.retainedBytes)
+}
+
+// RetainedHigh is the coordinator's retained-byte high-water over the last
+// hour - the most its Slots held reserved at once, and no less than they hold
+// now - and how much of the hour it covers: from when the coordinator began,
+// an hour at most.
+func RetainedHigh(coordinator *SlotExecutionCoordinator) (uint64, time.Duration) {
+	coordinator.reservations.mu.Lock()
+	defer coordinator.reservations.mu.Unlock()
+	now := coordinator.now()
+	minute := now.Unix() / 60
+	high := coordinator.reservations.retainedBytes
+	for _, bucket := range coordinator.reservations.high {
+		if bucket.minute > minute-retainedHighBuckets && bucket.minute <= minute {
+			high = max(high, bucket.bytes)
+		}
+	}
+	window := min(now.Sub(coordinator.reservations.highSince), retainedHighBuckets*time.Minute)
+	return high, max(window, 0)
+}
+
+// RetainedShare is the most one Query Group may hold reserved here (the
+// share its Slots are judged against): what the Leader checks a placement's
+// peak against, as this replica derives it.
+func RetainedShare(coordinator *SlotExecutionCoordinator) uint64 {
+	return coordinator.qgShareBytes()
 }
 
 type ProvisionalBudget struct {
@@ -256,6 +305,7 @@ func NewSlotExecutionCoordinator(ports Ports, budget ProvisionalBudget) (*SlotEx
 		return nil, errors.New("alarmd worker: positive process provisional budgets are required")
 	}
 	coordinator := &SlotExecutionCoordinator{ports: ports, budget: budget}
+	coordinator.reservations.highSince = coordinator.now()
 	if borrower := ports.RetainedBorrower; borrower != nil {
 		borrower.BorrowRetainedWithin(func() uint64 { return RetainedRoom(coordinator) })
 	}
@@ -285,6 +335,7 @@ func (coordinator *SlotExecutionCoordinator) acquireProvisional(series, retained
 	}
 	coordinator.reservations.series += series
 	coordinator.reservations.retainedBytes += retainedBytes
+	coordinator.noteRetainedHighLocked()
 	return nil
 }
 
@@ -342,6 +393,7 @@ func (coordinator *SlotExecutionCoordinator) tryAcquireRetained(retainedBytes ui
 		return false
 	}
 	coordinator.reservations.retainedBytes += retainedBytes
+	coordinator.noteRetainedHighLocked()
 	return true
 }
 
@@ -507,7 +559,7 @@ func (held *heldFrames) release() {
 func (coordinator *SlotExecutionCoordinator) Execute(
 	ctx context.Context,
 	request execution.SlotExecutionRequest,
-) (_ execution.SlotExecutionResult, executeErr error) {
+) (executeResult execution.SlotExecutionResult, executeErr error) {
 	if coordinator == nil {
 		return execution.SlotExecutionResult{}, errors.New("alarmd worker: initialized coordinator is required")
 	}
@@ -564,7 +616,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	// The Slot is begun: from here every return that did not write it down
 	// is counted once, by the reason it returned on.
 	var finalizationMode execution.FinalizationMode
-	defer func() { coordinator.countNotCommitted(applied, finalizationMode, executeErr) }()
+	defer func() { coordinator.countNotCommitted(applied, finalizationMode, executeResult, executeErr) }()
 	finalizationStarted := time.Now()
 	finalization, err := coordinator.ports.Finalization.ResolveFinalization(ctx, request)
 	// This step reads the frozen Plan, and so the Segment's content objects.
@@ -646,7 +698,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 			if refused := stream.splitSlice(leaf); refused != nil {
 				refused = stream.finalSliceRefusal(refused)
 				coordinator.observeQueryFailure(ctx, request.Operation, started, "execute", refused)
-				return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: query: %w", refused)
+				return execution.SlotExecutionResult{}, inSlotStep(execution.SlotNotCommittedQueryFailed, fmt.Errorf("alarmd worker: query: %w", refused))
 			}
 			continue
 		}
@@ -705,7 +757,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 				stream.keepTimedOutSplit(leaf)
 				coordinator.rememberSlotInput(request, stream, true)
 			}
-			return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: query: %w", err)
+			return execution.SlotExecutionResult{}, inSlotStep(execution.SlotNotCommittedQueryFailed, fmt.Errorf("alarmd worker: query: %w", err))
 		}
 		if !read {
 			execution.MarkQueryReturned(ctx, time.Now())
@@ -718,7 +770,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 		if tooLong := sliceQueryTooLong(queryRequest.Slice, sliceCompletion); tooLong != nil {
 			tooLong = stream.finalSliceRefusal(tooLong)
 			coordinator.observeQueryFailure(ctx, request.Operation, started, "execute", tooLong)
-			return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: query: %w", tooLong)
+			return execution.SlotExecutionResult{}, inSlotStep(execution.SlotNotCommittedQueryFailed, fmt.Errorf("alarmd worker: query: %w", tooLong))
 		}
 		if completion, err = foldSliceCompletion(completion, sliceCompletion); err != nil {
 			return execution.SlotExecutionResult{}, err
@@ -749,7 +801,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 			// Not "invalid query result": the query is only one of the things
 			// this step does, and the failure that brought 163 Slots down in a
 			// day was a state read of ours timing out, with the query fine.
-			return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: complete Slot: %w", err)
+			return execution.SlotExecutionResult{}, inSlotStep(execution.SlotNotCommittedCompleteFailed, fmt.Errorf("alarmd worker: complete Slot: %w", err))
 		}
 		if !stream.slicing() || stream.slices.landSliceRead(leaf) {
 			break
@@ -821,7 +873,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 			result.Timing = stream.timing()
 			return result, nil
 		}
-		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: execute frozen Slot: %w", err)
+		return execution.SlotExecutionResult{}, inSlotStep(execution.SlotNotCommittedApplyFailed, fmt.Errorf("alarmd worker: execute frozen Slot: %w", err))
 	}
 	// Filled at the one exit that has both the finished result and the stream
 	// that produced it. A Slot that ends any other way has no usage to report
@@ -899,7 +951,10 @@ func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 		Events: stream.effectsSpent.events + stream.effects.events, EventsWithoutMessage: stream.summary.withoutMessage,
 		RetainedBytes: stream.peakRetained, Series: stream.series,
 		DependencySeriesDiscarded: stream.dependencyDiscarded,
-		InputSlices:               stream.slicesRead(), InputSlicesDiscarded: stream.slicesDiscarded(),
+		PointsDropped:             stream.pointsDropped,
+		QueryWaitMillis:           stream.queryPhases.wait, QueryBodyMillis: stream.queryPhases.body,
+		QueryWaitMillisMax: stream.queryPhases.waitMax, QueryBodyMillisMax: stream.queryPhases.bodyMax,
+		InputSlices: stream.slicesRead(), InputSlicesDiscarded: stream.slicesDiscarded(),
 		FirstSeenUnseenSlices: stream.unseenSlices(), FirstSeenUnseenSeries: stream.unseenSeries(),
 		InputSlicesReadAhead: stream.readAheadEnds[readAheadReplayed], InputSlicesReadAheadOtherLeaf: stream.readAheadEnds[readAheadOtherLeaf],
 		InputSlicesReadAheadYielded: stream.readAheadEnds[readAheadYielded], InputSlicesReadAheadFailed: stream.readAheadEnds[readAheadFailed],
@@ -1037,7 +1092,7 @@ func (coordinator *SlotExecutionCoordinator) executeQueryFreeFinalization(
 		return err
 	})
 	if err != nil {
-		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: finalize query-free Slot: %w", err)
+		return execution.SlotExecutionResult{}, inSlotStep(execution.SlotNotCommittedQueryFreeFailed, fmt.Errorf("alarmd worker: finalize query-free Slot: %w", err))
 	}
 	if changedActivations != nil {
 		if err := coordinator.protectActivatedPlanGaps(
@@ -1829,7 +1884,7 @@ func (coordinator *SlotExecutionCoordinator) finalizeSummarized(
 		if planResult.HistoryCoverage.Resumed > 0 {
 			// Series an earlier attempt applied, resumed before evaluation:
 			// the segment shadow cannot tell this round's membership.
-			apply.shadow.retried(&coordinator.segmentShadow, due)
+			apply.shadow.retried(due)
 		}
 		output, err := apply.applyPlanState(ctx, due, planResult.StateResults, loadedState, stateIndex)
 		if err != nil {
@@ -1911,7 +1966,7 @@ func (coordinator *SlotExecutionCoordinator) commitProgress(
 		Projection: request.UnfinishedProjection(), ContentScope: request.ContentScope,
 	}
 	if err := progressRequest.Validate(); err != nil {
-		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: invalid progress commit: %w", err)
+		return execution.SlotExecutionResult{}, inSlotStep(execution.SlotNotCommittedProgressCommitFailed, fmt.Errorf("alarmd worker: invalid progress commit: %w", err))
 	}
 	progress, err := coordinator.ports.Progress.CommitProgress(ctx, progressRequest)
 	if err == nil {
@@ -1919,7 +1974,7 @@ func (coordinator *SlotExecutionCoordinator) commitProgress(
 	}
 	if err != nil {
 		coordinator.observe(ctx, observability.ComponentProgress, observability.StageProgressCommitted, request.Operation, started, "", "", err)
-		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: commit progress: %w", err)
+		return execution.SlotExecutionResult{}, inSlotStep(execution.SlotNotCommittedProgressCommitFailed, fmt.Errorf("alarmd worker: commit progress: %w", err))
 	}
 	if progress.Status != execution.ProgressCommitted {
 		err = progressNotCommitted(progress.Status)
@@ -1928,7 +1983,7 @@ func (coordinator *SlotExecutionCoordinator) commitProgress(
 			reason = execution.ReasonCode(refusal)
 		}
 		coordinator.observe(ctx, observability.ComponentProgress, observability.StageProgressCommitted, request.Operation, started, "", reason, err)
-		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: %w", err)
+		return execution.SlotExecutionResult{}, inSlotStep(execution.SlotNotCommittedProgressCommitFailed, fmt.Errorf("alarmd worker: %w", err))
 	}
 	// The Slot is written down. Whatever this attempt applied is now recorded
 	// where it belongs, so it must leave no mark behind: the mark answers a
@@ -2180,7 +2235,7 @@ func (coordinator *SlotExecutionCoordinator) writeEvents(
 			}
 		}
 	} else if err != nil {
-		return fmt.Errorf("alarmd worker: acknowledge events: %w", err)
+		return inSlotStep(execution.SlotNotCommittedOutputFailed, fmt.Errorf("alarmd worker: acknowledge events: %w", err))
 	}
 	// Only after the ACK: a batch the sink did not take opened nothing at
 	// the consumer, and the copy must not say it did. The constructor
@@ -2190,7 +2245,7 @@ func (coordinator *SlotExecutionCoordinator) writeEvents(
 		coordinator.observeNewOpens(ctx, operation, plan)
 	}
 	if err != nil {
-		return fmt.Errorf("alarmd worker: acknowledge events: %w", err)
+		return inSlotStep(execution.SlotNotCommittedOutputFailed, fmt.Errorf("alarmd worker: acknowledge events: %w", err))
 	}
 	return nil
 }

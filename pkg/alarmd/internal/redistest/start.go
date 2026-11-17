@@ -23,6 +23,13 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
+// StartedMarker begins the line a test's log carries each time a server
+// started here answers, followed by the version the server reports, its
+// address and the executable. The line is how a gate tells the tests that ran
+// a real Redis from those that did not, and on which version: a test's name
+// says neither, and a helper of a helper can start one.
+const StartedMarker = "redistest: redis-server serving"
+
 // startAttempts is how many free ports Start tries. A port is found free and
 // released before the server binds it, so another test can take it in
 // between; the next attempt takes another.
@@ -220,10 +227,13 @@ func (instance *Instance) start() string {
 		err := probe.Ping(ctx).Err()
 		if err == nil {
 			serving, dirErr := probe.ConfigGet(ctx, "dir").Result()
-			cancel()
 			if dirErr == nil && len(serving) == 2 && fmt.Sprint(serving[1]) == resolved {
+				version := serverVersion(ctx, probe)
+				cancel()
+				instance.tb.Logf("%s version=%s addr=%s executable=%s", StartedMarker, version, instance.Addr, instance.executable)
 				return ""
 			}
+			cancel()
 			instance.Stop()
 			return fmt.Sprintf("%s is served from %v, not this instance's %q", instance.Addr, serving, resolved)
 		}
@@ -249,6 +259,22 @@ func (instance *Instance) stopLocked() {
 		_ = os.Remove(instance.recorded)
 		instance.recorded = ""
 	}
+}
+
+// serverVersion is the redis_version the server reports, or why it could not
+// be read: the line names it either way, and a gate that expects a version
+// reads the reason as a mismatch.
+func serverVersion(ctx context.Context, probe *redis.Client) string {
+	info, err := probe.Info(ctx, "server").Result()
+	if err != nil {
+		return "unreadable(" + strings.ReplaceAll(err.Error(), " ", "_") + ")"
+	}
+	for _, line := range strings.Split(info, "\n") {
+		if value, found := strings.CutPrefix(strings.TrimSpace(line), "redis_version:"); found && value != "" {
+			return value
+		}
+	}
+	return "unreadable(no_redis_version)"
 }
 
 func freeAddress() (string, error) {

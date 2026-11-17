@@ -110,6 +110,11 @@ type stateCacheEntry struct {
 	touched, written time.Time
 	interval         time.Duration
 	cost             int64
+	// segment is an entry of a Plan's segments, a mark or a page, and
+	// segmentInterval its Plan's evaluation interval: a segment entry is
+	// untouched past two of those, as the Plan's round reads it every one.
+	segment         bool
+	segmentInterval time.Duration
 }
 
 type stateCacheGroup struct {
@@ -176,7 +181,10 @@ type stateCache struct {
 	// set rather than thrashing as an LRU would on a fixed rotation, and a
 	// group larger than the room is not taken in write by write and given
 	// back whole each round.
-	refused                                 map[execution.QueryGroupIdentity]*stateCacheRefusal
+	refused map[execution.QueryGroupIdentity]*stateCacheRefusal
+	// segmentNotes is what is remembered of the Query Groups' segments past
+	// their entries (segmentNotes).
+	segmentNotes                            map[execution.QueryGroupIdentity]*segmentNotes
 	bytes                                   int64
 	lookups, departures, restored, declined map[string]*atomic.Uint64
 }
@@ -195,7 +203,8 @@ func newStateCache(budget int64, replayAge time.Duration, now func() time.Time) 
 	return &stateCache{budget: budget, replayAge: replayAge, now: now,
 		byKey: map[string]*stateCacheEntry{}, groups: map[execution.QueryGroupIdentity]*stateCacheGroup{},
 		refused: map[execution.QueryGroupIdentity]*stateCacheRefusal{}, lookups: counters(StateCacheLookupResults),
-		departures: counters(StateCacheDepartureReasons), restored: counters(StateCacheRestoreCauses),
+		segmentNotes: map[execution.QueryGroupIdentity]*segmentNotes{},
+		departures:   counters(StateCacheDepartureReasons), restored: counters(StateCacheRestoreCauses),
 		declined: counters(StateCacheDeclineReasons)}
 }
 
@@ -459,6 +468,7 @@ func (cache *stateCache) dropQueryGroup(group execution.QueryGroupIdentity) {
 		}
 	}
 	delete(cache.refused, group)
+	delete(cache.segmentNotes, group)
 }
 
 // sweep removes a Query Group's entries past their life or untouched for
@@ -470,17 +480,38 @@ func (cache *stateCache) sweep(group execution.QueryGroupIdentity) {
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
+	now := cache.now()
+	// A group with no entries left may still hold notes of its segments.
 	held := cache.groups[group]
 	if held == nil {
-		return
+		held = &stateCacheGroup{}
 	}
-	now := cache.now()
 	for _, entry := range held.entries {
+		interval := entry.interval
+		if entry.segment {
+			interval = entry.segmentInterval
+		}
 		switch {
 		case !now.Before(entry.usableUntil):
 			cache.departLocked(entry, StateCacheDepartExpired)
-		case entry.interval > 0 && now.Sub(entry.touched) > 2*entry.interval:
+		case interval > 0 && now.Sub(entry.touched) > 2*interval:
 			cache.departLocked(entry, StateCacheDepartUntouched)
+		}
+	}
+	if notes := cache.segmentNotes[group]; notes != nil {
+		for mark, at := range notes.evicted {
+			if now.Sub(at) >= segmentNoteLife {
+				delete(notes.evicted, mark)
+			}
+		}
+		for mark, invalid := range notes.invalid {
+			// Kept while the mark could still be served: a Plan of a long
+			// interval keeps its entries for days, each round touching
+			// them, and the note is all that sends its next read to Redis.
+			// Its memory is bounded by the marks the cache holds.
+			if entry := cache.byKey[mark]; (entry == nil || !entry.segment) && now.Sub(invalid.at) >= segmentNoteLife {
+				delete(notes.invalid, mark)
+			}
 		}
 	}
 }
@@ -488,6 +519,11 @@ func (cache *stateCache) sweep(group execution.QueryGroupIdentity) {
 func (cache *stateCache) departLocked(entry *stateCacheEntry, reason string) {
 	cache.removeLocked(entry)
 	cache.departures[reason].Add(1)
+	if entry.segment && reason != StateCacheDepartReleased && isSegmentMarkKey(entry.key) {
+		// Let go for the budget, the room or its life, not by the Plan: its
+		// next read is an eviction's, not a cold one's.
+		cache.notesLocked(entry.group).evicted[entry.key] = cache.now()
+	}
 }
 
 func (cache *stateCache) removeLocked(entry *stateCacheEntry) {
@@ -550,7 +586,217 @@ func (store *ExecutionStore) StateCacheBorrower() execution.RetainedBytesBorrowe
 }
 
 // DropStateCacheQueryGroup removes a Query Group's entries when this process
-// stops holding it.
+// stops holding it, and what it last did with the group's segments.
 func (store *ExecutionStore) DropStateCacheQueryGroup(group execution.QueryGroupIdentity) {
 	store.cache.dropQueryGroup(group)
+	store.uses.drop(group)
+}
+
+// The cache's share in a Plan's segments (014 B3 3.2): the mark and the
+// pages kept as entries of the Plan's Query Group, under the budget and the
+// pool's room the State entries are kept under, read once a Slot before the
+// State. A segment key is the Plan's own generation's, written only by the
+// Query Group's owner under its fence: an entry is served while its fence is
+// the Slot's and its life lasts, and the replay and activation rules of a
+// State key do not apply - the mark's position tells one round from another.
+
+// segmentNotes is what the cache remembers of a Query Group's segments past
+// their entries: the marks it let go for its budget, the pool's room or
+// their life (evicted), so their next read is told from a cold one; and the
+// Plans whose last write is in doubt or found a key gone (invalid), served
+// from Redis until read again, with what the write in doubt tried to leave.
+type segmentNotes struct {
+	evicted map[string]time.Time
+	invalid map[string]segmentInvalid
+}
+
+type segmentInvalid struct {
+	reason string
+	// at is when the Plan's cache was let go: a note no read clears - the
+	// Plan deleted or moved to a new generation - leaves with the sweep
+	// once its mark is out of the cache and past segmentNoteLife.
+	at time.Time
+	// attempted is, by key, the SHA-1 of the bytes a write in doubt tried
+	// to leave there, "" for a removal: a later read finding them is the
+	// write landed, not drift.
+	attempted map[string]string
+}
+
+// segmentNoteLife is how long an eviction is remembered: past it the Plan's
+// next read is cold, as it would be from a cache that never held it.
+const segmentNoteLife = 6 * time.Hour
+
+func (cache *stateCache) notesLocked(group execution.QueryGroupIdentity) *segmentNotes {
+	notes := cache.segmentNotes[group]
+	if notes == nil {
+		notes = &segmentNotes{evicted: map[string]time.Time{}, invalid: map[string]segmentInvalid{}}
+		cache.segmentNotes[group] = notes
+	}
+	return notes
+}
+
+// segmentLookup answers a segment key from the cache: its bytes, nil for a
+// mark kept as absent, when an entry is there, its life left and its fence
+// the Slot's; and otherwise the lookup word of why not.
+func (cache *stateCache) segmentLookup(key string, fence execution.OwnerFence, group execution.QueryGroupIdentity) ([]byte, string) {
+	if cache == nil {
+		return nil, StateCacheMissAbsent
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if refusal := cache.refused[group]; refusal != nil {
+		return nil, refusal.missOf()
+	}
+	entry := cache.byKey[key]
+	switch {
+	case entry == nil || !entry.segment:
+		return nil, StateCacheMissAbsent
+	case !cache.now().Before(entry.usableUntil):
+		cache.departLocked(entry, StateCacheDepartExpired)
+		return nil, StateCacheMissExpired
+	case fence.IsZero() || entry.fence != fence:
+		return nil, StateCacheMissFence
+	}
+	entry.touched = cache.now()
+	if len(entry.raw) == 0 {
+		return nil, StateCacheHit
+	}
+	return entry.raw, StateCacheHit
+}
+
+// segmentPeek is a segment key's bytes as the cache holds them under fence,
+// its life past or not: what a read from Redis is compared with (drift).
+func (cache *stateCache) segmentPeek(key string, fence execution.OwnerFence) ([]byte, bool) {
+	if cache == nil {
+		return nil, false
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	entry := cache.byKey[key]
+	if entry == nil || !entry.segment || entry.fence != fence {
+		return nil, false
+	}
+	if len(entry.raw) == 0 {
+		return nil, true
+	}
+	return entry.raw, true
+}
+
+// segmentKept keeps a segment key's bytes, read or written under fence - a
+// mark absent from the store kept as no bytes - as a State write's are kept:
+// within the budget and the pool's room, the Query Group's entries together,
+// leaving untouched for two of the Plan's intervals.
+func (cache *stateCache) segmentKept(key string, raw []byte, group execution.QueryGroupIdentity, fence execution.OwnerFence,
+	slot execution.EvaluationTime, usableUntil time.Time, interval time.Duration) {
+	if cache == nil {
+		return
+	}
+	if raw == nil {
+		raw = []byte{}
+	}
+	cache.applied(stateCacheEntry{key: key, group: group, raw: raw, fence: fence, slot: slot, usableUntil: usableUntil,
+		segment: true, segmentInterval: interval})
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if notes := cache.segmentNotes[group]; notes != nil {
+		delete(notes.evicted, key)
+	}
+}
+
+// segmentRenew gives the cached segment keys under fence the life until
+// usableUntil, touched now: the keys a mark's write renewed in the store.
+func (cache *stateCache) segmentRenew(keys []string, fence execution.OwnerFence, usableUntil time.Time) {
+	if cache == nil || len(keys) == 0 {
+		return
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	now := cache.now()
+	for _, key := range keys {
+		if entry := cache.byKey[key]; entry != nil && entry.segment && entry.fence == fence {
+			entry.usableUntil, entry.touched = usableUntil, now
+		}
+	}
+}
+
+// segmentDrop lets a segment key go, as the Plan's own doing.
+func (cache *stateCache) segmentDrop(key string) {
+	cache.drop(key, StateCacheDepartReleased)
+}
+
+// segmentEvicted is whether the cache let the mark go for its budget, the
+// pool's room or its life within segmentNoteLife.
+func (cache *stateCache) segmentEvicted(group execution.QueryGroupIdentity, mark string) bool {
+	if cache == nil {
+		return false
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	notes := cache.segmentNotes[group]
+	if notes == nil {
+		return false
+	}
+	at, ok := notes.evicted[mark]
+	return ok && cache.now().Sub(at) < segmentNoteLife
+}
+
+// segmentInvalidate serves a Plan's segments from Redis until they are read
+// again, counted under reason; attempted is what a write in doubt tried to
+// leave.
+func (cache *stateCache) segmentInvalidate(group execution.QueryGroupIdentity, mark, reason string, attempted map[string]string) {
+	if cache == nil {
+		return
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	cache.notesLocked(group).invalid[mark] = segmentInvalid{reason: reason, attempted: attempted, at: cache.now()}
+}
+
+// segmentInvalidOf is why a Plan's segments are served from Redis, when they
+// are.
+func (cache *stateCache) segmentInvalidOf(group execution.QueryGroupIdentity, mark string) (segmentInvalid, bool) {
+	if cache == nil {
+		return segmentInvalid{}, false
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	notes := cache.segmentNotes[group]
+	if notes == nil {
+		return segmentInvalid{}, false
+	}
+	invalid, ok := notes.invalid[mark]
+	return invalid, ok
+}
+
+// segmentReread clears a Plan's invalid note: it was read from Redis.
+func (cache *stateCache) segmentReread(group execution.QueryGroupIdentity, mark string) {
+	if cache == nil {
+		return
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if notes := cache.segmentNotes[group]; notes != nil {
+		delete(notes.invalid, mark)
+	}
+}
+
+// segmentHeld is the marks, pages and bytes the cache holds of the segments.
+func (cache *stateCache) segmentHeld() (plans, pages, bytes int64) {
+	if cache == nil {
+		return 0, 0, 0
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	for key, entry := range cache.byKey {
+		if !entry.segment {
+			continue
+		}
+		bytes += entry.cost
+		if isSegmentMarkKey(key) {
+			plans++
+		} else {
+			pages++
+		}
+	}
+	return plans, pages, bytes
 }

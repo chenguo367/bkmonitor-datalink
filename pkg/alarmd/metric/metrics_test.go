@@ -44,6 +44,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisscript"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scopeclose"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/segment"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sourceliveness"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/state"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategycache"
@@ -408,6 +409,11 @@ func TestEveryFamilyIsAlarmdsAndCarriesNoConstantLabel(t *testing.T) {
 // come from their sources. Each is to be given a bound derived from where
 // its labels come from, and taken off; a family on it that gains a bound or
 // is registered no more fails the test until it is.
+//
+// RETIRE(0.7): the list goes when it is empty - every family on it given a
+// bound derived from its label source and taken off. The test fails for a
+// listed family that gains a bound or is registered no more, so the list
+// only shrinks.
 var pendingSeriesUpperBounds = map[string]string{
 	"alarmd_fleet_anomalies":                         "PENDING bound",
 	"alarmd_fleet_anomaly_oldest_age_seconds":        "PENDING bound",
@@ -812,15 +818,18 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		// the flow: two label-free histograms (bounds, +Inf, sum, count; the
 		// query duration has 10 bounds, the decision lag 15), six failure
 		// reasons, one label-free counter
-		fqName("access_query_duration_seconds"):    13,
-		fqName("access_query_answer_bytes"):        histogramSeries(len(observability.PhysicalQueryOutcomes), 12),
-		fqName("access_query_answer_series"):       histogramSeries(len(observability.PhysicalQueryOutcomes), 11),
-		fqName("access_query_answer_records"):      histogramSeries(len(observability.PhysicalQueryOutcomes), 14),
-		fqName("access_query_answer_seconds"):      histogramSeries(len(observability.PhysicalQueryOutcomes), len(QueryAnswerBuckets)),
-		fqName("slot_decision_lag_seconds"):        18,
-		fqName("access_query_failure_total"):       7,
-		fqName("output_events_rejected_all_total"): 1,
-		fqName("access_response_codec_total"):      3 * 3 * 4,
+		fqName("access_query_duration_seconds"):     13,
+		fqName("access_query_answer_bytes"):         histogramSeries(len(observability.PhysicalQueryOutcomes), 12),
+		fqName("access_query_answer_series"):        histogramSeries(len(observability.PhysicalQueryOutcomes), 11),
+		fqName("access_query_answer_records"):       histogramSeries(len(observability.PhysicalQueryOutcomes), 14),
+		fqName("access_query_answer_seconds"):       histogramSeries(len(observability.PhysicalQueryOutcomes), len(QueryAnswerBuckets)),
+		fqName("access_query_answer_phase_seconds"): histogramSeries(len(observability.PhysicalQueryOutcomes)*len(QueryAnswerPhases), len(QueryAnswerBuckets)),
+		fqName("slot_decision_lag_seconds"):         18,
+		fqName("access_query_failure_total"):        7,
+		// one series a reason, observability.PointDropReasons
+		fqName("access_query_points_dropped_total"): len(observability.PointDropReasons),
+		fqName("output_events_rejected_all_total"):  1,
+		fqName("access_response_codec_total"):       3 * 3 * 4,
 		// One per source answered through Elasticsearch terms.
 		fqName("uq_answer_truncated_total"): 4,
 		// attempt, no_attempt_reason, no_attempts, other.
@@ -1037,8 +1046,16 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("state_segment_shadow_members_total")] = len(observability.AllSegmentShadowEvents()) * len(observability.AllSegmentPeriodClasses())
 	bounds[fqName("state_segment_shadow_page_writes_total")] = len(observability.AllSegmentPeriodClasses())
 	bounds[fqName("state_segment_shadow_page_bytes_total")] = len(observability.AllSegmentPeriodClasses())
-	// plans, entries_open, entries_closed, bytes_estimated.
-	bounds[fqName("worker_segment_shadow_memory")] = 4
+	// The page cache's plans, pages and bytes.
+	bounds[fqName("worker_segment_shadow_memory")] = 3
+	bounds[fqName("state_segment_shadow_skipped_total")] = len(observability.AllSegmentShadowSkips())
+	bounds[fqName("state_segment_renewal_total")] = len(observability.AllSegmentRenewalResults())
+	// The compute cost bands, a sum and a count each.
+	bounds[fqName("worker_compute_cost")] = len(ComputeCostBands)
+	bounds[fqName("worker_compute_cost_query_groups")] = len(ComputeCostBands)
+	bounds[fqName("state_segment_read_total")] = 1 + len(segment.ReadReasons)
+	bounds[fqName("state_segment_write_total")] = len(segment.WriteResults)
+	bounds[fqName("state_segment_cache_drift_total")] = 1
 	// Every wait outcome by every band; one sum.
 	bounds[fqName("worker_slice_read_ahead_waits_total")] = len(observability.SliceReadAheadWaitOutcomes) * len(observability.SliceReadAheadWaitDurations)
 	bounds[fqName("worker_slice_read_ahead_wait_seconds_total")] = 1
@@ -1087,6 +1104,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("query_cooldown_saves_total")] = len(QueryCooldownSaveResults)
 	bounds[fqName("fleet_control_facts_writes_total")] = len(ControlFactsWriteResults)
 	bounds[fqName("fleet_plan_carries_reads_total")] = len(PlanCarriesReadResults)
+	bounds[fqName("fleet_plan_segments_reads_total")] = len(PlanCarriesReadResults)
 	bounds[fqName("linkd_filter_close_request_seconds")] = histogramSeries(2*len(filterclose.RequestResults), len(linkdFilterCloseRequestBuckets))
 	bounds[fqName("query_cooldown_loads_total")] = len(QueryCooldownLoadResults)
 	bounds[fqName("event_business_attribution_total")] = len(contract.BusinessAttributionSources)
@@ -1433,6 +1451,21 @@ func TestPlanCarriesReadResultsArePreCreated(t *testing.T) {
 	}
 	if len(counts) != len(PlanCarriesReadResults) || counts["failed"] != 1 || counts["read"] != 0 || counts["no_open_segment"] != 0 {
 		t.Fatalf("reads = %v, want every result present, failed at 1, nothing else", counts)
+	}
+}
+
+// The plan segments reads are pre-created by the plan carries reads'
+// results, and a result outside them creates no series.
+func TestPlanSegmentsReadResultsArePreCreated(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	r.ObservePlanSegmentsRead("no_open_segment")
+	r.ObservePlanSegmentsRead("guessed")
+	counts := map[string]float64{}
+	for _, m := range gatherFamily(t, r, "alarmd_fleet_plan_segments_reads_total") {
+		counts[m.GetLabel()[0].GetValue()] = m.GetCounter().GetValue()
+	}
+	if len(counts) != len(PlanCarriesReadResults) || counts["no_open_segment"] != 1 || counts["read"] != 0 || counts["failed"] != 0 {
+		t.Fatalf("reads = %v, want every result present, no_open_segment at 1, nothing else", counts)
 	}
 }
 

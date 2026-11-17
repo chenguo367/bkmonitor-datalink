@@ -259,7 +259,7 @@ func (coordinator *SlotExecutionCoordinator) observeQueryCompleted(
 		ReasonCode: reason, Duration: time.Since(started), DurationKnown: true,
 		QueryFailure: facts, QueryStatus: providerStatusFacts(completion), QueryCodec: providerCodecFacts(completion),
 		QueryUnavailable: providerUnavailableFacts(completion), QueryTruncation: providerTruncationFacts(completion),
-		QueryRanges:      providerRangeFacts(completion),
+		QueryRanges: providerRangeFacts(completion), QueryPointsDropped: pointsDroppedFacts(completion),
 		EvaluationResult: evaluationResult, EvaluationReason: evaluationReason,
 		CarriedReason: execution.CarriedReasonFacts(evaluated.ReasonCarried && evaluationReason != observability.ReasonNone,
 			evaluated.ReasonOrigin),
@@ -421,6 +421,16 @@ func providerTruncationFacts(completion execution.QueryExecutionCompletion) []ob
 // entry each with its digest: a Query Group's primaries can differ, by an
 // expression's clauses or by Plans of different windows, and each asks its
 // own range.
+// pointsDroppedFacts is the points every physical query of the completion
+// let go in its normalization, by reason; nil when none.
+func pointsDroppedFacts(completion execution.QueryExecutionCompletion) *observability.PointDrops {
+	var dropped observability.PointDrops
+	for _, item := range completion.PhysicalQueries {
+		dropped = dropped.Add(item.Stats.PointsDropped)
+	}
+	return dropped.Facts()
+}
+
 func providerRangeFacts(completion execution.QueryExecutionCompletion) []observability.QueryRangeFacts {
 	var facts []observability.QueryRangeFacts
 	for _, item := range completion.PhysicalQueries {

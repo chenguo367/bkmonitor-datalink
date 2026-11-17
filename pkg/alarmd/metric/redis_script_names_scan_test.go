@@ -26,7 +26,8 @@ var shaConstants = map[string]string{
 	"fencedBatchWriteSHA": "fencedBatchWriteScript", "applyHashDeltaSHA": "applyHashDeltaScript",
 	"recordHashFieldSHA": "recordHashFieldScript", "stageHashSegmentSHA": "stageHashSegmentScript",
 	"swapStagedHashSHA": "swapStagedHashScript", "discardStagedHashSHA": "discardStagedHashScript",
-	"renewIfBelowSHA": "renewIfBelowScript",
+	"renewIfBelowSHA": "renewIfBelowScript", "segmentWriteSHA": "segmentWriteScript",
+	"segmentRenewSHA": "segmentRenewScript",
 }
 
 // scriptParameters are the script arguments that are a function's parameter,

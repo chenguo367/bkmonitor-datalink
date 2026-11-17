@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/segment"
 )
 
 // GapRegistryUnavailable means the set of replicas that should have published
@@ -93,7 +94,12 @@ type Service struct {
 	localQueryRanges func(queryGroup string) (QueryRanges, bool)
 	// planCarries reads where an object's Plans' Runtime State comes from
 	// (controlplane PlanCarries), set once at wiring (SetPlanCarries).
-	planCarries  func(ctx context.Context, queryGroup string) (controlplane.PlanCarriesReading, error)
+	planCarries func(ctx context.Context, queryGroup string) (controlplane.PlanCarriesReading, error)
+	// planSegments reads an object's Plans' segment marks and what this
+	// replica last did with them (SetPlanSegments); localWake is this
+	// replica's due index entry for an object (SetLocalWake).
+	planSegments func(ctx context.Context, queryGroup string) (segment.PlansReading, error)
+	localWake    func(queryGroup string) WakeFacts
 	expectations ExpectationSource
 	registry     ReplicaRegistry
 	snapshots    SnapshotReader

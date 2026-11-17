@@ -95,6 +95,90 @@ const ByteConstraintPercent = byteConstraintPercent
 type ByteReadings struct {
 	Pool map[string]uint64
 	Peak map[execution.QueryGroupIdentity]uint64
+	// Occupancy is each judged Worker's concurrent occupancy as the Leader
+	// accounts it (014 C1 section 8.3): its reported high-water and the peaks
+	// its window may not have seen, plus the Query Groups landing on it and
+	// less the ones that left it. Set only when every judged Worker reported
+	// a high-water; nil, and the constraint judges each Worker by the sum of
+	// its Query Groups' peaks as before - a fleet of mixed readings is judged
+	// by the older one whole, or the moves would only ever go one way.
+	Occupancy map[string]uint64
+	// Share is the most one Query Group may hold on each Worker, as the
+	// Worker reported it; a Worker absent from it is not checked.
+	Share map[string]uint64
+	// HoldByteMoves is a new Leader's first hour: the Query Groups that left
+	// a Worker before it began are not known to it, so a Worker's occupancy
+	// may still carry them - no byte move and no all-over move is made.
+	// TermAge is how long the term has been led.
+	HoldByteMoves bool
+	TermAge       time.Duration
+	// Parts is what each Worker's occupancy was made of; Arrived the Query
+	// Groups counted as landing, which stay where they are while every
+	// Worker is over the line - the high-water has not seen them yet, and a
+	// move judged on it could take one straight back. NotReporting names the
+	// ready Workers with a pool that reported no high-water, the reason the
+	// fleet was judged by the sum of peaks.
+	Parts        map[string]OccupancyParts
+	Arrived      map[execution.QueryGroupIdentity]bool
+	NotReporting []string
+}
+
+// Moved is the readings after the moves the round has published: each
+// Query Group's peak counted on the Worker it went to and taken off the one
+// it left, for the planning that follows within the round. Under the sum of
+// peaks the owners say where each peak is, and the readings are unchanged.
+func (readings ByteReadings) Moved(moves []RebalanceMove) ByteReadings {
+	if readings.Occupancy == nil || len(moves) == 0 {
+		return readings
+	}
+	occupancy := make(map[string]uint64, len(readings.Occupancy))
+	for workerID, held := range readings.Occupancy {
+		occupancy[workerID] = held
+	}
+	arrived := make(map[execution.QueryGroupIdentity]bool, len(readings.Arrived)+len(moves))
+	for queryGroup := range readings.Arrived {
+		arrived[queryGroup] = true
+	}
+	for _, move := range moves {
+		peak := readings.Peak[move.QueryGroup]
+		if _, judged := occupancy[move.To]; judged {
+			occupancy[move.To] += peak
+		}
+		if held, judged := occupancy[move.From]; judged {
+			occupancy[move.From] = held - min(held, peak)
+		}
+		arrived[move.QueryGroup] = true
+	}
+	readings.Occupancy, readings.Arrived = occupancy, arrived
+	return readings
+}
+
+// ByteJudgement is how a round judges the constraint: occupancy, by the
+// Workers' concurrent occupancy; peak_sum, by each Worker's sum of peaks.
+const (
+	ByteJudgementOccupancy = "occupancy"
+	ByteJudgementPeakSum   = "peak_sum"
+)
+
+// held is a new Leader's first hour under occupancy. Under the sum of peaks
+// nothing that left a Worker is in its sum, and nothing is held.
+func (readings ByteReadings) held() bool {
+	return readings.Occupancy != nil && readings.HoldByteMoves
+}
+
+func (readings ByteReadings) judgement() string {
+	if readings.Occupancy != nil {
+		return ByteJudgementOccupancy
+	}
+	return ByteJudgementPeakSum
+}
+
+// shareFits is whether a Query Group's peak is within the Worker's reported
+// share: one past it is refused there whatever is free, and moving it only
+// moves the refusal.
+func (readings ByteReadings) shareFits(workerID string, peak uint64) bool {
+	share, known := readings.Share[workerID]
+	return !known || share == 0 || peak <= share
 }
 
 func (readings ByteReadings) pool(workerID string) (uint64, bool) {
@@ -167,6 +251,23 @@ type BytePlan struct {
 	// limit (the share of its pool the constraint allows), before the moves:
 	// above one is overloaded. Zero when no Worker is judged.
 	MostLoadedShare float64
+	// Judgement is what Sum is: occupancy or peak_sum. AllOver is every
+	// judged Worker over the line under occupancy, when a move is made only
+	// where the destination ends below the source's occupancy; Held is a
+	// new Leader's first hour, no byte move made. OverShare names the Query
+	// Groups an overloaded Worker could not move for being past every other
+	// Worker's share: theirs to split, not to move.
+	Judgement string
+	AllOver   bool
+	Held      bool
+	OverShare []execution.QueryGroupIdentity
+	// Parts, NotReporting and TermAge are the readings' own, for the facts.
+	Parts        map[string]OccupancyParts
+	NotReporting []string
+	TermAge      time.Duration
+	// PeakSum is each judged Worker's sum of peaks, whatever the judgement:
+	// what Sum was before occupancy, kept for the comparison.
+	PeakSum map[string]uint64
 }
 
 // PlanByteMoves computes the byte-constraint moves of one round. Only
@@ -184,7 +285,8 @@ func (router *Router) PlanByteMoves(
 	readings ByteReadings,
 	at time.Time,
 ) BytePlan {
-	plan := BytePlan{Sum: map[string]uint64{}}
+	plan := BytePlan{Sum: map[string]uint64{}, Judgement: readings.judgement(), Held: readings.held(),
+		Parts: readings.Parts, NotReporting: readings.NotReporting, TermAge: readings.TermAge, PeakSum: map[string]uint64{}}
 	if router == nil || at.IsZero() {
 		return plan
 	}
@@ -204,6 +306,7 @@ func (router *Router) PlanByteMoves(
 		}
 		judged = append(judged, worker.WorkerID)
 		plan.Sum[worker.WorkerID] = 0
+		plan.PeakSum[worker.WorkerID] = 0
 	}
 	sort.Strings(plan.PoolUnknown)
 	sort.Strings(judged)
@@ -223,9 +326,22 @@ func (router *Router) PlanByteMoves(
 			unreadGroups[owner] = append(unreadGroups[owner], queryGroup)
 			continue
 		}
-		plan.Sum[owner] += peak
+		plan.PeakSum[owner] += peak
+		if readings.Occupancy == nil {
+			plan.Sum[owner] += peak
+		}
 		owned[owner] = append(owned[owner], queryGroup)
 		readPeaks = append(readPeaks, peak)
+	}
+	if readings.Occupancy != nil {
+		// Concurrent occupancy: what the Worker held at once, and the
+		// Query Groups landing on it or gone from it. A Query Group with no
+		// reading is in its high-water already or among the ones landing,
+		// and adds nothing more.
+		for workerID := range plan.Sum {
+			plan.Sum[workerID] = readings.Occupancy[workerID]
+		}
+		unreadBy = map[string]int{}
 	}
 	plan.UnreadEstimate = unreadEstimate(readPeaks)
 	plan.ReadPeaks = peakDistribution(readPeaks)
@@ -253,6 +369,11 @@ func (router *Router) PlanByteMoves(
 	for workerID, total := range plan.Sum {
 		sum[workerID] = total
 	}
+	plan.AllOver = readings.Occupancy != nil && !plan.Held
+	for _, workerID := range judged {
+		pool, _ := readings.pool(workerID)
+		plan.AllOver = plan.AllOver && sum[workerID] > byteLimit(pool)
+	}
 	for _, workerID := range judged {
 		pool, _ := readings.pool(workerID)
 		if limit := byteLimit(pool); limit > 0 {
@@ -270,18 +391,31 @@ func (router *Router) PlanByteMoves(
 			}
 			return candidates[left] < candidates[right]
 		})
+		if plan.Held {
+			continue
+		}
 		moved := false
 		for _, queryGroup := range candidates {
 			peak := readings.Peak[queryGroup]
 			if peak == 0 {
 				break
 			}
+			if !router.shareFitsAnywhere(workerID, judged, readings, peak) {
+				plan.OverShare = append(plan.OverShare, queryGroup)
+				continue
+			}
 			destination := router.byteDestination(queryGroup, workerID, judged, ready, readings, sum, unreadBy, plan.UnreadEstimate, peak, at)
+			if destination == "" && plan.AllOver && !readings.Arrived[queryGroup] {
+				destination = router.relievingDestination(queryGroup, workerID, judged, ready, readings, sum, peak, at)
+			}
 			if destination == "" {
 				continue
 			}
 			plan.Moves = append(plan.Moves, ByteMove{QueryGroup: queryGroup, From: workerID, To: destination, Bytes: peak})
-			sum[workerID] -= peak
+			// Under occupancy a Query Group's peak may be more than the
+			// source's occupancy - a long-period one its window did not see -
+			// and the source is then empty, not wrapped round.
+			sum[workerID] -= min(peak, sum[workerID])
 			sum[destination] += peak
 			moved = true
 			break
@@ -322,7 +456,7 @@ func (router *Router) byteDestination(
 		projected := projectedSum(sum[workerID], unreadBy[workerID], unreadEstimate)
 		pool, _ := readings.pool(workerID)
 		limit := byteLimit(pool)
-		if projected > limit || peak > limit-projected {
+		if projected > limit || peak > limit-projected || !readings.shareFits(workerID, peak) {
 			continue
 		}
 		if router.additionalEligibility != nil && !router.additionalEligibility.Eligible(queryGroup, ready[workerID], at) {
@@ -331,6 +465,48 @@ func (router *Router) byteDestination(
 		left := limit - projected
 		if destination == "" || left > headroom || (left == headroom && workerID < destination) {
 			destination, headroom = workerID, left
+		}
+	}
+	return destination
+}
+
+// shareFitsAnywhere is whether some judged Worker other than from would hold
+// a Query Group of peak within its share.
+func (router *Router) shareFitsAnywhere(from string, judged []string, readings ByteReadings, peak uint64) bool {
+	for _, workerID := range judged {
+		if workerID != from && readings.shareFits(workerID, peak) {
+			return true
+		}
+	}
+	return false
+}
+
+// relievingDestination is, when every judged Worker is over the line, the
+// least occupied one the Query Group would leave below the occupancy it
+// leaves - O(destination) + peak < O(source) - within its share and
+// eligible, or "". Such a move never makes the heavier of the two heavier
+// and strictly lowers the sum of squares of the occupancies, so moves of
+// this kind end, and none is undone (014 C1 section 8.3).
+func (router *Router) relievingDestination(
+	queryGroup execution.QueryGroupIdentity,
+	from string,
+	judged []string,
+	ready map[string]ownership.WorkerRegistration,
+	readings ByteReadings,
+	sum map[string]uint64,
+	peak uint64,
+	at time.Time,
+) string {
+	destination := ""
+	for _, workerID := range judged {
+		if workerID == from || sum[workerID]+peak >= sum[from] || !readings.shareFits(workerID, peak) {
+			continue
+		}
+		if router.additionalEligibility != nil && !router.additionalEligibility.Eligible(queryGroup, ready[workerID], at) {
+			continue
+		}
+		if destination == "" || sum[workerID] < sum[destination] || (sum[workerID] == sum[destination] && workerID < destination) {
+			destination = workerID
 		}
 	}
 	return destination
@@ -370,6 +546,10 @@ type byteProjection struct {
 	known    map[string]uint64
 	unread   map[string]int
 	estimate uint64
+	// allOver is every judged Worker over the line under occupancy, out of
+	// a new Leader's first hour: a move is then made only where it relieves
+	// (relieves).
+	allOver bool
 }
 
 // newByteProjection projects the owners' Workers. The estimate is the one
@@ -383,13 +563,31 @@ func newByteProjection(owners map[execution.QueryGroupIdentity]string, readings 
 			continue
 		}
 		if peak, read := readings.peak(queryGroup); read {
-			projection.known[owner] += peak
+			if readings.Occupancy == nil {
+				projection.known[owner] += peak
+			}
 			peaks = append(peaks, peak)
 			continue
 		}
-		projection.unread[owner]++
+		if readings.Occupancy == nil {
+			projection.unread[owner]++
+		}
 	}
 	projection.estimate = unreadEstimate(peaks)
+	if readings.Occupancy != nil {
+		judged := 0
+		projection.allOver = !readings.held()
+		for workerID, held := range readings.Occupancy {
+			pool, known := readings.pool(workerID)
+			if !known {
+				continue
+			}
+			judged++
+			projection.known[workerID] = held
+			projection.allOver = projection.allOver && held > byteLimit(pool)
+		}
+		projection.allOver = projection.allOver && judged >= 2
+	}
 	return projection
 }
 
@@ -416,7 +614,36 @@ func (projection *byteProjection) fits(workerID string, queryGroup execution.Que
 		return true
 	}
 	peak, _ := projection.peakOf(queryGroup)
-	return projectedSum(projection.known[workerID], projection.unread[workerID], projection.estimate)+peak <= byteLimit(pool)
+	return projectedSum(projection.known[workerID], projection.unread[workerID], projection.estimate)+peak <= byteLimit(pool) &&
+		projection.readings.shareFits(workerID, peak)
+}
+
+// relieves reports whether, with every judged Worker over the line, moving
+// the Query Group from one Worker to another leaves the destination below
+// the occupancy of the source: the only moves the count and weighted
+// balance make then. Never for a placement, whose source has gone
+// (selectFitting asks fits alone).
+func (projection *byteProjection) relieves(to, from string, queryGroup execution.QueryGroupIdentity) bool {
+	if projection == nil || !projection.allOver || projection.readings.Arrived[queryGroup] {
+		return false
+	}
+	if _, judged := projection.readings.pool(to); !judged {
+		return false
+	}
+	peak, _ := projection.peakOf(queryGroup)
+	return projection.known[to]+peak < projection.known[from] && projection.readings.shareFits(to, peak)
+}
+
+// leave takes the Query Group's projected peak off the Worker it moves
+// from, under occupancy: its share of that Worker's high-water goes with it
+// as the Leader accounts a departure. Under the sum of peaks the Worker it
+// leaves is not taken down, as before.
+func (projection *byteProjection) leave(queryGroup execution.QueryGroupIdentity, from string) {
+	if projection == nil || projection.readings.Occupancy == nil {
+		return
+	}
+	peak, _ := projection.peakOf(queryGroup)
+	projection.known[from] -= min(peak, projection.known[from])
 }
 
 // land adds the Query Group's projected peak to the Worker it moves or is
@@ -428,7 +655,7 @@ func (projection *byteProjection) land(queryGroup execution.QueryGroupIdentity, 
 		return
 	}
 	peak, read := projection.peakOf(queryGroup)
-	if read {
+	if read || projection.readings.Occupancy != nil {
 		projection.known[to] += peak
 	} else {
 		projection.unread[to]++

@@ -7,6 +7,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // seriesDecoder is the shared business path of both wire formats. Framing is
@@ -19,10 +20,13 @@ type seriesDecoder struct {
 	ref                                           execution.ProviderResultRef
 	delivery                                      execution.SeriesDelivery
 	totalSeries, totalRecords, nullIdentityFields uint64
-	cut                                           *termsCutCounter
-	offGrid                                       bool
-	receivedAt                                    int64
-	decodeStarted                                 time.Time
+	// dropped is the points the normalization let go, every series of the
+	// answer together.
+	dropped       observability.PointDrops
+	cut           *termsCutCounter
+	offGrid       bool
+	receivedAt    int64
+	decodeStarted time.Time
 	// framed is set on an answer read a frame at a time, which hands on a
 	// frame's series before it reads the next (handOn): only its series are
 	// made canonical side by side. An answer read as one document hands each
@@ -110,6 +114,7 @@ func (session *seriesDecoder) deliver(ctx context.Context, job *normalizing) err
 		return err
 	}
 	session.nullIdentityFields += job.nullFields
+	session.dropped = session.dropped.Add(job.dropped)
 	if batch.Dataset.Len() == 0 {
 		return nil
 	}
@@ -189,7 +194,8 @@ func (session *seriesDecoder) complete(ctx context.Context, status *responseStat
 		dataState = execution.DataStateData
 	}
 	stats := execution.ProviderStats{Series: delivery.Series, Records: delivery.Records, NullIdentityFields: nullIdentityFields,
-		DecodeMillis: uint64(client.now().Sub(decodeStarted).Milliseconds())}
+		DecodeMillis: uint64(client.now().Sub(decodeStarted).Milliseconds()), PointsDropped: session.dropped}
+	client.notePointsDropped(session.dropped)
 	passthroughDetail := ""
 	var passthroughStatus *execution.ProviderStatusFact
 	if status != nil && status.Code != "" && status.Code != queryTSPartial {

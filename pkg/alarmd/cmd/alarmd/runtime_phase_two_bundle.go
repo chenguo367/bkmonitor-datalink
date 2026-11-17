@@ -41,6 +41,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/segment"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sourceliveness"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/state"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategycache"
@@ -561,6 +562,9 @@ func openProductionPhaseTwoBundleAssembly(
 	queryClient.WithAPMObserver(func(response accessuq.APMCarriedResponse) {
 		recorder.ObserveAPMCarriedResponse(response.Table, response.NotUnique, response.Bytes)
 	})
+	// Every point an answer's normalization lets go is counted by reason:
+	// data that arrived and was not evaluated is not left silent.
+	queryClient.WithPointsDroppedObserver(recorder.RecordQueryPointsDropped)
 	flights, err := scheduler.NewFlightCoordinatorWithRecovery(recoveryLimits, external.Now, observer)
 	if err != nil {
 		return nil, err
@@ -874,16 +878,13 @@ func openProductionPhaseTwoBundleAssembly(
 	}); err != nil {
 		return nil, err
 	}
-	if err := recorder.BindSegmentShadowMemory(func() metric.SegmentShadowMemoryReading {
-		reading := worker.SegmentShadowMemory(coordinator)
-		return metric.SegmentShadowMemoryReading{Plans: reading.Plans, Open: reading.Open, Closed: reading.Closed, Bytes: reading.Bytes}
-	}); err != nil {
-		return nil, err
-	}
 	// Sized by what the owned Query Groups were measured to retain, once
 	// every one of them has been: the cost source reads the census for the
 	// Leader's heartbeat, and the reservation from the same reading.
 	workerCosts := newWorkerCostSource(retainedPeaks, recorder, external.Now)
+	if err := recorder.BindComputeCost(workerCosts.ComputeCost); err != nil {
+		return nil, err
+	}
 	observationMemory.Reserve("retained", func() (uint64, uint64) {
 		held := worker.RetainedReserved(coordinator)
 		return workerCosts.RetainedReservation(cfg.PhaseTwo.Coordinator.MaxRetainedBytes, held), held
@@ -1073,6 +1074,15 @@ func openProductionPhaseTwoBundleAssembly(
 		recorder.ObservePlanCarriesRead(planCarriesReadResult(err))
 		return reading, err
 	})
+	// An object's Plans' segment marks, read on request: any replica reads
+	// the marks, and what was last done with them is the answering one's.
+	if executionStore != nil {
+		fleetService.SetPlanSegments(func(ctx context.Context, queryGroup string) (segment.PlansReading, error) {
+			reading, err := readPlanSegments(ctx, repository, executionStore, execution.QueryGroupIdentity(queryGroup))
+			recorder.ObservePlanSegmentsRead(planCarriesReadResult(err))
+			return reading, err
+		})
+	}
 	// Windows live under the same phase-two prefix as the rest of the runtime
 	// objects, and every replica reads them on the reconcile tick it already
 	// runs, so opening one needs neither a restart nor a release.
@@ -1344,6 +1354,10 @@ func openProductionPhaseTwoBundleAssembly(
 	flights.OnTurnedAwayReleased(bundle.noticeFlightReleased)
 	bundle.workerPorts = workerPorts
 	bundle.coordinator = coordinator
+	bundle.retained = func() (uint64, time.Duration, uint64) {
+		high, window := worker.RetainedHigh(coordinator)
+		return high, window, worker.RetainedShare(coordinator)
+	}
 	bundle.cmdbIndex = cmdbIndex
 	// The link's close by filter, where its control plane is named: the
 	// inactive and scope closes send through it, and the control leader's
@@ -1499,6 +1513,10 @@ func openProductionPhaseTwoBundleAssembly(
 	bundle.workerCosts = workerCosts
 	bundle.applied = publisher.applied
 	bundle.capacity = publisher.capacity
+	// Where an object stands in its cycle, for the object detail: from the
+	// due index the publisher puts on every listed row, so a healthy object,
+	// which no column lists, reads its next Slot the same way.
+	fleetService.SetLocalWake(bundle.ensureDueIndex().WakeOf)
 	// The first attempt runs now, so a broker that answers is open before the
 	// worker registers, as it always was; one that does not leaves the sink
 	// retrying and the bundle told, which is what keeps this replica out of

@@ -259,7 +259,7 @@ func TestNewPagesAreSpreadAndCarriedPagesRenewNoLater(t *testing.T) {
 
 func TestAMarkReadsBackAndRefusesWhatIsNotOne(t *testing.T) {
 	mark := segment.Mark{Version: execution.ApplyVersion{StateApplyEpoch: 3, EvaluationTime: 1200, SlotDigest: "slot"},
-		Position: 1140, Pages: 2, Renewed: []segment.Renewal{{At: 10, TTL: 100}, {At: 20, TTL: 100}}}
+		Position: 1140, Pages: 2, Renewed: []segment.Renewal{{At: 10, TTL: 100}, {At: 20, TTL: 100}}, Sizes: []int{40, 5}}
 	raw, err := segment.EncodeMark(mark)
 	if err != nil {
 		t.Fatal(err)
@@ -269,9 +269,11 @@ func TestAMarkReadsBackAndRefusesWhatIsNotOne(t *testing.T) {
 		t.Fatalf("read back %+v, %v, want %+v", read, err, mark)
 	}
 	for name, bad := range map[string]segment.Mark{
-		"three pages":    {Pages: 3, Renewed: make([]segment.Renewal, 3)},
-		"renewals short": {Pages: 2, Renewed: []segment.Renewal{{At: 1, TTL: 1}}},
-		"no lifetime":    {Pages: 1, Renewed: []segment.Renewal{{At: 1}}},
+		"three pages":    {Pages: 3, Renewed: make([]segment.Renewal, 3), Sizes: make([]int, 3)},
+		"renewals short": {Pages: 2, Renewed: []segment.Renewal{{At: 1, TTL: 1}}, Sizes: make([]int, 2)},
+		"no lifetime":    {Pages: 1, Renewed: []segment.Renewal{{At: 1}}, Sizes: []int{5}},
+		"sizes short":    {Pages: 2, Renewed: []segment.Renewal{{At: 1, TTL: 1}, {At: 1, TTL: 1}}, Sizes: []int{5}},
+		"size negative":  {Pages: 1, Renewed: []segment.Renewal{{At: 1, TTL: 1}}, Sizes: []int{-1}},
 	} {
 		if _, err := segment.EncodeMark(bad); !errors.Is(err, segment.ErrMark) {
 			t.Errorf("%s: %v, want ErrMark", name, err)

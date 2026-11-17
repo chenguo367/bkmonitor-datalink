@@ -41,6 +41,13 @@ type streamedExecution struct {
 	// dependencyDiscarded is the dependency series no PRIMARY of their Plan
 	// named, let go at the completion (discardDependenciesWithoutPrimary).
 	dependencyDiscarded uint64
+	// pointsDropped is the points the Slot's answers' normalization let go,
+	// by reason, every completion it took together: on its completion line,
+	// the Query Group's own.
+	pointsDropped observability.PointDrops
+	// queryPhases is the Slot's physical queries' time before their answers'
+	// first byte and after it, summed and the longest of each.
+	queryPhases queryPhaseTotals
 	// inputHolds is, by series, what the batches of that series were charged
 	// to the input phase and how many streamed bindings still point at them,
 	// so a window that lets its series' bindings go gives their bytes back
@@ -184,6 +191,9 @@ type streamedExecution struct {
 	readAheadWaitingMu    sync.Mutex
 	readAheadWaitingNow   int
 	readAheadWaitingSince time.Time
+	// segments is the Slot's Plans' stable segments, read as it begins,
+	// before any of its State (014 B3 3.2); nil for none.
+	segments *segmentSlot
 	// stageAheadEnds counts how the Slot's no-data first writes staged
 	// ahead ended (observability.NoDataStageAheadOutcomes), and
 	// groupsStagedAhead the groups they staged.
@@ -518,6 +528,7 @@ func (coordinator *SlotExecutionCoordinator) holdRetained(owner *streamedExecuti
 		err := coordinator.judgeRetainedLocked(owner, bytes, phase)
 		if err == nil {
 			coordinator.reservations.retainedBytes += bytes
+			coordinator.noteRetainedHighLocked()
 		}
 		coordinator.reservations.mu.Unlock()
 		if err == nil || !owner.yieldReadAhead(phase) {
@@ -639,7 +650,40 @@ func (stream *streamedExecution) Begin(ctx context.Context, header execution.Int
 	// and the absence judgement at completion reads the same resolutions.
 	stream.resolveTargetPlans(ctx)
 	stream.resolveScopeGroups(ctx)
+	// Once a Slot, before the first State preread: a slice's Begin again
+	// returned above.
+	stream.segments = stream.readSegments(ctx, header)
 	return nil
+}
+
+// readSegments reads the Slot's Plans' segments and reserves the books it
+// decoded from them as the State it holds is reserved (retainPhaseState):
+// held the Slot's whole run, growing with its members as its State grows
+// with its series. Reserved quietly - a refusal is the shadow's to count
+// (book_refused), not a capacity rejection, as the Slot goes on without its
+// shadow and its State written whole - and given back with the rest of the
+// Slot's reservation.
+func (stream *streamedExecution) readSegments(ctx context.Context, header execution.InternalExecutionHeader) *segmentSlot {
+	slot, skipped := stream.coordinator.loadSegments(ctx, stream.request, header)
+	return stream.holdSegments(ctx, slot, skipped)
+}
+
+// holdSegments reserves the books slot decoded, or counts why the Slot runs
+// without them.
+func (stream *streamedExecution) holdSegments(ctx context.Context, slot *segmentSlot, skipped string) *segmentSlot {
+	if slot != nil {
+		if bytes := slot.bookBytes(); bytes > 0 {
+			if err := stream.coordinator.acquireProvisional(0, bytes, stream, "segment_book"); err != nil {
+				slot, skipped = nil, observability.SegmentShadowSkippedBookRefused
+			} else {
+				stream.retainBytes(retainPhaseState, bytes)
+			}
+		}
+	}
+	if skipped != "" {
+		stream.coordinator.skipSegmentShadow(ctx, stream.request.Operation, skipped)
+	}
+	return slot
 }
 
 func (stream *streamedExecution) ConsumeSeries(ctx context.Context, batch execution.SeriesExecutionBatch) error {
@@ -794,6 +838,7 @@ func (stream *streamedExecution) releaseProvisional() {
 	// QueryExecutionSource has joined all deliveries before Execute returns.
 	// Drop the owning references before advertising reusable capacity.
 	stream.header = execution.InternalExecutionHeader{}
+	stream.segments = nil
 	stream.prepared = preparedNamedInputIndex{}
 	stream.streamed, stream.planSeries, stream.completionOnly, stream.effective = nil, nil, nil, nil
 	stream.inputHolds, stream.keysHeld, stream.summaryHeld = nil, 0, 0
@@ -1222,6 +1267,8 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 		return err
 	}
 	for _, query := range completion.PhysicalQueries {
+		stream.pointsDropped = stream.pointsDropped.Add(query.Stats.PointsDropped)
+		stream.queryPhases.add(query.Stats)
 		if query.NamedOutputs != nil {
 			if stream.namedOutputs == nil {
 				stream.namedOutputs = make(map[execution.PhysicalQueryDigest]*execution.NamedOutputRecords)
@@ -3478,3 +3525,17 @@ type oneTimeClose struct{}
 func (oneTimeClose) Contains(string, string, string) bool { return true }
 
 func (oneTimeClose) OneTimeClose() bool { return true }
+
+// queryPhaseTotals is a Slot's physical queries' wait (before the answer's
+// first byte, the provider's) and body (after it, read and decoded), each
+// summed over the queries and the longest one's.
+type queryPhaseTotals struct {
+	wait, body, waitMax, bodyMax uint64
+}
+
+func (totals *queryPhaseTotals) add(stats execution.ProviderStats) {
+	totals.wait += stats.WaitMillis
+	totals.body += stats.BodyMillis
+	totals.waitMax = max(totals.waitMax, stats.WaitMillis)
+	totals.bodyMax = max(totals.bodyMax, stats.BodyMillis)
+}

@@ -323,6 +323,22 @@ func TestAPlanCarryOutlivesAnEditOfAnotherPlanOfItsGroup(t *testing.T) {
 		if err != nil || len(reading.Plans) != 2 {
 			t.Fatalf("plan carries = (%+v, %v), want two Plans", reading, err)
 		}
+		// The open Segment's Plans, each under the generation it runs now -
+		// the one its segments are keyed by - in the same order, bounded by
+		// the limit with the Segment's count beside.
+		open, total, err := repository.OpenPlans(ctx, groups[0], 0)
+		if err != nil || total != 2 || len(open) != 2 {
+			t.Fatalf("open plans = (%+v, %d, %v), want the two", open, total, err)
+		}
+		for index, fact := range reading.Plans {
+			if open[index].Plan != fact.Plan || open[index].StateGeneration != fact.StateGeneration ||
+				(fact.CarriedFrom != nil && open[index].StateGeneration == fact.CarriedFrom.StateGeneration) {
+				t.Fatalf("open plan %d = %+v, want %+v under the generation it runs now", index, open[index], fact)
+			}
+		}
+		if first, total, err := repository.OpenPlans(ctx, groups[0], 1); err != nil || total != 2 || len(first) != 1 || first[0] != open[0] {
+			t.Fatalf("open plans by one = (%+v, %d, %v), want the first and a count of two", first, total, err)
+		}
 		for _, fact := range reading.Plans {
 			if fact.Plan.StrategyID == "1001" {
 				return fact

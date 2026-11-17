@@ -589,11 +589,23 @@ type ProviderStats struct {
 	Bytes                 uint64
 	QueryMillis           uint64
 	DecodeMillis          uint64
+	// Answered is whether the response's headers came back; WaitMillis is
+	// the part of QueryMillis before them and BodyMillis the rest - the
+	// answer carried, read and decoded. The query service writes its headers
+	// once the query is computed, so the wait holds its run. A query no
+	// response came back to waited the whole of it.
+	Answered   bool
+	WaitMillis uint64
+	BodyMillis uint64
 	// NullIdentityFields counts (series, identity field) pairs whose declared
 	// identity dimension was absent from the provider series and was bound to
 	// JSON null, as Python binds an absent dimension to None. It is a bounded
 	// diagnostics marker ("identity_field_null"); it has no evaluation impact.
 	NullIdentityFields uint64
+	// PointsDropped is the points the normalization let go rather than hand
+	// on, by reason (observability.PointDropReasons): a point outside the
+	// range the query accepts is the provider's, and was not evaluated.
+	PointsDropped observability.PointDrops
 }
 
 // PartialEvidence is a physical Provider fact. It does not itself authorize a

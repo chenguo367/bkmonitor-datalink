@@ -46,10 +46,7 @@ var restrictedBlocks = map[string][]string{
 // block that reads withheld data shows the notice with the login link. The
 // verdict itself is the server's and is shown as sent.
 func TestTheRestrictedSurfaceShowsNoticesNotInferences(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node is not on PATH, so the page's logic is NOT executed by this run")
-	}
+	node := pageNode(t, "the page's logic is NOT executed by this run")
 	full := fleet.HealthResponse{Health: fleet.HealthDegraded, Covered: 51, Determined: 51, Healthy: 49,
 		AnomaliesTotal: 2, DemotedTotal: 2, DemotionEntries: 2,
 		Builds:       []fleet.BuildGroup{{Replicas: []string{"replica-a"}}},
