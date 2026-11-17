@@ -604,6 +604,8 @@ type queryGroupState struct {
 	// queryRanges is what the latest round's primary queries were sent
 	// asking for, nil before any round named it (QueryRanges).
 	queryRanges *QueryRanges
+	// queryPhases is the latest completed Slot's query phases.
+	queryPhases *QueryPhases
 	// Once cooldown exposes a failure, keep that evidence visible until a real healthy completion.
 	cooldownExposed bool
 	strategies      map[StrategyRef]struct{}
@@ -1319,6 +1321,10 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	case observation.Stage == observability.StageSlotCompleted && observation.Err == nil:
 		state.shareRefusedLatest = false
 		state.noteShareUsage(observation.SlotBudgetUsage, trace.EvaluationTime, at)
+		if usage := observation.SlotBudgetUsage; usage != nil {
+			state.queryPhases = &QueryPhases{Slot: trace.EvaluationTime, WaitMillis: usage.QueryWaitMillis, BodyMillis: usage.QueryBodyMillis,
+				WaitMillisMax: usage.QueryWaitMillisMax, BodyMillisMax: usage.QueryBodyMillisMax}
+		}
 	}
 	if progress := observation.GapProgress; progress != nil {
 		if state.guards == nil {
@@ -2733,6 +2739,22 @@ func memoryGapOf(state *queryGroupState) *MemoryGap {
 		gap.Until = &until
 	}
 	return gap
+}
+
+// QueryPhases is the object's latest completed Slot's query phases, when
+// this process has seen a Slot of it complete. Answered from the owner, like
+// QueryRanges.
+func (tracker *Tracker) QueryPhases(queryGroup string) (QueryPhases, bool) {
+	if tracker == nil {
+		return QueryPhases{}, false
+	}
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	state := tracker.groups[queryGroup]
+	if state == nil || state.queryPhases == nil {
+		return QueryPhases{}, false
+	}
+	return *state.queryPhases, true
 }
 
 // QueryRanges is what the object's latest round's primary queries were sent

@@ -24,17 +24,21 @@ const (
 	LeaderRoundStageReadyWorkers     = "ready_workers"
 	LeaderRoundStageContentScopes    = "content_scopes"
 	LeaderRoundStageReconcileRecords = "reconcile_records"
-	LeaderRoundStageByteMoves        = "byte_moves"
-	LeaderRoundStageRebalanceMoves   = "rebalance_moves"
-	LeaderRoundStageAssignmentIndex  = "assignment_index"
-	LeaderRoundStageAssignmentSweep  = "assignment_sweep"
-	LeaderRoundStageViewPublish      = "view_publish"
+	// LeaderRoundStageSegmentSkip restates the segment skip word on the
+	// settled records (014 B3 stage 3): nothing in a steady round, every
+	// record once in a new Leader's first.
+	LeaderRoundStageSegmentSkip     = "segment_skip"
+	LeaderRoundStageByteMoves       = "byte_moves"
+	LeaderRoundStageRebalanceMoves  = "rebalance_moves"
+	LeaderRoundStageAssignmentIndex = "assignment_index"
+	LeaderRoundStageAssignmentSweep = "assignment_sweep"
+	LeaderRoundStageViewPublish     = "view_publish"
 )
 
 // LeaderRoundStages is every stage, in the order the round runs them.
 var LeaderRoundStages = []string{
 	LeaderRoundStageAuthority, LeaderRoundStageReadyWorkers, LeaderRoundStageContentScopes,
-	LeaderRoundStageReconcileRecords, LeaderRoundStageByteMoves, LeaderRoundStageRebalanceMoves,
+	LeaderRoundStageReconcileRecords, LeaderRoundStageSegmentSkip, LeaderRoundStageByteMoves, LeaderRoundStageRebalanceMoves,
 	LeaderRoundStageAssignmentIndex, LeaderRoundStageAssignmentSweep,
 	LeaderRoundStageViewPublish,
 }

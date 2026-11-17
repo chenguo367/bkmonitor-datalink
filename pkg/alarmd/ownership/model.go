@@ -326,6 +326,7 @@ const CapabilityShardAware = "shard-aware.v1"
 // publish because a ready worker does not declare CapabilityShardAware. It
 // names the replica; the count of them on a fleet that asked for no split
 // is zero, which is the reading a rollout is judged by.
+// RETIRE(0.7): 无产生方，里程碑死代码清点时删
 const ShardSplitHeld = "SHARD_SPLIT_HELD"
 
 // ShardSplitGate is the split contract's answer for one ready set.
@@ -345,15 +346,42 @@ type ShardSplitGate struct {
 // round's placements use; a registration that has expired is not in it, so
 // a replica that is gone does not hold a split.
 func ShardSplitAdmission(workers []WorkerRegistration) ShardSplitGate {
+	return capabilityGate(workers, CapabilityShardAware)
+}
+
+// capabilityGate is a fleet contract's gate for a ready set: admitted when
+// every ready worker declares the capability, with the ones that do not.
+func capabilityGate(workers []WorkerRegistration, capability string) ShardSplitGate {
 	gate := ShardSplitGate{Ready: len(workers)}
 	for _, worker := range workers {
-		if !worker.Declares(CapabilityShardAware) {
+		if !worker.Declares(capability) {
 			gate.Unaware = append(gate.Unaware, worker.WorkerID)
 		}
 	}
 	sort.Strings(gate.Unaware)
 	gate.Admitted = len(workers) > 0 && len(gate.Unaware) == 0
 	return gate
+}
+
+// CapabilitySegmentSkip is the stable-segment skip contract (design 014
+// B3, stage 3): a worker that declares it reads a Plan's stable members'
+// State through their segments when a Slot of it leaves their writes out,
+// and follows the Assignment's segment_skip word. A Leader sets that word
+// only while every ready worker declares it, and takes it back when one that
+// does not joins: a worker without it reads every member's own key, which a
+// skipped write left behind.
+const CapabilitySegmentSkip = "segment-skip.v1"
+
+// SegmentSkipHeld is the word for the skip the values asked for and the
+// Leader did not set because a ready worker does not declare
+// CapabilitySegmentSkip. It names the replica; on a fleet that asked for no
+// skip the count of them is zero.
+const SegmentSkipHeld = "SEGMENT_SKIP_HELD"
+
+// SegmentSkipAdmission decides the skip contract's gate for a ready set, the
+// way ShardSplitAdmission decides the split's.
+func SegmentSkipAdmission(workers []WorkerRegistration) ShardSplitGate {
+	return capabilityGate(workers, CapabilitySegmentSkip)
 }
 
 // Declares reports whether the registration names the capability.
@@ -442,6 +470,14 @@ type AssignmentRecord struct {
 	// on a record no leader has written it to yet: a reader treats zero as
 	// "not said", never as revision zero, which no timeline has.
 	TimelineRecordRevision uint64
+	// SegmentSkip, when not zero, is the control epoch of the Leader that
+	// let this Query Group's Slots leave their stable members' writes out
+	// (CapabilitySegmentSkip). A worker follows it only while it equals the
+	// epoch of the view it has installed, the Leader it runs under now: a
+	// word set by an earlier Leader - one a rollback put back, which does
+	// not know the word and so never takes it back - is ignored. Zero is no
+	// skip.
+	SegmentSkip uint64
 	// ObservedAt is the server instant a fence check read the record at, on
 	// the clock EffectiveAt is on; zero for a record read any other way.
 	ObservedAt time.Time
@@ -486,6 +522,14 @@ type AssignmentDecision struct {
 	// holds. A placement names it so a Query Group's first record carries
 	// the number the cutover would otherwise have been the only writer of.
 	TimelineRecordRevision uint64
+	// SetSegmentSkip writes the record's SegmentSkip as the epoch of the
+	// Leader publishing it - the epoch its fence holds, read by the script,
+	// which is also the epoch of the view that Leader publishes - and
+	// WithdrawSegmentSkip clears it. Neither leaves it as it is. Neither
+	// moves the record's revision: the word is the Leader's to restate, as
+	// the timeline revision is.
+	SetSegmentSkip      bool
+	WithdrawSegmentSkip bool
 }
 
 func (decision AssignmentDecision) Validate() error {
@@ -495,6 +539,9 @@ func (decision AssignmentDecision) Validate() error {
 	}
 	if decision.WithdrawContentScope && decision.ContentScope != "" {
 		return errors.New("alarmd ownership: an Assignment decision cannot both name and withdraw a content scope")
+	}
+	if decision.SetSegmentSkip && decision.WithdrawSegmentSkip {
+		return errors.New("alarmd ownership: an Assignment decision cannot both set and withdraw the segment skip")
 	}
 	return nil
 }

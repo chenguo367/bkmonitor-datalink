@@ -38,8 +38,21 @@ func TestTheSegmentStoreFamiliesAreReadAtTheScrapeEveryCellPresent(t *testing.T)
 			t.Fatalf("write cell %s: %d samples", result, len(samples))
 		}
 	}
+	for _, extension := range segment.Extensions {
+		if samples := redisSamples(t, recorder, "alarmd_state_segment_extend_total", map[string]string{"outcome": string(extension)}); len(samples) != 1 ||
+			samples[0].GetCounter().GetValue() != 0 {
+			t.Fatalf("extend cell %s: %v, want one at zero", extension, samples)
+		}
+	}
 	stats = state.SegmentStats{Reads: map[[2]string]uint64{{segment.SourceRedis, segment.ReadEvicted}: 4},
-		Writes: map[string]uint64{segment.WriteUnknown: 2}, Drift: 1, Plans: 3, Pages: 5, Bytes: 9_000}
+		Writes: map[string]uint64{segment.WriteUnknown: 2}, Drift: 1, Plans: 3, Pages: 5, Bytes: 9_000,
+		Extends: map[segment.Extension]uint64{segment.Extended: 7, segment.RefusedOffGrid: 2}}
+	for extension, want := range map[segment.Extension]float64{segment.Extended: 7, segment.RefusedOffGrid: 2, segment.Within: 0} {
+		if samples := redisSamples(t, recorder, "alarmd_state_segment_extend_total", map[string]string{"outcome": string(extension)}); len(samples) != 1 ||
+			samples[0].GetCounter().GetValue() != want {
+			t.Fatalf("extend cell %s: %v, want %v at the scrape", extension, samples, want)
+		}
+	}
 	if samples := redisSamples(t, recorder, "alarmd_state_segment_read_total", map[string]string{"source": segment.SourceRedis,
 		"reason": segment.ReadEvicted}); len(samples) != 1 || samples[0].GetCounter().GetValue() != 4 {
 		t.Fatalf("evicted reads %v, want 4 at the scrape", samples)

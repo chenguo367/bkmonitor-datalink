@@ -446,8 +446,21 @@ const (
 	// (decision-016 per-batch admission). Nothing was sent; the Plan waits,
 	// and the Slot retries after the next renewal or ends with the lease.
 	// Named apart from OUTPUT_ACK_UNKNOWN because no broker was asked.
-	ReasonOutputLeaseExpiring    = "OUTPUT_LEASE_EXPIRING"
-	ReasonStateWriteRetryable    = "STATE_WRITE_RETRYABLE"
+	ReasonOutputLeaseExpiring = "OUTPUT_LEASE_EXPIRING"
+	ReasonStateWriteRetryable = "STATE_WRITE_RETRYABLE"
+	// ReasonSegmentWriteFailed names a Slot whose round left members' State
+	// unwritten (014 B3 stage 3) and whose stable segments' write did not
+	// land - refused, failed or of unknown result: the members' reads rest
+	// on the pages and mark the round wrote, so its Progress waits.
+	// Retryable: the next attempt of the Slot writes every member whole.
+	ReasonSegmentWriteFailed = "SEGMENT_WRITE_FAILED"
+	// ReasonSegmentReadFailed names a Slot dispatched with a segment skip
+	// word whose stable segments did not read - the read failed, a Plan's
+	// or the generation it carries from did not answer, or the pool did not
+	// take the books: members left by an earlier round would read short.
+	// Retryable: the retry, its segments failing again, reads them as stored
+	// and writes every member whole (014 B3 §9.7).
+	ReasonSegmentReadFailed      = "SEGMENT_READ_FAILED"
 	ReasonStateCorrupt           = "STATE_CORRUPT"
 	ReasonStateSchemaUnsupported = "STATE_SCHEMA_UNSUPPORTED"
 	ReasonStateBudgetExceeded    = "STATE_BUDGET_EXCEEDED"

@@ -188,3 +188,40 @@ func TestQueryGroupIdentitySeparatesOnEachAddedFact(t *testing.T) {
 		})
 	}
 }
+
+// A piece re-split - another count, another matcher, another dimension, or
+// another index - is another Query Group. A State carry is looked for only
+// under the Plan's group (stateCarry, errPlanLeftItsGroup), so a carry
+// never crosses a change of a piece's shard: the generation a piece carries
+// from kept its segments under the shard the piece has now, and a Slot
+// reads the carried book by that shard alone (014 B3 §9.6).
+func TestARespiltPieceIsAnotherQueryGroup(t *testing.T) {
+	base := execution.QueryPlanFacts{
+		Provider: execution.ProviderUQ, ProviderRouteRef: "uq-primary-v1",
+		TenantID: "tenant-a", BusinessID: "2", SpaceScope: "bkcc__2",
+		MetricMerge: "a", StepMillis: 60_000, AlignmentMillis: 60_000,
+		DownSampleRange: execution.DownSampleNone, Timezone: "UTC",
+		Shard: &execution.ShardRef{Dimension: "bk_target_ip", Index: 0, Count: 2, MatcherDigest: strings.Repeat("a", 64)},
+	}
+	pieceIdentity, err := deriveQueryGroupIdentity(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, shard := range map[string]execution.ShardRef{
+		"another count":     {Dimension: "bk_target_ip", Index: 0, Count: 3, MatcherDigest: strings.Repeat("a", 64)},
+		"another matcher":   {Dimension: "bk_target_ip", Index: 0, Count: 2, MatcherDigest: strings.Repeat("b", 64)},
+		"another dimension": {Dimension: "bk_host_id", Index: 0, Count: 2, MatcherDigest: strings.Repeat("a", 64)},
+		"another index":     {Dimension: "bk_target_ip", Index: 1, Count: 2, MatcherDigest: strings.Repeat("a", 64)},
+	} {
+		facts := base
+		resplit := shard
+		facts.Shard = &resplit
+		identity, err := deriveQueryGroupIdentity(facts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if identity == pieceIdentity {
+			t.Errorf("%s keeps the piece's Query Group %s", name, identity)
+		}
+	}
+}

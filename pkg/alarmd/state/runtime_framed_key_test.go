@@ -64,7 +64,7 @@ func TestARecordIsReadFromTheFramedKeyAndWrittenThere(t *testing.T) {
 			if applied.Items[0].Status != execution.StateApplied {
 				t.Fatalf("apply = %+v, want APPLIED", applied.Items[0])
 			}
-			written := decodeRuntimeCovered(backend.values[framedKey], identity, frozenRef(), next, nil)
+			written, _ := decodeRuntimeCovered(backend.values[framedKey], identity, frozenRef(), next, nil)
 			if written.Representation != execution.StateRepresentationFramed || written.BlobRevision != test.wantWrittenRev ||
 				written.PersistedApplyVersion != next {
 				t.Fatalf("framed key after apply = %s revision %d version %+v, want framed revision %d at the applied version",

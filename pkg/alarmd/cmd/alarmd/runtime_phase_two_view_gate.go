@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
@@ -385,4 +386,25 @@ func (executor *viewGatedExecutor) Execute(ctx context.Context, request executio
 		return execution.SlotExecutionResult{}, err
 	}
 	return executor.next.Execute(ctx, request)
+}
+
+// installedControlEpoch is the control epoch of the view this worker has
+// installed, for the worker's judgement of a Slot's segment skip word
+// (worker.Ports.InstalledControlEpoch): the epoch of the Leader that
+// published the view, read once per Slot. The client is set once built,
+// after the ports that read it; until then there is no view.
+type installedControlEpoch struct {
+	client atomic.Pointer[viewstream.Client]
+}
+
+func (source *installedControlEpoch) read() (uint64, bool) {
+	client := source.client.Load()
+	if client == nil {
+		return 0, false
+	}
+	view, installed := client.Installed()
+	if !installed {
+		return 0, false
+	}
+	return view.Version.ControlEpoch, true
 }

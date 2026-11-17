@@ -103,6 +103,40 @@ type PlanWrite struct {
 	Mark       []byte
 	PageCount  int
 	PriorCount int
+	// Departed is the members the round closed whose State keys are renewed
+	// to the full lifetime with the mark (014 B3 3.3 step 3): set when a
+	// member may have lived on the pages' renewals alone - the round left
+	// one unwritten, or the round before did (Mark.Skipped).
+	Departed []execution.SeriesIdentityDigest
+	// SkipMode and Skipped are what the round did with its members' State
+	// writes (SkipModes) and how many it left unwritten: not stored, kept
+	// for a reading of the Plan's segments (LastUse).
+	SkipMode string
+	Skipped  int
+}
+
+// Skip modes, closed: what a Plan's round did with its members' State
+// writes (014 B3 stage 3). off: the Slot follows no segment skip word (none,
+// or one it ignored: state_segment_skip_flag_ignored_total); write_failed:
+// an earlier attempt of the Slot left members unwritten and its segments'
+// write did not land (SEGMENT_WRITE_FAILED); operation: its operation is not
+// a normal one; stopped: the Plan degraded a second time in its owner's
+// term (014 B3 §9.7); retried: a retry started the Plan's shadow over;
+// sampled: the piece's sampled round of the day; these write every member.
+// skip: members compared equal were left unwritten.
+const (
+	SkipModeOff         = "off"
+	SkipModeWriteFailed = "write_failed"
+	SkipModeOperation   = "operation"
+	SkipModeStopped     = "stopped"
+	SkipModeRetried     = "retried"
+	SkipModeSampled     = "sampled"
+	SkipModeSkip        = "skip"
+)
+
+// SkipModes is every skip mode.
+func SkipModes() []string {
+	return []string{SkipModeOff, SkipModeWriteFailed, SkipModeOperation, SkipModeStopped, SkipModeRetried, SkipModeSampled, SkipModeSkip}
 }
 
 // WriteRequest writes a Slot's Plans' rounds under the fence of its writes.
@@ -115,6 +149,10 @@ type WriteRequest struct {
 // WriteResult is each Plan's write's result, in request order.
 type WriteResult struct {
 	Plans []string
+	// DepartedGone is, a Plan each, the departing members' State keys the
+	// write found already gone: those members read MISSING_WARMING when
+	// they come back.
+	DepartedGone []int
 }
 
 // PageRenewal is a page due for its renewal (3.5): the open members whose

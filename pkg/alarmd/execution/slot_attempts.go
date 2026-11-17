@@ -52,8 +52,12 @@ func SlotBeginResult(status ProgressCommitStatus) string {
 // found; and by the step it failed in otherwise - query_failed,
 // complete_failed (completing the Slot: evaluation, State preflight),
 // apply_failed (admission, State and gap apply), output_failed (its events'
-// output), progress_commit_failed, query_free_failed. other is what none of
-// these names.
+// output), progress_commit_failed, query_free_failed; segment_write_failed,
+// a round that left members' State unwritten whose stable segments' write
+// did not land (SEGMENT_WRITE_FAILED, retried whole); segment_read_failed,
+// a Slot dispatched with a segment skip word whose segments did not read
+// (SEGMENT_READ_FAILED, its retry reading them as stored). other is what
+// none of these names.
 const (
 	SlotNotCommittedQueryNotReady        = contract.ReasonQueryNotReady
 	SlotNotCommittedSnapshotRetry        = string(FinalizationSnapshotRetry)
@@ -77,6 +81,8 @@ const (
 	SlotNotCommittedOutputFailed         = "output_failed"
 	SlotNotCommittedProgressCommitFailed = "progress_commit_failed"
 	SlotNotCommittedQueryFreeFailed      = "query_free_failed"
+	SlotNotCommittedSegmentWriteFailed   = "segment_write_failed"
+	SlotNotCommittedSegmentReadFailed    = "segment_read_failed"
 	SlotNotCommittedOther                = "other"
 )
 
@@ -88,4 +94,5 @@ var SlotNotCommittedReasons = []string{SlotNotCommittedQueryNotReady, SlotNotCom
 	SlotNotCommittedQueryPermitFailed, SlotNotCommittedCancelled, SlotNotCommittedDeadlineExceeded, SlotNotCommittedDeclined,
 	SlotNotCommittedCapacityRefused, SlotNotCommittedStoreConflict, SlotNotCommittedQueryFailed,
 	SlotNotCommittedCompleteFailed, SlotNotCommittedApplyFailed, SlotNotCommittedOutputFailed,
-	SlotNotCommittedProgressCommitFailed, SlotNotCommittedQueryFreeFailed, SlotNotCommittedOther}
+	SlotNotCommittedProgressCommitFailed, SlotNotCommittedQueryFreeFailed, SlotNotCommittedSegmentWriteFailed,
+	SlotNotCommittedSegmentReadFailed, SlotNotCommittedOther}

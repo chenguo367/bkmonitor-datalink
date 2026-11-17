@@ -14,6 +14,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,7 +48,12 @@ type shadowRig struct {
 	redis  *state.ExecutionStore
 	client *redis.Client
 	// wallAhead is how far the worker's wall clock runs ahead of the real.
-	wallAhead   atomic.Int64
+	wallAhead atomic.Int64
+	// skipWord, when set, is the segment skip word each Slot is dispatched
+	// with and the epoch of the view the worker holds: the Slots skip.
+	skipWord atomic.Uint64
+	// attempt, when set, is the attempt number each Slot is dispatched as.
+	attempt     atomic.Uint32
 	ports       *recordingPorts
 	provider    *shadowProvider
 	frozen      *shadowFrozen
@@ -80,6 +87,8 @@ type shadowObserved struct {
 	classes map[string]int64
 	// renewals is the page renewals, by result.
 	renewals map[string]int64
+	// notWritten is the admitted mutations not written, by reason.
+	notWritten map[observability.StateNotWrittenReason]int64
 }
 
 // renewal is the page renewals counted under result.
@@ -109,6 +118,12 @@ func (observed *shadowObserved) Observe(_ context.Context, observation observabi
 				}
 				observed.classes[fmt.Sprint(kind, "/", class)] += int64(count)
 			}
+		}
+		for reason, count := range census.NotWritten {
+			if observed.notWritten == nil {
+				observed.notWritten = map[observability.StateNotWrittenReason]int64{}
+			}
+			observed.notWritten[reason] += count
 		}
 		observed.mu.Unlock()
 	}
@@ -338,7 +353,11 @@ func newShadowRigWith(t *testing.T, hosts, padding int, recovery string, snapsho
 		Events: rig.ports, State: store, Progress: rig.ports, Observer: rig.observed,
 		// The worker's wall clock, which renewals are judged and timed by,
 		// run ahead of the real one by wallAhead.
-		Now: func() time.Time { return time.Now().Add(time.Duration(rig.wallAhead.Load())) }},
+		Now: func() time.Time { return time.Now().Add(time.Duration(rig.wallAhead.Load())) },
+		InstalledControlEpoch: func() (uint64, bool) {
+			word := rig.skipWord.Load()
+			return word, word != 0
+		}},
 		worker.ProvisionalBudget{MaxSeries: 400, MaxRetainedBytes: slicedPool, MaxStateMutations: 400, MaxEvents: 400, MaxGapMutations: 10})
 	if err != nil {
 		t.Fatal(err)
@@ -420,6 +439,10 @@ func (rig *shadowRig) execute(evaluation execution.EvaluationTime, absent []stri
 	request.Contract.Slot.EvaluationTime, request.Contract.DuePlanSetDigest = evaluation, digest
 	request.ExpectedNextSlot = evaluation
 	request.DuePlanTargets = execution.FrozenDuePlanTargets{DuePlanSetDigest: digest, Plans: []execution.PlanKey{due.Key()}}
+	request.SegmentSkip = rig.skipWord.Load()
+	if attempt := rig.attempt.Load(); attempt > 0 {
+		request.AttemptNo = attempt
+	}
 	return rig.coordinator.Execute(context.Background(), request)
 }
 
@@ -434,6 +457,36 @@ type lateLandingStore struct {
 	armed   bool
 	landing bool
 	kept    []func(context.Context) error
+	// written is every mutation a fenced write carried, by series, the last;
+	// items how many they were in all.
+	written map[execution.StateKeyIdentity]execution.StateMutation
+	items   int
+	// failSegments is how many of the next segment writes fail, as of
+	// unknown result, nothing sent; failReads the next segment reads.
+	failSegments int
+	failReads    int
+}
+
+func (store *lateLandingStore) ReadSegments(ctx context.Context, request segment.ReadRequest) (segment.ReadResult, error) {
+	store.mu.Lock()
+	if store.failReads > 0 {
+		store.failReads--
+		store.mu.Unlock()
+		return segment.ReadResult{}, errors.New("dial tcp: connection refused")
+	}
+	store.mu.Unlock()
+	return store.ExecutionStore.ReadSegments(ctx, request)
+}
+
+func (store *lateLandingStore) WriteSegments(ctx context.Context, request segment.WriteRequest) (segment.WriteResult, error) {
+	store.mu.Lock()
+	if store.failSegments > 0 {
+		store.failSegments--
+		store.mu.Unlock()
+		return segment.WriteResult{}, errors.New("i/o timeout: the segments' write's outcome is unknown")
+	}
+	store.mu.Unlock()
+	return store.ExecutionStore.WriteSegments(ctx, request)
 }
 
 func (store *lateLandingStore) late(ctx context.Context, write func(context.Context) error) (bool, error) {
@@ -468,6 +521,15 @@ func (store *lateLandingStore) ApplyRuntime(ctx context.Context, request executi
 
 func (store *lateLandingStore) ApplyRuntimeFenced(ctx context.Context, request execution.StateApplyRequest,
 	fence execution.StateApplyFence) (execution.StateApplyResult, error) {
+	store.mu.Lock()
+	if store.written == nil {
+		store.written = map[execution.StateKeyIdentity]execution.StateMutation{}
+	}
+	for _, mutation := range request.Items {
+		store.written[mutation.Identity] = mutation
+	}
+	store.items += len(request.Items)
+	store.mu.Unlock()
 	if kept, err := store.late(ctx, func(ctx context.Context) error {
 		_, err := store.ExecutionStore.ApplyRuntimeFenced(ctx, request, fence)
 		return err
@@ -581,6 +643,15 @@ func TestTheSegmentShadowThroughExecuteMatchesEveryWriteItWouldHaveLeft(t *testi
 	}
 	if open, _ := rig.storedMembers(at); open == 0 {
 		t.Error("the book in Redis has no open member")
+	}
+	// Every member's State, read through Execute, was read through the
+	// segments the Slot read (014 B3 3.2 rule 3): within - its own points
+	// reach the segment's end, every State being written - and never
+	// extended, nor refused.
+	for _, extension := range segment.Extensions {
+		if got := stats.Extends[extension]; (extension == segment.Within) != (got > 0) {
+			t.Errorf("%d member reads %s through Execute, want within alone", got, extension)
+		}
 	}
 }
 
@@ -818,5 +889,405 @@ func TestAPageDueByTheWorkersClockIsRenewedOnTheKeysTheStateWrote(t *testing.T) 
 	}
 	if after := rig.storedMark(at); after.Renewed[0].At < time.Now().Add(ahead-time.Minute).UnixMilli() {
 		t.Fatalf("the page's renewal time %d did not move to the worker's clock", after.Renewed[0].At)
+	}
+}
+
+// stateRecords is every State record the rig's Redis holds, by key.
+func (rig *shadowRig) stateRecords() map[string]string {
+	rig.t.Helper()
+	ctx := context.Background()
+	keys, err := rig.client.Keys(ctx, "alarmd-shadow:runtime*").Result()
+	if err != nil {
+		rig.t.Fatal(err)
+	}
+	records := make(map[string]string, len(keys))
+	for _, key := range keys {
+		value, err := rig.client.Get(ctx, key).Result()
+		if err != nil {
+			rig.t.Fatal(err)
+		}
+		records[key] = value
+	}
+	return records
+}
+
+// A Slot that follows its segment skip word leaves its steady members' State
+// unwritten and reads them through the segment: through Execute, round
+// after round beside a rig that writes every State, it sends the same
+// events, counts what it left as segment_member_skipped, reads the members
+// it left extended - never refused - and asks no coverage after its fold;
+// and once the word goes away, its first round, written whole from those
+// reads, leaves Redis holding byte for byte what the rig that never skipped
+// holds.
+func TestASlotThatSkipsReadsAndWritesAsARigThatWritesEveryRound(t *testing.T) {
+	skipping := newShadowRigWith(t, 6, 0, shadowRecoveryOff, 0, nil, 16<<20)
+	writing := newShadowRigWith(t, 6, 0, shadowRecoveryOff, 0, nil, 16<<20)
+	skipping.skipWord.Store(7)
+	at := frozenContract().Slot.EvaluationTime
+	foldedBefore := worker.SegmentCoverageAfterFold()
+	// sent is what a rig's round sent: each event by its series, kind,
+	// Level and semantic digest - what the round decided, not how many. The
+	// rig's Slot is one Plan of six series, whose round sends its events in
+	// one batch: the last batch is the round's.
+	sent := func(rig *shadowRig, before int) []string {
+		var keys []string
+		if rig.ports.eventCount > before {
+			for _, event := range rig.ports.lastEvents {
+				keys = append(keys, fmt.Sprint(event.RecordRef.DimensionIdentityDigest, "/", event.EventKind, "/",
+					event.PrimaryLevelID, "/", event.EvaluationTime, "/", event.EventSemanticDigest))
+			}
+		}
+		sort.Strings(keys)
+		return keys
+	}
+	step := func(absent []string, value map[string]string) {
+		t.Helper()
+		at += 60
+		decided := map[string][]string{}
+		for name, rig := range map[string]*shadowRig{"skipping": skipping, "writing": writing} {
+			before := rig.ports.eventCount
+			if completed, err := rig.run(at, absent, value, false); !completed {
+				t.Fatalf("%s Slot at %d: completed=%t err=%v", name, at, completed, err)
+			}
+			decided[name] = sent(rig, before)
+		}
+		if !reflect.DeepEqual(decided["skipping"], decided["writing"]) {
+			t.Fatalf("at %d the skipping rig sent %v, the writing one %v", at, decided["skipping"], decided["writing"])
+		}
+	}
+	for round := 0; round < 8; round++ {
+		step(nil, nil)
+	}
+	step(nil, map[string]string{"host-01": "10"}) // anomalous: an event, written whole
+	step(nil, nil)
+	step([]string{"host-02"}, nil) // away one round
+	for round := 0; round < 6; round++ {
+		step(nil, nil)
+	}
+	if writing.ports.eventCount == 0 {
+		t.Fatal("no round sent an event: the comparison of what they decided compared nothing")
+	}
+	skipping.observed.mu.Lock()
+	skipped := skipping.observed.notWritten[observability.StateNotWrittenSegmentMemberSkipped]
+	skipping.observed.mu.Unlock()
+	if skipped == 0 {
+		t.Fatal("the skipping rig left no member unwritten")
+	}
+	writing.observed.mu.Lock()
+	neverSkipped := writing.observed.notWritten[observability.StateNotWrittenSegmentMemberSkipped]
+	writing.observed.mu.Unlock()
+	if neverSkipped != 0 {
+		t.Fatalf("the rig without a word left %d members unwritten", neverSkipped)
+	}
+	extends := skipping.store.SegmentStats().Extends
+	if extends[segment.Extended] == 0 {
+		t.Fatalf("extensions %v: the skipping rig read none of the members it left through their segments", extends)
+	}
+	for _, extension := range segment.Extensions {
+		if extension != segment.Extended && extension != segment.Within && extends[extension] != 0 {
+			t.Errorf("%d member reads %s", extends[extension], extension)
+		}
+	}
+	if after := worker.SegmentCoverageAfterFold(); after != foldedBefore {
+		t.Fatalf("%d coverages asked after a fold", after-foldedBefore)
+	}
+	if !skipping.storedMark(at).Skipped || writing.storedMark(at).Skipped {
+		t.Fatalf("marks say skipped %v and %v, want the skipping rig's round alone", skipping.storedMark(at).Skipped,
+			writing.storedMark(at).Skipped)
+	}
+	// The word goes away: the round writes every State, the left members
+	// from their extended reads.
+	skipping.skipWord.Store(0)
+	step(nil, nil)
+	if skipping.storedMark(at).Skipped {
+		t.Fatal("a round that wrote every State says it left one")
+	}
+	skipping.store.mu.Lock()
+	writing.store.mu.Lock()
+	for identity, want := range writing.store.written {
+		got, written := skipping.store.written[identity]
+		if !written {
+			t.Errorf("%s never written by the skipping rig", identity.SeriesIdentityDigest)
+			continue
+		}
+		// What the write stores: the history it read - the points the
+		// segment made for the rounds left, as written ones - and the
+		// round's own.
+		if !reflect.DeepEqual(got.BaseHistory, want.BaseHistory) || !reflect.DeepEqual(got.Points, want.Points) {
+			t.Errorf("%s last written history %+v + %+v\nwant %+v + %+v", identity.SeriesIdentityDigest, got.BaseHistory, got.Points,
+				want.BaseHistory, want.Points)
+		}
+		if !reflect.DeepEqual(got.Levels, want.Levels) || !reflect.DeepEqual(got.SeriesGuard, want.SeriesGuard) {
+			t.Errorf("%s last written Levels %+v guard %+v\nwant %+v guard %+v", identity.SeriesIdentityDigest, got.Levels, got.SeriesGuard,
+				want.Levels, want.SeriesGuard)
+		}
+	}
+	if len(writing.store.written) == 0 || len(skipping.store.written) != len(writing.store.written) {
+		t.Errorf("%d series written, want %d", len(skipping.store.written), len(writing.store.written))
+	}
+	writing.store.mu.Unlock()
+	skipping.store.mu.Unlock()
+	// The records' own revision counts their writes, fewer where rounds were
+	// left: the same keys are there, not the same bytes.
+	got, want := skipping.stateRecords(), writing.stateRecords()
+	if len(want) == 0 || len(got) != len(want) {
+		t.Fatalf("%d State records, want %d", len(got), len(want))
+	}
+	for key := range want {
+		if _, there := got[key]; !there {
+			t.Errorf("%s missing from the skipping rig", key)
+		}
+	}
+}
+
+// A member departing in the first round after a Slot stopped skipping may
+// have lived on its pages' renewals alone: its key is renewed to the full
+// lifetime with the mark, because the round before left members unwritten
+// (its mark says so), though this round wrote every State - so it comes
+// back, within that lifetime, to the window it left. A rig that never
+// skipped renews no departing key, as in the second stage.
+func TestAMemberDepartingTheRoundAfterTheSkipStoppedIsRenewedWhole(t *testing.T) {
+	skipping := newShadowRigWith(t, 6, 0, shadowRecoveryOff, 0, nil, 16<<20)
+	writing := newShadowRigWith(t, 6, 0, shadowRecoveryOff, 0, nil, 16<<20)
+	skipping.skipWord.Store(7)
+	at := frozenContract().Slot.EvaluationTime
+	rigs := map[string]*shadowRig{"skipping": skipping, "writing": writing}
+	step := func(absent []string) {
+		t.Helper()
+		at += 60
+		for name, rig := range rigs {
+			if completed, err := rig.run(at, absent, nil, false); !completed {
+				t.Fatalf("%s Slot at %d: completed=%t err=%v", name, at, completed, err)
+			}
+		}
+	}
+	for round := 0; round < 8; round++ {
+		step(nil)
+	}
+	if !skipping.storedMark(at).Skipped {
+		t.Fatal("the skipping rig's last round left no member")
+	}
+	skipping.skipWord.Store(0)
+	// Every State key's life cut to a minute, as a key that lived on its
+	// pages' renewals could be left.
+	ctx := context.Background()
+	for _, rig := range rigs {
+		for key := range rig.stateRecords() {
+			if err := rig.client.PExpire(ctx, key, time.Minute).Err(); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	step([]string{"host-02"})
+	short := func(rig *shadowRig) int {
+		count := 0
+		for key := range rig.stateRecords() {
+			if life := rig.client.PTTL(ctx, key).Val(); life > 0 && life <= time.Minute {
+				count++
+			}
+		}
+		return count
+	}
+	if got := short(skipping); got != 0 {
+		t.Fatalf("%d keys of the skipping rig still live a minute or less after the round, want the departing member's renewed", got)
+	}
+	if got := short(writing); got != 1 {
+		t.Fatalf("%d keys of the rig that never skipped live a minute or less, want the departing member's alone, not renewed", got)
+	}
+}
+
+// commits is how many Progress commits the rig's Slots made.
+func (rig *shadowRig) commits() int {
+	commits := 0
+	for _, step := range *rig.ports.trace {
+		if step == "progress_commit" {
+			commits++
+		}
+	}
+	return commits
+}
+
+// skippedSoFar is the members the rig's rounds left unwritten so far.
+func (rig *shadowRig) skippedSoFar() int64 {
+	rig.observed.mu.Lock()
+	defer rig.observed.mu.Unlock()
+	return rig.observed.notWritten[observability.StateNotWrittenSegmentMemberSkipped]
+}
+
+// A round that left members unwritten waits for its segments (014 B3 §9.4):
+// their write not landing - of unknown result here - fails the Slot,
+// SEGMENT_WRITE_FAILED and retryable, its Progress not committed. The next
+// attempt of the Slot, a normal one, leaves no member: its own segment
+// write failing too, it is counted and the Slot commits, every State
+// written. The Slot after finds its members off the mark's grid and writes
+// them whole; they join again and later rounds leave them. A rig that never
+// skips only counts a failed segment write. Through it all both rigs send the same events, and
+// once the word goes away they hold the same State.
+func TestASegmentWriteFailingAfterARoundLeftMembersFailsTheSlotAndTheNextAttemptWritesWhole(t *testing.T) {
+	skipping := newShadowRigWith(t, 6, 0, shadowRecoveryOff, 0, nil, 16<<20)
+	writing := newShadowRigWith(t, 6, 0, shadowRecoveryOff, 0, nil, 16<<20)
+	skipping.skipWord.Store(7)
+	at := frozenContract().Slot.EvaluationTime
+	step := func() {
+		t.Helper()
+		at += 60
+		for name, rig := range map[string]*shadowRig{"skipping": skipping, "writing": writing} {
+			if completed, err := rig.run(at, nil, nil, false); !completed {
+				t.Fatalf("%s Slot at %d: completed=%t err=%v", name, at, completed, err)
+			}
+		}
+	}
+	for round := 0; round < 8; round++ {
+		step()
+	}
+	at += 60
+	// The round leaves members, and its segments' write fails.
+	skipping.store.mu.Lock()
+	skipping.store.failSegments = 1
+	skipping.store.mu.Unlock()
+	commits, left := skipping.commits(), skipping.skippedSoFar()
+	result, err := skipping.execute(at, nil, nil, false)
+	if err != nil || result.Completed || result.Result != observability.ResultRetrying ||
+		string(result.ReasonCode) != contract.ReasonSegmentWriteFailed {
+		t.Fatalf("a round whose segments did not land after it left members = (%+v, %v), want retrying with SEGMENT_WRITE_FAILED", result, err)
+	}
+	if skipping.commits() != commits || skipping.skippedSoFar() == left {
+		t.Fatalf("committed %d, left %d members: want no commit after a round that left some", skipping.commits()-commits,
+			skipping.skippedSoFar()-left)
+	}
+	// The next attempt leaves none; its own segment write failing is counted
+	// and the Slot commits.
+	skipping.store.mu.Lock()
+	skipping.store.failSegments, skipping.store.items = 1, 0
+	skipping.store.mu.Unlock()
+	left = skipping.skippedSoFar()
+	if completed, err := skipping.run(at, nil, nil, false); !completed {
+		t.Fatalf("the next attempt: completed=%t err=%v, want committed", completed, err)
+	}
+	skipping.store.mu.Lock()
+	items := skipping.store.items
+	skipping.store.mu.Unlock()
+	if skipping.skippedSoFar() != left || items != 6 || skipping.commits() != commits+1 {
+		t.Fatalf("the next attempt left %d members, wrote %d States, committed %d: want none left, all six written, one commit",
+			skipping.skippedSoFar()-left, items, skipping.commits()-commits)
+	}
+	// A rig that never skips only counts its failed segment write.
+	writing.store.mu.Lock()
+	writing.store.failSegments = 1
+	writing.store.mu.Unlock()
+	if completed, err := writing.run(at, nil, nil, false); !completed {
+		t.Fatalf("a round that left no member with its segments' write failing: completed=%t err=%v", completed, err)
+	}
+	// The Slot after finds the mark a round behind the State the attempt
+	// wrote: its members are off the mark's grid, written whole and taken off
+	// their pages. They join again, and the rounds after leave them.
+	left = skipping.skippedSoFar()
+	before, _ := skipping.observed.snapshot()
+	step()
+	after, _ := skipping.observed.snapshot()
+	if skipping.skippedSoFar() != left || after[observability.SegmentShadowExceptionOffGrid]-before[observability.SegmentShadowExceptionOffGrid] != 6 {
+		t.Fatalf("the Slot after left %d members, %d off the grid: want none left, all six off the mark's grid", skipping.skippedSoFar()-left,
+			after[observability.SegmentShadowExceptionOffGrid]-before[observability.SegmentShadowExceptionOffGrid])
+	}
+	for round := 0; round < 3; round++ {
+		step()
+	}
+	if skipping.skippedSoFar() == left {
+		t.Fatal("no round after the members joined again left one")
+	}
+	skipping.skipWord.Store(0)
+	step()
+	skipping.store.mu.Lock()
+	writing.store.mu.Lock()
+	defer writing.store.mu.Unlock()
+	defer skipping.store.mu.Unlock()
+	if len(writing.store.written) == 0 || len(skipping.store.written) != len(writing.store.written) {
+		t.Fatalf("%d series written, want %d", len(skipping.store.written), len(writing.store.written))
+	}
+	for identity, want := range writing.store.written {
+		got := skipping.store.written[identity]
+		if !reflect.DeepEqual(got.BaseHistory, want.BaseHistory) || !reflect.DeepEqual(got.Points, want.Points) ||
+			!reflect.DeepEqual(got.Levels, want.Levels) {
+			t.Errorf("%s last written %+v + %+v %+v\nwant %+v + %+v %+v", identity.SeriesIdentityDigest, got.BaseHistory, got.Points,
+				got.Levels, want.BaseHistory, want.Points, want.Levels)
+		}
+	}
+}
+
+// A Slot dispatched with its word whose segments do not read fails by
+// SEGMENT_READ_FAILED, through Execute, before anything is written; its
+// retry reads them as stored and commits, every State written; the rounds
+// after skip again, and once the word goes away the State is what a rig
+// that never skipped holds.
+func TestASlotWhoseSegmentsDidNotReadFailsByNameAndItsRetryCompletes(t *testing.T) {
+	skipping := newShadowRigWith(t, 6, 0, shadowRecoveryOff, 0, nil, 16<<20)
+	writing := newShadowRigWith(t, 6, 0, shadowRecoveryOff, 0, nil, 16<<20)
+	skipping.skipWord.Store(7)
+	at := frozenContract().Slot.EvaluationTime
+	step := func() {
+		t.Helper()
+		at += 60
+		for name, rig := range map[string]*shadowRig{"skipping": skipping, "writing": writing} {
+			if completed, err := rig.run(at, nil, nil, false); !completed {
+				t.Fatalf("%s Slot at %d: completed=%t err=%v", name, at, completed, err)
+			}
+		}
+	}
+	for round := 0; round < 8; round++ {
+		step()
+	}
+	at += 60
+	skipping.store.mu.Lock()
+	skipping.store.failReads, skipping.store.items = 1, 0
+	skipping.store.mu.Unlock()
+	commits := skipping.commits()
+	_, err := skipping.execute(at, nil, nil, false)
+	if word, named := worker.SegmentReadFailedReason(err); !named || word != contract.ReasonSegmentReadFailed {
+		t.Fatalf("a Slot whose segments did not read = %v, want SEGMENT_READ_FAILED", err)
+	}
+	skipping.store.mu.Lock()
+	items := skipping.store.items
+	skipping.store.failReads = 1
+	skipping.store.mu.Unlock()
+	if items != 0 || skipping.commits() != commits {
+		t.Fatalf("the failed attempt wrote %d States and committed %d", items, skipping.commits()-commits)
+	}
+	skipping.attempt.Store(2)
+	left := skipping.skippedSoFar()
+	if completed, err := skipping.run(at, nil, nil, false); !completed {
+		t.Fatalf("the retry: completed=%t err=%v, want committed", completed, err)
+	}
+	skipping.attempt.Store(0)
+	skipping.store.mu.Lock()
+	items = skipping.store.items
+	skipping.store.mu.Unlock()
+	if items != 6 || skipping.skippedSoFar() != left {
+		t.Fatalf("the retry wrote %d States and left %d members: want all six written", items, skipping.skippedSoFar()-left)
+	}
+	if completed, err := writing.run(at, nil, nil, false); !completed {
+		t.Fatalf("writing Slot at %d: completed=%t err=%v", at, completed, err)
+	}
+	for round := 0; round < 4; round++ {
+		step()
+	}
+	if skipping.skippedSoFar() == left {
+		t.Fatal("no round after the retry left a member")
+	}
+	skipping.skipWord.Store(0)
+	step()
+	skipping.store.mu.Lock()
+	writing.store.mu.Lock()
+	defer writing.store.mu.Unlock()
+	defer skipping.store.mu.Unlock()
+	if len(writing.store.written) == 0 || len(skipping.store.written) != len(writing.store.written) {
+		t.Fatalf("%d series written, want %d", len(skipping.store.written), len(writing.store.written))
+	}
+	for identity, want := range writing.store.written {
+		got := skipping.store.written[identity]
+		if !reflect.DeepEqual(got.BaseHistory, want.BaseHistory) || !reflect.DeepEqual(got.Points, want.Points) ||
+			!reflect.DeepEqual(got.Levels, want.Levels) {
+			t.Errorf("%s last written %+v + %+v %+v\nwant %+v + %+v %+v", identity.SeriesIdentityDigest, got.BaseHistory, got.Points,
+				got.Levels, want.BaseHistory, want.Points, want.Levels)
+		}
 	}
 }

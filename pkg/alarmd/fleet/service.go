@@ -92,6 +92,9 @@ type Service struct {
 	// localQueryRanges is this replica's account of an object's latest asked
 	// ranges, set the same way (SetLocalQueryRanges).
 	localQueryRanges func(queryGroup string) (QueryRanges, bool)
+	// localQueryPhases is this replica's account of an object's latest
+	// completed Slot's query phases (SetLocalQueryPhases).
+	localQueryPhases func(queryGroup string) (QueryPhases, bool)
 	// planCarries reads where an object's Plans' Runtime State comes from
 	// (controlplane PlanCarries), set once at wiring (SetPlanCarries).
 	planCarries func(ctx context.Context, queryGroup string) (controlplane.PlanCarriesReading, error)
@@ -586,6 +589,23 @@ func (service *Service) SetLocalRows(row func(queryGroup string) (Anomaly, bool)
 	if service != nil {
 		service.localRow = row
 	}
+}
+
+// SetLocalQueryPhases binds what this replica knows of an object's latest
+// completed Slot's query phases (Tracker.QueryPhases) for the object detail.
+func (service *Service) SetLocalQueryPhases(phases func(queryGroup string) (QueryPhases, bool)) {
+	if service != nil {
+		service.localQueryPhases = phases
+	}
+}
+
+// LocalQueryPhases is this replica's account of the object's latest
+// completed Slot's query phases, when it has one.
+func (service *Service) LocalQueryPhases(queryGroup string) (QueryPhases, bool) {
+	if service == nil || service.localQueryPhases == nil {
+		return QueryPhases{}, false
+	}
+	return service.localQueryPhases(queryGroup)
 }
 
 // SetLocalQueryRanges binds what this replica knows of an object's latest

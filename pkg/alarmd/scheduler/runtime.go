@@ -122,6 +122,11 @@ type SlotDispatchContext struct {
 	// (execution.SlotExecutionRequest.ContentScope). Empty for a Segment
 	// that predates content addressing.
 	ContentScope string
+	// SegmentSkip is the Assignment record's segment skip word as the Slot
+	// read it with its fence (ownership.AssignmentRecord.SegmentSkip): the
+	// epoch of the Leader that let the Slot leave its stable members'
+	// writes out, zero for none (execution.SlotExecutionRequest.SegmentSkip).
+	SegmentSkip uint64
 }
 
 func (slot FrozenSlot) Validate(queryGroup execution.QueryGroupIdentity) error {
@@ -1060,7 +1065,7 @@ func (runner *Runner) runOneTracked(
 		ShareExceeded:     runner.shareExceeded(slot) && slot.Recovery.Disposition != ReplayExpired && slot.ExpiredRange == nil,
 		QueryCooldownHeld: runner.queryCooldownHolds(), QueryCooldownProbe: runner.queryCooldownProbes(),
 		Operation: operation, AttemptNo: runner.attemptNo(slot), OwnerFence: fence, ExpectedNextSlot: slot.ExpectedNextSlot,
-		ContentScope: slot.Dispatch.ContentScope,
+		ContentScope: slot.Dispatch.ContentScope, SegmentSkip: slot.Dispatch.SegmentSkip,
 	}
 	if err := request.Validate(); err != nil {
 		return execution.SlotExecutionResult{}, false, err

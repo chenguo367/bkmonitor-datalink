@@ -301,7 +301,7 @@ func classifyWitnessedMutation(witness runtimeWitness, mutation execution.StateM
 // race on that key is named as one, rather than as a reset or a move between
 // two counts that were never comparable.
 func (store *ExecutionStore) classifyFencedOutcome(
-	contractRef execution.FrozenExecutionContractRef, mutation execution.StateMutation, outcome FencedWriteOutcome, expectedFramed uint64,
+	ctx context.Context, contractRef execution.FrozenExecutionContractRef, mutation execution.StateMutation, outcome FencedWriteOutcome, expectedFramed uint64,
 ) execution.StateApplyItemResult {
 	item := execution.StateApplyItemResult{Identity: mutation.Identity}
 	if outcome.Err != nil {
@@ -323,7 +323,7 @@ func (store *ExecutionStore) classifyFencedOutcome(
 			item.Status, item.ReasonCode = execution.StateApplyDeterministicInvalid, execution.ReasonCode(contract.ReasonStateBudgetExceeded)
 			return item
 		}
-		view := store.decodeRuntime(raw, mutation.Identity, contractRef, mutation.ApplyVersion)
+		view := store.decodeRuntime(ctx, raw, mutation.Identity, contractRef, mutation.ApplyVersion)
 		if view.Status == execution.StateDeterministicInvalid {
 			item.Status, item.ReasonCode = execution.StateApplyDeterministicInvalid, view.ReasonCode
 			return item
@@ -484,7 +484,7 @@ func (pipeline *runtimeApplyPipeline) exchange(ctx context.Context, batch runtim
 			moved = true
 			continue
 		}
-		pipeline.result.Items[index] = pipeline.store.classifyFencedOutcome(pipeline.request.Contract, pipeline.request.Items[index], outcome, batch.expected[position])
+		pipeline.result.Items[index] = pipeline.store.classifyFencedOutcome(ctx, pipeline.request.Contract, pipeline.request.Items[index], outcome, batch.expected[position])
 		if batch.cached[position] && pipeline.store.restorable(ctx, pipeline.request, pipeline.request.Items[index].Identity, batch.writes[position], outcome) {
 			batch.writes[position].ExpectedMissing = outcome.Status == FencedWriteConflictMissing
 			batch.writes[position].ExpectedDigest = ""
@@ -694,7 +694,7 @@ func (store *ExecutionStore) applyRuntimeSequential(
 	if len(values) == 1 {
 		framedRaw = values[0]
 	}
-	view := store.readStoredRecord(execution.StatePreflightRequest{Contract: contractRef},
+	view := store.readStoredRecord(ctx, execution.StatePreflightRequest{Contract: contractRef},
 		execution.StatePreflightItem{Identity: mutation.Identity, ApplyVersion: mutation.ApplyVersion}, framedRaw, nil)
 	witness, _ := store.witnesses.take(contractRef.Slot, mutation.Identity)
 	if view.Status == execution.StateDeterministicInvalid {
@@ -1067,7 +1067,7 @@ func (store *ExecutionStore) loadRuntimeBatch(
 			if len(raw) > largest {
 				largest = len(raw)
 			}
-			views[index].Carried = store.readCarriedRecord(request, item, raw, pass)
+			views[index].Carried = store.readCarriedRecord(ctx, request, item, raw, pass)
 			continue
 		}
 		view := execution.RuntimeStateView{Identity: item.Identity, Status: execution.StateMissingWarming}
@@ -1080,7 +1080,7 @@ func (store *ExecutionStore) loadRuntimeBatch(
 		if len(raw) > largest {
 			largest = len(raw)
 		}
-		views[index] = store.readFramedRecord(request, item, raw)
+		views[index] = store.readFramedRecord(ctx, request, item, raw)
 	}
 	return loaded, largest, err == nil
 }
@@ -1089,7 +1089,7 @@ func (store *ExecutionStore) loadRuntimeBatch(
 // carries from. Only a record that reads as a found one is carried; one that
 // is absent, oversize or does not read carries nothing, and each is counted.
 func (store *ExecutionStore) readCarriedRecord(
-	request execution.StatePreflightRequest, item execution.StatePreflightItem, raw []byte, pass *runtimeLoadPass,
+	ctx context.Context, request execution.StatePreflightRequest, item execution.StatePreflightItem, raw []byte, pass *runtimeLoadPass,
 ) *execution.RuntimeStateView {
 	if raw == nil {
 		pass.carryMissing++
@@ -1101,7 +1101,7 @@ func (store *ExecutionStore) readCarriedRecord(
 	}
 	previous := item.Identity
 	previous.StateGeneration = item.CarryFrom
-	view := store.decodeRuntime(raw, previous, request.Contract, item.ApplyVersion)
+	view := store.decodeRuntime(ctx, raw, previous, request.Contract, item.ApplyVersion)
 	switch view.Status {
 	case execution.StateFoundReady, execution.StateFoundWarming, execution.StateFoundGapped:
 		pass.carryFound++
@@ -1118,13 +1118,13 @@ func (store *ExecutionStore) readCarriedRecord(
 // derived id -- and was half of what reading a long-history Query Group's
 // state cost.
 func (store *ExecutionStore) readFramedRecord(
-	request execution.StatePreflightRequest, item execution.StatePreflightItem, framedRaw []byte,
+	ctx context.Context, request execution.StatePreflightRequest, item execution.StatePreflightItem, framedRaw []byte,
 ) execution.RuntimeStateView {
 	if framedRaw == nil || len(framedRaw) > store.options.MaxValueBytes {
-		return store.readStoredRecord(request, item, framedRaw, nil)
+		return store.readStoredRecord(ctx, request, item, framedRaw, nil)
 	}
-	decoded := store.decodeRuntime(framedRaw, item.Identity, request.Contract, item.ApplyVersion)
-	return store.readStoredRecord(request, item, framedRaw, &decoded)
+	decoded := store.decodeRuntime(ctx, framedRaw, item.Identity, request.Contract, item.ApplyVersion)
+	return store.readStoredRecord(ctx, request, item, framedRaw, &decoded)
 }
 
 // readStoredRecord turns the framed value one series holds into the view the
@@ -1140,7 +1140,7 @@ func (store *ExecutionStore) readFramedRecord(
 // binary's record, not garbage, and writing whole over it would roll the
 // series back silently on every cross-frame-version rollback.
 func (store *ExecutionStore) readStoredRecord(
-	request execution.StatePreflightRequest, item execution.StatePreflightItem, framedRaw []byte,
+	ctx context.Context, request execution.StatePreflightRequest, item execution.StatePreflightItem, framedRaw []byte,
 	framedDecoded *execution.RuntimeStateView,
 ) execution.RuntimeStateView {
 	if len(framedRaw) > store.options.MaxValueBytes {
@@ -1162,7 +1162,7 @@ func (store *ExecutionStore) readStoredRecord(
 	if framedDecoded != nil {
 		decoded = *framedDecoded
 	} else {
-		decoded = store.decodeRuntime(framedRaw, item.Identity, request.Contract, item.ApplyVersion)
+		decoded = store.decodeRuntime(ctx, framedRaw, item.Identity, request.Contract, item.ApplyVersion)
 	}
 	if decoded.Status == execution.StateDeterministicInvalid {
 		return decoded
@@ -1201,7 +1201,7 @@ func (store *ExecutionStore) restorable(
 		// This process wrote those bytes: its own concurrent write came first.
 		return false
 	}
-	view := store.decodeRuntime(outcome.Current, identity, request.Contract, last.applyVersion)
+	view := store.decodeRuntime(ctx, outcome.Current, identity, request.Contract, last.applyVersion)
 	if view.Status == execution.StateDeterministicInvalid ||
 		execution.CompareApplyVersion(view.PersistedApplyVersion, last.applyVersion) != execution.ApplyVersionPersistedOlder {
 		store.cache.countDeclined(StateCacheDeclineNewerVersion)

@@ -109,6 +109,23 @@ const (
 	SegmentShadowSkippedOther       = "other"
 )
 
+// Why a Slot did not follow its segment skip word, closed
+// (state_segment_skip_flag_ignored_total): epoch_mismatch, the word names a
+// Leader other than the one whose view the worker has installed - one set
+// before a Leader change, or left by a Leader a rollback replaced, which
+// never takes it back; no_view, the worker has installed no view to read
+// the Leader from.
+const (
+	SegmentSkipIgnoredEpochMismatch = "epoch_mismatch"
+	SegmentSkipIgnoredNoView        = "no_view"
+)
+
+// AllSegmentSkipIgnoredReasons is every reason, the cells the counter has
+// from the start.
+func AllSegmentSkipIgnoredReasons() []string {
+	return []string{SegmentSkipIgnoredEpochMismatch, SegmentSkipIgnoredNoView}
+}
+
 // AllSegmentShadowSkips is every reason, the cells the counter has from the
 // start.
 func AllSegmentShadowSkips() []string {
@@ -122,21 +139,25 @@ func AllSegmentShadowSkips() []string {
 // over_budget, renewal scripts that ran longer than their 2.5 ms; and
 // fallback_write, pages unrenewed for half their lifetime, whose members
 // are written whole - in the second stage counted only, every State being
-// written.
+// written; fallback_short_life, the same of a page whose lifetime is no more
+// than two of its Plan's intervals, which goes half of it between two rounds
+// by design - a Plan keeping one point, its life 1.5 intervals, or one its
+// horizon cuts short - not for renewals failing.
 const (
-	SegmentRenewalRenewed       = "renewed"
-	SegmentRenewalFailed        = "failed"
-	SegmentRenewalMissing       = "missing"
-	SegmentRenewalOverBudget    = "over_budget"
-	SegmentRenewalFallbackWrite = "fallback_write"
-	SegmentRenewalOther         = "other"
+	SegmentRenewalRenewed           = "renewed"
+	SegmentRenewalFailed            = "failed"
+	SegmentRenewalMissing           = "missing"
+	SegmentRenewalOverBudget        = "over_budget"
+	SegmentRenewalFallbackWrite     = "fallback_write"
+	SegmentRenewalFallbackShortLife = "fallback_short_life"
+	SegmentRenewalOther             = "other"
 )
 
 // AllSegmentRenewalResults is every result, the cells the counter has from
 // the start.
 func AllSegmentRenewalResults() []string {
 	return []string{SegmentRenewalRenewed, SegmentRenewalFailed, SegmentRenewalMissing, SegmentRenewalOverBudget,
-		SegmentRenewalFallbackWrite, SegmentRenewalOther}
+		SegmentRenewalFallbackWrite, SegmentRenewalFallbackShortLife, SegmentRenewalOther}
 }
 
 // Period classes, closed: the band a Plan's evaluation interval falls in, so
@@ -178,10 +199,49 @@ func SegmentPeriodClass(intervalSeconds int64) string {
 	}
 }
 
+// Degradations, closed: a Plan whose stable segments the Slot could not use
+// as written (014 B3 §9.7), read as stored and written whole. unread: its
+// segments, or the generation's it carries from, did not read in a retry of
+// a Slot dispatched with a segment skip word, the first attempt having
+// failed for it (SEGMENT_READ_FAILED); book_refused: the pool did not take
+// the books in such a retry; undecodable: its stored segments did not
+// decode, its book started over; write_absent: its round's write was not
+// made. Each is the permanent class, a Plan once a Slot; stopped is a Plan
+// reaching it a second time in its owner's term, its members no longer left
+// unwritten on this replica until the owner changes.
+const (
+	SegmentDegradedUnread      = "unread"
+	SegmentDegradedBookRefused = "book_refused"
+	SegmentDegradedUndecodable = "undecodable"
+	SegmentDegradedWriteAbsent = "write_absent"
+	SegmentDegradedStopped     = "stopped"
+)
+
+// AllSegmentDegradations is every degradation, the cells the counter has
+// from the start.
+func AllSegmentDegradations() []string {
+	return []string{SegmentDegradedUnread, SegmentDegradedBookRefused, SegmentDegradedUndecodable, SegmentDegradedWriteAbsent,
+		SegmentDegradedStopped}
+}
+
+// Shadow rounds, closed: whether a Plan's round was its piece's sampled
+// round of the day (014 B3 §9.2), every member written whole and compared -
+// sampled - or any other, normal.
+const (
+	SegmentRoundNormal  = "normal"
+	SegmentRoundSampled = "sampled"
+)
+
+// AllSegmentShadowRounds is every round.
+func AllSegmentShadowRounds() []string {
+	return []string{SegmentRoundNormal, SegmentRoundSampled}
+}
+
 // SegmentShadowKey and SegmentShadowMemberKey are a cell of each counter.
 type SegmentShadowKey struct {
 	Outcome     SegmentShadowOutcome
 	PeriodClass string
+	Round       string
 }
 
 type SegmentShadowMemberKey struct {
@@ -201,6 +261,52 @@ type SegmentShadowFacts struct {
 	Skipped map[string]int64 `json:"skipped,omitempty"`
 	// Renewals is the round's page renewals, by result.
 	Renewals map[string]int64 `json:"renewals,omitempty"`
+	// SkipFlagIgnored is the Slots dispatched with a segment skip word that
+	// did not follow it, by why (AllSegmentSkipIgnoredReasons).
+	SkipFlagIgnored map[string]int64 `json:"skip_flag_ignored,omitempty"`
+	// Samples is the Plans' sampled rounds of the day the Slot ran, by
+	// period class.
+	Samples map[string]int64 `json:"samples,omitempty"`
+	// Degraded is the Plans whose segments the Slot could not use as
+	// written, by why (AllSegmentDegradations).
+	Degraded map[string]int64 `json:"degraded,omitempty"`
+}
+
+// Degrade counts a Plan degraded. A reason outside the closed list is not
+// one this build gives and is not counted under a cell that does not exist.
+func (facts *SegmentShadowFacts) Degrade(reason string) {
+	for _, word := range AllSegmentDegradations() {
+		if reason == word {
+			if facts.Degraded == nil {
+				facts.Degraded = map[string]int64{}
+			}
+			facts.Degraded[reason]++
+			return
+		}
+	}
+}
+
+// Sample counts a Plan's round that was its piece's sampled round.
+func (facts *SegmentShadowFacts) Sample(class string) {
+	if facts.Samples == nil {
+		facts.Samples = map[string]int64{}
+	}
+	facts.Samples[NormalizeSegmentPeriodClass(class)]++
+}
+
+// IgnoreSkipFlag counts a Slot that did not follow its segment skip word.
+// A reason outside the closed list is not one this build gives and is not
+// counted under a cell that does not exist.
+func (facts *SegmentShadowFacts) IgnoreSkipFlag(reason string) {
+	for _, word := range AllSegmentSkipIgnoredReasons() {
+		if reason == word {
+			if facts.SkipFlagIgnored == nil {
+				facts.SkipFlagIgnored = map[string]int64{}
+			}
+			facts.SkipFlagIgnored[reason]++
+			return
+		}
+	}
 }
 
 // Renewal adds count to a renewal result's cell, its word normalised.
@@ -234,15 +340,20 @@ func (facts *SegmentShadowFacts) Skip(reason string) {
 	facts.Skipped[known]++
 }
 
-// Outcome adds count to an outcome's cell, every label normalised.
-func (facts *SegmentShadowFacts) Outcome(outcome SegmentShadowOutcome, class string, count int64) {
+// Outcome adds count to an outcome's cell in a round, every label
+// normalised: a round not sampled is normal.
+func (facts *SegmentShadowFacts) Outcome(outcome SegmentShadowOutcome, class, round string, count int64) {
 	if count == 0 {
 		return
 	}
 	if facts.Outcomes == nil {
 		facts.Outcomes = map[SegmentShadowKey]int64{}
 	}
-	facts.Outcomes[SegmentShadowKey{Outcome: normalizeSegmentShadowOutcome(outcome), PeriodClass: NormalizeSegmentPeriodClass(class)}] += count
+	if round != SegmentRoundSampled {
+		round = SegmentRoundNormal
+	}
+	facts.Outcomes[SegmentShadowKey{Outcome: normalizeSegmentShadowOutcome(outcome), PeriodClass: NormalizeSegmentPeriodClass(class),
+		Round: round}] += count
 }
 
 // Member adds count to an event's cell.
@@ -272,7 +383,7 @@ func (facts *SegmentShadowFacts) Pages(class string, pages, bytes int64) {
 // Empty is whether nothing was counted, so the facts are left off.
 func (facts SegmentShadowFacts) Empty() bool {
 	return len(facts.Outcomes) == 0 && len(facts.Members) == 0 && len(facts.PageWrites) == 0 && len(facts.Skipped) == 0 &&
-		len(facts.Renewals) == 0
+		len(facts.Renewals) == 0 && len(facts.SkipFlagIgnored) == 0 && len(facts.Samples) == 0 && len(facts.Degraded) == 0
 }
 
 func normalizeSegmentShadowOutcome(outcome SegmentShadowOutcome) SegmentShadowOutcome {

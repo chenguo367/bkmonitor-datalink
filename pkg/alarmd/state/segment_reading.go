@@ -106,6 +106,7 @@ func (uses *segmentUses) wrote(group execution.QueryGroupIdentity, plans []segme
 		use := uses.useLocked(group, plan.Key, plan.Lifetime.Interval, at)
 		when := at
 		use.last.WriteResult, use.last.WriteAt = results[index], &when
+		use.last.SkipMode, use.last.Skipped = plan.SkipMode, plan.Skipped
 	}
 }
 

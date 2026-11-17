@@ -224,8 +224,8 @@ func TestEverySlotCompletedReasonIsACellFromTheStart(t *testing.T) {
 			t.Errorf("scrape lacks %s", line)
 		}
 	}
-	if len(want) != 129 || len(slotReasonCells()) != len(want) {
-		t.Fatalf("slot_completed reason cells = %d (built %d), want 129: three words and the catalogue's 126",
+	if len(want) != 131 || len(slotReasonCells()) != len(want) {
+		t.Fatalf("slot_completed reason cells = %d (built %d), want 131: three words and the catalogue's 128",
 			len(want), len(slotReasonCells()))
 	}
 }
@@ -1041,8 +1041,12 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("slot_begin_total")] = len(execution.SlotBeginResults)
 	bounds[fqName("slot_not_committed_total")] = len(execution.SlotNotCommittedReasons)
 	bounds[fqName("progress_projection_superseded_total")] = len(progress.SupersededProjectionFields)
-	// The segment shadow: every outcome and event by every period class.
-	bounds[fqName("state_segment_shadow_total")] = len(observability.AllSegmentShadowOutcomes()) * len(observability.AllSegmentPeriodClasses())
+	// The segment shadow: every outcome and event by every period class, the
+	// outcomes in each round.
+	bounds[fqName("state_segment_shadow_total")] = len(observability.AllSegmentShadowOutcomes()) * len(observability.AllSegmentPeriodClasses()) *
+		len(observability.AllSegmentShadowRounds())
+	bounds[fqName("state_segment_sample_total")] = len(observability.AllSegmentPeriodClasses())
+	bounds[fqName("state_segment_degraded_total")] = len(observability.AllSegmentDegradations())
 	bounds[fqName("state_segment_shadow_members_total")] = len(observability.AllSegmentShadowEvents()) * len(observability.AllSegmentPeriodClasses())
 	bounds[fqName("state_segment_shadow_page_writes_total")] = len(observability.AllSegmentPeriodClasses())
 	bounds[fqName("state_segment_shadow_page_bytes_total")] = len(observability.AllSegmentPeriodClasses())
@@ -1050,11 +1054,13 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("worker_segment_shadow_memory")] = 3
 	bounds[fqName("state_segment_shadow_skipped_total")] = len(observability.AllSegmentShadowSkips())
 	bounds[fqName("state_segment_renewal_total")] = len(observability.AllSegmentRenewalResults())
+	bounds[fqName("state_segment_skip_flag_ignored_total")] = len(observability.AllSegmentSkipIgnoredReasons())
 	// The compute cost bands, a sum and a count each.
 	bounds[fqName("worker_compute_cost")] = len(ComputeCostBands)
 	bounds[fqName("worker_compute_cost_query_groups")] = len(ComputeCostBands)
 	bounds[fqName("state_segment_read_total")] = 1 + len(segment.ReadReasons)
 	bounds[fqName("state_segment_write_total")] = len(segment.WriteResults)
+	bounds[fqName("state_segment_extend_total")] = len(segment.Extensions)
 	bounds[fqName("state_segment_cache_drift_total")] = 1
 	// Every wait outcome by every band; one sum.
 	bounds[fqName("worker_slice_read_ahead_waits_total")] = len(observability.SliceReadAheadWaitOutcomes) * len(observability.SliceReadAheadWaitDurations)

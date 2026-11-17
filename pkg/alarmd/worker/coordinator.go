@@ -86,6 +86,11 @@ type Ports struct {
 	// write, so one that stops appearing leaves nothing behind for longer
 	// than H. Optional: nil leaves the retention's own lifetime uncapped.
 	StateHorizon func() int64
+	// InstalledControlEpoch is the control epoch of the view this worker has
+	// installed and whether it has one (viewstream Client.Installed): the
+	// Leader a Slot's segment skip word is judged against
+	// (execution.SegmentSkipAdmitted). Nil is no view: no word is followed.
+	InstalledControlEpoch func() (uint64, bool)
 	// ExecutionEvidence records and reads how far an earlier attempt at a Slot
 	// got. It is the one optional port: nil keeps exactly the behaviour of
 	// builds before it existed, which is that a Slot finalized after its replay
@@ -148,6 +153,14 @@ type SlotExecutionCoordinator struct {
 	// notEvaluatedLines is when each Query Group last wrote its
 	// series_not_evaluated line (slot_counts.go).
 	notEvaluatedLines seriesNotEvaluatedLines
+	// segmentWriteFailures is each Query Group's Slot whose round left
+	// members unwritten and whose segments' write did not land: its next
+	// attempt writes every member whole (segment_shadow.go).
+	segmentWriteFailures segmentWriteFailures
+	// segmentDegradations is each Query Group's Plans degraded to the
+	// permanent class in its owner's term, and the ones stopped by it
+	// (segment_shadow.go).
+	segmentDegradations segmentDegradations
 	// noDataSkips is how long each Plan's no-data detection has been skipping.
 	// One per process, because a streak is about rounds rather than about one
 	// Slot. See no_data_skip_streak.go.
@@ -1989,6 +2002,7 @@ func (coordinator *SlotExecutionCoordinator) commitProgress(
 	// where it belongs, so it must leave no mark behind: the mark answers a
 	// question only an attempt that never got here can raise.
 	appliedPlansFrom(ctx).progressCommitted()
+	coordinator.segmentWriteFailures.forget(request.Contract.Slot.QueryGroup)
 	observationResult := observability.Result(observability.ResultSuccess)
 	observationReason := progress.ReasonCode
 	if completion.Kind == execution.CompletionGapSkipped || completion.Kind == execution.CompletionSnapshotUnavailable {

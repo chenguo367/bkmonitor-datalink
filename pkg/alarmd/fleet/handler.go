@@ -872,6 +872,11 @@ type DetailResponse struct {
 	// count that does not recover is read against its strategy's windows
 	// here: it asks N + R periods and accepts one.
 	LastQueryRanges *QueryRanges `json:"last_query_ranges,omitempty"`
+	// LastQueryPhases is the object's latest completed Slot's queries split
+	// at their answers' first byte - the query service's wait and the body
+	// carried and decoded - from the replica that tracks it: the Query
+	// Group's own reading, which a completed Slot writes no line of.
+	LastQueryPhases *QueryPhases `json:"last_query_phases,omitempty"`
 	// PlanCarries is where each of the object's Plans' Runtime State comes
 	// from: the generation it runs under and since when, and the generation
 	// and strategy revision an edit carried history from.
@@ -1455,6 +1460,9 @@ func objectDetail(response http.ResponseWriter, request *http.Request, service *
 	}
 	if ranges, known := service.LocalQueryRanges(queryGroup); known {
 		body.LastQueryRanges = &ranges
+	}
+	if phases, known := service.LocalQueryPhases(queryGroup); known {
+		body.LastQueryPhases = &phases
 	}
 	if segments, bound, err := service.PlanSegments(request.Context(), queryGroup); bound {
 		switch {

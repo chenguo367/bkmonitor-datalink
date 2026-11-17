@@ -17,6 +17,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/segment"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 )
 
@@ -503,11 +504,26 @@ func (stream *streamedExecution) unretain(phase retainPhase, bytes uint64) {
 type retainedOwnerKey struct{}
 
 // withRetainedOwner names the execution whose share the bytes held further
-// down ctx count against: the frames a State write keeps and the segments a
+// down ctx count against - the frames a State write keeps and the segments a
 // no-data first write holds are the Slot's, and judged with the rest of what
-// it holds (judgeRetainedLocked).
+// it holds (judgeRetainedLocked) - and, a stream's, the segments its Slot
+// read, which every State read under ctx is extended by
+// (segment.WithSource): the Slot's preflight, a cache hit, the first-seen
+// and no-data pre-reads, a carried generation, the write path's conflict
+// decode.
 func withRetainedOwner(ctx context.Context, stream *streamedExecution) context.Context {
+	if stream != nil {
+		ctx = segment.WithSource(ctx, streamSegments{stream: stream})
+	}
 	return context.WithValue(ctx, retainedOwnerKey{}, stream)
+}
+
+// streamSegments answers the State store from the segments the stream's
+// Slot read: its books once Begin read them, none before or without them.
+type streamSegments struct{ stream *streamedExecution }
+
+func (source streamSegments) Coverage(identity execution.StateKeyIdentity) (segment.Coverage, bool) {
+	return source.stream.segments.Coverage(identity)
 }
 
 func retainedOwnerFrom(ctx context.Context) *streamedExecution {
@@ -652,7 +668,11 @@ func (stream *streamedExecution) Begin(ctx context.Context, header execution.Int
 	stream.resolveScopeGroups(ctx)
 	// Once a Slot, before the first State preread: a slice's Begin again
 	// returned above.
-	stream.segments = stream.readSegments(ctx, header)
+	segments, err := stream.readSegments(ctx, header)
+	if err != nil {
+		return err
+	}
+	stream.segments = segments
 	return nil
 }
 
@@ -662,18 +682,32 @@ func (stream *streamedExecution) Begin(ctx context.Context, header execution.Int
 // with its series. Reserved quietly - a refusal is the shadow's to count
 // (book_refused), not a capacity rejection, as the Slot goes on without its
 // shadow and its State written whole - and given back with the rest of the
-// Slot's reservation.
-func (stream *streamedExecution) readSegments(ctx context.Context, header execution.InternalExecutionHeader) *segmentSlot {
-	slot, skipped := stream.coordinator.loadSegments(ctx, stream.request, header)
+// Slot's reservation. A Slot dispatched with a segment skip word whose books
+// are refused fails its first attempt as one whose segments did not read,
+// and its retry runs without them, degraded (014 B3 §9.7).
+func (stream *streamedExecution) readSegments(ctx context.Context, header execution.InternalExecutionHeader) (*segmentSlot, error) {
+	slot, skipped, err := stream.coordinator.loadSegments(ctx, stream.request, header)
+	if err != nil {
+		return nil, err
+	}
 	return stream.holdSegments(ctx, slot, skipped)
 }
 
 // holdSegments reserves the books slot decoded, or counts why the Slot runs
 // without them.
-func (stream *streamedExecution) holdSegments(ctx context.Context, slot *segmentSlot, skipped string) *segmentSlot {
+func (stream *streamedExecution) holdSegments(ctx context.Context, slot *segmentSlot, skipped string) (*segmentSlot, error) {
 	if slot != nil {
 		if bytes := slot.bookBytes(); bytes > 0 {
 			if err := stream.coordinator.acquireProvisional(0, bytes, stream, "segment_book"); err != nil {
+				keys := slot.planKeys()
+				if stream.coordinator.segmentReadFails(stream.request, keys) {
+					return nil, segmentsUnreadError{why: "the pool did not take the books"}
+				}
+				if stream.request.SegmentSkip != 0 {
+					var facts observability.SegmentShadowFacts
+					stream.coordinator.degradeSegments(stream.request, keys, observability.SegmentDegradedBookRefused, &facts)
+					stream.coordinator.emitSegmentFacts(ctx, stream.request.Operation, &facts)
+				}
 				slot, skipped = nil, observability.SegmentShadowSkippedBookRefused
 			} else {
 				stream.retainBytes(retainPhaseState, bytes)
@@ -683,7 +717,7 @@ func (stream *streamedExecution) holdSegments(ctx context.Context, slot *segment
 	if skipped != "" {
 		stream.coordinator.skipSegmentShadow(ctx, stream.request.Operation, skipped)
 	}
-	return slot
+	return slot, nil
 }
 
 func (stream *streamedExecution) ConsumeSeries(ctx context.Context, batch execution.SeriesExecutionBatch) error {

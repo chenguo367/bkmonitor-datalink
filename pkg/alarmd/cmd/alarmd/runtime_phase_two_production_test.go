@@ -2315,6 +2315,9 @@ func productionRequest(fact execution.FrozenSlotContractFact, operation executio
 type fakePhaseTwoOwnershipStore struct {
 	mu  sync.Mutex
 	now time.Time
+	// leaderEpoch, when set, is the epoch AcquireControlLeader hands out;
+	// one otherwise.
+	leaderEpoch uint64
 	// sweepErr, when set, is what SweepAssignments fails with after
 	// recording the keep set; sweep is what it reports when it does not.
 	sweepErr               error
@@ -2432,8 +2435,12 @@ func (store *fakePhaseTwoOwnershipStore) AcquireControlLeader(
 	if store.acquireLeaderErr != nil {
 		return ownership.PublicationAuthority{}, store.acquireLeaderErr
 	}
+	epoch := store.leaderEpoch
+	if epoch == 0 {
+		epoch = 1
+	}
 	return ownership.PublicationAuthority{Fence: execution.OwnerFence{
-		QueryGroup: ownership.ControlLeaderIdentity, OwnerID: leaderID, OwnerEpoch: 1, LeaseToken: "leader-token",
+		QueryGroup: ownership.ControlLeaderIdentity, OwnerID: leaderID, OwnerEpoch: epoch, LeaseToken: "leader-token",
 	}, Deadline: at.Add(ttl)}, nil
 }
 

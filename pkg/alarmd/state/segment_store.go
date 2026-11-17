@@ -78,13 +78,18 @@ func isSegmentMarkKey(key string) bool {
 // segmentStats are the segments' counts, kept beside the cache so a store
 // with the cache off counts its reads too.
 type segmentStats struct {
-	reads  map[[2]string]*atomic.Uint64
-	writes map[string]*atomic.Uint64
-	drift  atomic.Uint64
+	reads   map[[2]string]*atomic.Uint64
+	writes  map[string]*atomic.Uint64
+	drift   atomic.Uint64
+	extends map[segment.Extension]*atomic.Uint64
 }
 
 func newSegmentStats() *segmentStats {
-	stats := &segmentStats{reads: map[[2]string]*atomic.Uint64{}, writes: map[string]*atomic.Uint64{}}
+	stats := &segmentStats{reads: map[[2]string]*atomic.Uint64{}, writes: map[string]*atomic.Uint64{},
+		extends: map[segment.Extension]*atomic.Uint64{}}
+	for _, extension := range segment.Extensions {
+		stats.extends[extension] = &atomic.Uint64{}
+	}
 	stats.reads[[2]string{segment.SourceCache, segment.ReadHit}] = &atomic.Uint64{}
 	for _, reason := range segment.ReadReasons {
 		stats.reads[[2]string{segment.SourceRedis, reason}] = &atomic.Uint64{}
@@ -95,6 +100,14 @@ func newSegmentStats() *segmentStats {
 	return stats
 }
 
+// extended counts a member's read by what its extension did; an extension
+// outside the closed list is not one segment.Extend gives.
+func (stats *segmentStats) extended(extension segment.Extension) {
+	if counter := stats.extends[extension]; counter != nil {
+		counter.Add(1)
+	}
+}
+
 // SegmentStats is what the segments' metrics read.
 type SegmentStats struct {
 	// Reads is a Plan's reads by source and reason, Writes a Plan's writes
@@ -103,6 +116,10 @@ type SegmentStats struct {
 	Reads  map[[2]string]uint64
 	Writes map[string]uint64
 	Drift  uint64
+	// Extends is a member's reads by what their extension did (segment.Extend):
+	// extended, normal points made where its segment covers; within, its
+	// own points reach the segment's end; and the refusals, read as stored.
+	Extends map[segment.Extension]uint64
 	// Plans, Pages and Bytes are what the cache holds of the segments: the
 	// marks, the pages, and their charge, a share of state_cache_bytes.
 	Plans, Pages, Bytes int64
@@ -116,6 +133,10 @@ func (store *ExecutionStore) SegmentStats() SegmentStats {
 	}
 	for result, counter := range store.segments.writes {
 		stats.Writes[result] = counter.Load()
+	}
+	stats.Extends = map[segment.Extension]uint64{}
+	for extension, counter := range store.segments.extends {
+		stats.Extends[extension] = counter.Load()
 	}
 	stats.Plans, stats.Pages, stats.Bytes = store.cache.segmentHeld()
 	return stats
@@ -397,7 +418,11 @@ type segmentWriteChunk struct {
 	mark   *BackendWrite
 	keep   []string
 	remove []string
-	bytes  int
+	// departing is the State keys of the members the round closed, renewed
+	// to the full lifetime before the mark (segment.PlanWrite.Departed), in
+	// chunks of their own.
+	departing []string
+	bytes     int
 }
 
 // segmentPlanWrite is one Plan's write as its target's backend sends it: its
@@ -412,6 +437,8 @@ type segmentPlanWrite struct {
 type segmentPlanOutcome struct {
 	result  string
 	missing int
+	// departedGone is the departing members' keys the write found gone.
+	departedGone int
 }
 
 // SegmentBackend writes the Plans' segments under the owner fence: each
@@ -430,7 +457,7 @@ type SegmentBackend interface {
 // (unknown_result), and one whose mark found a kept page gone too
 // (renew_missing).
 func (store *ExecutionStore) WriteSegments(ctx context.Context, request segment.WriteRequest) (segment.WriteResult, error) {
-	result := segment.WriteResult{Plans: make([]string, len(request.Plans))}
+	result := segment.WriteResult{Plans: make([]string, len(request.Plans)), DepartedGone: make([]int, len(request.Plans))}
 	defer func() {
 		for _, word := range result.Plans {
 			store.segments.writes[word].Add(1)
@@ -499,6 +526,7 @@ func (store *ExecutionStore) WriteSegments(ctx context.Context, request segment.
 		for position, plan := range byTarget[name] {
 			outcome := outcomes[position]
 			result.Plans[plan.index] = outcome.result
+			result.DepartedGone[plan.index] = outcome.departedGone
 			if outcome.result != segment.WriteApplied {
 				// Not applied whole - in doubt, refused otherwise, or refused
 				// by the fence at a chunk after earlier ones landed - so what
@@ -585,6 +613,28 @@ func (store *ExecutionStore) segmentChunks(plan segment.PlanWrite, mark string) 
 	}
 	current.mark = &BackendWrite{Key: mark, Value: plan.Mark}
 	current.bytes += len(plan.Mark)
+	// The departing members' keys in chunks of their own, before the mark's:
+	// at most segment.RenewKeys keys and a script's bytes each, as a page
+	// renewal is cut. PEXPIRE is idempotent, so one chunk landing and a later
+	// one refused leaves nothing wrong; the mark, last, lands only after
+	// every one of them.
+	departing := segmentWriteChunk{}
+	for _, digest := range plan.Departed {
+		key, err := RuntimeStateKeyV3(store.options.Prefix, execution.StateKeyIdentity{Plan: plan.Key.Plan,
+			StateGeneration: plan.Key.Generation, SeriesIdentityDigest: digest})
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(departing.departing) == segment.RenewKeys || (len(departing.departing) > 0 && departing.bytes+len(key) > fencedScriptBytes) {
+			chunks = append(chunks, departing)
+			departing = segmentWriteChunk{}
+		}
+		departing.departing = append(departing.departing, key)
+		departing.bytes += len(key)
+	}
+	if len(departing.departing) > 0 {
+		chunks = append(chunks, departing)
+	}
 	return append(chunks, current), written, nil
 }
 

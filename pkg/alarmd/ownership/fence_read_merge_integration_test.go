@@ -274,11 +274,16 @@ func TestTheMergedFenceAnswersAsTheFenceItReplaced(t *testing.T) {
 		want := runFenceMergeCase(t, client, before, c, now)
 		got := runFenceMergeCase(t, client, checkFenceScript, c, now)
 		// A valid reply now also says the server instant it was read at
-		// (A2), the one element the fence it replaced did not send.
-		if reply, ok := got.reply.([]interface{}); ok && len(reply) == 12 {
+		// (A2), and after it the record's segment skip word (014 B3 stage
+		// 3), none on these records: the two elements the fence it replaced
+		// did not send.
+		if reply, ok := got.reply.([]interface{}); ok && len(reply) == 13 {
 			observed, isInt := reply[11].(int64)
 			if !isInt || observed < now || observed > now+60_000 {
 				t.Errorf("%s: the reply's server instant %v, want TIME's, at or after %d", c.name, reply[11], now)
+			}
+			if word, isText := reply[12].(string); !isText || word != "" {
+				t.Errorf("%s: the reply's segment skip word %v, want none", c.name, reply[12])
 			}
 			got.reply = reply[:11]
 		}

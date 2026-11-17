@@ -115,9 +115,7 @@ type ExecutionStoreOptions struct {
 // it is a member: its entry and the Plan's mark and grid (segment.Coverage).
 // Every read of a stored record asks it, in the one place a record becomes a
 // view (decodeRuntime), so no reader reads a member another way.
-type SegmentCoverage interface {
-	Coverage(identity execution.StateKeyIdentity) (segment.Coverage, bool)
-}
+type SegmentCoverage = segment.Source
 
 type ExecutionStore struct {
 	options   ExecutionStoreOptions
@@ -339,7 +337,7 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 			// Served from what this process last wrote: the same bytes the
 			// store holds while every rule of §4.3 holds, decoded and
 			// witnessed exactly as bytes read back are.
-			result.Items[index] = store.readFramedRecord(request, item, entry.raw)
+			result.Items[index] = store.readFramedRecord(ctx, request, item, entry.raw)
 			if !request.Unwitnessed {
 				store.witnesses.markCached(request.Contract.Slot, item.Identity)
 			}
@@ -471,10 +469,20 @@ func (store *ExecutionStore) ApplyRuntime(ctx context.Context, request execution
 	return store.applyRuntime(ctx, request, nil)
 }
 
-// decodeRuntime is decodeRuntimeCovered with the store's segments: every
-// reader of a stored record in the store reads it through here.
-func (store *ExecutionStore) decodeRuntime(raw []byte, identity execution.StateKeyIdentity, contractRef execution.FrozenExecutionContractRef, candidate execution.ApplyVersion) execution.RuntimeStateView {
-	return decodeRuntimeCovered(raw, identity, contractRef, candidate, store.options.Segments)
+// decodeRuntime is decodeRuntimeCovered with the segments of the Slot
+// reading under ctx (segment.WithSource), or else the store's: every reader
+// of a stored record in the store reads it through here. A member's read
+// is counted by what its extension did (state_segment_extend_total).
+func (store *ExecutionStore) decodeRuntime(ctx context.Context, raw []byte, identity execution.StateKeyIdentity, contractRef execution.FrozenExecutionContractRef, candidate execution.ApplyVersion) execution.RuntimeStateView {
+	segments := segment.SourceFrom(ctx)
+	if segments == nil {
+		segments = store.options.Segments
+	}
+	view, extension := decodeRuntimeCovered(raw, identity, contractRef, candidate, segments)
+	if extension != "" {
+		store.segments.extended(extension)
+	}
+	return view
 }
 
 // decodeRuntimeCovered reads a stored framed record, extends a member's read
@@ -488,34 +496,35 @@ func (store *ExecutionStore) decodeRuntime(raw []byte, identity execution.StateK
 // frame's magic are corrupt: no writer of this or the previous snapshot
 // stores any other shape under the runtime key.
 func decodeRuntimeCovered(raw []byte, identity execution.StateKeyIdentity, contractRef execution.FrozenExecutionContractRef,
-	candidate execution.ApplyVersion, segments SegmentCoverage) execution.RuntimeStateView {
+	candidate execution.ApplyVersion, segments SegmentCoverage) (execution.RuntimeStateView, segment.Extension) {
 	invalid := func(reason string) execution.RuntimeStateView {
 		return execution.RuntimeStateView{Identity: identity, BlobRevision: 1, Status: execution.StateDeterministicInvalid,
 			ReasonCode: execution.ReasonCode(reason)}
 	}
 	if !packedFrame(raw) {
-		return invalid(contract.ReasonStateCorrupt)
+		return invalid(contract.ReasonStateCorrupt), ""
 	}
 	view, err := decodeRuntimePacked(raw, identity)
 	switch {
 	case errors.Is(err, ErrUnsupportedState):
-		return invalid(contract.ReasonStateSchemaUnsupported)
+		return invalid(contract.ReasonStateSchemaUnsupported), ""
 	case err != nil:
-		return invalid(contract.ReasonStateCorrupt)
+		return invalid(contract.ReasonStateCorrupt), ""
 	}
 	view.Representation = execution.StateRepresentationFramed
 	view.Status = storedLoadStatus(view.Levels, view.SeriesGuard)
+	var extension segment.Extension
 	if segments != nil {
 		if coverage, member := segments.Coverage(identity); member {
-			view, _ = segment.Extend(view, coverage)
+			view, extension = segment.Extend(view, coverage)
 		}
 	}
 	classified, err := execution.ClassifyStatePreflight(execution.StatePreflightRequest{Contract: contractRef,
 		Items: []execution.StatePreflightItem{{Identity: identity, ApplyVersion: candidate}}}, execution.StatePreflightResult{Items: []execution.RuntimeStateView{view}})
 	if err != nil {
-		return invalid(contract.ReasonStateCorrupt)
+		return invalid(contract.ReasonStateCorrupt), extension
 	}
-	return classified.Items[0]
+	return classified.Items[0], extension
 }
 
 // storedLoadStatus is what the Levels and the series guard say about a record

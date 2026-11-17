@@ -758,6 +758,8 @@ var codeChecks = map[string]verdict{
 	"RESOURCE_SHARE_EXCEEDED": lands(CheckPlanUnevaluable),
 	"KAFKA_UNAVAILABLE":       otherDown(),
 	"STATE_WRITE_RETRYABLE":   storeDown(),
+	"SEGMENT_WRITE_FAILED":    storeDown(),
+	"SEGMENT_READ_FAILED":     storeDown(),
 	"OUTPUT_ACK_UNKNOWN":      otherDown(),
 	// This deployment's own Snapshot store not answering until the Slot's
 	// recovery bound. The word is shared with a corrupt Snapshot and an

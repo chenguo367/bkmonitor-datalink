@@ -69,6 +69,11 @@ func TestASlotFailureThatNamesItselfIsNotReportedAsUnnamed(t *testing.T) {
 			want: observability.ReasonCode(contract.ReasonQueryDeliveryTimeout),
 		},
 		{
+			name: "a Slot with a segment skip word whose segments did not read",
+			err:  fmt.Errorf("alarmd worker: query: %w", worker.ErrSegmentsUnread),
+			want: observability.ReasonCode(contract.ReasonSegmentReadFailed),
+		},
+		{
 			name: "a slice read ahead and taken on ended with its context ended",
 			err:  fmt.Errorf("alarmd worker: query: %w", worker.ErrReadAheadContextEnded),
 			want: observability.ReasonCode(contract.ReasonReadAheadContextEnded),

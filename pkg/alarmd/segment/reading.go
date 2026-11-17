@@ -73,13 +73,17 @@ type PlanReading struct {
 // LastUse is what a process last did with a Plan's segments: the source and
 // reason its last read came by (cache and hit, the cache answered; redis and
 // why it did not) and when, and the result its last write came back with
-// (WriteResults) and when. A part not done is empty.
+// (WriteResults) and when, with what that write's round did with its
+// members' State writes (SkipModes) and how many it left unwritten. A part
+// not done is empty.
 type LastUse struct {
 	ReadSource  string     `json:"read_source,omitempty"`
 	ReadReason  string     `json:"read_reason,omitempty"`
 	ReadAt      *time.Time `json:"read_at,omitempty"`
 	WriteResult string     `json:"write_result,omitempty"`
 	WriteAt     *time.Time `json:"write_at,omitempty"`
+	SkipMode    string     `json:"skip_mode,omitempty"`
+	Skipped     int        `json:"skipped,omitempty"`
 }
 
 // ReadMark is a Plan's reading of the mark bytes Redis holds for it: absent

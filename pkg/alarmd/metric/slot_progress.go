@@ -49,9 +49,12 @@ func newSlotProgressMetrics() slotProgressMetrics {
 			Subsystem: metricSubsystem, Name: "slot_not_committed_total",
 			Help: "Slot attempts that began their Slot (slot_begin_total{result=\"committed\"}) and returned without " +
 				"writing it down, once each, by why: QUERY_NOT_READY, SNAPSHOT_RETRY; a result by its reason or kind " +
-				"(activation_read_failed, activation_changed, output_retry_pending, retry_pending, incomplete, " +
+				"(activation_read_failed, activation_changed, output_retry_pending, segment_write_failed - a round " +
+				"that left members' State unwritten whose stable segments' write did not land, retried whole - " +
+				"retry_pending, incomplete, " +
 				"no_result: a panic); an error by what it is (finalization_failed, owner_refused, query_permit_failed, cancelled, " +
-				"deadline_exceeded, declined, capacity_refused, store_conflict) or else the step it failed in " +
+				"deadline_exceeded, declined, capacity_refused, store_conflict, segment_read_failed - a Slot with a " +
+				"segment skip word whose segments did not read, its retry reading them as stored) or else the step it failed in " +
 				"(query_, complete_, apply_, output_, progress_commit_, query_free_failed); other, none of these.",
 		}, []string{"reason"}),
 		superseded: prometheus.NewCounterVec(prometheus.CounterOpts{

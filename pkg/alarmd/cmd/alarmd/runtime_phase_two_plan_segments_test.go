@@ -52,6 +52,13 @@ func assertTheObjectReadsItsPlanSegmentsAndNextSlot(t *testing.T, bundle *phaseT
 		read.Last.ReadSource == "" || read.Last.ReadReason == "" || read.Last.ReadAt == nil {
 		t.Fatalf("this replica's last use %+v, want the round's read and its applied write", read.Last)
 	}
+	// The round's one query waited the provider's 50 ms before its answer's
+	// first byte (the full test's query service): the object reads it on its
+	// detail, a completed Slot writing no line of its own.
+	if detail.LastQueryPhases == nil || detail.LastQueryPhases.WaitMillis < 50 || detail.LastQueryPhases.WaitMillisMax < 50 ||
+		detail.LastQueryPhases.Slot != int64(slot) {
+		t.Fatalf("last_query_phases = %+v, want the round at %d's 50 ms wait", detail.LastQueryPhases, slot)
+	}
 	if detail.Wake == nil || !detail.Wake.Known || detail.Wake.IntervalSeconds <= 0 ||
 		detail.Wake.NextSlot.Unix() != int64(slot)+detail.Wake.IntervalSeconds {
 		t.Fatalf("wake = %+v, want the Slot after %d by its period", detail.Wake, slot)

@@ -220,9 +220,15 @@ var failureFacets = map[string]facets{
 	// stage, as this deployment's own contract between plan and read.
 	"SUPPLEMENT_KEPT_READ_ABSENT": {StageQuery, ClassContract, DependencyNone},
 	// The Slot given up for that refusal (finding.go has the why).
-	"RESOURCE_SHARE_EXCEEDED":       {StageEvaluate, ClassCapacity, DependencyNone},
-	"KAFKA_UNAVAILABLE":             {StageCommit, ClassUnavailable, DependencyKafka},
-	"STATE_WRITE_RETRYABLE":         {StageCommit, ClassUnavailable, ""},
+	"RESOURCE_SHARE_EXCEEDED": {StageEvaluate, ClassCapacity, DependencyNone},
+	"KAFKA_UNAVAILABLE":       {StageCommit, ClassUnavailable, DependencyKafka},
+	"STATE_WRITE_RETRYABLE":   {StageCommit, ClassUnavailable, ""},
+	// A Slot whose stable segments' write did not land after its round left
+	// members unwritten: the State store's, as a State write's.
+	"SEGMENT_WRITE_FAILED": {StageCommit, ClassUnavailable, ""},
+	// Its stable segments not read before the Slot's State: the State
+	// store's, as a State read's.
+	"SEGMENT_READ_FAILED":           {StageEvaluate, ClassUnavailable, ""},
 	"OUTPUT_ACK_UNKNOWN":            {StageCommit, ClassUnavailable, DependencyKafka},
 	"SNAPSHOT_UNAVAILABLE":          {StageConfig, ClassUnavailable, ""},
 	"TARGET_RESOLUTION_INCOMPLETE":  {StageQuery, ClassConfig, DependencyNone},

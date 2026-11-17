@@ -240,7 +240,7 @@ func openProductionControlRoleBundle(
 	}
 	assignments.WithTimelineRevisions(core.Repository)
 	controlOwnership, err := newProductionPhaseTwoOwnership(productionPhaseTwoOwnershipDependencies{
-		Roles: cfg.EffectiveRoles(), Store: core.Ownership, WorkerID: cfg.PhaseTwo.Worker.ID,
+		Roles: cfg.EffectiveRoles(), Store: core.Ownership, WorkerID: cfg.PhaseTwo.Worker.ID, SegmentSkip: cfg.PhaseTwo.Control.SegmentSkip,
 		Catalog: core.Catalog, Progress: core.Progress, Now: external.Now, Observer: observer,
 		ControlLeaderTTL: cfg.PhaseTwo.Ownership.ControlLeaderTTL.Duration(), Reconcile: assignments, Activations: core.Repository,
 		LeaseTTL: cfg.PhaseTwo.Ownership.LeaseTTL.Duration(), ReconcileInterval: cfg.PhaseTwo.Control.ReconcileInterval.Duration(),

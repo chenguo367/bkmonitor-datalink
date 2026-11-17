@@ -26,12 +26,12 @@ type SegmentStoreSource func() state.SegmentStats
 // stage) from the execution store: every cell of every closed vocabulary from
 // the start, so a zero is a reading.
 type segmentStoreCollector struct {
-	source                      SegmentStoreSource
-	reads, writes, drift, cache *prometheus.Desc
+	source                               SegmentStoreSource
+	reads, writes, drift, cache, extends *prometheus.Desc
 }
 
 func (c *segmentStoreCollector) Describe(descriptions chan<- *prometheus.Desc) {
-	for _, desc := range []*prometheus.Desc{c.reads, c.writes, c.drift, c.cache} {
+	for _, desc := range []*prometheus.Desc{c.reads, c.writes, c.drift, c.cache, c.extends} {
 		descriptions <- desc
 	}
 }
@@ -48,6 +48,9 @@ func (c *segmentStoreCollector) Collect(metrics chan<- prometheus.Metric) {
 		metrics <- prometheus.MustNewConstMetric(c.writes, prometheus.CounterValue, float64(stats.Writes[result]), result)
 	}
 	metrics <- prometheus.MustNewConstMetric(c.drift, prometheus.CounterValue, float64(stats.Drift))
+	for _, extension := range segment.Extensions {
+		metrics <- prometheus.MustNewConstMetric(c.extends, prometheus.CounterValue, float64(stats.Extends[extension]), string(extension))
+	}
 	metrics <- prometheus.MustNewConstMetric(c.cache, prometheus.GaugeValue, float64(stats.Plans), "plans")
 	metrics <- prometheus.MustNewConstMetric(c.cache, prometheus.GaugeValue, float64(stats.Pages), "pages")
 	metrics <- prometheus.MustNewConstMetric(c.cache, prometheus.GaugeValue, float64(stats.Bytes), "bytes")
@@ -92,6 +95,13 @@ func (r *Recorder) BindSegmentStore(source SegmentStoreSource) error {
 				"kept - other bytes, or gone with no write or renewal saying so - beyond what a write in doubt tried "+
 				"to leave. The cache's claim that its owner is the keys' only writer, read against the store: zero "+
 				"is the second stage's bar."),
+		extends: descriptor("state_segment_extend_total",
+			"Reads of a Plan's stable segment member's State (014 B3 3.2 rule 3), by what the read's extension "+
+				"did: extended, normal points made from its own last point to the segment's end (min of its "+
+				"close and the Plan's mark), the points a skipped write left out; within, its own points reach the "+
+				"end, as every read does while every State is written; refused_* (not_found, off_grid, "+
+				"fingerprint, record_id, record_clash, bad_coverage, no_levels), read as stored - so as a gap "+
+				"where points are missing, never as normal.", "outcome"),
 		cache: descriptor("worker_segment_shadow_memory",
 			"What the State cache holds of the Plans' stable segments on this worker, at the scrape, by kind: "+
 				"plans, the marks; pages, the member pages; bytes, their charge (value and key at their size "+

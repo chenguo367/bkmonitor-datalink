@@ -10,6 +10,7 @@
 package state
 
 import (
+	"context"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
@@ -58,7 +59,7 @@ func longHistoryRecord(t testing.TB) ([]byte, execution.StateKeyIdentity, execut
 // read derives, point by point.
 func TestALongRecordReadsBackEveryPointsDerivedID(t *testing.T) {
 	raw, identity, next := longHistoryRecord(t)
-	view := decodeRuntimeCovered(raw, identity, frozenRef(), next, nil)
+	view, _ := decodeRuntimeCovered(raw, identity, frozenRef(), next, nil)
 	if len(view.History) != longHistoryPoints {
 		t.Fatalf("read back %d points (status %s %s), want %d", len(view.History), view.Status, view.ReasonCode, longHistoryPoints)
 	}
@@ -80,7 +81,7 @@ func BenchmarkReadALongHistoryRecord(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for index := 0; index < b.N; index++ {
-		if view := decodeRuntimeCovered(raw, identity, frozenRef(), next, nil); len(view.History) != longHistoryPoints {
+		if view, _ := decodeRuntimeCovered(raw, identity, frozenRef(), next, nil); len(view.History) != longHistoryPoints {
 			b.Fatalf("read back %d points", len(view.History))
 		}
 	}
@@ -96,9 +97,9 @@ func TestTheStoreDecodesAFramedRecordOnce(t *testing.T) {
 	store := newBatchStore(t, newPipelineMemoryBackend(), nil)
 	item := execution.StatePreflightItem{Identity: identity, ApplyVersion: next}
 	request := execution.StatePreflightRequest{Contract: frozenRef(), Items: []execution.StatePreflightItem{item}}
-	decode := testing.AllocsPerRun(5, func() { _ = decodeRuntimeCovered(raw, identity, frozenRef(), next, nil) })
+	decode := testing.AllocsPerRun(5, func() { _, _ = decodeRuntimeCovered(raw, identity, frozenRef(), next, nil) })
 	read := testing.AllocsPerRun(5, func() {
-		if view := store.readFramedRecord(request, item, raw); len(view.History) != longHistoryPoints {
+		if view := store.readFramedRecord(context.Background(), request, item, raw); len(view.History) != longHistoryPoints {
 			t.Fatalf("read back %d points", len(view.History))
 		}
 	})

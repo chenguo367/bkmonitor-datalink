@@ -1276,6 +1276,10 @@ type productionPhaseTwoOwnershipDependencies struct {
 	// Assignments under it like a control process, and needs the same
 	// coordination dependencies.
 	ControlCandidate bool
+	// SegmentSkip is the values' ask for the segment skip word
+	// (phase_two.control.segment_skip): the Leader sets it on the records
+	// while every ready worker declares the contract (reconcileSegmentSkip).
+	SegmentSkip bool
 	// QueryCooldowns keeps each owned Query Group's place in the query
 	// cooldown pool across restarts and owners. Nil keeps it in the Runner
 	// alone, which is what every runtime did before.
@@ -1694,6 +1698,16 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 	// reading exist so a roll can be watched going 0 -> n -> 0 before one
 	// does.
 	shardGate := ownership.ShardSplitAdmission(workers)
+	// The segment skip word, restated on the records the round settled
+	// before any move: a move leaves the word as it is.
+	skip, err := runtime.reconcileSegmentSkip(ctx, authority, workers, records, at)
+	if err != nil {
+		if errors.Is(err, ownership.ErrStaleFence) {
+			runtime.clearControlAuthority(authority)
+		}
+		return err
+	}
+	round.done(fleet.LeaderRoundStageSegmentSkip)
 	readings := runtime.dependencies.Costs.Readings(owners, workers)
 	bytePlan := runtime.reconciler.PlanByteMoves(owners, workers, readings, at)
 	byteMoves := make([]scheduler.RebalanceMove, 0, len(bytePlan.Moves))
@@ -1705,7 +1719,7 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 		owners[move.QueryGroup] = move.To
 	}
 	if err != nil {
-		runtime.observeRebalance(ctx, scheduler.RebalancePlan{Owned: map[string]int{}}, rebalanceOutcome{}, bytePlan, byteOutcome, shardGate, settlement, at)
+		runtime.observeRebalance(ctx, scheduler.RebalancePlan{Owned: map[string]int{}}, rebalanceOutcome{}, bytePlan, byteOutcome, shardGate, skip, settlement, at)
 		return err
 	}
 	round.done(fleet.LeaderRoundStageByteMoves)
@@ -1720,7 +1734,7 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 	for _, move := range outcome.applied {
 		owners[move.QueryGroup] = move.To
 	}
-	runtime.observeRebalance(ctx, plan, outcome, bytePlan, byteOutcome, shardGate, settlement, at)
+	runtime.observeRebalance(ctx, plan, outcome, bytePlan, byteOutcome, shardGate, skip, settlement, at)
 	if err != nil {
 		return err
 	}
@@ -2066,6 +2080,7 @@ func (runtime *productionPhaseTwoOwnership) observeRebalance(
 	bytePlan scheduler.BytePlan,
 	byteOutcome rebalanceOutcome,
 	shardGate ownership.ShardSplitGate,
+	skip observability.SegmentSkipFacts,
 	settlement scheduler.RoundSettlement,
 	at time.Time,
 ) {
@@ -2080,6 +2095,12 @@ func (runtime *productionPhaseTwoOwnership) observeRebalance(
 		DeclinedEverywhere: settlement.DeclinedEverywhere, DeclinedEverywhereSample: declinedEverywhereSamples(settlement),
 		Bytes:      byteConstraintFacts(bytePlan, byteOutcome),
 		ShardAware: &observability.ShardAwareFacts{Ready: shardGate.Ready, Unaware: shardGate.Unaware},
+	}
+	// The word's facts only when they say something: asked for, or a
+	// round that took words back or failed to. Without the ask every
+	// worker is one that does not declare it, which is not news.
+	if skip.Asked || skip.Withdrawn > 0 || skip.Failed > 0 {
+		facts.SegmentSkip = &skip
 	}
 	workerIDs := make([]string, 0, len(plan.Owned))
 	for workerID := range plan.Owned {
@@ -2116,6 +2137,7 @@ func (runtime *productionPhaseTwoOwnership) observeRebalance(
 	}
 	published.Bytes = fleetByteConstraintFacts(bytePlan, byteOutcome)
 	published.ShardAware = &fleet.ShardAwareFacts{Ready: shardGate.Ready, Unaware: shardGate.Unaware}
+	published.SegmentSkip = facts.SegmentSkip
 	runtime.mu.Lock()
 	runtime.lastRebalance = published
 	runtime.mu.Unlock()

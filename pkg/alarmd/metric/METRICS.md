@@ -2061,7 +2061,7 @@ Slots of Query Groups this process holds that were sent to replay before their n
 
 Labels: `reason`
 
-Slot attempts that began their Slot (slot_begin_total{result="committed"}) and returned without writing it down, once each, by why: QUERY_NOT_READY, SNAPSHOT_RETRY; a result by its reason or kind (activation_read_failed, activation_changed, output_retry_pending, retry_pending, incomplete, no_result: a panic); an error by what it is (finalization_failed, owner_refused, query_permit_failed, cancelled, deadline_exceeded, declined, capacity_refused, store_conflict) or else the step it failed in (query_, complete_, apply_, output_, progress_commit_, query_free_failed); other, none of these.
+Slot attempts that began their Slot (slot_begin_total{result="committed"}) and returned without writing it down, once each, by why: QUERY_NOT_READY, SNAPSHOT_RETRY; a result by its reason or kind (activation_read_failed, activation_changed, output_retry_pending, segment_write_failed - a round that left members' State unwritten whose stable segments' write did not land, retried whole - retry_pending, incomplete, no_result: a panic); an error by what it is (finalization_failed, owner_refused, query_permit_failed, cancelled, deadline_exceeded, declined, capacity_refused, store_conflict, segment_read_failed - a Slot with a segment skip word whose segments did not read, its retry reading them as stored) or else the step it failed in (query_, complete_, apply_, output_, progress_commit_, query_free_failed); other, none of these.
 
 ## alarmd_slot_operation_duration_seconds
 
@@ -2253,6 +2253,18 @@ Slots whose retained bytes reached at least 95 percent of the one-object share o
 
 Segment keys a read from Redis under the fence the State cache kept them under found other than kept - other bytes, or gone with no write or renewal saying so - beyond what a write in doubt tried to leave. The cache's claim that its owner is the keys' only writer, read against the store: zero is the second stage's bar.
 
+## alarmd_state_segment_degraded_total
+
+Labels: `reason`
+
+Plans whose stable segments a Slot could not use as written (014 B3 9.7) - their members read as stored, every one written whole, the book started over - by reason: unread (the segments, or the generation's carried from, did not read in a retry of a Slot dispatched with a segment skip word, its first attempt failed SEGMENT_READ_FAILED), book_refused (the pool did not take the books in such a retry), undecodable (the stored segments did not decode), write_absent (the round's write was not made); a Plan once a Slot. stopped: a Plan degraded a second time in its owner's term, its members no longer left unwritten on this replica until the owner changes - plan_segments.last skip_mode "stopped" names it. Zero is the reading; undecodable or stopped growing is segments being lost.
+
+## alarmd_state_segment_extend_total
+
+Labels: `outcome`
+
+Reads of a Plan's stable segment member's State (014 B3 3.2 rule 3), by what the read's extension did: extended, normal points made from its own last point to the segment's end (min of its close and the Plan's mark), the points a skipped write left out; within, its own points reach the end, as every read does while every State is written; refused_* (not_found, off_grid, fingerprint, record_id, record_clash, bad_coverage, no_levels), read as stored - so as a gap where points are missing, never as normal.
+
 ## alarmd_state_segment_read_total
 
 Labels: `source`, `reason`
@@ -2263,7 +2275,13 @@ A Plan's stable segments (014 B3: its mark and member pages) read once a Slot be
 
 Labels: `result`
 
-The renewals of a Plan's member pages due - a quarter of the shorter of the lifetime their last renewal gave and this round's since it (014 B3 3.5) - by result: renewed and failed, pages whose scripts all answered or not (a failed page's renewal time stays, and it is renewed whole next round); missing, member State keys a renewal found gone (not made again: they read MISSING_WARMING); over_budget, renewal scripts of at most 256 keys that ran past 2.5 ms by the server's clock; fallback_write, pages unrenewed for half their lifetime, whose members are written whole - in the second stage counted only, every State being written. missing, over_budget and fallback_write all zero over every lifetime tier is the third stage's bar.
+The renewals of a Plan's member pages due - a quarter of the shorter of the lifetime their last renewal gave and this round's since it (014 B3 3.5) - by result: renewed and failed, pages whose scripts all answered or not (a failed page's renewal time stays, and it is renewed whole next round); missing, member State keys a renewal found gone (not made again: they read MISSING_WARMING); over_budget, renewal scripts of at most 256 keys that ran past 2.5 ms by the server's clock; fallback_write, pages unrenewed for half their lifetime, whose members are written whole - in the second stage counted only, every State being written; fallback_short_life, the same of a page whose lifetime is no more than two of its Plan's intervals, which goes half of it between two rounds by design (a Plan keeping one point, or one its horizon cuts short), every round. missing, over_budget and fallback_write all zero over every lifetime tier is the third stage's bar; fallback_short_life is not read in it.
+
+## alarmd_state_segment_sample_total
+
+Labels: `period_class`
+
+Plans' rounds that were their piece's sampled round of the day (014 B3 9.2), whether the round skips or not, by the Plan's period class: about one a day for each piece of each Plan, every round for a Plan run once a day or less often. In a sampled round no member is left unwritten - every one is written whole and compared, its outcomes under state_segment_shadow_total{round="sampled"}. Flat while Plans run is a sampled round that never comes.
 
 ## alarmd_state_segment_shadow_members_total
 
@@ -2291,9 +2309,15 @@ Slots run without the shadow of their Plans' stable segments, their State writte
 
 ## alarmd_state_segment_shadow_total
 
-Labels: `outcome`, `period_class`
+Labels: `outcome`, `period_class`, `round`
 
-Open members of a Plan's stable segments present in a round, as the shadow kept in process compared them - every State still written - by outcome and the Plan's period class (lt_1m, 1m, le_5m, le_1h, le_1d, gt_1d). match: the points the segment makes and the Level state it reads as are what the round wrote. exception_*: a member the skip would have written whole and taken off its page, by the first reason - events (it sent events), unsteady (not decided steady and normal with its stored Levels unchanged), level (a Level not FULL), off_grid (its points off the mark's grid), returned (a closed member back), short_of_mark (its last point short of the round's mark): read exception_events for whether quiet members send events. mismatch_*: a member the skip would have left unwritten, once each field the made read differs in from the write: a skip would read it otherwise than written. mismatch_unmade: the points could not be made. Zero mismatches over every period class is the shadow stage's evidence.
+Open members of a Plan's stable segments present in a round, as the shadow kept in process compared them - every State still written - by outcome and the Plan's period class (lt_1m, 1m, le_5m, le_1h, le_1d, gt_1d). match: the points the segment makes and the Level state it reads as are what the round wrote. exception_*: a member the skip would have written whole and taken off its page, by the first reason - events (it sent events), unsteady (not decided steady and normal with its stored Levels unchanged), level (a Level not FULL), off_grid (its points off the mark's grid), returned (a closed member back), short_of_mark (its last point short of the round's mark): read exception_events for whether quiet members send events. mismatch_*: a member the skip would have left unwritten, once each field the made read differs in from the write: a skip would read it otherwise than written. mismatch_unmade: the points could not be made. round: sampled, the Plan's piece's sampled round of the day (014 B3 9.2), every member written whole and compared; normal, any other. Zero mismatches over every period class, read as sum without(round) - series from a process before the label carry none and sum the same - is the shadow stage's evidence; with members skipped, mismatch_* in round="sampled" is the third stage's alarm reading.
+
+## alarmd_state_segment_skip_flag_ignored_total
+
+Labels: `reason`
+
+Slots dispatched with the Assignment's segment skip word (014 B3 stage 3) that did not follow it, their stable members written whole, by reason: epoch_mismatch (the word names a Leader other than the one whose view the worker has installed - set before a Leader change and not yet restated, or left by a Leader a rollback replaced), no_view (the worker has installed no view). Nonzero for a short while after a Leader change is expected; growing without one is a word nobody restates.
 
 ## alarmd_state_segment_write_total
 
@@ -2315,7 +2339,7 @@ Series the Query Groups this replica holds now bound in their latest evaluated r
 
 Labels: `reason`
 
-Runtime State mutations admitted for writing (state_series_class_total) that their attempt did not write, by the exit they left at. output_withheld is a Plan whose output did not start or did not land - a lease too short for a batch, a refusal decided in this process, an acknowledgement unknown - so none of its State was written; output_partial is a series whose events the sink would not represent; state_admission_rejected is a mutation the State admission refused by name; state_apply_failed is a write the store failed or refused; slot_failed is the rest the attempt admitted when it ended with an error by any other exit, its own Plan's or a later one's; unaccounted stays zero, each non-zero attempt saying so on a line with reason internal_unknown: admitted mutations no named exit counted on an attempt that completed, after which the classes sum to written plus this family again, or more counted than admitted, by the difference, when they cannot - the census itself counted wrong. Otherwise the classes sum to written plus this family, per attempt.
+Runtime State mutations admitted for writing (state_series_class_total) that their attempt did not write, by why: the exit they left at, or the skip. output_withheld is a Plan whose output did not start or did not land - a lease too short for a batch, a refusal decided in this process, an acknowledgement unknown - so none of its State was written; output_partial is a series whose events the sink would not represent; state_admission_rejected is a mutation the State admission refused by name; state_apply_failed is a write the store failed or refused; segment_member_skipped is not an exit but the skip (014 B3 stage 3): an open member of its Plan's stable segments, steady, normal and quiet on the grid, its State left as it was and read through the segment; slot_failed is the rest the attempt admitted when it ended with an error by any other exit, its own Plan's or a later one's; unaccounted stays zero, each non-zero attempt saying so on a line with reason internal_unknown: admitted mutations no named exit counted on an attempt that completed, after which the classes sum to written plus this family again, or more counted than admitted, by the difference, when they cannot - the census itself counted wrong. Otherwise the classes sum to written plus this family, per attempt.
 
 ## alarmd_state_superseded_total
 

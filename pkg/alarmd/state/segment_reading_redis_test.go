@@ -55,9 +55,9 @@ func TestAnObjectsPlanSegmentsAreTheMarksAndWhatThisProcessLastDidWithThem(t *te
 	secondMark, secondRaw := readingMark(t, 1_799_999_940, 1_799_999_820, 4)
 	results := writeSegments(t, writer, testApplyFence(),
 		segment.PlanWrite{Key: onFirst, Lifetime: segmentLifetime(), Pages: map[int][]byte{0: []byte("a"), 1: []byte("b")},
-			Mark: firstRaw, PageCount: 2},
+			Mark: firstRaw, PageCount: 2, SkipMode: segment.SkipModeSkip, Skipped: 3},
 		segment.PlanWrite{Key: onSecond, Lifetime: segmentLifetime(), Pages: map[int][]byte{0: []byte("a"), 1: []byte("b"),
-			2: []byte("c"), 3: []byte("d")}, Mark: secondRaw, PageCount: 4})
+			2: []byte("c"), 3: []byte("d")}, Mark: secondRaw, PageCount: 4, SkipMode: segment.SkipModeSampled})
 	if results[0] != segment.WriteApplied || results[1] != segment.WriteApplied {
 		t.Fatalf("writes: %v", results)
 	}
@@ -104,15 +104,16 @@ func TestAnObjectsPlanSegmentsAreTheMarksAndWhatThisProcessLastDidWithThem(t *te
 	if !reading.LastRecorded || reading.Plans[2].Last != nil || reading.Plans[3].Last != nil {
 		t.Fatalf("the writer's reading %+v, want its two Plans' uses and none for the others", reading)
 	}
-	if last := reading.Plans[0].Last; !reflect.DeepEqual(last, &segment.LastUse{WriteResult: segment.WriteApplied, WriteAt: &wrote}) {
-		t.Fatalf("the writer's last use of the first Plan %+v, want its applied write alone", last)
+	if last := reading.Plans[0].Last; !reflect.DeepEqual(last, &segment.LastUse{WriteResult: segment.WriteApplied, WriteAt: &wrote,
+		SkipMode: segment.SkipModeSkip, Skipped: 3}) {
+		t.Fatalf("the writer's last use of the first Plan %+v, want its applied write alone, with its round's skip", last)
 	}
 	at = at.Add(time.Minute)
 	read := at
 	readSegments(t, writer, testApplyFence().Fence, onFirst, onSecond)
 	reading, _ = writer.PlanSegments(ctx, group, keys)
 	if last := reading.Plans[1].Last; !reflect.DeepEqual(last, &segment.LastUse{ReadSource: segment.SourceCache,
-		ReadReason: segment.ReadHit, ReadAt: &read, WriteResult: segment.WriteApplied, WriteAt: &wrote}) {
+		ReadReason: segment.ReadHit, ReadAt: &read, WriteResult: segment.WriteApplied, WriteAt: &wrote, SkipMode: segment.SkipModeSampled}) {
 		t.Fatalf("after a read the cache answered: %+v", last)
 	}
 

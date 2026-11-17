@@ -823,6 +823,9 @@ func openProductionPhaseTwoBundleAssembly(
 	// a store that can (execution.PlanNoDataStager), and writes it whole at
 	// the statement otherwise: the store it is handed has to be one.
 	var _ execution.PlanNoDataStager = executionStore
+	// The view client is built after the ports; the Slots read its epoch
+	// through this once it is set.
+	installedEpoch := &installedControlEpoch{}
 	workerPorts := worker.Ports{
 		Now:           time.Now,
 		EffectiveTime: legacyTime.Provider(),
@@ -841,9 +844,10 @@ func openProductionPhaseTwoBundleAssembly(
 		OpenAlerts: &openAlertCopyPort{copy: openAlertCopy, own: ownOpens, record: episodeWriter, opens: newOpens},
 		// The horizon the platform settings copy resolves now, read per Slot:
 		// runtime state lives at most this long past a series' last write.
-		StateHorizon: func() int64 { return platformSettings.Current().NoDataTrackingHorizonSeconds },
-		Targets:      targetResolver,
-		ScopeGroups:  scopeGroups,
+		StateHorizon:          func() int64 { return platformSettings.Current().NoDataTrackingHorizonSeconds },
+		InstalledControlEpoch: installedEpoch.read,
+		Targets:               targetResolver,
+		ScopeGroups:           scopeGroups,
 		// The State cache borrows what no Slot has reserved of the retained
 		// pool and gives it back when a Slot needs it.
 		RetainedBorrower: executionStore.StateCacheBorrower(),
@@ -944,6 +948,7 @@ func openProductionPhaseTwoBundleAssembly(
 	productionOwnership, err := newProductionPhaseTwoOwnership(productionPhaseTwoOwnershipDependencies{
 		Roles:                cfg.EffectiveRoles(),
 		ControlCandidate:     phaseTwoControlCandidacy(cfg) == ownership.ControlCandidacyFallback,
+		SegmentSkip:          cfg.PhaseTwo.Control.SegmentSkip,
 		SteppedDownAsLeader:  controlLeaderSteppedDown(reconciler, recorder),
 		QueryCooldowns:       newProductionQueryCooldownStore(cfg, redisForCaller(runtimeClient, redisfailure.CallerQueryCooldown), recorder, observer),
 		ReadHolds:            readHolds,
@@ -1004,6 +1009,7 @@ func openProductionPhaseTwoBundleAssembly(
 		return nil, err
 	}
 	viewGate.attach(viewClient)
+	installedEpoch.client.Store(viewClient)
 	productionOwnership.WithViewExecutionGate(viewGate)
 	recorder.SetViewClientSource(func() metric.ViewClientCounts {
 		counts := viewClientCounts(viewClient.Stats())
@@ -1067,6 +1073,7 @@ func openProductionPhaseTwoBundleAssembly(
 	// request for the objects it tracks.
 	fleetService.SetLocalRows(fleetTracker.TrackedRow)
 	fleetService.SetLocalQueryRanges(fleetTracker.QueryRanges)
+	fleetService.SetLocalQueryPhases(fleetTracker.QueryPhases)
 	// Where an object's Plans' Runtime State comes from, read from its
 	// timeline on request: any replica can answer it.
 	fleetService.SetPlanCarries(func(ctx context.Context, queryGroup string) (controlplane.PlanCarriesReading, error) {

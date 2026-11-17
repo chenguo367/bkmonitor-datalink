@@ -437,11 +437,14 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		stateSeriesNotWritten: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: metricSubsystem, Name: "state_series_not_written_total",
 			Help: "Runtime State mutations admitted for writing (state_series_class_total) that their attempt " +
-				"did not write, by the exit they left at. output_withheld is a Plan whose output did not start " +
+				"did not write, by why: the exit they left at, or the skip. output_withheld is a Plan whose output did not start " +
 				"or did not land - a lease too short for a batch, a refusal decided in this process, an " +
 				"acknowledgement unknown - so none of its State was written; output_partial is a series whose " +
 				"events the sink would not represent; state_admission_rejected is a mutation the State " +
 				"admission refused by name; state_apply_failed is a write the store failed or refused; " +
+				"segment_member_skipped is not an exit but the skip (014 B3 stage 3): an open member of its Plan's " +
+				"stable segments, steady, normal and quiet on the grid, its State left as it was and read through " +
+				"the segment; " +
 				"slot_failed is the rest the attempt admitted when it ended with an error by any other exit, " +
 				"its own Plan's or a later one's; unaccounted stays zero, each non-zero attempt saying so on a " +
 				"line with reason internal_unknown: admitted mutations no named exit counted on an attempt that " +

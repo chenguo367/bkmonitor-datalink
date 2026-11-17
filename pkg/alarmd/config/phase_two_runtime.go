@@ -54,6 +54,14 @@ type PhaseTwoControlConfig struct {
 	RefreshInterval   Duration `yaml:"-"`
 	ReconcileInterval Duration `yaml:"-"`
 	CatalogTTL        Duration `yaml:"-"`
+	// SegmentSkip asks the Control Leader to let Slots leave their Plans'
+	// stable members' writes out (design 014 B3 stage 3). Off by default.
+	// The Leader sets the Assignments' segment skip word only while every
+	// ready worker declares ownership.CapabilitySegmentSkip; asked for and
+	// held, the round's rebalance facts carry SEGMENT_SKIP_HELD and the
+	// workers that do not.
+	// A build without the key keeps it among the unknown keys and starts.
+	SegmentSkip bool `yaml:"segment_skip"`
 }
 
 // PhaseTwoPlatformSettingsConfig is alarmd's deployment layer of the

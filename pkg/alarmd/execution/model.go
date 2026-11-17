@@ -244,6 +244,12 @@ type SlotExecutionRequest struct {
 	// for a Segment written before Segments named their content, in which
 	// case the fence compares what it always compared and nothing more.
 	ContentScope string
+	// SegmentSkip is the Assignment's segment skip word the Slot was
+	// dispatched with: the control epoch of the Leader that let it leave its
+	// stable members' writes out (design 014 B3 stage 3), zero for none. The
+	// worker follows it only while it equals the epoch of the view it has
+	// installed (SegmentSkipAdmitted).
+	SegmentSkip uint64
 	// Supplement is set exactly when Operation is OperationSupplement: the
 	// series this execution may evaluate. See SupplementScope.
 	Supplement *SupplementScope

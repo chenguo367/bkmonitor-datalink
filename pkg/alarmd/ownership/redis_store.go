@@ -407,6 +407,19 @@ func (store *RedisStore) PublishAssignmentReporting(
 	return record, holder, err
 }
 
+// segmentSkipMode is the publish script's word for the decision's segment
+// skip: "1" sets it to the publishing Leader's epoch, "2" clears it, empty
+// leaves it.
+func segmentSkipMode(decision AssignmentDecision) string {
+	switch {
+	case decision.SetSegmentSkip:
+		return "1"
+	case decision.WithdrawSegmentSkip:
+		return "2"
+	}
+	return ""
+}
+
 func (store *RedisStore) publishAssignment(
 	ctx context.Context,
 	authority PublicationAuthority,
@@ -429,7 +442,7 @@ func (store *RedisStore) publishAssignment(
 		decision.ExpectedRecordRevision, string(decision.QueryGroup), decision.DesiredWorkerID,
 		string(decision.PlacementReason), decision.DecidedAt.UnixMilli(),
 		decision.ContentScope, ContentSwitchMargin.Milliseconds(), boolText(decision.WithdrawContentScope),
-		decision.TimelineRecordRevision, store.leaseTTL.Milliseconds(), holder).Result()
+		decision.TimelineRecordRevision, store.leaseTTL.Milliseconds(), holder, segmentSkipMode(decision)).Result()
 	if err != nil {
 		return AssignmentRecord{}, "", err
 	}
@@ -447,6 +460,9 @@ func (store *RedisStore) publishAssignment(
 	var kind HolderKind
 	if len(values) > 11 {
 		kind = HolderKind(scriptText(values[11]))
+	}
+	if err == nil && len(values) > 12 {
+		record.SegmentSkip = uint64(scriptInt(values[12]))
 	}
 	return record, kind, err
 }
@@ -510,6 +526,7 @@ func assignmentFromHash(
 		AssignedAt:   time.UnixMilli(parseInt(values["assigned_at_ms"])),
 		ContentScope: values["content_scope"], PendingContentScope: values["pending_content_scope"],
 		TimelineRecordRevision: parseUint(values["timeline_record_revision"]),
+		SegmentSkip:            parseUint(values["segment_skip"]),
 	}
 	if effective := parseInt(values["effective_at_ms"]); effective > 0 {
 		record.EffectiveAt = time.UnixMilli(effective)
@@ -804,6 +821,11 @@ func (store *RedisStore) CheckFenceWithAssignment(
 		if observed := scriptInt(values[11]); observed > 0 {
 			record.ObservedAt = time.UnixMilli(observed)
 		}
+	}
+	// The segment skip word comes after the server instant, so the
+	// elements before it keep the places they had.
+	if err == nil && len(values) > 12 {
+		record.SegmentSkip = uint64(scriptInt(values[12]))
 	}
 	return record, err
 }
@@ -1297,7 +1319,8 @@ return {'RENEWED', deadline_ms, scope, pending, effective, now_ms, timeline}
 // ARGV[5], when present and non-empty, is the content scope the caller is
 // executing; the fence then also refuses a record that names another. The
 // reply's elements 8 to 10 carry the record's content scope, pending scope
-// and effective time; element 11 carries the timeline revision.
+// and effective time; element 11 carries the timeline revision, element 12
+// the server instant, and element 13 the record's segment skip word.
 var checkFenceScript = redisscript.New("ownership_check_fence", FenceLua+`
 local require_assignment = ARGV[1]
 local owner_id = ARGV[2]
@@ -1308,16 +1331,17 @@ local now_ms = redis_now_ms()
 local empty = {'', '', '', '', '', '', '', '', '', ''}
 local record_fields = {'desired_worker_id', 'assignment_generation',
   'record_revision', 'control_epoch', 'placement_reason', 'assigned_at_ms',
-  'content_scope', 'pending_content_scope', 'effective_at_ms', 'timeline_record_revision'}
+  'content_scope', 'pending_content_scope', 'effective_at_ms', 'timeline_record_revision', 'segment_skip'}
 local refusal, facts = fence_refusal(KEYS[1], KEYS[2], require_assignment, owner_id, epoch, token, content_scope, now_ms, record_fields)
 if refusal then return {refusal, empty[1], empty[2], empty[3], empty[4], empty[5], empty[6], empty[7], empty[8], empty[9], empty[10]} end
-local record = {'', '', '', '', '', '', '', '', '', ''}
+local record = {'', '', '', '', '', '', '', '', '', '', ''}
 if require_assignment == '1' then
   for index, name in ipairs(record_fields) do
     if facts[name] then record[index] = facts[name] end
   end
 end
-return {'VALID', record[1], record[2], record[3], record[4], record[5], record[6], record[7], record[8], record[9], record[10], now_ms}
+return {'VALID', record[1], record[2], record[3], record[4], record[5], record[6], record[7], record[8], record[9], record[10], now_ms,
+  record[11]}
 `)
 
 var releaseScript = redisscript.New("ownership_release", `
@@ -1369,9 +1393,14 @@ return 'RELEASED'
 // to clear. Withdrawing the comparison refuses nobody, so it waits for no
 // deadline; it is exclusive with a named scope and checked before it.
 //
+// ARGV[15] is the segment skip word's mode (segmentSkipMode): '1' writes the
+// fence's leader epoch, '2' clears it, empty leaves it; it does not move
+// record_revision.
+//
 // Replies are ten elements: desired worker, generation, revision, control
 // epoch, reason, assigned_at, query group, content scope, pending scope,
-// effective_at_ms.
+// effective_at_ms; then the timeline revision, the holder kind and the
+// segment skip word.
 var publishAssignmentScript = redisscript.New("ownership_publish_assignment", FenceLua+`
 local leader_id = ARGV[1]
 local leader_epoch = ARGV[2]
@@ -1395,6 +1424,7 @@ local withdraw = ARGV[11] == '1'
 local timeline = tonumber(ARGV[12] or '0')
 local leader_ttl_ms = tonumber(ARGV[13] or '0')
 local holder_id = ARGV[14] or ''
+local skip_mode = ARGV[15] or ''
 -- The lease's holder and what decides whether it is still alive. A holder
 -- that took its lease under a worker session (owner_session_epoch, A2) is
 -- alive unless that session is proven gone: KEYS[4] is the session record of
@@ -1431,7 +1461,7 @@ end
 local function reply()
   local f = redis.call('HMGET', KEYS[2], 'desired_worker_id', 'assignment_generation', 'record_revision',
     'control_epoch', 'placement_reason', 'assigned_at_ms', 'content_scope', 'pending_content_scope', 'effective_at_ms',
-    'timeline_record_revision')
+    'timeline_record_revision', 'segment_skip')
   -- What the lease's holder is, for the Leader to count its moves by: one
   -- holding under a worker session, one renewing its own lease, or none.
   local held = redis.call('HMGET', KEYS[3], 'owner_id', 'owner_session_epoch')
@@ -1440,7 +1470,8 @@ local function reply()
     holder_kind = 'no_session'
     if held[2] and held[2] ~= '' then holder_kind = 'session' end
   end
-  return {f[1], f[2], f[3], f[4], f[5], f[6], query_group, f[7] or '', f[8] or '', tonumber(f[9] or '0'), tonumber(f[10] or '0'), holder_kind}
+  return {f[1], f[2], f[3], f[4], f[5], f[6], query_group, f[7] or '', f[8] or '', tonumber(f[9] or '0'), tonumber(f[10] or '0'), holder_kind,
+    tonumber(f[11] or '0')}
 end
 -- The timeline revision is the Query Group's, not the decision's: written
 -- when a decision names one newer than the record holds and left alone
@@ -1460,6 +1491,15 @@ end
 -- Leader reckon one grace by one number. Like the timeline revision, it does
 -- not move record_revision.
 if leader_ttl_ms > 0 then redis.call('HSET', KEYS[2], 'lease_ttl_ms', leader_ttl_ms) end
+-- The segment skip word (design 014 B3 stage 3) is the epoch of the Leader
+-- whose fence this script just checked - the epoch of the view that Leader
+-- publishes, so a worker compares the two numbers from one source. Like the
+-- timeline revision it does not move record_revision.
+if skip_mode == '1' then
+  redis.call('HSET', KEYS[2], 'segment_skip', leader_epoch)
+elseif skip_mode == '2' then
+  redis.call('HDEL', KEYS[2], 'segment_skip')
+end
 local current_desired = redis.call('HGET', KEYS[2], 'desired_worker_id')
 if current_desired and current_desired == desired then
   if withdraw then

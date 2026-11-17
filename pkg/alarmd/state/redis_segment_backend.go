@@ -32,9 +32,13 @@ import (
 //
 // ARGV[1] fenced ('1'/'0'); ARGV[2] the pages written; ARGV[3] whether the
 // mark is; ARGV[4] the pages kept; ARGV[5] the pages removed; ARGV[6] the TTL
-// in milliseconds. Fenced, KEYS[1..2] are the assignment and ownership
-// hashes and ARGV[7..11] the fence's. Then the pages' keys and values, the
-// mark's key and value, the kept pages' keys, the removed pages' keys.
+// in milliseconds; ARGV[7] the departing members' State keys renewed to it
+// (014 B3 3.3 step 3), in chunks of their own before the mark's, at most
+// segment.RenewKeys a chunk. Fenced, KEYS[1..2] are the assignment and ownership
+// hashes and ARGV[8..12] the fence's. Then the pages' keys and values, the
+// mark's key and value, the kept pages' keys, the removed pages' keys, the
+// departing members' keys. The answer counts the kept pages already gone
+// and, apart, the departing members' keys already gone.
 const segmentWriteScript = ownership.FenceLua + `
 local fenced = ARGV[1] == '1'
 local pages = tonumber(ARGV[2])
@@ -42,12 +46,13 @@ local marked = ARGV[3] == '1'
 local kept = tonumber(ARGV[4])
 local removed = tonumber(ARGV[5])
 local ttl = ARGV[6]
-local key, arg = 1, 7
+local departing = tonumber(ARGV[7])
+local key, arg = 1, 8
 if fenced then
-  local refusal = fence_refusal(KEYS[1], KEYS[2], ARGV[7], ARGV[8], ARGV[9], ARGV[10], ARGV[11], redis_now_ms())
+  local refusal = fence_refusal(KEYS[1], KEYS[2], ARGV[8], ARGV[9], ARGV[10], ARGV[11], ARGV[12], redis_now_ms())
   if refusal == 'CONTENT_MOVED' then return {'CONTENT_MOVED'} end
   if refusal then return {'STALE_OWNER'} end
-  key, arg = 3, 12
+  key, arg = 3, 13
 end
 for index = 0, pages - 1 do
   redis.call('PSETEX', KEYS[key + index], ttl, ARGV[arg + index])
@@ -64,8 +69,13 @@ if marked then
   for index = 0, removed - 1 do
     redis.call('DEL', KEYS[key + index])
   end
+  key = key + removed
 end
-return {'APPLIED', missing}
+local gone = 0
+for index = 0, departing - 1 do
+  if redis.call('PEXPIRE', KEYS[key + index], ttl) == 0 then gone = gone + 1 end
+end
+return {'APPLIED', missing, gone}
 `
 
 // segmentWriteSHA addresses segmentWriteScript by its SHA-1.
@@ -79,10 +89,10 @@ var segmentWriteSHA = func() string {
 const segmentPipelineBytes = 8 * fencedScriptBytes
 
 func segmentWriteArguments(guard *FenceGuard, ttl time.Duration, chunk segmentWriteChunk) ([]string, []interface{}) {
-	keys := make([]string, 0, 3+len(chunk.pages)+len(chunk.keep)+len(chunk.remove))
-	args := make([]interface{}, 0, 13+len(chunk.pages))
+	keys := make([]string, 0, 3+len(chunk.pages)+len(chunk.keep)+len(chunk.remove)+len(chunk.departing))
+	args := make([]interface{}, 0, 14+len(chunk.pages))
 	args = append(args, boolArg(guard != nil), len(chunk.pages), boolArg(chunk.mark != nil), len(chunk.keep),
-		len(chunk.remove), ttl.Milliseconds())
+		len(chunk.remove), ttl.Milliseconds(), len(chunk.departing))
 	if guard != nil {
 		keys = append(keys, guard.Keys.AssignmentKey, guard.Keys.OwnershipKey)
 		args = append(args, boolArg(guard.Keys.RequireAssignment), guard.OwnerID,
@@ -98,6 +108,7 @@ func segmentWriteArguments(guard *FenceGuard, ttl time.Duration, chunk segmentWr
 		keys = append(keys, chunk.keep...)
 		keys = append(keys, chunk.remove...)
 	}
+	keys = append(keys, chunk.departing...)
 	return keys, args
 }
 
@@ -213,8 +224,25 @@ func segmentPlanOutcomeOf(replies []redis.Cmder) segmentPlanOutcome {
 			return segmentPlanOutcome{result: result}
 		}
 		outcome.missing += missing
+		outcome.departedGone += segmentDepartedGone(reply)
 	}
 	return outcome
+}
+
+// segmentDepartedGone is the departing members' keys an applied chunk found
+// already gone.
+func segmentDepartedGone(cmd redis.Cmder) int {
+	typed, ok := cmd.(*redis.Cmd)
+	if !ok {
+		return 0
+	}
+	items, _ := typed.Val().([]interface{})
+	if len(items) > 2 {
+		if gone, ok := items[2].(int64); ok {
+			return int(gone)
+		}
+	}
+	return 0
 }
 
 func segmentChunkResult(cmd redis.Cmder) (string, int) {

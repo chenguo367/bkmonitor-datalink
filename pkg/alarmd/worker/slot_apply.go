@@ -392,14 +392,6 @@ func (apply *slotApply) applyPlanState(
 	var writeReuse observability.StateWriteReuseFacts
 	var alreadyApplied observability.StateAlreadyAppliedFacts
 	var admittedClasses []observability.StateSeriesClassKey
-	// What the segment shadow compares each written series by: the view it
-	// was decided from, its class and whether it sent events.
-	type shadowed struct {
-		view       execution.RuntimeStateView
-		class      execution.SeriesClass
-		eventsSent bool
-		noData     bool
-	}
 	shadowedByState := make(map[execution.StateKeyIdentity]shadowed, len(stateResults))
 	for _, stateResult := range stateResults {
 		statePosition, found := stateIndex[stateResult.Mutation.Identity]
@@ -618,6 +610,10 @@ func (apply *slotApply) applyPlanState(
 			return planOutputWithheld, nil
 		}
 	}
+	// The members the round leaves unwritten (014 B3 3.3 step 2) - after
+	// the events, which they have none of - keep their State as it was,
+	// read through the segment; the census counts them not written.
+	accepted, acceptedBytes = apply.leaveMembers(due, accepted, acceptedBytes, shadowedByState)
 	if len(accepted) > 0 {
 		rejectedApply, err := coordinator.applyState(ctx, request.Operation, request.Contract, request.OwnerFence, request.ContentScope, retention, horizon, accepted, acceptedBytes)
 		if err != nil {
@@ -651,6 +647,38 @@ func (apply *slotApply) applyPlanState(
 	// and the deferred release has them.
 	held.release()
 	return output, nil
+}
+
+// shadowed is what the segment shadow compares a written series by: the
+// view it was decided from, its class and whether it sent events.
+type shadowed struct {
+	view       execution.RuntimeStateView
+	class      execution.SeriesClass
+	eventsSent bool
+	noData     bool
+}
+
+// leaveMembers takes out of a Plan's write the series the round's shadow
+// leaves (segmentShadowRound.leaves), counted not written as
+// segment_member_skipped. A no-data series is written as today, its
+// presence the no-data memory's (014 B3 3.7): kept out by name here, though
+// the shadow would not leave it either - its write is never decided
+// steady (wouldLeave's unsteady) - so the rule does not rest on that.
+func (apply *slotApply) leaveMembers(due execution.DuePlan, accepted []execution.StateMutation, bytes []admittedState,
+	shadowed map[execution.StateKeyIdentity]shadowed) ([]execution.StateMutation, []admittedState) {
+	if apply.shadow == nil || !apply.shadow.skip {
+		return accepted, bytes
+	}
+	kept, keptBytes := accepted[:0:0], bytes[:0:0]
+	for index, mutation := range accepted {
+		if written := shadowed[mutation.Identity]; !written.noData &&
+			apply.shadow.leaves(due, written.view, mutation, written.class, written.eventsSent) {
+			continue
+		}
+		kept, keptBytes = append(kept, mutation), append(keptBytes, bytes[index])
+	}
+	apply.frozenRenewals.RecordNotWritten(observability.StateNotWrittenSegmentMemberSkipped, len(accepted)-len(kept))
+	return kept, keptBytes
 }
 
 // noteRetryPending keeps the first Plan reason a retry is pending on.
@@ -772,7 +800,13 @@ func (apply *slotApply) complete(
 	// write beside its State (014 B3 3.3): an attempt whose Progress does not
 	// land is retried, and the retry finds its series applied and starts
 	// their Plans over.
-	coordinator.foldSegmentShadow(ctx, request, apply.shadow, header.DuePlans, apply.withheldNoData)
+	// A round that left members unwritten waits for its segments: their
+	// write not landing fails the Slot, retryable, and the next attempt
+	// writes every member whole (014 B3 §9.4).
+	if coordinator.foldSegmentShadow(ctx, request, apply.shadow, header.DuePlans, apply.withheldNoData) {
+		return execution.SlotExecutionResult{Completed: false, Result: observability.ResultRetrying,
+			ReasonCode: execution.ReasonCode(contract.ReasonSegmentWriteFailed)}, nil
+	}
 	// The activation facts are read again before Progress; the owner fence is
 	// not, because the commit's script runs it at the moment of the write
 	// (02 §7.5), and nothing between here and there is a side effect.

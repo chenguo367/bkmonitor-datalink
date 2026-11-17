@@ -13,6 +13,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -45,6 +46,19 @@ type memorySegments struct {
 	// keys renewed, the page answered not renewed.
 	failPage func(segment.PlanKey, int) bool
 	renewals int
+	// departed is the members each Plan's last write renewed as departed;
+	// departedGone, when set, answers every one of them already gone.
+	departed     map[segment.PlanKey][]execution.SeriesIdentityDigest
+	departedGone bool
+	// written is each Plan's last write; refuse, when set, answers every
+	// write with it, nothing written.
+	written map[segment.PlanKey]segment.PlanWrite
+	refuse  string
+	// readFails fails every read whole; unread answers its Plans failed.
+	readFails bool
+	unread    map[segment.PlanKey]bool
+	// noLife answers every read with no lifetime: no write can be made.
+	noLife bool
 }
 
 func newMemorySegments() *memorySegments {
@@ -66,6 +80,9 @@ func (store *memorySegments) writeState(key segment.PlanKey, series []execution.
 }
 
 func (store *memorySegments) life() time.Duration {
+	if store.noLife {
+		return 0
+	}
 	if store.ttl > 0 {
 		return store.ttl
 	}
@@ -100,13 +117,23 @@ func (store *memorySegments) RenewSegments(_ context.Context, request segment.Re
 
 func (store *memorySegments) ReadSegments(_ context.Context, request segment.ReadRequest) (segment.ReadResult, error) {
 	var result segment.ReadResult
+	if store.readFails {
+		return result, errors.New("dial tcp: connection refused")
+	}
 	for _, plan := range request.Plans {
+		if store.unread[plan.Key] {
+			result.Plans = append(result.Plans, segment.Stored{Key: plan.Key, Source: segment.SourceRedis, Reason: segment.ReadFailed})
+			continue
+		}
 		stored := segment.Stored{Key: plan.Key, Mark: store.marks[plan.Key], Source: segment.SourceRedis,
 			Reason: segment.ReadCold, TTL: store.life()}
+		// Bytes that are not a mark are answered as read, as the State
+		// store answers them: the worker's decoding says they are not.
 		if stored.Mark != nil {
 			mark, err := segment.DecodeMark(stored.Mark)
 			if err != nil {
-				return segment.ReadResult{}, err
+				result.Plans = append(result.Plans, stored)
+				continue
 			}
 			for page := 0; page < mark.Pages; page++ {
 				stored.Pages = append(stored.Pages, store.pages[plan.Key][page])
@@ -120,6 +147,14 @@ func (store *memorySegments) ReadSegments(_ context.Context, request segment.Rea
 func (store *memorySegments) WriteSegments(_ context.Context, request segment.WriteRequest) (segment.WriteResult, error) {
 	var result segment.WriteResult
 	for _, plan := range request.Plans {
+		if store.written == nil {
+			store.written = map[segment.PlanKey]segment.PlanWrite{}
+		}
+		store.written[plan.Key] = plan
+		if store.refuse != "" {
+			result.Plans, result.DepartedGone = append(result.Plans, store.refuse), append(result.DepartedGone, 0)
+			continue
+		}
 		if store.pages[plan.Key] == nil {
 			store.pages[plan.Key] = map[int][]byte{}
 		}
@@ -131,6 +166,15 @@ func (store *memorySegments) WriteSegments(_ context.Context, request segment.Wr
 		}
 		store.marks[plan.Key] = plan.Mark
 		result.Plans = append(result.Plans, segment.WriteApplied)
+		if store.departed == nil {
+			store.departed = map[segment.PlanKey][]execution.SeriesIdentityDigest{}
+		}
+		store.departed[plan.Key] = plan.Departed
+		gone := 0
+		if store.departedGone {
+			gone = len(plan.Departed)
+		}
+		result.DepartedGone = append(result.DepartedGone, gone)
 	}
 	return result, nil
 }
@@ -288,7 +332,7 @@ func runShadowFor(t *testing.T, store *memorySegments, due execution.DuePlan, wr
 }
 
 func outcome(facts observability.SegmentShadowFacts, outcome observability.SegmentShadowOutcome) int64 {
-	return facts.Outcomes[observability.SegmentShadowKey{Outcome: outcome, PeriodClass: observability.SegmentPeriodMinute}]
+	return facts.Outcomes[observability.SegmentShadowKey{Outcome: outcome, PeriodClass: observability.SegmentPeriodMinute, Round: observability.SegmentRoundNormal}]
 }
 
 func member(facts observability.SegmentShadowFacts, event observability.SegmentShadowEvent) int64 {
@@ -593,7 +637,7 @@ func TestASlotReservesItsBooksAndRunsWithoutTheShadowWhenThePoolRefusesThem(t *t
 			budget: ProvisionalBudget{MaxSeries: 1000, MaxRetainedBytes: room}}
 		request := shadowRequest(execution.OperationNormal, 1260)
 		stream := &streamedExecution{coordinator: coordinator, request: request, began: true}
-		held := stream.holdSegments(context.Background(), shadowSlot(t, store, request, shadowDue), "")
+		held, _ := stream.holdSegments(context.Background(), shadowSlot(t, store, request, shadowDue), "")
 		var skipped, rejected int
 		for _, observation := range observations.observed {
 			if observation.SegmentShadow != nil {

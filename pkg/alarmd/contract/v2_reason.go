@@ -244,6 +244,8 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	ReasonOutputClientRejected:     {ReasonOutputClientRejected, ReasonClassDeterministic, ReasonDomainReceipt | ReasonDomainObservation},
 	ReasonOutputLeaseExpiring:      {ReasonOutputLeaseExpiring, ReasonClassRetryable, ReasonDomainObservation},
 	ReasonStateWriteRetryable:      {ReasonStateWriteRetryable, ReasonClassRetryable, ReasonDomainObservation},
+	ReasonSegmentWriteFailed:       {ReasonSegmentWriteFailed, ReasonClassRetryable, ReasonDomainObservation},
+	ReasonSegmentReadFailed:        {ReasonSegmentReadFailed, ReasonClassRetryable, ReasonDomainObservation},
 	ReasonStateCorrupt:             {ReasonStateCorrupt, ReasonClassDeterministic, ReasonDomainReceipt | ReasonDomainObservation},
 	ReasonStateSchemaUnsupported:   {ReasonStateSchemaUnsupported, ReasonClassDeterministic, ReasonDomainReceipt | ReasonDomainObservation},
 	ReasonStateBudgetExceeded:      {ReasonStateBudgetExceeded, ReasonClassDeterministic, ReasonDomainReceipt | ReasonDomainObservation},

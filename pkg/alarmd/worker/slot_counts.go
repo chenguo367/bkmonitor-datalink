@@ -82,6 +82,8 @@ func notCommittedReason(mode execution.FinalizationMode, result execution.SlotEx
 			return execution.SlotNotCommittedCancelled
 		case errors.Is(err, context.DeadlineExceeded):
 			return execution.SlotNotCommittedDeadlineExceeded
+		case segmentsUnread(err):
+			return execution.SlotNotCommittedSegmentReadFailed
 		case mode == "":
 			return execution.SlotNotCommittedFinalizationFailed
 		case errors.Is(err, execution.ErrExecutionDeclined):
@@ -105,6 +107,8 @@ func notCommittedReason(mode execution.FinalizationMode, result execution.SlotEx
 	switch string(result.ReasonCode) {
 	case contract.ReasonActivationReadFailed:
 		return execution.SlotNotCommittedActivationReadFailed
+	case contract.ReasonSegmentWriteFailed:
+		return execution.SlotNotCommittedSegmentWriteFailed
 	case contract.ReasonConfigDrift, contract.ReasonPlanReactivated, contract.ReasonPlanNotActive:
 		return execution.SlotNotCommittedActivationChanged
 	case contract.ReasonOutputACKUnknown, contract.ReasonOutputLeaseExpiring:
@@ -217,6 +221,8 @@ func ForgetQueryGroup(coordinator *SlotExecutionCoordinator, queryGroup executio
 	coordinator.notEvaluatedLines.mu.Lock()
 	delete(coordinator.notEvaluatedLines.byGroup, queryGroup)
 	coordinator.notEvaluatedLines.mu.Unlock()
+	coordinator.segmentWriteFailures.forget(queryGroup)
+	coordinator.segmentDegradations.forget(queryGroup)
 }
 
 // reportSeriesNotEvaluated names, for a completed Slot that bound series it

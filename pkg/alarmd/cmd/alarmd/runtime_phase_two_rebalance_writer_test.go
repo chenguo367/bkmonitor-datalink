@@ -114,13 +114,23 @@ func (store *rebalanceOwnershipStore) PublishAssignment(
 	if current.RecordRevision != decision.ExpectedRecordRevision {
 		return ownership.AssignmentRecord{}, ownership.ErrAssignmentConflict
 	}
+	// The script's rule for the segment skip word: the publishing Leader's
+	// own epoch, or cleared, or left; the revision does not move.
+	switch {
+	case decision.SetSegmentSkip:
+		current.SegmentSkip = authority.Fence.OwnerEpoch
+	case decision.WithdrawSegmentSkip:
+		current.SegmentSkip = 0
+	}
 	if exists && current.DesiredWorkerID == decision.DesiredWorkerID {
+		store.assignments[decision.QueryGroup] = current
 		return current, nil
 	}
 	record := ownership.AssignmentRecord{
 		QueryGroup: decision.QueryGroup, DesiredWorkerID: decision.DesiredWorkerID,
 		AssignmentGeneration: current.AssignmentGeneration + 1, RecordRevision: current.RecordRevision + 1,
 		ControlEpoch: authority.Fence.OwnerEpoch, PlacementReason: decision.PlacementReason, AssignedAt: decision.DecidedAt,
+		SegmentSkip: current.SegmentSkip,
 	}
 	store.assignments[decision.QueryGroup] = record
 	return record, nil

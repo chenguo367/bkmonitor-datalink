@@ -1686,6 +1686,24 @@ type RebalanceFacts struct {
 	// 4.7.7): how many ready workers, and which of them do not declare the
 	// split contract. A split is published only while Unaware is empty.
 	ShardAware *ShardAwareFacts `json:"shard_aware,omitempty"`
+	// SegmentSkip is the same round's segment skip word (014 B3 stage 3).
+	SegmentSkip *SegmentSkipFacts `json:"segment_skip,omitempty"`
+}
+
+// SegmentSkipFacts is one round's segment skip word: whether the values
+// asked for it; the gate on the ready set, as the split's, said only when
+// asked; Held, the word SEGMENT_SKIP_HELD when asked for and not set because
+// a ready worker does not declare the contract; and the records the round
+// restated: Set to this Leader's epoch, Withdrawn, and Failed - a conflict
+// with another write or an error, restated by the next round.
+type SegmentSkipFacts struct {
+	Asked     bool     `json:"asked"`
+	Ready     int      `json:"ready,omitempty"`
+	Unaware   []string `json:"unaware,omitempty"`
+	Held      string   `json:"held,omitempty"`
+	Set       int      `json:"set"`
+	Withdrawn int      `json:"withdrawn"`
+	Failed    int      `json:"failed"`
 }
 
 // ShardAwareFacts is one round's split-contract census over the ready set.

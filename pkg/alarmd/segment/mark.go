@@ -32,6 +32,11 @@ type Mark struct {
 	// Sizes is each page's bytes as written: what a cold read cuts its
 	// MGETs by, rather than by the largest a page can be.
 	Sizes []int
+	// Skipped is whether the round that wrote the mark left a member's
+	// State write out (014 B3 stage 3): the next round's departing members
+	// are then renewed whole, their keys having lived on the pages'
+	// renewals alone. A build before the stage reads the mark without it.
+	Skipped bool
 }
 
 // Renewal is a page's last renewal: At, the wall clock in milliseconds the
@@ -55,6 +60,7 @@ type markJSON struct {
 	Pages    int                    `json:"pages"`
 	Renewed  []Renewal              `json:"renewed"`
 	Sizes    []int                  `json:"sizes"`
+	Skipped  bool                   `json:"skipped,omitempty"`
 }
 
 // EncodeMark is a mark's bytes.
@@ -63,7 +69,7 @@ func EncodeMark(mark Mark) ([]byte, error) {
 		return nil, err
 	}
 	return json.Marshal(markJSON{Schema: markSchema, Version: mark.Version, Position: mark.Position,
-		Pages: mark.Pages, Renewed: mark.Renewed, Sizes: mark.Sizes})
+		Pages: mark.Pages, Renewed: mark.Renewed, Sizes: mark.Sizes, Skipped: mark.Skipped})
 }
 
 // DecodeMark reads a mark back.
@@ -76,7 +82,7 @@ func DecodeMark(raw []byte) (Mark, error) {
 		return Mark{}, fmt.Errorf("%w: schema %q", ErrMark, decoded.Schema)
 	}
 	mark := Mark{Version: decoded.Version, Position: decoded.Position, Pages: decoded.Pages, Renewed: decoded.Renewed,
-		Sizes: decoded.Sizes}
+		Sizes: decoded.Sizes, Skipped: decoded.Skipped}
 	if err := mark.check(); err != nil {
 		return Mark{}, err
 	}

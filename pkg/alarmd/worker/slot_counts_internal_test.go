@@ -34,6 +34,8 @@ func TestNotCommittedResultsAndStepsAreNamed(t *testing.T) {
 		{name: "degraded", result: execution.SlotExecutionResult{Result: observability.ResultDegraded}, want: execution.SlotNotCommittedIncomplete},
 		{name: "lease expiring", result: execution.SlotExecutionResult{Result: observability.ResultRetrying,
 			ReasonCode: execution.ReasonCode(contract.ReasonOutputLeaseExpiring)}, want: execution.SlotNotCommittedOutputRetryPending},
+		{name: "segments not landed", result: execution.SlotExecutionResult{Result: observability.ResultRetrying,
+			ReasonCode: execution.ReasonCode(contract.ReasonSegmentWriteFailed)}, want: execution.SlotNotCommittedSegmentWriteFailed},
 		{name: "plan reactivated", result: execution.SlotExecutionResult{Result: observability.ResultRetrying,
 			ReasonCode: execution.ReasonCode(contract.ReasonPlanReactivated)}, want: execution.SlotNotCommittedActivationChanged},
 		{name: "plan not active", result: execution.SlotExecutionResult{Result: observability.ResultDegraded,
@@ -42,6 +44,8 @@ func TestNotCommittedResultsAndStepsAreNamed(t *testing.T) {
 		{name: "innermost step", err: inSlotStep(execution.SlotNotCommittedApplyFailed,
 			fmt.Errorf("apply: %w", inSlotStep(execution.SlotNotCommittedOutputFailed, errors.New("ack")))), want: execution.SlotNotCommittedOutputFailed},
 		{name: "no step", err: errors.New("before any step"), want: execution.SlotNotCommittedOther},
+		{name: "segments unread", err: inSlotStep(execution.SlotNotCommittedQueryFailed, fmt.Errorf("query: %w",
+			segmentsUnreadError{why: "the read failed"})), want: execution.SlotNotCommittedSegmentReadFailed},
 	} {
 		if got := notCommittedReason(query, test.result, test.err); got != test.want {
 			t.Errorf("%s: %q, want %q", test.name, got, test.want)

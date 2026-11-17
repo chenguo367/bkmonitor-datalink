@@ -32,12 +32,14 @@ type renewalRig struct {
 	wall  int64
 	key   segment.PlanKey
 	total observability.SegmentShadowFacts
+	// due is the Plan's due entry, shadowDue's one-minute Plan unless set.
+	due execution.DuePlan
 }
 
 func newRenewalRig(t *testing.T, ttl time.Duration) *renewalRig {
 	t.Helper()
 	rig := &renewalRig{t: t, store: newMemorySegments(), wall: time.Unix(1_800_000_000, 0).UnixMilli(),
-		key: segment.PlanKey{Plan: shadowDue.Identity, Generation: "g"}}
+		key: segment.PlanKey{Plan: shadowDue.Identity, Generation: "g"}, due: shadowDue}
 	rig.store.ttl = ttl
 	rig.store.wall = func() int64 { return rig.wall }
 	rig.store.at = 1140
@@ -68,7 +70,7 @@ func (rig *renewalRig) round(step time.Duration, present []int) observability.Se
 		}
 	}
 	rig.store.writeState(rig.key, written)
-	facts := runShadow(rig.t, rig.store, rounds, false)
+	facts := runShadowFor(rig.t, rig.store, rig.due, rounds, false)
 	for result, count := range facts.Renewals {
 		rig.total.Renewal(result, count)
 	}
@@ -215,6 +217,30 @@ func TestAPageUnrenewedForHalfItsLifetimeIsCountedForTheFallback(t *testing.T) {
 	}
 	if since := rig.wall - rig.mark().Renewed[0].At; since < (5 * time.Minute).Milliseconds() {
 		t.Fatalf("fallback counted %d ms after the page's renewal, before half its lifetime", since)
+	}
+	if short := rig.total.Renewals[observability.SegmentRenewalFallbackShortLife]; short != 0 {
+		t.Fatalf("a one-minute Plan with ten minutes of life counted %d short-lived fallbacks", short)
+	}
+}
+
+// A Plan whose pages live no more than two of its intervals - two-hourly,
+// its keys given three hours, as a Plan keeping one point is - goes half a
+// lifetime between two rounds: every round its page is a fallback, by
+// design and with every renewal answering, and is counted
+// fallback_short_life, never fallback_write, which the bar reads.
+func TestAPlanLivingNoMoreThanTwoIntervalsCountsItsFallbackApart(t *testing.T) {
+	rig := newRenewalRig(t, 3*time.Hour)
+	rig.due.ScheduleSpec.EvaluationIntervalSeconds = 7200
+	rig.round(2*time.Hour, series(3))
+	for round := 1; round <= 4; round++ {
+		before := rig.total.Renewals[observability.SegmentRenewalFallbackShortLife]
+		rig.round(2*time.Hour, series(3))
+		if got := rig.total.Renewals[observability.SegmentRenewalFallbackShortLife] - before; got != 1 {
+			t.Fatalf("round %d counted %d short-lived fallbacks, want its one page", round, got)
+		}
+	}
+	if rig.total.Renewals[observability.SegmentRenewalFallbackWrite] != 0 || rig.total.Renewals[observability.SegmentRenewalFailed] != 0 {
+		t.Fatalf("renewals %v, want no fallback_write and none failed", rig.total.Renewals)
 	}
 }
 

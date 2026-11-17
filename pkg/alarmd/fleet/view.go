@@ -244,6 +244,20 @@ type QueryRangeFact struct {
 	AcceptedSeconds int64  `json:"accepted_seconds"`
 }
 
+// QueryPhases is the object's latest completed Slot's physical queries split
+// at their answers' first byte: the wait before it (the query service
+// computing the query) and the body after (the answer carried, read and
+// decoded), summed over the Slot's queries and the longest query's of each,
+// in milliseconds - the Slot's own slot_budget_usage, which a Slot that
+// completes writes no line of.
+type QueryPhases struct {
+	Slot          int64  `json:"slot"`
+	WaitMillis    uint64 `json:"wait_millis"`
+	BodyMillis    uint64 `json:"body_millis"`
+	WaitMillisMax uint64 `json:"wait_millis_max"`
+	BodyMillisMax uint64 `json:"body_millis_max"`
+}
+
 // MaxQueryRanges bounds the physical queries an object keeps a range for.
 const MaxQueryRanges = 4
 
@@ -2350,6 +2364,9 @@ type RebalanceFacts struct {
 	// goes 0 -> n -> 0; after it, empty for good, and a rollback puts the
 	// rolled-back replica back on it.
 	ShardAware *ShardAwareFacts `json:"shard_aware,omitempty"`
+	// SegmentSkip is the Leader's segment skip word for the page (014 B3
+	// stage 3), as the round's log line carries it.
+	SegmentSkip *observability.SegmentSkipFacts `json:"segment_skip,omitempty"`
 }
 
 // ShardAwareFacts is the Leader's split gate for the page.

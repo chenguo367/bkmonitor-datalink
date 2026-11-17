@@ -160,6 +160,8 @@ var reasonSourcesV2 = map[string]ReasonSourceV2{
 	ReasonStateVersionConflict:       ReasonSourceMet,
 	ReasonStateStaleVersion:          ReasonSourceMet,
 	ReasonStateWriteRetryable:        ReasonSourceMet,
+	ReasonSegmentWriteFailed:         ReasonSourceMet,
+	ReasonSegmentReadFailed:          ReasonSourceMet,
 	ReasonStateCorrupt:               ReasonSourceMet,
 	ReasonStateSchemaUnsupported:     ReasonSourceMet,
 	ReasonOutputACKUnknown:           ReasonSourceMet,

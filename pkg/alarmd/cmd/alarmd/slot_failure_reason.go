@@ -119,6 +119,11 @@ func slotFailureReason(err error) (observability.ReasonCode, string) {
 	if refusal, named := worker.NoDataRosterReadReason(err); named {
 		reason = observability.ReasonCode(refusal)
 	}
+	// A Slot with a segment skip word whose stable segments did not read
+	// fails its first attempt by that name (014 B3 §9.7).
+	if unread, named := worker.SegmentReadFailedReason(err); named {
+		reason = observability.ReasonCode(unread)
+	}
 	if refusal, named := worker.GapApplyReason(err); named {
 		reason = observability.ReasonCode(refusal)
 		// The site goes on the line as its own field, not only inside the

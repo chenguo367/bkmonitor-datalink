@@ -51,6 +51,10 @@ const (
 	// StateNotWrittenApplyFailed: the write was made and the store did not
 	// take it - the apply failed, or refused the mutation.
 	StateNotWrittenApplyFailed StateNotWrittenReason = "state_apply_failed"
+	// StateNotWrittenSegmentMemberSkipped: an open member of its Plan's
+	// stable segments, steady, normal and quiet on the grid, its State left
+	// as it was and read through the segment (014 B3 stage 3).
+	StateNotWrittenSegmentMemberSkipped StateNotWrittenReason = "segment_member_skipped"
 	// StateNotWrittenSlotFailed: the attempt ended with an error before the
 	// mutation was written, by any other exit: a later step of its own Plan,
 	// or another Plan, or the completion.
@@ -86,7 +90,7 @@ func AllStateSeriesKinds() []StateSeriesKind {
 func AllStateNotWrittenReasons() []StateNotWrittenReason {
 	return []StateNotWrittenReason{
 		StateNotWrittenOutputWithheld, StateNotWrittenOutputPartial, StateNotWrittenAdmissionRejected,
-		StateNotWrittenApplyFailed, StateNotWrittenSlotFailed, StateNotWrittenUnaccounted,
+		StateNotWrittenApplyFailed, StateNotWrittenSegmentMemberSkipped, StateNotWrittenSlotFailed, StateNotWrittenUnaccounted,
 	}
 }
 
