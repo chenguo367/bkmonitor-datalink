@@ -72,6 +72,9 @@ type slotApply struct {
 	// renew, held for a Slot applied window by window (slotStateKeys); nil
 	// for a Slot applied whole.
 	keys slotStateKeys
+	// shadow is this attempt's shadow of its Plans' stable segments, folded
+	// once its Progress is written; nil for a supplement or a probe.
+	shadow *segmentShadowRound
 }
 
 // attemptCensus is what one attempt's census is reported from, counts only:
@@ -223,6 +226,7 @@ func (coordinator *SlotExecutionCoordinator) readSlotActivations(
 		forced:         unsatisfiedForcedWarmingActivations(guardActivations, loadedGaps, changedPlans),
 		withheldNoData: make(map[execution.PlanIdentity]struct{}),
 		attemptCensus:  &attemptCensus{},
+		shadow:         newSegmentShadowRound(request),
 	}
 	registerSlotApply(ctx, apply)
 	return apply, true
@@ -388,6 +392,15 @@ func (apply *slotApply) applyPlanState(
 	var writeReuse observability.StateWriteReuseFacts
 	var alreadyApplied observability.StateAlreadyAppliedFacts
 	var admittedClasses []observability.StateSeriesClassKey
+	// What the segment shadow compares each written series by: the view it
+	// was decided from, its class and whether it sent events.
+	type shadowed struct {
+		view       execution.RuntimeStateView
+		class      execution.SeriesClass
+		eventsSent bool
+		noData     bool
+	}
+	shadowedByState := make(map[execution.StateKeyIdentity]shadowed, len(stateResults))
 	for _, stateResult := range stateResults {
 		statePosition, found := stateIndex[stateResult.Mutation.Identity]
 		if !found {
@@ -409,6 +422,8 @@ func (apply *slotApply) applyPlanState(
 				Class: seriesClassLabel(stateResult.Class), Series: seriesKindLabel(stateResult.NoData)})
 			coordinator.observe(ctx, observability.ComponentState, observability.StageMutationCompared, request.Operation, started, observability.ResultSuccess, observability.ReasonNone, nil)
 			mutations = append(mutations, stateResult.Mutation)
+			shadowedByState[stateResult.Mutation.Identity] = shadowed{view: view, class: stateResult.Class,
+				eventsSent: len(stateResult.Events) > 0, noData: stateResult.NoData}
 			eventsByState[stateResult.Mutation.Identity] = append([]contract.TriggerEventV1(nil), stateResult.Events...)
 			if len(stateResult.WithoutMessage) != 0 {
 				withoutMessageByState[stateResult.Mutation.Identity] = stateResult.WithoutMessage
@@ -619,6 +634,11 @@ func (apply *slotApply) applyPlanState(
 		for _, mutation := range accepted {
 			reason, terminal := rejectedApply[mutation.Identity]
 			if !terminal {
+				// A no-data series is written as today, its presence the
+				// no-data memory's (014 B3 3.7): no member of a page.
+				if written := shadowedByState[mutation.Identity]; !written.noData {
+					apply.shadow.observe(&coordinator.segmentShadow, due, written.view, mutation, written.class, written.eventsSent)
+				}
 				continue
 			}
 			return 0, fmt.Errorf(
@@ -758,6 +778,7 @@ func (apply *slotApply) complete(
 	coordinator.markOutOfHours(ctx, header, &attribution.Coverage)
 	result, err := coordinator.commitProgress(ctx, request, completion, attribution)
 	if err == nil && result.Completed {
+		coordinator.foldSegmentShadow(ctx, request, apply.shadow, header.DuePlans, apply.withheldNoData)
 		result.QueryAvailability, result.QueryUnavailableReason = query.availability(), query.unavailableReason()
 		result.QueryUnknownReason = query.unknownReason()
 		result.PrimaryQueryClock = query.clock

@@ -2943,6 +2943,8 @@ type Observation struct {
 	ShortPeriodCompletion *ShortPeriodCompletionFacts
 	StateApplyChunk       *StateApplyChunkFacts
 	StateWriteReuse       *StateWriteReuseFacts
+	// SegmentShadow is a Slot's shadow of its Plans' stable segments.
+	SegmentShadow *SegmentShadowFacts
 	// WarmingPeak is the hour a state_warming_peak line reports.
 	WarmingPeak          *WarmingPeakFacts
 	StateAlreadyApplied  *StateAlreadyAppliedFacts

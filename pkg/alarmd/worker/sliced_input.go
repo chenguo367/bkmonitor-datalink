@@ -1251,15 +1251,6 @@ func (stream *streamedExecution) slicesDeferred() uint64 {
 	return stream.slices.deferredRead
 }
 
-// sliceStartDiscarded is 1 when a slice this Slot started in from its
-// memory was let go for its size.
-func (stream *streamedExecution) sliceStartDiscarded() uint64 {
-	if stream.slicing() && stream.slices.startDiscarded {
-		return 1
-	}
-	return 0
-}
-
 // sliceCutFrom is where the dimension this Slot's starting slices were cut
 // on came from, empty for a Slot not started in slices counted.
 func (stream *streamedExecution) sliceCutFrom() string {

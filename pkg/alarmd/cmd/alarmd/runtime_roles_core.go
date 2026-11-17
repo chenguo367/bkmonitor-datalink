@@ -67,6 +67,22 @@ func executionStoreOptions(cfg config.Config, router state.StorageRouter) state.
 	}
 }
 
+// productionProgressStoreOptions is the Progress store as production opens
+// it, its counts bound to the recorder: a hook left unset reads as a family
+// of zeros, as if nothing it counts ever happened.
+func productionProgressStoreOptions(cfg config.Config, control progress.ControlStore, slots progress.ContinuousSlotResolver,
+	now func() time.Time, observer observability.Observer, recorder *metric.Recorder) progress.StoreOptions {
+	return progress.StoreOptions{
+		Prefix: productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "schedule"), Control: control,
+		Slots: slots, Now: now, Observer: observer,
+		// The owner's reads of the record, by caller and by whether the
+		// key or the owner's record answered.
+		Reads: recorder.RecordProgressRead,
+		// Each projection field a later attempt of an unfinished Slot changed.
+		Superseded: recorder.RecordProgressProjectionSuperseded,
+	}
+}
+
 // logNoDataGroupBound writes one line at startup when the deployment's no-data
 // group bound is above the default: the operator raised it, and the line names
 // the one-off Redis cost that buys (contract.NoDataGroupFirstWriteCost). An
@@ -370,13 +386,7 @@ func openPhaseTwoCoreResources(ctx context.Context, cfg config.Config, recorder 
 			}
 		}
 	}
-	progressStore, err := progress.NewStore(progress.StoreOptions{
-		Prefix: productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "schedule"), Control: ownershipStore,
-		Slots: catalog, Now: now, Observer: observer,
-		// The owner's reads of the record, by caller and by whether the
-		// key or the owner's record answered.
-		Reads: recorder.RecordProgressRead,
-	})
+	progressStore, err := progress.NewStore(productionProgressStoreOptions(cfg, ownershipStore, catalog, now, observer, recorder))
 	if err != nil {
 		return nil, err
 	}

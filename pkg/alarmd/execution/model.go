@@ -4883,6 +4883,7 @@ type SlotBudgetUsage struct {
 	InputSliceShapeRefusedSingleValue   uint64
 	InputSliceShapeRefusedSplitError    uint64
 	InputSliceShapeMergeRefused         uint64
+	InputSliceShapeSizedKept            uint64
 	// InputSliceCutOn is where the dimension this Slot's starting slices
 	// were cut on came from (observability.InputSliceCutOnSources), empty
 	// for a Slot not started in slices counted.

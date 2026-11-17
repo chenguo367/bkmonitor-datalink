@@ -61,10 +61,13 @@ type Recorder struct {
 	retainedBound     bool
 	sliceMemoryMu     sync.Mutex
 	sliceMemoryBound  bool
-	resourceMu        sync.Mutex
-	resourceBound     bool
-	observations      observationMetrics
-	phaseTwo          phaseTwoMetrics
+	// segmentShadowMemory* guard the shadow books' binding.
+	segmentShadowMemoryMu    sync.Mutex
+	segmentShadowMemoryBound bool
+	resourceMu               sync.Mutex
+	resourceBound            bool
+	observations             observationMetrics
+	phaseTwo                 phaseTwoMetrics
 }
 
 func NewRecorder(build BuildInfo) *Recorder {

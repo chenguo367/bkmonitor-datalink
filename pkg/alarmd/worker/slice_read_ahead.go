@@ -206,8 +206,13 @@ func (ahead *sliceReadAhead) ResolvedScopeGroups() execution.ScopeGroupMembershi
 // read's end once it is let go. A read that waits keeps what it took and
 // reads no more of its answer; it is woken when the Slot takes it on or lets
 // it go. Caller holds ahead.mu.
-func (ahead *sliceReadAhead) keep(ctx context.Context, bytes uint64) (*streamedExecution, error) {
+func (ahead *sliceReadAhead) keep(ctx context.Context, bytes uint64) (pass *streamedExecution, err error) {
 	var waitedFrom time.Time
+	defer func() {
+		if !waitedFrom.IsZero() {
+			ahead.countWait(waitedFrom, time.Now(), readAheadWaitOutcome(pass, err, ahead.stopped))
+		}
+	}()
 	defer func() {
 		if !waitedFrom.IsZero() && ahead.stream != nil {
 			waited := time.Since(waitedFrom).Milliseconds()
@@ -242,9 +247,86 @@ func (ahead *sliceReadAhead) keep(ctx context.Context, bytes uint64) (*streamedE
 		}
 		if waitedFrom.IsZero() {
 			waitedFrom = time.Now()
+			if ahead.stream != nil {
+				ahead.stream.readAheadWaitBegan(waitedFrom)
+			}
 		}
 		ahead.changed.Wait()
 	}
+}
+
+// readAheadWaitOutcome is how a wait for room ended, an index of
+// observability.SliceReadAheadWaitOutcomes: kept, passed, stopped, canceled.
+func readAheadWaitOutcome(pass *streamedExecution, err error, stopped bool) int {
+	switch {
+	case err == nil && pass == nil:
+		return 0
+	case pass != nil:
+		return 1
+	case stopped:
+		return 2
+	default:
+		return 3
+	}
+}
+
+// ReadAheadWaitCounter is told of every wait of a read ahead for room as it
+// ends, however its Slot ends - a read let go as the Slot ends waits past
+// the Slot's usage, and one whose Slot fails has none: by how it ended and
+// how long it took (observability.SliceReadAheadWaitOutcomes,
+// SliceReadAheadWaitDurations); and of the Slot time with at least one read
+// ahead waiting, as the last of them ends. The metric recorder is one.
+type ReadAheadWaitCounter interface {
+	RecordReadAheadWait(outcome, duration string, waited time.Duration)
+	RecordReadAheadWaiting(waited time.Duration)
+}
+
+// countWait tells the counter of one wait for room that began at from and
+// ended at to, and, the last of the stream's to end, of its time with one
+// waiting.
+func (ahead *sliceReadAhead) countWait(from, to time.Time, outcome int) {
+	var counter ReadAheadWaitCounter
+	if ahead.coordinator != nil {
+		counter = ahead.coordinator.ports.ReadAheadWaits
+	}
+	waited := to.Sub(from)
+	if counter != nil {
+		counter.RecordReadAheadWait(observability.SliceReadAheadWaitOutcomes[outcome],
+			observability.SliceReadAheadWaitDurations[observability.SliceReadAheadWaitDuration(waited)], waited)
+	}
+	if ahead.stream == nil {
+		return
+	}
+	if waiting, last := ahead.stream.readAheadWaitEnded(to); last && counter != nil {
+		counter.RecordReadAheadWaiting(waiting)
+	}
+}
+
+// readAheadWaitBegan and readAheadWaitEnded keep the time at least one read
+// ahead of the stream waits for room: from the first of them to begin while
+// none waits, to the last to end.
+func (stream *streamedExecution) readAheadWaitBegan(at time.Time) {
+	stream.readAheadWaitingMu.Lock()
+	defer stream.readAheadWaitingMu.Unlock()
+	if stream.readAheadWaitingNow == 0 {
+		stream.readAheadWaitingSince = at
+	}
+	stream.readAheadWaitingNow++
+}
+
+// readAheadWaitEnded ends one wait and, when it was the last of the
+// stream's, reports the time since the first of them began.
+func (stream *streamedExecution) readAheadWaitEnded(at time.Time) (time.Duration, bool) {
+	stream.readAheadWaitingMu.Lock()
+	defer stream.readAheadWaitingMu.Unlock()
+	if stream.readAheadWaitingNow == 0 {
+		return 0, false
+	}
+	stream.readAheadWaitingNow--
+	if stream.readAheadWaitingNow > 0 {
+		return 0, false
+	}
+	return max(at.Sub(stream.readAheadWaitingSince), 0), true
 }
 
 // fitsShare reports whether bytes more fit the stream's share beside all it

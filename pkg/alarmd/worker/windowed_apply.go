@@ -961,6 +961,13 @@ func (apply *slotApply) windowedTail(ctx context.Context, stream *streamedExecut
 		}
 		apply.noteRetryPending(planResult)
 	}
+	// Series an earlier attempt applied, resumed before evaluation: the
+	// segment shadow cannot tell their Plans' membership this round.
+	for plan, resumed := range stream.windows.resumed {
+		if due, ok := duePlan(apply.header.DuePlans, plan); ok && resumed > 0 {
+			apply.shadow.retried(&apply.coordinator.segmentShadow, due)
+		}
+	}
 	census := stream.seriesCensus
 	census.Written += apply.written
 	return apply.complete(ctx, stream.bindings, &stream.summary, stream.noDataMutations,

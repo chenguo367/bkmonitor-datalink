@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -176,6 +177,13 @@ type streamedExecution struct {
 	readAheadYieldedBytes     uint64
 	readAheadYieldDistanceMax uint64
 	readAheadWaitMax          atomic.Int64
+	// readAheadWaiting is the reads ahead waiting for room now, and since
+	// when one of them has: the waits of reads ahead side by side overlap,
+	// and the Slot's time with one waiting is counted once, as the last of
+	// them ends (readAheadWaitEnded).
+	readAheadWaitingMu    sync.Mutex
+	readAheadWaitingNow   int
+	readAheadWaitingSince time.Time
 	// stageAheadEnds counts how the Slot's no-data first writes staged
 	// ahead ended (observability.NoDataStageAheadOutcomes), and
 	// groupsStagedAhead the groups they staged.

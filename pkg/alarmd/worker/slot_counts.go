@@ -107,8 +107,9 @@ func (lines *seriesNotEvaluatedLines) take(queryGroup execution.QueryGroupIdenti
 // than a method, as SliceMemory is: Execute is the coordinator's one method.
 func ForgetQueryGroup(coordinator *SlotExecutionCoordinator, queryGroup execution.QueryGroupIdentity) {
 	coordinator.notEvaluatedLines.mu.Lock()
-	defer coordinator.notEvaluatedLines.mu.Unlock()
 	delete(coordinator.notEvaluatedLines.byGroup, queryGroup)
+	coordinator.notEvaluatedLines.mu.Unlock()
+	coordinator.segmentShadow.forget(queryGroup)
 }
 
 // reportSeriesNotEvaluated names, for a completed Slot that bound series it

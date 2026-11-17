@@ -1,5 +1,7 @@
 package observability
 
+import "time"
+
 // CapacityRejectionFacts is a log-only snapshot of one failed shared
 // reservation. Values use CapacityBudget units; nil OwnUsed means unknown,
 // not zero. No query, key, URL, or raw error is accepted here.
@@ -158,6 +160,7 @@ type SlotBudgetUsageFacts struct {
 	InputSliceShapeRefusedSingleValue   uint64 `json:"input_slice_shape_refused_single_value,omitempty"`
 	InputSliceShapeRefusedSplitError    uint64 `json:"input_slice_shape_refused_split_error,omitempty"`
 	InputSliceShapeMergeRefused         uint64 `json:"input_slice_shape_merge_refused,omitempty"`
+	InputSliceShapeSizedKept            uint64 `json:"input_slice_shape_sized_kept,omitempty"`
 	// InputSliceCutOn is where the dimension the Slot's starting slices
 	// were cut on came from (InputSliceCutOnSources), empty for a Slot not
 	// started in slices counted: read whole, or in its Query Group's shape.
@@ -296,6 +299,33 @@ var SeriesNotEvaluatedFamilies = [SeriesNotEvaluatedFamilyCount]string{string(Al
 var SliceReadAheadYieldPhases = [9]string{"normal_input", "normal_output", "normal_gap", "normal_no_data",
 	"slot_output", "frames", "window_bound", "query_free", "other"}
 
+// How a read ahead's wait for room ended, closed: kept, room came and it
+// took the bytes; passed, the Slot took the read on while it waited, the
+// bytes going to the Slot; stopped, the read was let go; canceled, its
+// context ended. And how long it waited, in bands: under a millisecond, to
+// ten, to a hundred, to a second, a second or more.
+var (
+	SliceReadAheadWaitOutcomes  = [4]string{"kept", "passed", "stopped", "canceled"}
+	SliceReadAheadWaitDurations = [5]string{"lt_1ms", "1ms_10ms", "10ms_100ms", "100ms_1s", "ge_1s"}
+)
+
+// SliceReadAheadWaitDuration is the band of SliceReadAheadWaitDurations a
+// wait falls in.
+func SliceReadAheadWaitDuration(waited time.Duration) int {
+	switch {
+	case waited < time.Millisecond:
+		return 0
+	case waited < 10*time.Millisecond:
+		return 1
+	case waited < 100*time.Millisecond:
+		return 2
+	case waited < time.Second:
+		return 3
+	default:
+		return 4
+	}
+}
+
 // How a slice's read that ran out of time ended, closed: split and read
 // again, the Slot's query completing; split and read again, the Slot's query
 // failing after; not split - the cooldown held, its time could not be put on
@@ -330,6 +360,11 @@ var NoDataStageAheadOutcomes = [4]string{"carried", "differs", "discarded", "sto
 // of its series apart, kept nothing; refused_split_error, a split that failed
 // otherwise, kept nothing; merge_refused, a split taken back whose shape
 // would not rebuild without it - the shape is kept as it was, not dropped.
+// Two count the splits kept for a slice's size that did keep: sized_split,
+// a slice the Slot started in let go for its size and its split kept for the
+// next Slot (inputslice.Tree.SplitSized; the Slot's
+// input_slice_start_discarded), and sized_kept, a slice read whole past a
+// slice's series kept split for the next Slot (KeepSizedSplit).
 const (
 	InputSliceShapeStarted              = "started"
 	InputSliceShapeKept                 = "kept"
@@ -345,15 +380,18 @@ const (
 	InputSliceShapeRefusedSingleValue   = "refused_single_value"
 	InputSliceShapeRefusedSplitError    = "refused_split_error"
 	InputSliceShapeMergeRefused         = "merge_refused"
+	InputSliceShapeSizedSplit           = "sized_split"
+	InputSliceShapeSizedKept            = "sized_kept"
 )
 
 // InputSliceShapeOutcomes is every outcome, in the order of the
-// SlotBudgetUsageFacts fields that count them.
-var InputSliceShapeOutcomes = [14]string{InputSliceShapeStarted, InputSliceShapeKept, InputSliceShapeMerged,
+// SlotBudgetUsageFacts fields that count them; sized_split's is
+// InputSliceStartDiscarded.
+var InputSliceShapeOutcomes = [16]string{InputSliceShapeStarted, InputSliceShapeKept, InputSliceShapeMerged,
 	InputSliceShapeVoidedRevision, InputSliceShapeVoidedDimensions, InputSliceShapeVoidedMaxLeaves,
 	InputSliceShapeRefusedNotALeaf, InputSliceShapeRefusedNotAPartition, InputSliceShapeRefusedMaxLeaves,
 	InputSliceShapeEvictedIdle, InputSliceShapeRefusedCondition, InputSliceShapeRefusedSingleValue,
-	InputSliceShapeRefusedSplitError, InputSliceShapeMergeRefused}
+	InputSliceShapeRefusedSplitError, InputSliceShapeMergeRefused, InputSliceShapeSizedSplit, InputSliceShapeSizedKept}
 
 // Where the dimension a Slot's starting slices were cut on came from,
 // closed: root_split, the one its Query Group's last read had its root split

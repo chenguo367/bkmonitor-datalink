@@ -323,7 +323,7 @@ func (store *ExecutionStore) classifyFencedOutcome(
 			item.Status, item.ReasonCode = execution.StateApplyDeterministicInvalid, execution.ReasonCode(contract.ReasonStateBudgetExceeded)
 			return item
 		}
-		view := decodeRuntime(raw, mutation.Identity, contractRef, mutation.ApplyVersion)
+		view := store.decodeRuntime(raw, mutation.Identity, contractRef, mutation.ApplyVersion)
 		if view.Status == execution.StateDeterministicInvalid {
 			item.Status, item.ReasonCode = execution.StateApplyDeterministicInvalid, view.ReasonCode
 			return item
@@ -1101,7 +1101,7 @@ func (store *ExecutionStore) readCarriedRecord(
 	}
 	previous := item.Identity
 	previous.StateGeneration = item.CarryFrom
-	view := decodeRuntime(raw, previous, request.Contract, item.ApplyVersion)
+	view := store.decodeRuntime(raw, previous, request.Contract, item.ApplyVersion)
 	switch view.Status {
 	case execution.StateFoundReady, execution.StateFoundWarming, execution.StateFoundGapped:
 		pass.carryFound++
@@ -1123,7 +1123,7 @@ func (store *ExecutionStore) readFramedRecord(
 	if framedRaw == nil || len(framedRaw) > store.options.MaxValueBytes {
 		return store.readStoredRecord(request, item, framedRaw, nil)
 	}
-	decoded := decodeRuntime(framedRaw, item.Identity, request.Contract, item.ApplyVersion)
+	decoded := store.decodeRuntime(framedRaw, item.Identity, request.Contract, item.ApplyVersion)
 	return store.readStoredRecord(request, item, framedRaw, &decoded)
 }
 
@@ -1162,7 +1162,7 @@ func (store *ExecutionStore) readStoredRecord(
 	if framedDecoded != nil {
 		decoded = *framedDecoded
 	} else {
-		decoded = decodeRuntime(framedRaw, item.Identity, request.Contract, item.ApplyVersion)
+		decoded = store.decodeRuntime(framedRaw, item.Identity, request.Contract, item.ApplyVersion)
 	}
 	if decoded.Status == execution.StateDeterministicInvalid {
 		return decoded
@@ -1201,7 +1201,7 @@ func (store *ExecutionStore) restorable(
 		// This process wrote those bytes: its own concurrent write came first.
 		return false
 	}
-	view := decodeRuntime(outcome.Current, identity, request.Contract, last.applyVersion)
+	view := store.decodeRuntime(outcome.Current, identity, request.Contract, last.applyVersion)
 	if view.Status == execution.StateDeterministicInvalid ||
 		execution.CompareApplyVersion(view.PersistedApplyVersion, last.applyVersion) != execution.ApplyVersionPersistedOlder {
 		store.cache.countDeclined(StateCacheDeclineNewerVersion)

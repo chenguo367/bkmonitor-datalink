@@ -468,7 +468,7 @@ func TestRuntimeSeriesGuardDeterminesPersistedStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	view := decodeRuntime(raw, mutation.Identity, frozenRef(), mutation.ApplyVersion)
+	view := decodeRuntimeCovered(raw, mutation.Identity, frozenRef(), mutation.ApplyVersion, nil)
 	if view.Status != execution.StateFoundWarming {
 		t.Fatalf("status = %s, want FOUND_WARMING", view.Status)
 	}

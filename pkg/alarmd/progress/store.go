@@ -59,7 +59,27 @@ type StoreOptions struct {
 	// the record, by caller and by whether the key or the owner's record
 	// answered it (progress_reads_total).
 	Reads func(caller, source string)
+	// Superseded is optional. It is told of every field of an unfinished
+	// Slot's projection a fenced BeginSlot replaced with its attempt's, once
+	// a field, when the write applied (SupersededProjectionFields,
+	// progress_projection_superseded_total).
+	Superseded func(field string)
 }
+
+// The fields of an unfinished Slot's projection a later fenced attempt of
+// the same Slot can change, the closed vocabulary of
+// progress_projection_superseded_total and of the superseded line's
+// differing fields: the contract, the earliest query deadline, the
+// keep-until derivation, the due Plan targets.
+const (
+	SupersededContract       = "contract"
+	SupersededDeadline       = "deadline"
+	SupersededKeepUntil      = "keep_until"
+	SupersededDuePlanTargets = "due_plan_targets"
+)
+
+// SupersededProjectionFields lists them, for the metric's cells.
+var SupersededProjectionFields = []string{SupersededContract, SupersededDeadline, SupersededKeepUntil, SupersededDuePlanTargets}
 
 type Store struct {
 	options StoreOptions
@@ -256,8 +276,10 @@ func (store *Store) BeginSlot(ctx context.Context, request execution.ProgressBeg
 	unread := execution.ProgressBeginResult{Status: execution.ProgressRetryableIO, ReasonCode: execution.ReasonCode(contract.ReasonRedisUnavailable)}
 	// A projection the attempt supersedes is reported once, from the record
 	// the write ended on: a write that conflicts on the owner's record and is
-	// made again would otherwise report it twice (fencedWrite).
-	var superseded func()
+	// made again would otherwise report it twice (fencedWrite). Its line is
+	// written however the write ended; its fields are counted only when the
+	// write replaced the projection.
+	var superseded func(replaced bool)
 	result, err := fencedWrite(ctx, store, ProgressReadBegin, request.Identity.QueryGroup, name, request.OwnerFence, unread,
 		func(result execution.ProgressBeginResult) bool {
 			// Judged on the owner's record, now read again: what that pass
@@ -273,14 +295,14 @@ func (store *Store) BeginSlot(ctx context.Context, request execution.ProgressBeg
 			return store.beginSlotOn(ctx, request, name, raw, missing, &superseded)
 		})
 	if superseded != nil {
-		superseded()
+		superseded(err == nil && result.Status == execution.ProgressCommitted)
 	}
 	return result, err
 }
 
 // beginSlotOn is BeginSlot on the record raw (missing when there is none).
 func (store *Store) beginSlotOn(ctx context.Context, request execution.ProgressBeginRequest, name string, raw []byte, missing bool,
-	superseded *func()) (execution.ProgressBeginResult, error) {
+	superseded *func(replaced bool)) (execution.ProgressBeginResult, error) {
 	var err error
 	current := execution.ScheduleProgress{Identity: request.Identity, NextSlot: request.Projection.Contract.Slot.EvaluationTime}
 	// abandoned is the unfinished Slot a later Segment skipped, reported once
@@ -307,8 +329,8 @@ func (store *Store) beginSlotOn(ctx context.Context, request execution.ProgressB
 				// committed for it, so its projection replaces the persisted one,
 				// whether the Segment is the same or a later one now owns the time.
 				if !persisted.Equal(request.Projection) {
-					*superseded = func() {
-						store.observeSupersededProjection(ctx, request.Identity.QueryGroup, persisted, request.Projection)
+					*superseded = func(replaced bool) {
+						store.observeSupersededProjection(ctx, request.Identity.QueryGroup, persisted, request.Projection, replaced)
 					}
 				}
 			case current.NextSlot != requested && newerSegment:
@@ -600,22 +622,32 @@ func (store *Store) observeSupersededProjection(
 	queryGroup execution.QueryGroupIdentity,
 	persisted execution.UnfinishedSlotProjection,
 	request execution.UnfinishedSlotProjection,
+	replaced bool,
 ) {
-	if store.options.Observer == nil {
-		return
-	}
 	var fields []string
 	if persisted.Contract != request.Contract {
-		fields = append(fields, "contract")
+		fields = append(fields, SupersededContract)
 	}
 	if persisted.EarliestQueryDeadlineUnixMilli != request.EarliestQueryDeadlineUnixMilli {
-		fields = append(fields, "deadline")
+		fields = append(fields, SupersededDeadline)
 	}
 	if persisted.KeepUntilUnixMilli != request.KeepUntilUnixMilli {
-		fields = append(fields, "keep_until")
+		fields = append(fields, SupersededKeepUntil)
 	}
 	if !persisted.DuePlanTargets.Equal(request.DuePlanTargets) {
-		fields = append(fields, "due_plan_targets")
+		fields = append(fields, SupersededDuePlanTargets)
+	}
+	// Counted once the write replaced the projection - a refused write, or
+	// one whose outcome is unknown, replaced nothing and is tried again - and
+	// whether or not anything observes: the line is the only other trace of
+	// a supersede, and progress_committed is no stage of observation_total.
+	if replaced && store.options.Superseded != nil {
+		for _, field := range fields {
+			store.options.Superseded(field)
+		}
+	}
+	if store.options.Observer == nil {
+		return
 	}
 	defer func() { _ = recover() }()
 	store.options.Observer.Observe(ctx, observability.Observation{

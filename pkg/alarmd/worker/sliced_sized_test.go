@@ -33,8 +33,14 @@ func TestASliceLetGoForItsSizeIsStartedSplitTheRoundAfter(t *testing.T) {
 	fixture.source.facts = cloudHostFacts()
 	request := windowedRequest()
 	for round := 1; round <= 2; round++ {
-		if result, err := fixture.coordinator.Execute(context.Background(), request); err != nil || !result.Completed {
+		result, err := fixture.coordinator.Execute(context.Background(), request)
+		if err != nil || !result.Completed {
 			t.Fatalf("round %d: result=%+v err=%v", round, result, err)
+		}
+		// The second lets a slice it started in go for its size and keeps
+		// its split: the one sized_split this Query Group pays.
+		if round == 2 && result.Usage.InputSliceStartDiscarded != 1 {
+			t.Fatalf("second round usage %+v, want its start let go for its size, counted sized_split", result.Usage)
 		}
 	}
 	first := len(fixture.source.calls)
@@ -73,6 +79,9 @@ func TestACoarseCutForSizeIsRefinedForSeriesWithinTwoRounds(t *testing.T) {
 	fixture := newSlicedFixture(t, slicedHosts(24, 45<<10), sliceableFacts(), 200)
 	fixture.source.queryMillis = 10_000
 	request := windowedRequest()
+	// sizedKept is the rounds that kept a slice read whole split for its
+	// series (input_slice_shape_sized_kept).
+	sizedKept := map[int]uint64{}
 	landed := func(round int) []string {
 		t.Helper()
 		before := len(fixture.source.calls)
@@ -80,6 +89,7 @@ func TestACoarseCutForSizeIsRefinedForSeriesWithinTwoRounds(t *testing.T) {
 		if err != nil || !result.Completed {
 			t.Fatalf("round %d: result=%+v err=%v, want it completed", round, result, err)
 		}
+		sizedKept[round] = result.Usage.InputSliceShapeSizedKept
 		if round > 2 && result.Usage.InputSlicesDiscarded != 0 {
 			t.Fatalf("round %d let %d slices go, want none after the first cut's round", round, result.Usage.InputSlicesDiscarded)
 		}
@@ -104,6 +114,16 @@ func TestACoarseCutForSizeIsRefinedForSeriesWithinTwoRounds(t *testing.T) {
 	for round := 4; round <= 7; round++ {
 		if got := landed(round); !reflect.DeepEqual(got, settled) {
 			t.Fatalf("round %d landed %d slices, round 3 %d: want the cut settled from round 3", round, len(got), len(settled))
+		}
+	}
+	// The refinement is counted where it is kept, and the settled rounds
+	// keep none.
+	if sizedKept[1]+sizedKept[2]+sizedKept[3] == 0 {
+		t.Fatalf("sized_kept by round %v: the refinement within two rounds kept no split for series", sizedKept)
+	}
+	for round := 4; round <= 7; round++ {
+		if sizedKept[round] != 0 {
+			t.Fatalf("sized_kept by round %v: settled round %d kept a split", sizedKept, round)
 		}
 	}
 }

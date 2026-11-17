@@ -46,6 +46,7 @@ type phaseTwoMetrics struct {
 	lastProgress                   *prometheus.GaugeVec
 	capacity                       *prometheus.CounterVec
 	stateWriteReuse                *prometheus.CounterVec
+	segmentShadow                  segmentShadowMetrics
 	stateSeriesClass               *prometheus.CounterVec
 	stateSeriesNotWritten          *prometheus.CounterVec
 	stateAlreadyApplied            *prometheus.CounterVec
@@ -109,6 +110,9 @@ type phaseTwoMetrics struct {
 	sliceReadAhead                 *prometheus.CounterVec
 	seriesNotEvaluated             *prometheus.CounterVec
 	sliceReadAheadYields           *prometheus.CounterVec
+	sliceReadAheadWaits            *prometheus.CounterVec
+	sliceReadAheadWaitSeconds      prometheus.Counter
+	sliceReadAheadWaitingSeconds   prometheus.Counter
 	inputSliceTimeouts             *prometheus.CounterVec
 	inputSliceShapes               *prometheus.CounterVec
 	noDataStagesAhead              *prometheus.CounterVec
@@ -444,6 +448,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"admitted, by the difference, when they cannot - the census itself counted wrong. Otherwise the " +
 				"classes sum to written plus this family, per attempt.",
 		}, []string{"reason"}),
+		segmentShadow: newSegmentShadowMetrics(),
 		stateWriteReuse: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: metricSubsystem, Name: "state_write_reuse_total",
 			Help: "Runtime State mutations admitted for writing, by how much of what the write carries was " +
@@ -1007,6 +1012,34 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"Counted from completed Slots, whose rows carry what the yielded reads held " +
 			"(read_ahead_yielded_bytes), the farthest from the slice being read (read_ahead_yield_distance_max) " +
 			"and the longest any read ahead waited for room (read_ahead_wait_millis_max)."}, []string{"phase"})
+	metrics.sliceReadAheadWaits = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem,
+		Name: "worker_slice_read_ahead_waits_total", Help: "Waits of the slices read ahead for room - a read that has " +
+			"an answer's bytes and finds its limit, the pool or the share full waits, keeping what it took and reading " +
+			"no more - by how each ended and how long it took. outcome: kept, room came and it took the bytes; passed, " +
+			"the Slot took the read on while it waited; stopped, the read was let go; canceled, its context ended. " +
+			"duration: lt_1ms, 1ms_10ms, 10ms_100ms, 100ms_1s, ge_1s. Every wait is counted as it ends, under a " +
+			"millisecond too, whatever its Slot came to: a read let go as its Slot ends, or as a runner cancels it, " +
+			"counts as stopped. Their time is worker_slice_read_ahead_wait_seconds_total, summed over waits, and " +
+			"worker_slice_read_ahead_waiting_seconds_total the Slot time with at least one waiting."},
+		[]string{"outcome", "duration"})
+	for _, outcome := range observability.SliceReadAheadWaitOutcomes {
+		for _, duration := range observability.SliceReadAheadWaitDurations {
+			metrics.sliceReadAheadWaits.WithLabelValues(outcome, duration)
+		}
+	}
+	metrics.sliceReadAheadWaitSeconds = prometheus.NewCounter(prometheus.CounterOpts{Subsystem: metricSubsystem,
+		Name: "worker_slice_read_ahead_wait_seconds_total", Help: "Seconds the slices read ahead waited for room, summed " +
+			"over every wait as it ends (worker_slice_read_ahead_waits_total), every attempt's. Reads ahead side by " +
+			"side wait at once, so this is waiting summed over reads, and its rate over the rate of " +
+			"alarmd_slot_operation_duration_seconds_sum{stage=\"execute\"} may pass 1; the share of Slot time with a " +
+			"read ahead waiting is worker_slice_read_ahead_waiting_seconds_total's."})
+	metrics.sliceReadAheadWaitingSeconds = prometheus.NewCounter(prometheus.CounterOpts{Subsystem: metricSubsystem,
+		Name: "worker_slice_read_ahead_waiting_seconds_total", Help: "Seconds of Slot time with at least one slice read " +
+			"ahead waiting for room, the overlap of waits side by side counted once, as the last of them ends, every " +
+			"attempt's. Its rate over the rate of alarmd_slot_operation_duration_seconds_sum{stage=\"execute\"} - " +
+			"every attempt's execute too, failed and retried ones among them - is the share of Slot time with a read " +
+			"ahead waiting, 1 at most but for a wait that outlived its attempt's execute. A wait is on a read's " +
+			"goroutine beside the Slot's: it is on the Slot's path only where the Slot then waits for that read."})
 	for _, phase := range observability.SliceReadAheadYieldPhases {
 		metrics.sliceReadAheadYields.WithLabelValues(phase)
 	}
@@ -1032,6 +1065,10 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"refused_condition_budget, refused_single_value (its sample told none of its series apart) and " +
 			"refused_split_error count such a split that kept nothing; merge_refused a " +
 			"split taken back whose shape would not rebuild without it, the shape kept as it was rather than dropped. " +
+			"Two count a split kept for a slice's size that did keep: sized_split, a slice the Slot started in let go " +
+			"for its size, its split kept for the next Slot to start in its parts (the completion row's " +
+			"input_slice_start_discarded; a Query Group that keeps paying it every round is what the split exists to " +
+			"end); sized_kept, a slice read whole past a slice's series kept split for the next Slot. " +
 			"Which Query Group is not a label here."}, []string{"outcome"})
 	for _, outcome := range observability.InputSliceShapeOutcomes {
 		metrics.inputSliceShapes.WithLabelValues(outcome)
@@ -2331,7 +2368,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.queryAdmission, m.queryDownstreamDistress,
 		m.noDataSlotPlans, m.noDataAbsences, m.noDataManualCloseDropped, m.noDataManualCloseReadFailures, m.targetPlanResolutions, m.targetSelectorResolutions, m.targetExcludedAbsentMembers, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.inPlaceWaits, m.inPlaceHeldInputBytes, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetRedis,
-		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.retainedShareApproaching, m.inputSlices, m.slicedSlots, m.firstSeenUnseen, m.sliceReadAhead, m.seriesNotEvaluated, m.sliceReadAheadYields, m.inputSliceTimeouts, m.inputSliceShapes, m.noDataStagesAhead, m.noDataStageAheadDiffers, m.noDataGroupsStagedAhead, m.schedulePruneSkipped, m.scheduleCutoverDuration,
+		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.retainedShareApproaching, m.inputSlices, m.slicedSlots, m.firstSeenUnseen, m.sliceReadAhead, m.seriesNotEvaluated, m.sliceReadAheadYields, m.sliceReadAheadWaits, m.sliceReadAheadWaitSeconds, m.sliceReadAheadWaitingSeconds, m.inputSliceTimeouts, m.inputSliceShapes, m.noDataStagesAhead, m.noDataStageAheadDiffers, m.noDataGroupsStagedAhead, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
 		m.scheduleCutoverQueryGroups, m.scheduleCutoverReadHoldLinks, m.fleetOverdueEpisodes, m.fleetRestoreUnread, m.scheduleCutoverTimelinesRead, m.scheduleCutoverFirstDuration,
 		m.scheduleCutoverFirstTimelines, m.replayExpiries, m.replayTakeovers, m.slotDiversions, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
@@ -2339,7 +2376,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.objectCatalogObjects, m.catalogRenewals, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectCatalogWrittenBytes, m.objectReads, m.stateGenerationSkew, m.stateCarry,
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.byteOverloadedWorkers, m.byteMostLoadedShare, m.byteUnreadGroups, m.placementUnfit, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlRecordReads, m.controlRecordMismatches, m.controlRecordConflicts, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.recoveryWithheld, m.noDataEnd, m.openAlertGate,
-	}...), append(append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), append(append(m.handover.collectors(), m.slotProgress.collectors()...), m.sreActions.actions, m.sreActions.rollouts, m.sreActions.watched, m.sreActions.receipts, m.cliAuth.total, m.cliAuth.rosterApplied)...), append(m.controlFacts.collectors(), m.traceExport.collectors()...)...),
+	}...), append(append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), append(append(m.handover.collectors(), m.slotProgress.collectors()...), m.sreActions.actions, m.sreActions.rollouts, m.sreActions.watched, m.sreActions.receipts, m.cliAuth.total, m.cliAuth.rosterApplied)...), append(append(m.controlFacts.collectors(), m.traceExport.collectors()...), m.segmentShadow.collectors()...)...),
 		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.activeCopy, m.fleetTracker, m.effectiveTimeRefresh, m.activationRebuild, m.timelineRepair, m.activationSkippedTimelines, m.timelineUnreadableReports, m.activationHeader, m.activationBlocked, m.liveReserve, m.roundMemory, m.stateSeriesHeld, m.targetGroup, m.effectiveClose, m.logLines, m.observerPanics, m.absentClose, m.editClose, m.noDataCloseAPI, m.linkdFilterClose, m.linkdFilterCloseRequests, m.openEpisodeRecord, m.newOpens, m.frontRefused, m.processMemory, m.strategyScopeClose, m.targetScopeClose, m.controlSourceRounds, m.apmCarried, m.apmCarriedBytes, m.sourceLivenessChecks, m.sourceLivenessSeconds, m.sourceLivenessDeferred, m.sourceLivenessEvicted, m.sourceLivenessHeldEvicted, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.controlFactsWrites, m.planCarriesReads, m.queryCooldownLoads, m.eventBusinessAttribution, m.detectionSnapshots, m.detectionSnapshotStates, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
 		m.controlSourceRetainedStale, m.controlSourceLastGoodIdentity, m.platformSettings,
 		m.redisPool, m.renewalGate, m.stateCache, m.stateWitness, m.canonicalEncoding, m.datasetRecordIDs, m.legacyPodCache,
@@ -2789,6 +2826,7 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	if observation.Stage == observability.StageOutputUnapplied && isOwnershipRefusalReason(observation.ReasonCode) {
 		m.handover.outputUnapplied.WithLabelValues(string(observation.ReasonCode)).Inc()
 	}
+	m.segmentShadow.observe(observation.SegmentShadow)
 	if facts := observation.StateWriteReuse; facts != nil && !facts.Empty() {
 		for key, count := range facts.Counts {
 			m.stateWriteReuse.WithLabelValues(string(key.Class), string(key.Stored)).Add(float64(count))
@@ -3590,7 +3628,7 @@ func (m phaseTwoMetrics) observeSlicing(usage *observability.SlotBudgetUsageFact
 		m.sliceReadAheadYields.WithLabelValues(observability.SliceReadAheadYieldPhases[phase]).Add(float64(count))
 	}
 	m.inputSliceTimeouts.WithLabelValues(observability.InputSliceTimeoutSplitSucceeded).Add(float64(usage.InputSliceTimeouts))
-	for outcome, count := range [...]uint64{usage.InputSliceShapeStarted, usage.InputSliceShapeKept, usage.InputSliceShapeMerged, usage.InputSliceShapeVoidedRevision, usage.InputSliceShapeVoidedDimensions, usage.InputSliceShapeVoidedMaxLeaves, usage.InputSliceShapeRefusedNotALeaf, usage.InputSliceShapeRefusedNotAPartition, usage.InputSliceShapeRefusedMaxLeaves, usage.InputSliceShapeEvictedIdle, usage.InputSliceShapeRefusedCondition, usage.InputSliceShapeRefusedSingleValue, usage.InputSliceShapeRefusedSplitError, usage.InputSliceShapeMergeRefused} {
+	for outcome, count := range [...]uint64{usage.InputSliceShapeStarted, usage.InputSliceShapeKept, usage.InputSliceShapeMerged, usage.InputSliceShapeVoidedRevision, usage.InputSliceShapeVoidedDimensions, usage.InputSliceShapeVoidedMaxLeaves, usage.InputSliceShapeRefusedNotALeaf, usage.InputSliceShapeRefusedNotAPartition, usage.InputSliceShapeRefusedMaxLeaves, usage.InputSliceShapeEvictedIdle, usage.InputSliceShapeRefusedCondition, usage.InputSliceShapeRefusedSingleValue, usage.InputSliceShapeRefusedSplitError, usage.InputSliceShapeMergeRefused, usage.InputSliceStartDiscarded, usage.InputSliceShapeSizedKept} {
 		m.inputSliceShapes.WithLabelValues(observability.InputSliceShapeOutcomes[outcome]).Add(float64(count))
 	}
 	for outcome, count := range [...]uint64{usage.NoDataStagesAheadCarried, usage.NoDataStagesAheadDiffers,
@@ -3602,4 +3640,24 @@ func (m phaseTwoMetrics) observeSlicing(usage *observability.SlotBudgetUsageFact
 		m.noDataStageAheadDiffers.WithLabelValues(nodata.StagedDiffersReasons[reason]).Add(float64(count))
 	}
 	m.noDataGroupsStagedAhead.Add(float64(usage.NoDataGroupsStagedAhead))
+}
+
+// RecordReadAheadWait counts one wait of a read ahead for room as it ends, by
+// how it ended and its band, and adds its time; a word outside the closed
+// lists is dropped.
+func (r *Recorder) RecordReadAheadWait(outcome, duration string, waited time.Duration) {
+	if r == nil || !knownLabel(observability.SliceReadAheadWaitOutcomes[:], outcome) ||
+		!knownLabel(observability.SliceReadAheadWaitDurations[:], duration) {
+		return
+	}
+	r.phaseTwo.sliceReadAheadWaits.WithLabelValues(outcome, duration).Inc()
+	r.phaseTwo.sliceReadAheadWaitSeconds.Add(max(waited, 0).Seconds())
+}
+
+// RecordReadAheadWaiting adds Slot time with at least one read ahead waiting.
+func (r *Recorder) RecordReadAheadWaiting(waited time.Duration) {
+	if r == nil {
+		return
+	}
+	r.phaseTwo.sliceReadAheadWaitingSeconds.Add(max(waited, 0).Seconds())
 }

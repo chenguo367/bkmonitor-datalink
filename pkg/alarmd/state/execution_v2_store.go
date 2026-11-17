@@ -16,6 +16,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/segment"
 )
 
 const executionGapSchemaV2 = "alarmd-plan-gap-v2"
@@ -104,6 +105,18 @@ type ExecutionStoreOptions struct {
 	RestoreProgressCheck func(ctx context.Context, group execution.QueryGroupIdentity, slot execution.EvaluationTime) (bool, error)
 	// Now is the cache's clock; nil is time.Now.
 	Now func() time.Time
+	// Segments is what a found record's read is extended by, a series of a
+	// Plan's stable segments (014 B3 3.2). Nil reads every record as stored:
+	// no Plan's segments are known.
+	Segments SegmentCoverage
+}
+
+// SegmentCoverage is a series' coverage by its Plan's stable segments, when
+// it is a member: its entry and the Plan's mark and grid (segment.Coverage).
+// Every read of a stored record asks it, in the one place a record becomes a
+// view (decodeRuntime), so no reader reads a member another way.
+type SegmentCoverage interface {
+	Coverage(identity execution.StateKeyIdentity) (segment.Coverage, bool)
 }
 
 type ExecutionStore struct {
@@ -451,11 +464,24 @@ func (store *ExecutionStore) ApplyRuntime(ctx context.Context, request execution
 	return store.applyRuntime(ctx, request, nil)
 }
 
-// decodeRuntime reads a stored framed record and classifies it against the
-// candidate the caller is about to apply. Bytes that do not carry the frame's
-// magic are corrupt: no writer of this or the previous snapshot stores any
-// other shape under the runtime key.
-func decodeRuntime(raw []byte, identity execution.StateKeyIdentity, contractRef execution.FrozenExecutionContractRef, candidate execution.ApplyVersion) execution.RuntimeStateView {
+// decodeRuntime is decodeRuntimeCovered with the store's segments: every
+// reader of a stored record in the store reads it through here.
+func (store *ExecutionStore) decodeRuntime(raw []byte, identity execution.StateKeyIdentity, contractRef execution.FrozenExecutionContractRef, candidate execution.ApplyVersion) execution.RuntimeStateView {
+	return decodeRuntimeCovered(raw, identity, contractRef, candidate, store.options.Segments)
+}
+
+// decodeRuntimeCovered reads a stored framed record, extends a member's read
+// by its segment (segment.Extend: the State's own points, then normal ones
+// where the segment covers, up to the mark and never further), and
+// classifies it against the candidate the caller is about to apply. It is the
+// one place a stored record becomes a view: the Slot's preflight, a cache hit
+// (the cache keeps the bytes), the first-seen pre-pass and the no-data
+// series' reads (both preflights), a carried generation's read, and the
+// write path's conflict decode all come here. Bytes that do not carry the
+// frame's magic are corrupt: no writer of this or the previous snapshot
+// stores any other shape under the runtime key.
+func decodeRuntimeCovered(raw []byte, identity execution.StateKeyIdentity, contractRef execution.FrozenExecutionContractRef,
+	candidate execution.ApplyVersion, segments SegmentCoverage) execution.RuntimeStateView {
 	invalid := func(reason string) execution.RuntimeStateView {
 		return execution.RuntimeStateView{Identity: identity, BlobRevision: 1, Status: execution.StateDeterministicInvalid,
 			ReasonCode: execution.ReasonCode(reason)}
@@ -472,6 +498,11 @@ func decodeRuntime(raw []byte, identity execution.StateKeyIdentity, contractRef 
 	}
 	view.Representation = execution.StateRepresentationFramed
 	view.Status = storedLoadStatus(view.Levels, view.SeriesGuard)
+	if segments != nil {
+		if coverage, member := segments.Coverage(identity); member {
+			view, _ = segment.Extend(view, coverage)
+		}
+	}
 	classified, err := execution.ClassifyStatePreflight(execution.StatePreflightRequest{Contract: contractRef,
 		Items: []execution.StatePreflightItem{{Identity: identity, ApplyVersion: candidate}}}, execution.StatePreflightResult{Items: []execution.RuntimeStateView{view}})
 	if err != nil {

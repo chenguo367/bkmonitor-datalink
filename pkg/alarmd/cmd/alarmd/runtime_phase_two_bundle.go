@@ -829,6 +829,8 @@ func openProductionPhaseTwoBundleAssembly(
 		ExecutionEvidence: slotAppliedMarks,
 		// How each BeginSlot went, and why a begun Slot was not written down.
 		SlotCounts: recorder,
+		// Every wait of a read ahead for room, as it ends.
+		ReadAheadWaits: recorder,
 		// Linked only with the link's control plane: without it the copy is
 		// never refreshed and can never judge, and the worker keeps no
 		// no-data end index.
@@ -869,6 +871,12 @@ func openProductionPhaseTwoBundleAssembly(
 		reading := worker.SliceMemory(coordinator)
 		return metric.SliceMemoryReading{Remembered: reading.Remembered, Unswept: reading.Unswept,
 			Leaves: reading.Leaves, LeafSeries: reading.LeafSeries, Deferred: reading.Deferred}
+	}); err != nil {
+		return nil, err
+	}
+	if err := recorder.BindSegmentShadowMemory(func() metric.SegmentShadowMemoryReading {
+		reading := worker.SegmentShadowMemory(coordinator)
+		return metric.SegmentShadowMemoryReading{Plans: reading.Plans, Open: reading.Open, Closed: reading.Closed, Bytes: reading.Bytes}
 	}); err != nil {
 		return nil, err
 	}

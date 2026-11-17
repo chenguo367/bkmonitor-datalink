@@ -215,6 +215,22 @@ func ringRatioQueryFacts(t *testing.T) execution.QueryPlanFacts {
 // from, as the strategy compiler binds a history dependency.
 func ringRatioCompiledPlan(t *testing.T, ref string) (*strategy.CompiledPlan, []execution.DataRequirement) {
 	t.Helper()
+	return ringRatioCompiledPlanRecovering(t, ref, `{"enabled":true,"consecutive_windows":1}`)
+}
+
+// ringRatioCompiledPlanRecovering is ringRatioCompiledPlan with the Level's
+// recovery plan given.
+func ringRatioCompiledPlanRecovering(t *testing.T, ref, recovery string) (*strategy.CompiledPlan, []execution.DataRequirement) {
+	t.Helper()
+	return ringRatioCompiledPlanWith(t, ref, recovery, 0, nil)
+}
+
+// ringRatioCompiledPlanWith is ringRatioCompiledPlan with the Level's
+// recovery plan, the strategy's snapshot revision - above zero, the Plan is
+// on the consumer's standard protocol - and its no-data setting given.
+func ringRatioCompiledPlanWith(t *testing.T, ref, recovery string, snapshotRevision int64,
+	noData *contract.NoDataConfigV1) (*strategy.CompiledPlan, []execution.DataRequirement) {
+	t.Helper()
 	projection := strategy.AlgorithmInputProjection{ValueFields: []string{"value"}, DimensionFields: []string{"host"}, IdentityFields: []string{"host"}}
 	requirement := func(name string, role strategy.AlgorithmInputRole, start, end int64, points []strategy.AlgorithmNamedInputPoint,
 		readiness strategy.AlgorithmReadinessClass) strategy.AlgorithmInputRequirement {
@@ -262,11 +278,11 @@ func ringRatioCompiledPlan(t *testing.T, ref string) (*strategy.CompiledPlan, []
 	if err != nil {
 		t.Fatal(err)
 	}
-	strategyRef := contract.StrategyRefV2{TenantID: "tenant", StrategyID: "7", Revision: "strategy-v1"}
+	strategyRef := contract.StrategyRefV2{TenantID: "tenant", StrategyID: "7", Revision: "strategy-v1", SnapshotRevision: snapshotRevision}
 	inputProjection := contract.InputProjectionV2{ValueFields: []string{"value"}, DimensionFields: []string{"host"},
 		BusinessIdentityField: "bk_biz_id", MultiValueAlignment: "SINGLE_VALUE", DataUnit: "percent",
 		MissingValuePolicy: contract.MissingValuePolicyRequired}
-	plan := contract.EvaluationPlanV2{PlanID: "7", StrategyRef: strategyRef, InputProjection: inputProjection,
+	plan := contract.EvaluationPlanV2{PlanID: "7", StrategyRef: strategyRef, InputProjection: inputProjection, NoData: noData,
 		StrategyIR: contract.StrategyIRV2{Schema: contract.Schema{Name: contract.StrategyIRSchemaV2, Major: 2},
 			StrategyRef: strategyRef, InputProjection: inputProjection,
 			ExecutionSemantics: contract.ExecutionSemanticsV2{EvaluationScope: contract.EvaluationScopeSeries,
@@ -278,7 +294,7 @@ func ringRatioCompiledPlan(t *testing.T, ref string) (*strategy.CompiledPlan, []
 				TriggerPlan: contract.TypedPlanV1{Type: "N_OF_M", Version: 1,
 					Config: json.RawMessage(`{"window_size":1,"required_anomalies":1,"step_seconds":60}`)},
 				RecoveryPlan: contract.TypedPlanV1{Type: "CONTINUOUS_TRIGGER_MISS", Version: 1,
-					Config: json.RawMessage(`{"enabled":true,"consecutive_windows":1}`)},
+					Config: json.RawMessage(recovery)},
 			}}}}
 	result, err := compiler.Compile(context.Background(), strategy.CompileRequest{Plan: plan,
 		DatasetContract: contract.DatasetContractV2{SchemaDigest: strings.Repeat("1", 64),

@@ -19,10 +19,11 @@ import (
 // What a Slot costs the Progress record, and what its attempts come to: the
 // reads of the record a Query Group's owner makes, by whether the key or the
 // owner's record answered them (B2-3), and how each attempt's BeginSlot went
-// and why one that began did not write its Slot down (B7). Every cell of
-// every family exists from the start, so a zero is a reading.
+// and why one that began did not write its Slot down (B7), and which fields
+// of an unfinished Slot's projection a later attempt of it changed. Every
+// cell of every family exists from the start, so a zero is a reading.
 type slotProgressMetrics struct {
-	reads, begins, notCommitted *prometheus.CounterVec
+	reads, begins, notCommitted, superseded *prometheus.CounterVec
 }
 
 func newSlotProgressMetrics() slotProgressMetrics {
@@ -52,6 +53,15 @@ func newSlotProgressMetrics() slotProgressMetrics {
 				"(every other return: a failed query, State write or Progress commit among them). Begun less " +
 				"these is the attempts that committed.",
 		}, []string{"reason"}),
+		superseded: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Subsystem: metricSubsystem, Name: "progress_projection_superseded_total",
+			Help: "Fields of an unfinished Slot's projection that a later attempt's fenced BeginSlot replaced, " +
+				"counted once the write applied, a field each: contract, deadline (the earliest query deadline), " +
+				"keep_until, due_plan_targets. A supersede that changed two fields counts in both. A write refused " +
+				"(stale_owner, content_moved) or of unknown outcome replaced nothing and counts none, though its " +
+				"progress_committed line, degraded CONFIG_DRIFT, naming the fields, is written as every supersede's " +
+				"is. A BeginSlot made again on a conflict counts once, from the pass its write ended on.",
+		}, []string{"field"}),
 	}
 	for _, caller := range progress.ProgressReadCallers {
 		for _, source := range progress.ProgressReadSources {
@@ -64,11 +74,14 @@ func newSlotProgressMetrics() slotProgressMetrics {
 	for _, reason := range execution.SlotNotCommittedReasons {
 		metrics.notCommitted.WithLabelValues(reason)
 	}
+	for _, field := range progress.SupersededProjectionFields {
+		metrics.superseded.WithLabelValues(field)
+	}
 	return metrics
 }
 
 func (m slotProgressMetrics) collectors() []prometheus.Collector {
-	return []prometheus.Collector{m.reads, m.begins, m.notCommitted}
+	return []prometheus.Collector{m.reads, m.begins, m.notCommitted, m.superseded}
 }
 
 // RecordProgressRead counts one read of a Progress record by its owner; a
@@ -100,4 +113,14 @@ func (r *Recorder) RecordSlotNotCommitted(reason string) {
 		reason = execution.SlotNotCommittedOther
 	}
 	r.phaseTwo.slotProgress.notCommitted.WithLabelValues(reason).Inc()
+}
+
+// RecordProgressProjectionSuperseded counts one field of an unfinished Slot's
+// projection a later attempt of it changed; a field outside
+// progress.SupersededProjectionFields is dropped.
+func (r *Recorder) RecordProgressProjectionSuperseded(field string) {
+	if r == nil || !knownLabel(progress.SupersededProjectionFields, field) {
+		return
+	}
+	r.phaseTwo.slotProgress.superseded.WithLabelValues(field).Inc()
 }

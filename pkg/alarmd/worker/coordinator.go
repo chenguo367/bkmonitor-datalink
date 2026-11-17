@@ -113,6 +113,9 @@ type Ports struct {
 	// began its Slot did not write it down (SlotCounter). Optional: nil counts
 	// nothing.
 	SlotCounts SlotCounter
+	// ReadAheadWaits is told of every wait of a read ahead for room as it
+	// ends (ReadAheadWaitCounter). Optional: nil counts nothing.
+	ReadAheadWaits ReadAheadWaitCounter
 }
 
 // ScopeGroupResolver reads one dynamic group a target scope names for one
@@ -145,6 +148,9 @@ type SlotExecutionCoordinator struct {
 	// notEvaluatedLines is when each Query Group last wrote its
 	// series_not_evaluated line (slot_counts.go).
 	notEvaluatedLines seriesNotEvaluatedLines
+	// segmentShadow is each Query Group's Plans' stable segments as the
+	// shadow keeps them in process (segment_shadow.go).
+	segmentShadow segmentShadow
 	// noDataSkips is how long each Plan's no-data detection has been skipping.
 	// One per process, because a streak is about rounds rather than about one
 	// Slot. See no_data_skip_streak.go.
@@ -916,10 +922,11 @@ func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 		InputSliceShapeRefusedSingleValue:   shapes[11],
 		InputSliceShapeRefusedSplitError:    shapes[12],
 		InputSliceShapeMergeRefused:         shapes[13],
+		InputSliceShapeSizedKept:            shapes[15],
 		InputSliceCutOn:                     stream.sliceCutFrom(),
 		InputSliceDimension:                 stream.sliceDimension(),
 		InputSlicesDeferred:                 stream.slicesDeferred(),
-		InputSliceStartDiscarded:            stream.sliceStartDiscarded(),
+		InputSliceStartDiscarded:            shapes[14],
 		NoDataStagesAheadCarried:            stream.stageAheadEnds[stageAheadCarried], NoDataStagesAheadDiffers: stream.stageAheadEnds[stageAheadDiffers],
 		NoDataStagesAheadDiscarded: stream.stageAheadEnds[stageAheadDiscarded], NoDataStagesAheadStopped: stream.stageAheadEnds[stageAheadStopped],
 		NoDataStageAheadDiffersKeptOtherwise: stream.stageAheadDiffers[0], NoDataStageAheadDiffersCountMismatch: stream.stageAheadDiffers[1],
@@ -1818,6 +1825,11 @@ func (coordinator *SlotExecutionCoordinator) finalizeSummarized(
 		gapRetention, err := apply.planGapsBefore(ctx, due, &planResult)
 		if err != nil {
 			return execution.SlotExecutionResult{}, err
+		}
+		if planResult.HistoryCoverage.Resumed > 0 {
+			// Series an earlier attempt applied, resumed before evaluation:
+			// the segment shadow cannot tell this round's membership.
+			apply.shadow.retried(&coordinator.segmentShadow, due)
 		}
 		output, err := apply.applyPlanState(ctx, due, planResult.StateResults, loadedState, stateIndex)
 		if err != nil {

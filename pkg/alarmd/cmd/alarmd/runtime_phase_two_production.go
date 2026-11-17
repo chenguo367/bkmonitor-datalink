@@ -3623,6 +3623,7 @@ func slotBudgetUsageFacts(usage execution.SlotBudgetUsage) *observability.SlotBu
 		InputSliceShapeRefusedSingleValue:   usage.InputSliceShapeRefusedSingleValue,
 		InputSliceShapeRefusedSplitError:    usage.InputSliceShapeRefusedSplitError,
 		InputSliceShapeMergeRefused:         usage.InputSliceShapeMergeRefused,
+		InputSliceShapeSizedKept:            usage.InputSliceShapeSizedKept,
 		InputSliceCutOn:                     usage.InputSliceCutOn,
 		InputSliceDimension:                 usage.InputSliceDimension,
 		InputSlicesDeferred:                 usage.InputSlicesDeferred,

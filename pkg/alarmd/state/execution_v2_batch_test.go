@@ -515,7 +515,7 @@ func TestApplyRuntimeRepeatedKeyFallsBackToSequentialPath(t *testing.T) {
 		t.Fatalf("repeated key must use the sequential path: pipelines=%d cas=%d", backend.pipelines, backend.casCalls)
 	}
 	key, _ := RuntimeStateKeyV3("alarmd", first.Identity)
-	view := decodeRuntime(backend.values[key], first.Identity, frozenRef(), second.ApplyVersion)
+	view := decodeRuntimeCovered(backend.values[key], first.Identity, frozenRef(), second.ApplyVersion, nil)
 	if view.BlobRevision != 2 || view.PersistedMutationDigest != second.MutationDigest {
 		t.Fatalf("later duplicate did not observe the earlier write: %+v", view)
 	}
@@ -825,7 +825,7 @@ func TestApplyRuntimeRepeatedKeyWithTheSameStatementIsNamedRepeatedKey(t *testin
 		t.Fatalf("later copy = %+v, want ALREADY_APPLIED kind repeated_key at stored revision 1: the request itself wrote this key, no client re-sent it", later)
 	}
 	key, _ := RuntimeStateKeyV3("alarmd", first.Identity)
-	view := decodeRuntime(backend.values[key], first.Identity, frozenRef(), first.ApplyVersion)
+	view := decodeRuntimeCovered(backend.values[key], first.Identity, frozenRef(), first.ApplyVersion, nil)
 	if view.BlobRevision != 1 {
 		t.Fatalf("the later copy rewrote the key: revision %d, want 1", view.BlobRevision)
 	}

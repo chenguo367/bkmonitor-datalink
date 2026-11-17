@@ -262,6 +262,8 @@ func (stream *streamedExecution) sliceShapeOutcomes() [len(observability.InputSl
 			outcome == observability.InputSliceShapeKept && usage.kept,
 			outcome == observability.InputSliceShapeMerged && usage.merged,
 			outcome == observability.InputSliceShapeMergeRefused && usage.mergeRefused,
+			outcome == observability.InputSliceShapeSizedSplit && stream.slices.startDiscarded,
+			outcome == observability.InputSliceShapeSizedKept && stream.slices.sizedKept,
 			outcome == usage.dropped:
 			counts[index] = 1
 		}

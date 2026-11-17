@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -283,6 +284,7 @@ const metricFamilySeriesDevelopmentLimit = 50000
 func TestCustomMetricFamilySeriesDevelopmentLimits(t *testing.T) {
 	recorder := NewRecorder(BuildInfo{})
 	bindBudgetSources(t, recorder)
+	bindEverySource(t, recorder)
 	populateAllCustomLabelCombinations(recorder)
 
 	bounds := customMetricFamilySeriesUpperBounds()
@@ -297,11 +299,24 @@ func TestCustomMetricFamilySeriesDevelopmentLimits(t *testing.T) {
 		}
 	}
 	for family := range descriptors {
-		if _, ok := bounds[family]; !ok {
+		_, ok := bounds[family]
+		_, pending := pendingSeriesUpperBounds[family]
+		if !ok && !pending {
 			t.Errorf("registered custom metric family %s has no series upper bound", family)
+		}
+		if ok && pending {
+			t.Errorf("metric family %s has a bound now: take it off pendingSeriesUpperBounds", family)
+		}
+	}
+	for family := range pendingSeriesUpperBounds {
+		if !descriptors[family] {
+			t.Errorf("pending family %s is registered no more: take it off pendingSeriesUpperBounds", family)
 		}
 	}
 	for family, got := range countCustomSeriesByFamily(t, recorder) {
+		if _, pending := pendingSeriesUpperBounds[family]; pending {
+			continue
+		}
 		if got > bounds[family] {
 			t.Errorf("metric family %s registered series = %d, theoretical maximum = %d", family, got, bounds[family])
 		}
@@ -384,6 +399,85 @@ func TestEveryFamilyIsAlarmdsAndCarriesNoConstantLabel(t *testing.T) {
 	}
 	if families == 0 {
 		t.Fatal("the recorder described no alarmd family; the check read nothing")
+	}
+}
+
+// pendingSeriesUpperBounds are the families a Bind method registers that had
+// no bound when every Bind method was first bound here (11-17, B3): fleet,
+// object cache, observation memory and store census families, whose labels
+// come from their sources. Each is to be given a bound derived from where
+// its labels come from, and taken off; a family on it that gains a bound or
+// is registered no more fails the test until it is.
+var pendingSeriesUpperBounds = map[string]string{
+	"alarmd_fleet_anomalies":                         "PENDING bound",
+	"alarmd_fleet_anomaly_oldest_age_seconds":        "PENDING bound",
+	"alarmd_fleet_checks":                            "PENDING bound",
+	"alarmd_fleet_degradations":                      "PENDING bound",
+	"alarmd_fleet_failures":                          "PENDING bound",
+	"alarmd_fleet_gaps":                              "PENDING bound",
+	"alarmd_fleet_handover_objects":                  "PENDING bound",
+	"alarmd_fleet_health":                            "PENDING bound",
+	"alarmd_fleet_losses":                            "PENDING bound",
+	"alarmd_fleet_objects":                           "PENDING bound",
+	"alarmd_fleet_partition_objects":                 "PENDING bound",
+	"alarmd_fleet_query_cooldown_objects":            "PENDING bound",
+	"alarmd_fleet_running_strategies":                "PENDING bound",
+	"alarmd_fleet_stalled_objects":                   "PENDING bound",
+	"alarmd_fleet_workers":                           "PENDING bound",
+	"alarmd_object_cache_decoded_ratio":              "PENDING bound",
+	"alarmd_object_cache_decoded_samples_total":      "PENDING bound",
+	"alarmd_observation_memory_admitted_bytes_total": "PENDING bound",
+	"alarmd_observation_memory_budget_held_bytes":    "PENDING bound",
+	"alarmd_observation_memory_budget_size_bytes":    "PENDING bound",
+	"alarmd_observation_memory_headroom_bytes":       "PENDING bound",
+	"alarmd_observation_memory_held_bytes":           "PENDING bound",
+	"alarmd_observation_memory_over_total":           "PENDING bound",
+	"alarmd_observation_memory_refused_total":        "PENDING bound",
+	"alarmd_store_census_exact":                      "PENDING bound",
+	"alarmd_store_census_family_bytes":               "PENDING bound",
+	"alarmd_store_census_family_keys":                "PENDING bound",
+	"alarmd_store_census_family_samples":             "PENDING bound",
+	"alarmd_store_census_keys":                       "PENDING bound",
+	"alarmd_store_census_timestamp_seconds":          "PENDING bound",
+}
+
+// bindEverySource binds each Bind method bindBudgetSources did not, as the
+// reference test does (describedRecorder), but with a source that answers
+// its zero value rather than panicking: a family a Bind method registers is
+// counted against its bound once it is added, with no list to add it to.
+func bindEverySource(t *testing.T, recorder *Recorder) {
+	t.Helper()
+	bound := map[string]bool{"BindCapacityLoad": true, "BindRetainedReservation": true, "BindSliceMemory": true,
+		"BindQueryPermits": true}
+	value := reflect.ValueOf(recorder)
+	for i := 0; i < value.NumMethod(); i++ {
+		method := value.Type().Method(i)
+		if !strings.HasPrefix(method.Name, "Bind") || bound[method.Name] {
+			continue
+		}
+		args := make([]reflect.Value, 0, method.Type.NumIn()-1)
+		for in := 1; in < method.Type.NumIn(); in++ {
+			param := method.Type.In(in)
+			switch param.Kind() {
+			case reflect.Func:
+				args = append(args, reflect.MakeFunc(param, func([]reflect.Value) []reflect.Value {
+					out := make([]reflect.Value, param.NumOut())
+					for index := range out {
+						out[index] = reflect.Zero(param.Out(index))
+					}
+					return out
+				}))
+			case reflect.Interface:
+				t.Fatalf("%s takes a %s, which this test cannot make", method.Name, param)
+			default:
+				args = append(args, reflect.Zero(param))
+			}
+		}
+		for _, out := range value.Method(i).Call(args) {
+			if err, _ := out.Interface().(error); err != nil {
+				t.Fatalf("%s: %v", method.Name, err)
+			}
+		}
 	}
 }
 
@@ -937,6 +1031,18 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("progress_reads_total")] = len(progress.ProgressReadCallers) * len(progress.ProgressReadSources)
 	bounds[fqName("slot_begin_total")] = len(execution.SlotBeginResults)
 	bounds[fqName("slot_not_committed_total")] = len(execution.SlotNotCommittedReasons)
+	bounds[fqName("progress_projection_superseded_total")] = len(progress.SupersededProjectionFields)
+	// The segment shadow: every outcome and event by every period class.
+	bounds[fqName("state_segment_shadow_total")] = len(observability.AllSegmentShadowOutcomes()) * len(observability.AllSegmentPeriodClasses())
+	bounds[fqName("state_segment_shadow_members_total")] = len(observability.AllSegmentShadowEvents()) * len(observability.AllSegmentPeriodClasses())
+	bounds[fqName("state_segment_shadow_page_writes_total")] = len(observability.AllSegmentPeriodClasses())
+	bounds[fqName("state_segment_shadow_page_bytes_total")] = len(observability.AllSegmentPeriodClasses())
+	// plans, entries_open, entries_closed, bytes_estimated.
+	bounds[fqName("worker_segment_shadow_memory")] = 4
+	// Every wait outcome by every band; one sum.
+	bounds[fqName("worker_slice_read_ahead_waits_total")] = len(observability.SliceReadAheadWaitOutcomes) * len(observability.SliceReadAheadWaitDurations)
+	bounds[fqName("worker_slice_read_ahead_wait_seconds_total")] = 1
+	bounds[fqName("worker_slice_read_ahead_waiting_seconds_total")] = 1
 	bounds[fqName("state_cache_bytes")] = 1
 	bounds[fqName("state_cache_budget_bytes")] = 1
 	bounds[fqName("state_cache_query_groups")] = 1

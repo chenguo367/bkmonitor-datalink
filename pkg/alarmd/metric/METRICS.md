@@ -1581,6 +1581,12 @@ Labels: `completion_kind`, `cause`, `reason`, `origin`
 
 Acknowledged Slots that completed short of whole - COMPLETED_WITH_UNAVAILABLE, COMPLETED_WITH_PARTIAL_GAP - by the cause the completion carried (the most actionable of what the round hit) and that cause's reason: which Plan, Level or query it was and when are on the progress_committed line (completion_strategy, completion_level, completion_query). NONE is a completion that carried no cause. origin says whose the reason is: physical for what the round met itself - a primary input's reason always is - and carried for a stored guard's reason a Level outcome repeated on a later round (LEVEL_OUTCOME_UNKNOWN, GAP_GUARD_WARMING); the guard's origin Slot is on the progress_committed line (evaluation_reason_origin_slot). reason=QUERY_TIMEOUT,origin=physical is a timeout this round. A Slot is filed here by its cause, so one that ended PLAN_NOT_ACTIVE while its primary input was unavailable is under PRIMARY_INPUT_UNAVAILABLE: how many Slots ended PLAN_NOT_ACTIVE is slot_completed_reasons_total{reason="PLAN_NOT_ACTIVE"}, and the two families are not summed.
 
+## alarmd_progress_projection_superseded_total
+
+Labels: `field`
+
+Fields of an unfinished Slot's projection that a later attempt's fenced BeginSlot replaced, counted once the write applied, a field each: contract, deadline (the earliest query deadline), keep_until, due_plan_targets. A supersede that changed two fields counts in both. A write refused (stale_owner, content_moved) or of unknown outcome replaced nothing and counts none, though its progress_committed line, degraded CONFIG_DRIFT, naming the fields, is written as every supersede's is. A BeginSlot made again on a conflict counts once, from the pass its write ended on.
+
 ## alarmd_progress_reads_total
 
 Labels: `caller`, `source`
@@ -2225,6 +2231,30 @@ Times this process forgot every generation-scoped key life it had remembered, be
 
 Slots whose retained bytes reached at least 95 percent of the one-object share of the retained pool they were admitted under: completed Slots at or past the threshold, and Slots given up because the share refused them (RESOURCE_SHARE_EXCEEDED), which are past it. The objects are listed by name under RETAINED_SHARE_APPROACHING on the page and in fleet.get, except a completed Slot applied in more than one window: its windows are bounded by the share, so it reaches the share by construction and is counted here but not listed.
 
+## alarmd_state_segment_shadow_members_total
+
+Labels: `event`, `period_class`
+
+What the shadow of a Plan's stable segments did with its pages' membership, by event and the Plan's period class. joined: a series written and decided steady and normal at the mark. departed: an open member absent from the round, closed at the mark before. expired: a closed member past its window and its key's life. reset: a Plan's shadow started over, its members counted - a retry of a Slot an earlier attempt had written some series of leaves the round's membership unknown.
+
+## alarmd_state_segment_shadow_page_bytes_total
+
+Labels: `period_class`
+
+Bytes of the member pages a round of the shadow would have rewritten, each page encoded whole as it would be written, by the Plan's period class.
+
+## alarmd_state_segment_shadow_page_writes_total
+
+Labels: `period_class`
+
+Member pages a round of the shadow would have rewritten - a join, a close, a removal or an expiry on them, or their count changed - by the Plan's period class: the page write the skip adds, read beside state_segment_shadow_page_bytes_total.
+
+## alarmd_state_segment_shadow_total
+
+Labels: `outcome`, `period_class`
+
+Open members of a Plan's stable segments present in a round, as the shadow kept in process compared them - every State still written - by outcome and the Plan's period class (lt_1m, 1m, le_5m, le_1h, le_1d, gt_1d). match: the points the segment makes and the Level state it reads as are what the round wrote. exception_*: a member the skip would have written whole and taken off its page, by the first reason - events (it sent events), unsteady (not decided steady and normal with its stored Levels unchanged), level (a Level not FULL), off_grid (its points off the mark's grid), returned (a closed member back), short_of_mark (its last point short of the round's mark): read exception_events for whether quiet members send events. mismatch_*: a member the skip would have left unwritten, once each field the made read differs in from the write: a skip would read it otherwise than written. mismatch_unmade: the points could not be made. Zero mismatches over every period class is the shadow stage's evidence.
+
 ## alarmd_state_series_class_total
 
 Labels: `class`, `series`
@@ -2561,7 +2591,7 @@ One per held gap scope per round that read it, by status, by why it is held, and
 
 Labels: `outcome`
 
-Slots by what they did with their Query Group's shape, the leaves a slice that ran out of time for its size was split into, which the next Slot starts in: started, read in it; kept, a slice split for its time kept in it; merged, its last kept split taken back after three quick rounds; voided_revision, voided_dimensions, voided_max_leaves, dropped as the query revision or the dimensions changed or it grew past a starting tree's leaves; refused_not_a_leaf, refused_not_a_partition, refused_max_leaves, dropped as its leaves were not a partition of every value. A dropped shape's Slot starts in slices counted anew. evicted_idle counts the Query Groups whose slice memory, shape or none, was dropped for no Slot started on this replica for ten of their periods and ten minutes at least. A slice read whole past a slice's series is kept split for the next Slot: refused_max_leaves (as above), refused_condition_budget, refused_single_value (its sample told none of its series apart) and refused_split_error count such a split that kept nothing; merge_refused a split taken back whose shape would not rebuild without it, the shape kept as it was rather than dropped. Which Query Group is not a label here.
+Slots by what they did with their Query Group's shape, the leaves a slice that ran out of time for its size was split into, which the next Slot starts in: started, read in it; kept, a slice split for its time kept in it; merged, its last kept split taken back after three quick rounds; voided_revision, voided_dimensions, voided_max_leaves, dropped as the query revision or the dimensions changed or it grew past a starting tree's leaves; refused_not_a_leaf, refused_not_a_partition, refused_max_leaves, dropped as its leaves were not a partition of every value. A dropped shape's Slot starts in slices counted anew. evicted_idle counts the Query Groups whose slice memory, shape or none, was dropped for no Slot started on this replica for ten of their periods and ten minutes at least. A slice read whole past a slice's series is kept split for the next Slot: refused_max_leaves (as above), refused_condition_budget, refused_single_value (its sample told none of its series apart) and refused_split_error count such a split that kept nothing; merge_refused a split taken back whose shape would not rebuild without it, the shape kept as it was rather than dropped. Two count a split kept for a slice's size that did keep: sized_split, a slice the Slot started in let go for its size, its split kept for the next Slot to start in its parts (the completion row's input_slice_start_discarded; a Query Group that keeps paying it every round is what the split exists to end); sized_kept, a slice read whole past a slice's series kept split for the next Slot. Which Query Group is not a label here.
 
 ## alarmd_worker_input_slice_timeouts_total
 
@@ -2683,6 +2713,12 @@ Labels: `queue`
 
 Callers queued for a permit at the moment of the scrape, by queue. Non-zero means the budget is the constraint right now; zero does NOT mean it has spare room, because a caller that is admitted immediately never appears here.
 
+## alarmd_worker_segment_shadow_memory
+
+Labels: `kind`
+
+The books the shadow of the Plans' stable segments keeps in process on this worker (014 B3, first stage), at the scrape, by kind: plans, the Plans with a book; entries_open and entries_closed, their members by whether the segment is open, as each Plan's last fold left them; bytes_estimated, entries at about 160 bytes each - the digest as the key and in the entry, its two times, the map's share - and a Plan's book at 256: an estimate, to read against the live heap. plans rising with the owned Query Groups standing still is books no round folds; entries_closed rising, closed members that do not expire.
+
 ## alarmd_worker_series_not_evaluated_total
 
 Labels: `algorithm_family`, `reason`
@@ -2706,6 +2742,20 @@ Query Groups this worker keeps a sliced-input memory for, at the scrape, by scop
 Labels: `outcome`
 
 How the slices read ahead - read while the slice before completed - ended, by outcome: replayed, handed to the Slot; other_leaf, let go because the next slice was another; yielded, let go for a reservation of the Slot's own the share or the pool would otherwise refuse; failed, let go because the read failed before it was handed on; context_ended, refused because its read ended with its context ended, what it answered then not taken for the slice - read again, or the Slot failed once its series were the Slot's. Every slice let go is read again on the Slot's goroutine. Counted from completed Slots.
+
+## alarmd_worker_slice_read_ahead_wait_seconds_total
+
+Seconds the slices read ahead waited for room, summed over every wait as it ends (worker_slice_read_ahead_waits_total), every attempt's. Reads ahead side by side wait at once, so this is waiting summed over reads, and its rate over the rate of alarmd_slot_operation_duration_seconds_sum{stage="execute"} may pass 1; the share of Slot time with a read ahead waiting is worker_slice_read_ahead_waiting_seconds_total's.
+
+## alarmd_worker_slice_read_ahead_waiting_seconds_total
+
+Seconds of Slot time with at least one slice read ahead waiting for room, the overlap of waits side by side counted once, as the last of them ends, every attempt's. Its rate over the rate of alarmd_slot_operation_duration_seconds_sum{stage="execute"} - every attempt's execute too, failed and retried ones among them - is the share of Slot time with a read ahead waiting, 1 at most but for a wait that outlived its attempt's execute. A wait is on a read's goroutine beside the Slot's: it is on the Slot's path only where the Slot then waits for that read.
+
+## alarmd_worker_slice_read_ahead_waits_total
+
+Labels: `outcome`, `duration`
+
+Waits of the slices read ahead for room - a read that has an answer's bytes and finds its limit, the pool or the share full waits, keeping what it took and reading no more - by how each ended and how long it took. outcome: kept, room came and it took the bytes; passed, the Slot took the read on while it waited; stopped, the read was let go; canceled, its context ended. duration: lt_1ms, 1ms_10ms, 10ms_100ms, 100ms_1s, ge_1s. Every wait is counted as it ends, under a millisecond too, whatever its Slot came to: a read let go as its Slot ends, or as a runner cancels it, counts as stopped. Their time is worker_slice_read_ahead_wait_seconds_total, summed over waits, and worker_slice_read_ahead_waiting_seconds_total the Slot time with at least one waiting.
 
 ## alarmd_worker_slice_read_ahead_yields_total
 

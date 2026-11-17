@@ -12,6 +12,7 @@ package progress
 import (
 	"bytes"
 	"context"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -343,5 +344,74 @@ func TestASupersededProjectionIsReportedOnceAcrossARedo(t *testing.T) {
 	}
 	if drift != 1 {
 		t.Fatalf("%d superseded-projection observations, want one for the one projection superseded", drift)
+	}
+}
+
+// A supersede counts each field it changed, once, though its BeginSlot is
+// made twice - on the owner's record a write behind it made stale, and on the
+// key read again - and with nothing observing: the count is the supersede's
+// only trace a metric reads. A BeginSlot of the same projection counts none,
+// and one the fence refused replaced nothing and counts none, its line
+// written all the same.
+func TestASupersededProjectionCountsEachFieldItChangedOnceAcrossARedo(t *testing.T) {
+	persisted := progressProjectionAt(120)
+	current := execution.ScheduleProgress{Identity: ownerIdentity, NextSlot: 120, LastFullSlot: 60,
+		LastCompletionKind: execution.CompletionFull, UnfinishedSlot: &persisted}
+	ctx := context.Background()
+	var lines int
+	begin := func(projection execution.UnfinishedSlotProjection, behind bool, refuse ownership.FencedCASStatus) map[string]int {
+		t.Helper()
+		control := &ownerControl{value: mustEncode(t, current)}
+		counts := map[string]int{}
+		now := time.Unix(1_800_000_000, 0)
+		options := StoreOptions{Prefix: "alarmd", Control: control, Slots: fixedSlotResolver{interval: 60},
+			Now: func() time.Time { return now }, Superseded: func(field string) { counts[field]++ }}
+		if refuse != "" {
+			options.Observer = observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+				if observation.ReasonCode == observability.ReasonCode(contract.ReasonConfigDrift) {
+					lines++
+				}
+			})
+		}
+		store, err := NewStore(options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.LoadProgressFor(ctx, ownerIdentity, ownerFence(1)); err != nil {
+			t.Fatal(err)
+		}
+		if behind {
+			stale := current
+			stale.LastDataSlot = 7
+			control.writeBehind(mustEncode(t, stale))
+		}
+		control.refuse = refuse
+		result, err := store.BeginSlot(ctx, execution.ProgressBeginRequest{Identity: ownerIdentity, OwnerFence: ownerFence(1), Projection: projection})
+		if refuse == "" && (err != nil || result.Status != execution.ProgressCommitted) {
+			t.Fatalf("BeginSlot() = (%+v, %v), want committed", result, err)
+		}
+		if refuse != "" && result.Status == execution.ProgressCommitted {
+			t.Fatalf("BeginSlot() = %+v under a refusing fence, want it not committed", result)
+		}
+		return counts
+	}
+	superseding := progressProjectionAt(120)
+	superseding.EarliestQueryDeadlineUnixMilli += 5_000
+	superseding.KeepUntilUnixMilli += 5_000
+	want := map[string]int{"deadline": 1, "keep_until": 1}
+	if got := begin(superseding, true, ""); !reflect.DeepEqual(got, want) {
+		t.Fatalf("across a redo counted %v, want %v", got, want)
+	}
+	if got := begin(superseding, false, ""); !reflect.DeepEqual(got, want) {
+		t.Fatalf("in one pass counted %v, want %v", got, want)
+	}
+	if got := begin(progressProjectionAt(120), true, ""); len(got) != 0 {
+		t.Fatalf("the same projection begun again counted %v, want none", got)
+	}
+	for _, refusal := range []ownership.FencedCASStatus{ownership.FencedCASStaleOwner, ownership.FencedCASContentMoved} {
+		lines = 0
+		if got := begin(superseding, false, refusal); len(got) != 0 || lines != 1 {
+			t.Fatalf("a BeginSlot the fence refused (%s) counted %v and wrote %d lines, want none counted and its one line", refusal, got, lines)
+		}
 	}
 }
