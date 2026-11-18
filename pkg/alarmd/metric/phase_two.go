@@ -2366,7 +2366,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 	return append(append(m.workflow.collectors(), []prometheus.Collector{
 		m.shortPeriod.completed, m.shortPeriod.duration, m.shortPeriod.lag,
 		m.queryStatus.responses,
-		m.flow.queryDuration, m.flow.answerBytes, m.flow.answerSeries, m.flow.answerRecords, m.flow.answerSeconds, m.flow.answerPhaseSeconds, m.flow.queryFailures, m.flow.decisionLag, m.flow.outputRejectedAll, m.flow.pointsDropped,
+		m.flow.queryDuration, m.flow.answerBytes, m.flow.answerSeries, m.flow.answerRecords, m.flow.answerSeconds, m.flow.answerPhaseSeconds, m.flow.queryFailures, m.flow.decisionLag, m.flow.outputRejectedAll, m.flow.pointsDropped, m.flow.requestEnd,
 		m.queryCodec.responses,
 		m.queryTruncation.truncated,
 		m.queryUnavailable.attributions,

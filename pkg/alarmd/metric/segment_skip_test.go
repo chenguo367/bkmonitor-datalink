@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/state"
 )
 
 // The segment skip word's ignored Slots are counted by reason, every cell
@@ -111,5 +112,43 @@ func TestTheDegradedPlansAreCountedByWhyEveryCellFromTheStart(t *testing.T) {
 	}
 	if samples := redisSamples(t, recorder, "alarmd_state_segment_degraded_total", map[string]string{"reason": "not_a_reason"}); len(samples) != 0 {
 		t.Fatalf("a why outside the list made a cell: %v", samples)
+	}
+}
+
+// The State cache's charge and departures are served by kind, State values
+// and segments, every reason's cell of each from the start; each kind's
+// departures are served as the cache counted them, never taken from their
+// sum.
+func TestTheStateCacheServesStateValuesAndSegmentsApart(t *testing.T) {
+	recorder := NewRecorder(BuildInfo{Version: "0.7.9999", Commit: "0123456789abcdef", SchemaVersion: "v3"})
+	recorder.SetStateCacheSource(func() state.StateCacheStats {
+		// The sum behind its kinds, as a total read a moment before them
+		// would be: each kind is served as it was counted, never taken
+		// from the sum.
+		return state.StateCacheStats{Bytes: 100, SegmentBytes: 30, BudgetBytes: 1000,
+			Departures:        map[string]uint64{state.StateCacheDepartReleased: 1, state.StateCacheDepartOverBudget: 3},
+			StateDepartures:   map[string]uint64{state.StateCacheDepartReleased: 3},
+			SegmentDepartures: map[string]uint64{state.StateCacheDepartReleased: 2, state.StateCacheDepartOverBudget: 4}}
+	})
+	for kind, want := range map[string]float64{state.StateCacheKindState: 70, state.StateCacheKindSegment: 30} {
+		if samples := redisSamples(t, recorder, "alarmd_state_cache_bytes", map[string]string{"kind": kind}); len(samples) != 1 ||
+			samples[0].GetGauge().GetValue() != want {
+			t.Fatalf("bytes of %s: %v, want %v", kind, samples, want)
+		}
+	}
+	for _, reason := range state.StateCacheDepartureReasons {
+		want := map[string]float64{state.StateCacheKindState: 0, state.StateCacheKindSegment: 0}
+		switch reason {
+		case state.StateCacheDepartReleased:
+			want = map[string]float64{state.StateCacheKindState: 3, state.StateCacheKindSegment: 2}
+		case state.StateCacheDepartOverBudget:
+			want = map[string]float64{state.StateCacheKindState: 0, state.StateCacheKindSegment: 4}
+		}
+		for kind, value := range want {
+			if samples := redisSamples(t, recorder, "alarmd_state_cache_departures_total", map[string]string{"reason": reason, "kind": kind}); len(samples) != 1 ||
+				samples[0].GetCounter().GetValue() != value {
+				t.Fatalf("departures %s of %s: %v, want %v", reason, kind, samples, value)
+			}
+		}
 	}
 }

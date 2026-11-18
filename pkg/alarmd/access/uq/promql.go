@@ -152,6 +152,11 @@ func (client *Client) Range(ctx context.Context, request RangeRequest) (RangeRes
 	// A connection the server dropped while idle is re-dialed by the
 	// transport, as for an evaluation query (markReplayable).
 	markReplayable(httpRequest)
+	// A PromQL range asks as its window ends, as every PromQL query does
+	// (requestEnd): counted beside the evaluation path's requests.
+	if client.observeEnd != nil {
+		client.observeEnd(observability.QueryRequestEndSourceNotEligible)
+	}
 
 	response, err := client.httpClient.Do(httpRequest)
 	if err != nil {

@@ -414,5 +414,6 @@ func controlTrends(cfg config.Config, external phaseTwoProductionExternalDepende
 	}
 	client.WithNow(external.QueryClock)
 	client.WithPointsDroppedObserver(recorder.RecordQueryPointsDropped)
+	client.WithRequestEndObserver(recorder.RecordQueryRequestEnd)
 	return fleetTrends(client, config.ProcessNamespace(), external.Now), nil
 }

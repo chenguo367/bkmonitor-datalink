@@ -19,9 +19,10 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 )
 
-// A control process's trends read counts the rows it lets go on the
-// process's counter, as a worker's queries do: the trends' own client is
-// wired to the same observer.
+// A control process's trends read counts the rows it lets go, and how its
+// request's end was asked, on the process's counters, as a worker's queries
+// do: the trends' own client is wired to the same observers. A PromQL range
+// asks as its window ends.
 func TestAControlProcesssTrendsCountTheRowsTheyLetGo(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
@@ -43,5 +44,8 @@ func TestAControlProcesssTrendsCountTheRowsTheyLetGo(t *testing.T) {
 	}
 	if got := counterValue(t, recorder, "alarmd_access_query_points_dropped_total", map[string]string{"reason": "row_missing_columns"}); got != 1 {
 		t.Fatalf("row_missing_columns = %v, want the one row let go", got)
+	}
+	if got := counterValue(t, recorder, "alarmd_access_query_request_end_total", map[string]string{"outcome": "source_not_eligible"}); got != 1 {
+		t.Fatalf("request_end{source_not_eligible} = %v, want the one range request", got)
 	}
 }

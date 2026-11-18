@@ -115,6 +115,15 @@ func (client *Client) WithPointsDroppedObserver(observe func(observability.Point
 	return client
 }
 
+// WithRequestEndObserver sets the observer told, for every request sent, how
+// its end was asked (observability.QueryRequestEndOutcomes).
+func (client *Client) WithRequestEndObserver(observe func(string)) *Client {
+	if client != nil {
+		client.observeEnd = observe
+	}
+	return client
+}
+
 // notePointsDropped hands the points an answer let go to the observer, when
 // it let any go.
 func (client *Client) notePointsDropped(dropped observability.PointDrops) {

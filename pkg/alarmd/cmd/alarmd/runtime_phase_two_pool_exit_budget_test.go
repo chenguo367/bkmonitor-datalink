@@ -135,6 +135,7 @@ func (backend *poolBackend) roundTrip(request *http.Request) (*http.Response, er
 	if err != nil {
 		return nil, err
 	}
+	end = askedWindowEnd(end, payload.NotTimeAlign)
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(map[string]any{"series": []any{map[string]any{
 		"name": "_result0", "columns": []string{"_time", "_value"}, "types": []string{"float", "float"},

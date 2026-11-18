@@ -32,6 +32,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/state"
 )
 
 // pinnedWorkers is the placement a two-worker case injects: each Query Group
@@ -306,6 +307,21 @@ func (worker *workerOfTwo) cacheReading(t *testing.T, family, label, value strin
 	return got
 }
 
+// departureReading is the State cache's departures for reason, State
+// entries' and the segments' together.
+func (worker *workerOfTwo) departureReading(t *testing.T, reason string) float64 {
+	t.Helper()
+	var sum float64
+	for _, kind := range state.StateCacheKinds {
+		got, served := servedSample(t, worker.recorder, "alarmd_state_cache_departures_total", map[string]string{"reason": reason, "kind": kind})
+		if !served {
+			t.Fatalf("%s's /metrics serves no state_cache_departures_total{reason=%q,kind=%q}", worker.id, reason, kind)
+		}
+		sum += got
+	}
+	return sum
+}
+
 // The values the case's answers carry, against sharedGroupStrategy's
 // threshold of 1 (gte).
 const (
@@ -399,7 +415,7 @@ func TestAStrategyBackOnItsWorkerIsNotServedWhatItCachedBeforeAnotherWorkerHeldI
 	}
 	cache := func(family, label, value string) float64 { return a.cacheReading(t, family, label, value) }
 	hits, activations := cache("alarmd_state_cache_lookups_total", "result", "hit"), cache("alarmd_state_cache_lookups_total", "result", "miss_activation")
-	conflicts := cache("alarmd_state_cache_departures_total", "reason", "conflict")
+	conflicts := a.departureReading(t, "conflict")
 	declined := cache("alarmd_state_cache_restore_declined_total", "reason", "newer_version")
 	// Back, over the threshold again.
 	fixture.value.Store(aboveThreshold)
@@ -429,7 +445,7 @@ func TestAStrategyBackOnItsWorkerIsNotServedWhatItCachedBeforeAnotherWorkerHeldI
 	}
 	// worker-b's bytes are what worker-a wrote over: no write went in
 	// conflict with them, none was declined as older, none restored.
-	if got := cache("alarmd_state_cache_departures_total", "reason", "conflict"); got != conflicts {
+	if got := a.departureReading(t, "conflict"); got != conflicts {
 		t.Fatalf("state_cache_departures_total{conflict} rose by %v, want worker-a's writes made on worker-b's bytes", got-conflicts)
 	}
 	if got := cache("alarmd_state_cache_restore_declined_total", "reason", "newer_version"); got != declined {

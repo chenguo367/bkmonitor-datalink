@@ -81,6 +81,12 @@ Labels: `reason`
 
 Points the normalization of a query's answer let go rather than evaluate, by reason: outside_range_before and outside_range_after, a point before the range the query accepts or at or after its end; row_missing_columns, a trends range row without the time or value column. Not zero where the provider looks back further than asked: read its baseline, and each Slot's own on its completion line (points_dropped).
 
+## alarmd_access_query_request_end_total
+
+Labels: `outcome`
+
+Query requests sent, by how their end was asked: trimmed, a second before the window's end - the provider takes its range's end in, and the point there is the next round's, let go as outside_range_after; every grid point being a whole second, no other point is left out. Asked at the window's end: step_not_whole_seconds, a step whose grid need not be whole seconds; not_time_align, a query not aligned to the provider's grid; source_not_eligible, a clause not a metric time series read from VictoriaMetrics (logs, events, APM, bk_data, PromQL - the control process's trends ranges among them), whose last bucket a range ending earlier would cut short. A trimmed request leaves the point at the end out; a provider that rounds a long range's end up to its step may still answer it, let go as outside_range_after as before.
+
 ## alarmd_access_response_codec_total
 
 Labels: `codec`, `negotiation`, `completion`
@@ -2193,13 +2199,15 @@ The most the State cache may hold: the container's thirty-second, borrowed from 
 
 ## alarmd_state_cache_bytes
 
-The State cache's charge: each entry's value and key rounded to their size classes plus a fixed overhead, summed. Read against state_cache_budget_bytes.
+Labels: `kind`
+
+The State cache's charge: each entry's value and key rounded to their size classes plus a fixed overhead, summed, by kind - state, the Runtime State values; segment, the Plans' stable segment marks and member pages (014 B3). The two share one budget, the container's thirty-second (state_cache_budget_bytes): read their sum against it, and each kind for what it takes of it.
 
 ## alarmd_state_cache_departures_total
 
-Labels: `reason`
+Labels: `reason`, `kind`
 
-Entries that left the State cache, by reason: released (the Query Group stopped, was lost, declined or handed over), unknown (a write of its request ended in doubt), conflict (its write did not apply), expired, renewal_missing, untouched (neither read nor written for two of its own intervals), over_budget (its Query Group did not fit the budget: it left whole, or a write of it was not taken in), yielded (the same for what the Slots leave of the retained pool, or its Query Group given back whole for a Slot that needed the room). A group kept out is judged again once a round, by a whole round of it, so one that never fits leaves once rather than every round. Every cell exists from the start.
+Entries that left the State cache, by reason and kind - state, a Runtime State value; segment, a Plan's stable segment mark or member page (014 B3); the two share the budget - : released (the Query Group stopped, was lost, declined or handed over), unknown (a write of its request ended in doubt), conflict (its write did not apply), expired, renewal_missing, untouched (neither read nor written for two of its own intervals), over_budget (its Query Group did not fit the budget: it left whole, or a write of it was not taken in), yielded (the same for what the Slots leave of the retained pool, or its Query Group given back whole for a Slot that needed the room). A group kept out is judged again once a round, by a whole round of it, so one that never fits leaves once rather than every round. Every cell exists from the start.
 
 ## alarmd_state_cache_lookups_total
 
@@ -2275,7 +2283,7 @@ A Plan's stable segments (014 B3: its mark and member pages) read once a Slot be
 
 Labels: `result`
 
-The renewals of a Plan's member pages due - a quarter of the shorter of the lifetime their last renewal gave and this round's since it (014 B3 3.5) - by result: renewed and failed, pages whose scripts all answered or not (a failed page's renewal time stays, and it is renewed whole next round); missing, member State keys a renewal found gone (not made again: they read MISSING_WARMING); over_budget, renewal scripts of at most 256 keys that ran past 2.5 ms by the server's clock; fallback_write, pages unrenewed for half their lifetime, whose members are written whole - in the second stage counted only, every State being written; fallback_short_life, the same of a page whose lifetime is no more than two of its Plan's intervals, which goes half of it between two rounds by design (a Plan keeping one point, or one its horizon cuts short), every round. missing, over_budget and fallback_write all zero over every lifetime tier is the third stage's bar; fallback_short_life is not read in it.
+The renewals of a Plan's member pages due - a quarter of the shorter of the lifetime their last renewal gave and this round's since it (014 B3 3.5) - by result: renewed and failed, pages whose scripts all answered or not (a failed page's renewal time stays, and it is renewed whole next round); missing, member State keys a renewal found gone (not made again: they read MISSING_WARMING); over_budget, renewal scripts of at most 256 keys that ran past 2.5 ms by the server's clock; fallback_write, pages unrenewed for half their lifetime, whose members are written whole - in the second stage counted only, every State being written; fallback_unrenewable, the same of a page no earlier round could have renewed - unrenewed for less than its Plan's interval past the quarter lifetime it falls due by - by design: a lifetime of two intervals or less (a Plan keeping one point, or one its horizon cuts short), or a new page, made staggered, of a Plan whose keys live under four intervals. missing, over_budget and fallback_write all zero over every lifetime tier is the third stage's bar; fallback_unrenewable is not read in it.
 
 ## alarmd_state_segment_sample_total
 

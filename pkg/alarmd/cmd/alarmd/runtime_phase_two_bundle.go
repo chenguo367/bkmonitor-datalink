@@ -565,6 +565,9 @@ func openProductionPhaseTwoBundleAssembly(
 	// Every point an answer's normalization lets go is counted by reason:
 	// data that arrived and was not evaluated is not left silent.
 	queryClient.WithPointsDroppedObserver(recorder.RecordQueryPointsDropped)
+	// Every request says how its end was asked: a step before the window's
+	// end, or why not (access_query_request_end_total).
+	queryClient.WithRequestEndObserver(recorder.RecordQueryRequestEnd)
 	flights, err := scheduler.NewFlightCoordinatorWithRecovery(recoveryLimits, external.Now, observer)
 	if err != nil {
 		return nil, err

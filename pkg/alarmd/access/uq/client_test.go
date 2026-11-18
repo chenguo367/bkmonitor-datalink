@@ -482,9 +482,28 @@ func TestRequestMatchesTraceablePythonFinalWireFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _ := json.Marshal(request)
+	// Python asked its window's end itself; alarmd asks a second before it
+	// (requestEnd), the one field it differs in on purpose.
+	want = pythonEndASecondEarlier(t, want, "1700124000", "1700123999")
 	if !jsonEqual(got, want) {
 		t.Fatalf("request differs from final-wire fixture\ngot=%s\nwant=%s", got, want)
 	}
+}
+
+// pythonEndASecondEarlier is a recorded Python request with its end_time,
+// which must read was, asked a second earlier as alarmd asks it.
+func pythonEndASecondEarlier(t *testing.T, recorded []byte, was, now string) []byte {
+	t.Helper()
+	var python map[string]any
+	if err := json.Unmarshal(recorded, &python); err != nil || python["end_time"] != was {
+		t.Fatalf("the recorded Python request's end = %v (%v), want %s", python["end_time"], err, was)
+	}
+	python["end_time"] = now
+	shifted, err := json.Marshal(python)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return shifted
 }
 
 func TestRequestPreservesPythonAVGAndRealTimeFunctionShapes(t *testing.T) {
@@ -526,6 +545,10 @@ func TestRequestPreservesPythonAVGAndRealTimeFunctionShapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Python asked its window's end itself; alarmd asks a second before it
+	// (requestEnd), the one field it differs in on purpose. The shapes are
+	// what this pins.
+	want = pythonEndASecondEarlier(t, want, "1700124000", "1700123999")
 	if !jsonEqual(got, want) {
 		t.Fatalf("request lost Python empty function shapes\ngot=%s\nwant=%s", got, want)
 	}

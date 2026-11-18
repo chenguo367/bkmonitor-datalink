@@ -47,10 +47,13 @@ func TestOrdinaryQueriesAreUnchangedByteForByte(t *testing.T) {
 		name, path, revision, digest, wire string
 		spec                               func(*testing.T) execution.PhysicalQuerySpec
 	}{
+		// One field changed on purpose since: a metric time series asks a
+		// second before its window's end (requestEnd), its revision and
+		// digest as they were; the event and log queries below ask as before.
 		{name: "valid", path: "/query/ts",
 			revision: "467b5e00518b88e30c2e81e28326e0cd60a9bde3a4b9e26ecbff6be86b190eb0",
 			digest:   "7089ce86ff435065c48ba119322f81a29f2b014b166f4df76b4b4d5416312085",
-			wire:     `{"query_list":[{"data_source":"bkmonitor","table_id":"system.cpu","field_name":"usage","driver":"influxdb","time_field":"time","is_regexp":false,"reference_name":"a","function":[{"method":"abs","position":0}],"time_aggregation":{"function":"avg","window":"60s","position":0},"conditions":{"field_list":[{"field_name":"host","op":"eq","value":["127.0.0.1"],"is_prefix":true}]},"query_string":""}],"metric_merge":"a","start_time":"1700123000","end_time":"1700124000","step":"60s","space_uid":"bkcc__2","down_sample_range":"","timezone":"UTC","not_time_align":false}`,
+			wire:     `{"query_list":[{"data_source":"bkmonitor","table_id":"system.cpu","field_name":"usage","driver":"influxdb","time_field":"time","is_regexp":false,"reference_name":"a","function":[{"method":"abs","position":0}],"time_aggregation":{"function":"avg","window":"60s","position":0},"conditions":{"field_list":[{"field_name":"host","op":"eq","value":["127.0.0.1"],"is_prefix":true}]},"query_string":""}],"metric_merge":"a","start_time":"1700123000","end_time":"1700123999","step":"60s","space_uid":"bkcc__2","down_sample_range":"","timezone":"UTC","not_time_align":false}`,
 			spec:     func(t *testing.T) execution.PhysicalQuerySpec { return validAttempt(t).Spec }},
 		{name: "custom_event", path: "/query/ts",
 			revision: "0b3f3e0b4c6d639132b031a4ba10659b2020ad98456916ad1e6d6ba2a44acc91",

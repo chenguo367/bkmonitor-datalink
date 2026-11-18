@@ -139,25 +139,27 @@ func AllSegmentShadowSkips() []string {
 // over_budget, renewal scripts that ran longer than their 2.5 ms; and
 // fallback_write, pages unrenewed for half their lifetime, whose members
 // are written whole - in the second stage counted only, every State being
-// written; fallback_short_life, the same of a page whose lifetime is no more
-// than two of its Plan's intervals, which goes half of it between two rounds
-// by design - a Plan keeping one point, its life 1.5 intervals, or one its
-// horizon cuts short - not for renewals failing.
+// written; fallback_unrenewable, the same of a page no earlier round could
+// have renewed - unrenewed for less than its Plan's interval past the quarter
+// lifetime it falls due by - by design, not for renewals failing: a page
+// whose lifetime is no more than two intervals (a Plan keeping one point, or
+// one its horizon cuts short), or a new page, made staggered earlier by up to
+// a quarter lifetime, of a Plan whose keys live under four intervals.
 const (
-	SegmentRenewalRenewed           = "renewed"
-	SegmentRenewalFailed            = "failed"
-	SegmentRenewalMissing           = "missing"
-	SegmentRenewalOverBudget        = "over_budget"
-	SegmentRenewalFallbackWrite     = "fallback_write"
-	SegmentRenewalFallbackShortLife = "fallback_short_life"
-	SegmentRenewalOther             = "other"
+	SegmentRenewalRenewed             = "renewed"
+	SegmentRenewalFailed              = "failed"
+	SegmentRenewalMissing             = "missing"
+	SegmentRenewalOverBudget          = "over_budget"
+	SegmentRenewalFallbackWrite       = "fallback_write"
+	SegmentRenewalFallbackUnrenewable = "fallback_unrenewable"
+	SegmentRenewalOther               = "other"
 )
 
 // AllSegmentRenewalResults is every result, the cells the counter has from
 // the start.
 func AllSegmentRenewalResults() []string {
 	return []string{SegmentRenewalRenewed, SegmentRenewalFailed, SegmentRenewalMissing, SegmentRenewalOverBudget,
-		SegmentRenewalFallbackWrite, SegmentRenewalFallbackShortLife, SegmentRenewalOther}
+		SegmentRenewalFallbackWrite, SegmentRenewalFallbackUnrenewable, SegmentRenewalOther}
 }
 
 // Period classes, closed: the band a Plan's evaluation interval falls in, so

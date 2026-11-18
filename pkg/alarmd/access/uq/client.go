@@ -118,6 +118,10 @@ type Client struct {
 	// observeDropped hears the points every answer's normalization let go
 	// (WithPointsDroppedObserver); nil hears nothing.
 	observeDropped func(observability.PointDrops)
+	// observeEnd hears, for every request sent, whether its end was asked a
+	// step before the window's and why not (WithRequestEndObserver); nil
+	// hears nothing.
+	observeEnd func(string)
 }
 
 // markReplayable lets the transport send a query again, once, when the
@@ -318,6 +322,10 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 	path, encoded, err := buildWireRequestSliced(attempt.Spec, carriesAPMApp(attempt.Spec) && !attempt.NoAppCarry, attempt.Slice)
 	if err != nil {
 		return execution.ProviderCompletion{}, err
+	}
+	if client.observeEnd != nil {
+		_, outcome := requestEnd(attempt.Spec)
+		client.observeEnd(outcome)
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, client.endpoint+path, bytes.NewReader(encoded))
 	if err != nil {
@@ -740,7 +748,7 @@ func buildRequestCarrying(spec execution.PhysicalQuerySpec, carryApp bool) (requ
 		})
 	}
 	body := request{TSDBMap: spec.PlanFacts.TSDBMap, QueryList: queries, MetricMerge: spec.PlanFacts.MetricMerge,
-		StartTime: strconv.FormatInt(spec.ProviderRange.Start, 10), EndTime: strconv.FormatInt(spec.ProviderRange.End, 10),
+		StartTime: strconv.FormatInt(spec.ProviderRange.Start, 10), EndTime: strconv.FormatInt(requestEndOf(spec), 10),
 		Step: durationString(spec.PlanFacts.RequestStepMillis()), SpaceUID: bodySpace(spec.PlanFacts),
 		DownSampleRange: string(spec.PlanFacts.DownSampleRange), Timezone: spec.PlanFacts.Timezone,
 		NotTimeAlign: spec.PlanFacts.NotTimeAlign}

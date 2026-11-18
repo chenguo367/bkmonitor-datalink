@@ -1218,13 +1218,14 @@ func settleSegmentShadow(ctx context.Context, store segment.Store, request execu
 		var pages []segment.PageRenewal
 		for page, renewal := range fold.renewed {
 			if renewal.Fallback(now) {
-				// A page whose lifetime is no more than two of its Plan's
-				// intervals goes half of it between two rounds: its fallback
-				// every round is by design, not renewals failing - counted
-				// apart from fallback_write, which the third stage's bar reads.
+				// A page no earlier round could have renewed - the round
+				// before came before it fell due, a quarter of its shorter
+				// lifetime after its renewal - went half its lifetime by
+				// design, not for renewals failing: counted apart from
+				// fallback_write, which the third stage's bar reads.
 				result := observability.SegmentRenewalFallbackWrite
-				if renewal.TTL/2 <= state.interval*1000 {
-					result = observability.SegmentRenewalFallbackShortLife
+				if now-renewal.At < state.interval*1000+min(renewal.TTL, ttl)/4 {
+					result = observability.SegmentRenewalFallbackUnrenewable
 				}
 				facts.Renewal(result, 1)
 			}

@@ -195,6 +195,10 @@ var removedLabelValues = []struct {
 	// happen". The word stays a finalization mode, so only its emission is
 	// guarded.
 	{"slot_not_committed_total", "reason", "EXACT_SET_BLOCKED", true},
+	// A page past half its lifetime by design was first told apart by its
+	// lifetime alone (0.7.4914); it is now any page no earlier round could
+	// have renewed, under its own word.
+	{"state_segment_renewal_total", "result", "fallback_short_life", false},
 }
 
 // A removed label value is emitted by no family, whatever its source
@@ -228,6 +232,16 @@ func TestARemovedLabelValueIsNotEmitted(t *testing.T) {
 		}
 		if removed.family == "slot_not_committed_total" {
 			r.RecordSlotNotCommitted(removed.value)
+		}
+		if removed.family == "state_segment_renewal_total" {
+			// The shadow counts a renewal's result through its facts, which
+			// keep to their closed list.
+			var facts observability.SegmentShadowFacts
+			facts.Renewal(removed.value, 1)
+			r.Observe(context.Background(), observability.NormalizeObservation(observability.Observation{
+				Component: observability.ComponentState, Stage: observability.StageMutationCompared,
+				Result: observability.ResultSuccess, Operation: observability.OperationNormal, SegmentShadow: &facts,
+			}))
 		}
 	}
 	// The target group store's states and the selector reasons are closed

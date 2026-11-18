@@ -56,7 +56,9 @@ type flowMetrics struct {
 	failures           map[string]prometheus.Counter
 	// pointsDropped is the points the answers' normalization let go, by
 	// reason, each reason built at zero.
-	pointsDropped     *prometheus.CounterVec
+	pointsDropped *prometheus.CounterVec
+	// requestEnd is the requests sent, by how their end was asked.
+	requestEnd        *prometheus.CounterVec
 	decisionLag       prometheus.Histogram
 	outputRejectedAll prometheus.Counter
 	// backend is the query backend's last answer and last failure, the
@@ -152,6 +154,18 @@ func newFlowMetrics(work *prometheus.CounterVec) flowMetrics {
 	for _, reason := range observability.PointDropReasons {
 		m.pointsDropped.WithLabelValues(reason)
 	}
+	m.requestEnd = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "access_query_request_end_total",
+		Help: "Query requests sent, by how their end was asked: trimmed, a second before the window's end - the provider " +
+			"takes its range's end in, and the point there is the next round's, let go as outside_range_after; every grid " +
+			"point being a whole second, no other point is left out. Asked at the window's end: step_not_whole_seconds, a " +
+			"step whose grid need not be whole seconds; not_time_align, a query not aligned to the provider's grid; " +
+			"source_not_eligible, a clause not a metric time series read from VictoriaMetrics (logs, events, APM, bk_data, " +
+			"PromQL - the control process's trends ranges among them), whose last bucket a range ending earlier would cut " +
+			"short. A trimmed request leaves the point at the end out; a provider that rounds a long range's end up to " +
+			"its step may still answer it, let go as outside_range_after as before."}, []string{"outcome"})
+	for _, outcome := range observability.QueryRequestEndOutcomes {
+		m.requestEnd.WithLabelValues(outcome)
+	}
 	m.backend = &queryBackendBook{}
 	m.failures = make(map[string]prometheus.Counter, len(queryFailureReasons))
 	for _, reason := range queryFailureReasons {
@@ -180,6 +194,21 @@ func (r *Recorder) RecordPhysicalQuery(elapsed time.Duration, failure string) {
 	}
 	counter.Inc()
 	flow.backend.note(time.Now(), failure)
+}
+
+// RecordQueryRequestEnd counts one request sent by how its end was asked; an
+// outcome outside the closed list is not one this build gives and makes no
+// cell.
+func (r *Recorder) RecordQueryRequestEnd(outcome string) {
+	if r == nil {
+		return
+	}
+	for _, known := range observability.QueryRequestEndOutcomes {
+		if outcome == known {
+			r.phaseTwo.flow.requestEnd.WithLabelValues(outcome).Inc()
+			return
+		}
+	}
 }
 
 // RecordQueryPointsDropped counts the points an answer's normalization let

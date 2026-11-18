@@ -233,15 +233,18 @@ func (fixture *lifecycleFixture) answerQuery(writer http.ResponseWriter, request
 		return
 	}
 	var payload struct {
-		EndTime string `json:"end_time"`
+		EndTime      string `json:"end_time"`
+		NotTimeAlign bool   `json:"not_time_align"`
 	}
 	_ = json.NewDecoder(request.Body).Decode(&payload)
 	end, err := strconv.ParseInt(payload.EndTime, 10, 64)
 	if err != nil || end <= 0 {
 		end = fixture.clock.Load() / 1000
-	}
-	if end > 1_000_000_000_000 {
-		end /= 1000
+	} else {
+		if end > 1_000_000_000_000 {
+			end /= 1000
+		}
+		end = askedWindowEnd(end, payload.NotTimeAlign)
 	}
 	fixture.mu.Lock()
 	reporting, value, partial, byHostID := append([]string(nil), fixture.reporting...), fixture.value, fixture.partial, fixture.byHostID

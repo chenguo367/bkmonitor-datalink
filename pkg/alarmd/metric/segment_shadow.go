@@ -76,11 +76,12 @@ func newSegmentShadowMetrics() segmentShadowMetrics {
 				"round); missing, member State keys a renewal found gone (not made again: they read " +
 				"MISSING_WARMING); over_budget, renewal scripts of at most 256 keys that ran past 2.5 ms by the " +
 				"server's clock; fallback_write, pages unrenewed for half their lifetime, whose members are written " +
-				"whole - in the second stage counted only, every State being written; fallback_short_life, the same of " +
-				"a page whose lifetime is no more than two of its Plan's intervals, which goes half of it between two " +
-				"rounds by design (a Plan keeping one point, or one its horizon cuts short), every round. missing, " +
-				"over_budget and fallback_write all zero over every lifetime tier is the third stage's bar; " +
-				"fallback_short_life is not read in it.",
+				"whole - in the second stage counted only, every State being written; fallback_unrenewable, the same of " +
+				"a page no earlier round could have renewed - unrenewed for less than its Plan's interval past the " +
+				"quarter lifetime it falls due by - by design: a lifetime of two intervals or less (a Plan keeping one " +
+				"point, or one its horizon cuts short), or a new page, made staggered, of a Plan whose keys live under " +
+				"four intervals. missing, over_budget and fallback_write all zero over every lifetime tier is the third " +
+				"stage's bar; fallback_unrenewable is not read in it.",
 		}, []string{"result"}),
 		skipFlagIgnored: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: metricSubsystem, Name: "state_segment_skip_flag_ignored_total",

@@ -466,9 +466,10 @@ type controlledG4UQRequest struct {
 	QueryList []struct {
 		TableID string `json:"table_id"`
 	} `json:"query_list"`
-	MetricMerge string `json:"metric_merge"`
-	StartTime   string `json:"start_time"`
-	EndTime     string `json:"end_time"`
+	MetricMerge  string `json:"metric_merge"`
+	StartTime    string `json:"start_time"`
+	EndTime      string `json:"end_time"`
+	NotTimeAlign bool   `json:"not_time_align"`
 }
 
 type controlledRoundTripper func(*http.Request) (*http.Response, error)
@@ -488,6 +489,7 @@ func controlledG4UQClient(t *testing.T, base int64, table string) *http.Client {
 		if err != nil {
 			return nil, fmt.Errorf("controlled UQ end_time=%q: %w", payload.EndTime, err)
 		}
+		end = askedWindowEnd(end, payload.NotTimeAlign)
 		return controlledG4UQResponse(request, table, controlledG4UQSeries(base, end, table, payload.MetricMerge))
 	})}
 }

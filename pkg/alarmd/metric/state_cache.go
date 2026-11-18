@@ -43,14 +43,15 @@ func newStateCacheCollector() *stateCacheCollector {
 				"round of it fits the budget but not what the Slots leave of the retained pool, or it was given back "+
 				"for a Slot). Every cell exists from the start, so a zero is a reading.", "result"),
 		departures: descriptor("state_cache_departures_total",
-			"Entries that left the State cache, by reason: released (the Query Group stopped, was lost, "+
+			"Entries that left the State cache, by reason and kind - state, a Runtime State value; segment, a Plan's "+
+				"stable segment mark or member page (014 B3); the two share the budget - : released (the Query Group stopped, was lost, "+
 				"declined or handed over), unknown (a write of its request ended in doubt), conflict (its "+
 				"write did not apply), expired, renewal_missing, untouched (neither read nor written for two "+
 				"of its own intervals), over_budget (its Query Group did not fit the budget: it left whole, or a write "+
 				"of it was not taken in), yielded (the same for what the Slots leave of the retained pool, or its "+
 				"Query Group given back whole for a Slot that needed the room). A group kept out is judged again "+
 				"once a round, by a whole round of it, so one that never fits leaves once rather than every round. "+
-				"Every cell exists from the start.", "reason"),
+				"Every cell exists from the start.", "reason", "kind"),
 		restored: descriptor("state_cache_restored_total",
 			"Values written back over an external change to a key the State cache served, by cause: missing "+
 				"(the key was deleted or evicted) and rolled_back (older bytes than this process last wrote, "+
@@ -63,7 +64,9 @@ func newStateCacheCollector() *stateCacheCollector {
 				"legitimate writer's, handled as an ordinary conflict).", "reason"),
 		bytes: descriptor("state_cache_bytes",
 			"The State cache's charge: each entry's value and key rounded to their size classes plus a fixed "+
-				"overhead, summed. Read against state_cache_budget_bytes."),
+				"overhead, summed, by kind - state, the Runtime State values; segment, the Plans' stable segment marks "+
+				"and member pages (014 B3). The two share one budget, the container's thirty-second "+
+				"(state_cache_budget_bytes): read their sum against it, and each kind for what it takes of it.", "kind"),
 		budget: descriptor("state_cache_budget_bytes",
 			"The most the State cache may hold: the container's thirty-second, borrowed from the retained-bytes "+
 				"pool while no Slot has reserved it and given back when one needs it. A Query Group that would go "+
@@ -102,7 +105,6 @@ func (c *stateCacheCollector) Collect(ch chan<- prometheus.Metric) {
 		counts map[string]uint64
 	}{
 		{c.lookups, state.StateCacheLookupResults, stats.Lookups},
-		{c.departures, state.StateCacheDepartureReasons, stats.Departures},
 		{c.restored, state.StateCacheRestoreCauses, stats.Restored},
 		{c.declined, state.StateCacheDeclineReasons, stats.Declined},
 	} {
@@ -110,7 +112,16 @@ func (c *stateCacheCollector) Collect(ch chan<- prometheus.Metric) {
 			ch <- prometheus.MustNewConstMetric(family.desc, prometheus.CounterValue, float64(family.counts[word]), word)
 		}
 	}
-	ch <- prometheus.MustNewConstMetric(c.bytes, prometheus.GaugeValue, float64(stats.Bytes))
+	// Each kind's departures as the cache counts them apart, never one
+	// taken from the other: two counters read a moment apart could be.
+	for _, reason := range state.StateCacheDepartureReasons {
+		ch <- prometheus.MustNewConstMetric(c.departures, prometheus.CounterValue, float64(stats.StateDepartures[reason]), reason,
+			state.StateCacheKindState)
+		ch <- prometheus.MustNewConstMetric(c.departures, prometheus.CounterValue, float64(stats.SegmentDepartures[reason]), reason,
+			state.StateCacheKindSegment)
+	}
+	ch <- prometheus.MustNewConstMetric(c.bytes, prometheus.GaugeValue, float64(stats.Bytes-stats.SegmentBytes), state.StateCacheKindState)
+	ch <- prometheus.MustNewConstMetric(c.bytes, prometheus.GaugeValue, float64(stats.SegmentBytes), state.StateCacheKindSegment)
 	ch <- prometheus.MustNewConstMetric(c.budget, prometheus.GaugeValue, float64(stats.BudgetBytes))
 	ch <- prometheus.MustNewConstMetric(c.groups, prometheus.GaugeValue, float64(stats.QueryGroups))
 }

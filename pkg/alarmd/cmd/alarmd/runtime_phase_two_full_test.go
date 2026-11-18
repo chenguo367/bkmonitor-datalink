@@ -935,6 +935,11 @@ func testProductionFullTargetFlow(t *testing.T, diagnostic, split bool) {
 	if missing := counterValue(t, recorder, "alarmd_access_query_points_dropped_total", map[string]string{"reason": "row_missing_columns"}); missing != 0 {
 		t.Fatalf("row_missing_columns = %v, want the reason built at zero", missing)
 	}
+	// The strategy's bk_monitor time series asked a second before its
+	// window's end, counted on the process's counter.
+	if trimmed := counterValue(t, recorder, "alarmd_access_query_request_end_total", map[string]string{"outcome": "trimmed"}); trimmed < 1 {
+		t.Fatalf("request_end{trimmed} = %v, want the Slot's query asked a second before its window's end", trimmed)
+	}
 	assertObservedOrder(t, stages, []observability.Stage{
 		observability.StageSnapshotRefreshed, observability.StageAssignmentAcquired,
 		observability.StageScheduleDue, observability.StageSlotStarted, observability.StageEvaluationCompleted,
@@ -1838,7 +1843,8 @@ func TestProductionPhaseTwoBundleCompletesIncompleteAccessWithoutStoppingHealthy
 			QueryList []struct {
 				TableID string `json:"table_id"`
 			} `json:"query_list"`
-			EndTime string `json:"end_time"`
+			EndTime      string `json:"end_time"`
+			NotTimeAlign bool   `json:"not_time_align"`
 		}
 		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil || len(payload.QueryList) != 1 {
 			t.Errorf("decode UQ request: payload=%+v error=%v", payload, err)
@@ -1851,6 +1857,7 @@ func TestProductionPhaseTwoBundleCompletesIncompleteAccessWithoutStoppingHealthy
 			writer.WriteHeader(http.StatusBadRequest)
 			return
 		}
+		end = askedWindowEnd(end, payload.NotTimeAlign)
 		body := `{"series":[{"name":"_result0","columns":["_time","_result"],"types":["int64","float64"],"group_keys":["host"],"group_values":["127.0.0.1"],"values":[[` +
 			strconv.FormatInt((end-1)*1000, 10) + `,95]]}],"status":null,"trace_id":"g3b-recovered","is_partial":false,"result_table_id":[]}`
 		if payload.QueryList[0].TableID == "system.cpu" {

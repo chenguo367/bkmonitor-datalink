@@ -67,6 +67,16 @@ const (
 var StateCacheDepartureReasons = []string{StateCacheDepartReleased, StateCacheDepartUnknown, StateCacheDepartConflict,
 	StateCacheDepartExpired, StateCacheDepartRenewalMissing, StateCacheDepartUntouched, StateCacheDepartOverBudget, StateCacheDepartYielded}
 
+// Entry kinds, closed: a Runtime State value, or a Plan's stable segment - a
+// mark or a member page (014 B3). The two share the cache's budget.
+const (
+	StateCacheKindState   = "state"
+	StateCacheKindSegment = "segment"
+)
+
+// StateCacheKinds lists them.
+var StateCacheKinds = []string{StateCacheKindState, StateCacheKindSegment}
+
 // Restore causes and refusals (§4.4).
 const (
 	StateCacheRestoreMissing            = "missing"
@@ -150,6 +160,13 @@ type StateCacheStats struct {
 	Departures         map[string]uint64
 	Restored           map[string]uint64
 	Declined           map[string]uint64
+	// SegmentBytes is the stable segments' entries' share of Bytes, read
+	// with it under the cache's lock: the rest are Runtime State values.
+	// StateDepartures and SegmentDepartures are each kind's departures,
+	// counted apart, and Departures their sum: a reading taken while
+	// entries leave never makes one kind's count of the other's.
+	SegmentBytes                       int64
+	StateDepartures, SegmentDepartures map[string]uint64
 }
 
 // stateCache is per ExecutionStore. Nil is a disabled cache: every method is
@@ -184,9 +201,14 @@ type stateCache struct {
 	refused map[execution.QueryGroupIdentity]*stateCacheRefusal
 	// segmentNotes is what is remembered of the Query Groups' segments past
 	// their entries (segmentNotes).
-	segmentNotes                            map[execution.QueryGroupIdentity]*segmentNotes
-	bytes                                   int64
-	lookups, departures, restored, declined map[string]*atomic.Uint64
+	segmentNotes                map[execution.QueryGroupIdentity]*segmentNotes
+	bytes                       int64
+	lookups, restored, declined map[string]*atomic.Uint64
+	// stateDepartures and segmentDepartures count each kind's departures
+	// apart (departuresOf); segmentBytes is the segments' entries' share of
+	// bytes.
+	segmentBytes                       int64
+	stateDepartures, segmentDepartures map[string]*atomic.Uint64
 }
 
 func newStateCache(budget int64, replayAge time.Duration, now func() time.Time) *stateCache {
@@ -203,9 +225,9 @@ func newStateCache(budget int64, replayAge time.Duration, now func() time.Time) 
 	return &stateCache{budget: budget, replayAge: replayAge, now: now,
 		byKey: map[string]*stateCacheEntry{}, groups: map[execution.QueryGroupIdentity]*stateCacheGroup{},
 		refused: map[execution.QueryGroupIdentity]*stateCacheRefusal{}, lookups: counters(StateCacheLookupResults),
-		segmentNotes: map[execution.QueryGroupIdentity]*segmentNotes{},
-		departures:   counters(StateCacheDepartureReasons), restored: counters(StateCacheRestoreCauses),
-		declined: counters(StateCacheDeclineReasons)}
+		segmentNotes:    map[execution.QueryGroupIdentity]*segmentNotes{},
+		stateDepartures: counters(StateCacheDepartureReasons), segmentDepartures: counters(StateCacheDepartureReasons),
+		restored: counters(StateCacheRestoreCauses), declined: counters(StateCacheDeclineReasons)}
 }
 
 // sizeClass rounds a length up to the allocator's size class, close enough:
@@ -346,7 +368,7 @@ func (cache *stateCache) applied(entry stateCacheEntry) {
 				cache.departLocked(resident, bound)
 			}
 		} else {
-			cache.departures[bound].Add(1)
+			cache.departuresOf(entry.segment)[bound].Add(1)
 		}
 		cache.refused[entry.group] = &stateCacheRefusal{bound: bound, slot: entry.slot, size: size}
 		return
@@ -362,6 +384,9 @@ func (cache *stateCache) applied(entry stateCacheEntry) {
 	group.bytes += stored.cost
 	cache.byKey[entry.key] = &stored
 	cache.bytes += stored.cost
+	if stored.segment {
+		cache.segmentBytes += stored.cost
+	}
 	cache.held.Store(cache.bytes)
 }
 
@@ -516,9 +541,18 @@ func (cache *stateCache) sweep(group execution.QueryGroupIdentity) {
 	}
 }
 
+// departuresOf is the departure counters of an entry's kind: a segment's or
+// a Runtime State value's.
+func (cache *stateCache) departuresOf(segment bool) map[string]*atomic.Uint64 {
+	if segment {
+		return cache.segmentDepartures
+	}
+	return cache.stateDepartures
+}
+
 func (cache *stateCache) departLocked(entry *stateCacheEntry, reason string) {
 	cache.removeLocked(entry)
-	cache.departures[reason].Add(1)
+	cache.departuresOf(entry.segment)[reason].Add(1)
 	if entry.segment && reason != StateCacheDepartReleased && isSegmentMarkKey(entry.key) {
 		// Let go for the budget, the room or its life, not by the Plan: its
 		// next read is an eviction's, not a cold one's.
@@ -532,6 +566,9 @@ func (cache *stateCache) removeLocked(entry *stateCacheEntry) {
 	}
 	delete(cache.byKey, entry.key)
 	cache.bytes -= entry.cost
+	if entry.segment {
+		cache.segmentBytes -= entry.cost
+	}
 	cache.held.Store(cache.bytes)
 	if group := cache.groups[entry.group]; group != nil {
 		delete(group.entries, entry.key)
@@ -566,10 +603,16 @@ func (cache *stateCache) stats() StateCacheStats {
 		return out
 	}
 	cache.mu.Lock()
-	bytes, groups := cache.bytes, len(cache.groups)
+	bytes, segmentBytes, groups := cache.bytes, cache.segmentBytes, len(cache.groups)
 	cache.mu.Unlock()
-	return StateCacheStats{Bytes: bytes, BudgetBytes: cache.budget, QueryGroups: groups,
-		Lookups: read(cache.lookups), Departures: read(cache.departures), Restored: read(cache.restored), Declined: read(cache.declined)}
+	stats := StateCacheStats{Bytes: bytes, BudgetBytes: cache.budget, QueryGroups: groups,
+		Lookups: read(cache.lookups), Restored: read(cache.restored), Declined: read(cache.declined), SegmentBytes: segmentBytes}
+	stats.StateDepartures, stats.SegmentDepartures = read(cache.stateDepartures), read(cache.segmentDepartures)
+	stats.Departures = make(map[string]uint64, len(stats.StateDepartures))
+	for reason, count := range stats.StateDepartures {
+		stats.Departures[reason] = count + stats.SegmentDepartures[reason]
+	}
+	return stats
 }
 
 // StateCacheStats reports the cache's sizes and counts; the zero value when
@@ -787,11 +830,11 @@ func (cache *stateCache) segmentHeld() (plans, pages, bytes int64) {
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
+	bytes = cache.segmentBytes
 	for key, entry := range cache.byKey {
 		if !entry.segment {
 			continue
 		}
-		bytes += entry.cost
 		if isSegmentMarkKey(key) {
 			plans++
 		} else {

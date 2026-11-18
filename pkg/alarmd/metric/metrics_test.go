@@ -828,6 +828,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("access_query_failure_total"):        7,
 		// one series a reason, observability.PointDropReasons
 		fqName("access_query_points_dropped_total"): len(observability.PointDropReasons),
+		fqName("access_query_request_end_total"):    len(observability.QueryRequestEndOutcomes),
 		fqName("output_events_rejected_all_total"):  1,
 		fqName("access_response_codec_total"):       3 * 3 * 4,
 		// One per source answered through Elasticsearch terms.
@@ -1032,7 +1033,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("absent_strategy_close_total")] = len(absentalerts.Outcomes)
 	bounds[fqName("strategy_edit_close_total")] = len(editclose.Outcomes)
 	bounds[fqName("state_cache_lookups_total")] = len(state.StateCacheLookupResults)
-	bounds[fqName("state_cache_departures_total")] = len(state.StateCacheDepartureReasons)
+	bounds[fqName("state_cache_departures_total")] = len(state.StateCacheDepartureReasons) * len(state.StateCacheKinds)
 	bounds[fqName("state_cache_restored_total")] = len(state.StateCacheRestoreCauses)
 	bounds[fqName("state_cache_restore_declined_total")] = len(state.StateCacheDeclineReasons)
 	// Every caller by both sources; every BeginSlot status; every reason a
@@ -1066,7 +1067,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("worker_slice_read_ahead_waits_total")] = len(observability.SliceReadAheadWaitOutcomes) * len(observability.SliceReadAheadWaitDurations)
 	bounds[fqName("worker_slice_read_ahead_wait_seconds_total")] = 1
 	bounds[fqName("worker_slice_read_ahead_waiting_seconds_total")] = 1
-	bounds[fqName("state_cache_bytes")] = 1
+	bounds[fqName("state_cache_bytes")] = len(state.StateCacheKinds)
 	bounds[fqName("state_cache_budget_bytes")] = 1
 	bounds[fqName("state_cache_query_groups")] = 1
 	bounds[fqName("state_witness_items")] = 1

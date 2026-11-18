@@ -31,7 +31,9 @@ func TestAQueryWithNamedOutputsAsksForThem(t *testing.T) {
 	}{
 		{name: "structured", path: "/query/ts",
 			spec: compiledNamedSpec(t, "a + b", namedOutputsAB, namedTimeSeriesA, namedTimeSeriesB),
-			wire: `"metric_merge":"a + b",` + `"start_time":"1700123000","end_time":"1700124000","step":"60s","space_uid":"bkcc__2","down_sample_range":"","timezone":"Asia/Shanghai","not_time_align":false,` +
+			// A metric time series asks a second before its window's end
+			// (requestEnd); the PromQL query below asks as its window ends.
+			wire: `"metric_merge":"a + b",` + `"start_time":"1700123000","end_time":"1700123999","step":"60s","space_uid":"bkcc__2","down_sample_range":"","timezone":"Asia/Shanghai","not_time_align":false,` +
 				`"response_contract":"named_outputs/v1","legacy_output_ref":"C","output_list":[{"reference_name":"A","expression":"a"},{"reference_name":"B","expression":"b"},{"reference_name":"C","expression":"a + b"}]}`},
 		{name: "promql", path: "/query/ts/promql",
 			spec: compiledNamedSpec(t, "a + b", namedOutputsAB, namedPromQLA, namedPromQLB),

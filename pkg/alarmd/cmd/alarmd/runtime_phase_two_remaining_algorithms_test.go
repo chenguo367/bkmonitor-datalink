@@ -82,6 +82,7 @@ func TestProductionRemainingAlgorithms(t *testing.T) {
 					if err != nil {
 						return nil, err
 					}
+					end = askedWindowEnd(end, payload.NotTimeAlign)
 					// A few daily points must not fetch a week of continuous data.
 					if end-start > 180 {
 						return nil, fmt.Errorf("unbounded historical query [%d,%d)", start, end)

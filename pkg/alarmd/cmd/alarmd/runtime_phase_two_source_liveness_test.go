@@ -660,13 +660,15 @@ func TestTheAbsentProbeNeverReadsTheLastPeriodWithData(t *testing.T) {
 		body, _ := io.ReadAll(request.Body)
 		request.Body = io.NopCloser(bytes.NewReader(body))
 		var payload struct {
-			Start string `json:"start_time"`
-			End   string `json:"end_time"`
+			Start        string `json:"start_time"`
+			End          string `json:"end_time"`
+			NotTimeAlign bool   `json:"not_time_align"`
 		}
 		_ = json.Unmarshal(body, &payload)
 		start, _ := strconv.ParseInt(payload.Start, 10, 64)
 		end, _ := strconv.ParseInt(payload.End, 10, 64)
 		if !isSourceProbe(body) {
+			end = askedWindowEnd(end, payload.NotTimeAlign)
 			// The query service as it labels a bucket: by the bucket's
 			// start, the samples in it half a period later. A series' last
 			// real point is then the start of its last period with data,
@@ -786,8 +788,9 @@ func TestASeriesEndsOnlyOnItsOwnSpansVerdict(t *testing.T) {
 		body, _ := io.ReadAll(request.Body)
 		request.Body = io.NopCloser(bytes.NewReader(body))
 		var payload struct {
-			Start string `json:"start_time"`
-			End   string `json:"end_time"`
+			Start        string `json:"start_time"`
+			End          string `json:"end_time"`
+			NotTimeAlign bool   `json:"not_time_align"`
 		}
 		_ = json.Unmarshal(body, &payload)
 		start, _ := strconv.ParseInt(payload.Start, 10, 64)
@@ -795,6 +798,7 @@ func TestASeriesEndsOnlyOnItsOwnSpansVerdict(t *testing.T) {
 		fixture.mu.Lock()
 		defer fixture.mu.Unlock()
 		if !isSourceProbe(body) {
+			end := askedWindowEnd(end, payload.NotTimeAlign)
 			series := make([]string, 0, len(fixture.reporting))
 			for _, host := range fixture.reporting {
 				samples[host] = end - period/2
