@@ -99,8 +99,18 @@ func TestQueryCooldownDoesNotCountDuplicateOrQueryFreeCompletion(t *testing.T) {
 	}
 	runner.queryCooldown.until = now.Add(time.Minute)
 	slot.Recovery.Disposition = ReplayExpired
-	if runner.deferUnavailableQuery(context.Background(), slot) {
-		t.Fatal("expired finalization delayed")
+	// A Slot given up alone while the pool holds is the hold's to keep
+	// (heldPastDistance); its finalization is not delayed past its recovery
+	// bound, nor is a range's.
+	if !runner.deferUnavailableQuery(context.Background(), slot) {
+		t.Fatal("a Slot past its distance was given up while the pool holds")
+	}
+	atBound := slot
+	atBound.RecoveryUntilUnixMilli = now.UnixMilli()
+	ranged := slot
+	ranged.ExpiredRange = &execution.ExpiredRangeProjectionV1{}
+	if runner.deferUnavailableQuery(context.Background(), atBound) || runner.deferUnavailableQuery(context.Background(), ranged) {
+		t.Fatal("expired finalization delayed past its recovery bound, or a range's")
 	}
 	runner.recordQueryAvailability(context.Background(), slot, execution.OperationNormal, execution.SlotExecutionResult{Completed: true, QueryAvailability: execution.QueryAvailabilityAvailable}, 10, runner.queryCooldownDecidedBy(execution.OperationNormal))
 	if runner.queryCooldown.failures != 1 || !runner.queryCooldown.until.Equal(now.Add(time.Minute)) {
@@ -120,9 +130,11 @@ func TestQueryCooldownMaintenanceConfigAndDisable(t *testing.T) {
 	if !runner.deferUnavailableQuery(context.Background(), slot) || !runner.queryCooldown.wakeAt.Equal(now.Add(5*time.Second)) {
 		t.Fatal("cooldown passed maintenance deadline")
 	}
+	// Not at the Slot's recheck, earlier though it is: the hold keeps what
+	// passes its distance, and waking there gave one Slot up a grid point.
 	slot.Recovery.RecheckAtUnixMilli = now.Add(time.Second).UnixMilli()
-	if !runner.deferUnavailableQuery(context.Background(), slot) || !runner.queryCooldown.wakeAt.Equal(now.Add(time.Second)) {
-		t.Fatal("cooldown hid earlier replay-distance change")
+	if !runner.deferUnavailableQuery(context.Background(), slot) || !runner.queryCooldown.wakeAt.Equal(now.Add(5*time.Second)) {
+		t.Fatal("cooldown woke at the Slot's recheck")
 	}
 	// An unrelated publication is not a query/schedule change.
 	slot.Contract.SnapshotRevision = "another-snapshot"

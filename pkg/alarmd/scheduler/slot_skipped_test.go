@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -320,5 +321,53 @@ func TestACursorSkipWritesOneSlotSkippedLineOnceApplied(t *testing.T) {
 			number(line, "skipped_first_slot") != 120 || number(line, "owner_epoch") != 7 {
 			t.Fatalf("cursor skip line = %v", line)
 		}
+	}
+}
+
+// A query-free skip line names whose the Slot is: its strategies, each once
+// however many Plans it was split into, sorted and bounded, with the counts
+// over every Plan, and its businesses alike. skip_gap_plans stays what it
+// was, the gap markers written, one a Plan; the first few Plans' strategy
+// ids, repeated for a split strategy, are no longer on the line.
+func TestASkipLineNamesTheStrategiesOfItsSlotOnceEach(t *testing.T) {
+	at := time.Unix(100, 0)
+	source := &fakeSlotSource{slot: frozenSlot("query-group-1"), facts: SlotDueFacts{IntervalSeconds: 10}}
+	plan := func(business, strategy string, shard int) execution.PlanKey {
+		return execution.PlanKey{PlanIdentity: execution.PlanIdentity{TenantID: "system", BusinessID: business, StrategyID: strategy}, ShardIndex: shard}
+	}
+	source.slot.DuePlanTargets.Plans = []execution.PlanKey{
+		plan("3", "17", 0), plan("2", "12", 0), plan("2", "11", 1), plan("3", "16", 0),
+		plan("2", "11", 0), plan("3", "14", 0), plan("2", "15", 0), plan("3", "13", 0),
+	}
+	source.slot.Recovery = SlotRecoveryFacts{Disposition: ReplayExpired, Reason: ReplayExpiredByDistance, Distance: 5}
+	observer, output := sampledLog(t)
+	flights, err := NewFlightCoordinatorWithRecovery(testRecoveryLimits(), func() time.Time { return at })
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner, err := NewRunner("query-group-1", &fakeSession{fence: source.slot.Dispatch.OwnerFence}, source,
+		&scriptedExecutor{results: []execution.SlotExecutionResult{gapSkippedResult()}}, flights, func() time.Time { return at })
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.WithSlotSkipReport(observer, nil)
+	if _, attempted, err := runner.RunOne(context.Background()); err != nil || !attempted {
+		t.Fatalf("RunOne() = %t %v", attempted, err)
+	}
+	lines := logLines(t, output, observability.StageSlotSkipped)
+	if len(lines) != 1 {
+		t.Fatalf("slot_skipped lines = %d, want one: %s", len(lines), output.String())
+	}
+	line := lines[0]
+	if !reflect.DeepEqual(line["strategy_ids"], []any{"11", "12", "13", "14", "15"}) || number(line, "strategy_count") != 7 ||
+		!reflect.DeepEqual(line["business_ids"], []any{"2", "3"}) || number(line, "business_count") != 2 {
+		t.Fatalf("the line names %v of %v strategies and %v of %v businesses, want 11-15 of 7 and 2, 3 of 2: %v",
+			line["strategy_ids"], line["strategy_count"], line["business_ids"], line["business_count"], line)
+	}
+	if number(line, "skip_gap_plans") != 8 {
+		t.Fatalf("skip_gap_plans = %v, want a marker on each of the 8 Plans", line["skip_gap_plans"])
+	}
+	if _, present := line["skip_gap_strategies"]; present {
+		t.Fatalf("the line still carries skip_gap_strategies: %v", line)
 	}
 }

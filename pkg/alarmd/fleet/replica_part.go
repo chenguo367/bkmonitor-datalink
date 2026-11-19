@@ -103,6 +103,9 @@ type ReplicaPart struct {
 	// (runningStrategiesOf); nil from a snapshot that does not say which
 	// strategies evaluate on its objects, and nil merged when any part is.
 	RunningStrategies map[StateWord]int `json:"running_strategies,omitempty"`
+	// QueryPause is the replica's paused objects (queryPausePartOf); nil
+	// from a build before it, which leaves the merged counts lower bounds.
+	QueryPause *QueryPausePart `json:"query_pause,omitempty"`
 	// Metrics is what the verdict scrape counts from rows. Nil on a part a
 	// build before it published, which says nothing of those counts: such a
 	// summary is read as none, and the replica is summarized from its
@@ -156,6 +159,7 @@ func ReplicaPartOf(view View, now time.Time) ReplicaPart {
 	part.PrunedSkips, part.PrunedSkipsTotal = firstScreenList(pruned), len(pruned)
 	part.RetainedShare, part.RetainedShareTotal = firstScreenList(retained), len(retained)
 	part.ReadEarly, part.ReadEarlyTotal = firstScreenList(readEarly), len(readEarly)
+	part.QueryPause = queryPausePartOf(view)
 	for _, demoted := range view.Demoted {
 		if cooldown := demoted.QueryCooldown; cooldown != nil && !cooldown.Until.IsZero() && cooldown.Until.Before(now) {
 			part.DemotedDue++
@@ -192,6 +196,7 @@ func MergeReplicaParts(parts ...ReplicaPart) ReplicaPart {
 		}
 		mergeCohortRows(merged.CohortRows, part.CohortRows)
 		mergeCoolingRows(&merged.Cooling, part.Cooling)
+		mergeQueryPause(&merged.QueryPause, part.QueryPause)
 		mergeLoss(&merged.Loss, part.Loss)
 		merged.Truncated |= part.Truncated
 		mergeCheckTallies(merged.CheckRows, part.CheckRows)

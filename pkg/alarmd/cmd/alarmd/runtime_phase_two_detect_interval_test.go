@@ -121,18 +121,11 @@ func TestRuntimeAConfiguredAndAnUnconfiguredStrategyRunInOnePublication(t *testi
 			base.QueryPlan, configured.QueryPlan)
 	}
 
-	// The fixture runs one Query Group's runner at a time, so the state the
-	// production observer saw applied between two reads is that runner's.
-	applied := func() int {
-		count := 0
-		for _, observation := range fixture.observed() {
-			if observation.Stage == observability.StageStateApplied && observation.Result == observability.ResultSuccess {
-				count++
-			}
-		}
-		return count
-	}
-	before := applied()
+	// Each group's Slots settle their State, written or, the segment skip on
+	// by default, every member left out as a stable segment member (014 B3
+	// stage 3). The fixture runs one Query Group's runner at a time, so the
+	// Slots between two reads are that runner's.
+	mark := len(fixture.observed())
 	slots := runFullSlots(t, fixture, settledRunner(fixture.bundle, stepped), stepped, 4)
 	for index := 1; index < len(slots); index++ {
 		if slots[index]-slots[index-1] != 15 {
@@ -142,7 +135,8 @@ func TestRuntimeAConfiguredAndAnUnconfiguredStrategyRunInOnePublication(t *testi
 	if fixture.unalignedCalls.Load() == 0 {
 		t.Fatal("the configured strategy's Slots completed without an unaligned query")
 	}
-	afterStepped := applied()
+	steppedCompleted, steppedSettled := stateSettledSlots(fixture.observed()[mark:])
+	mark = len(fixture.observed())
 	// The delay each group's advice is rounded to is the one its delay was:
 	// fifteen seconds for the group read unaligned, the minute for the other.
 	holds := fixture.bundle.dependencies.ReadHolds
@@ -153,9 +147,9 @@ func TestRuntimeAConfiguredAndAnUnconfiguredStrategyRunInOnePublication(t *testi
 		t.Fatalf("advice rounded to %v and %v, want 15s for the stepped group and a minute for the other", steppedUnit, baseUnit)
 	}
 	_ = runOneSlotFull(t, fixture)
-	afterBase := applied()
-	if afterStepped-before < len(slots) || afterBase == afterStepped {
-		t.Fatalf("state applied %d times over the configured strategy's %d Slots and %d over the other's, want both to apply state",
-			afterStepped-before, len(slots), afterBase-afterStepped)
+	baseCompleted, baseSettled := stateSettledSlots(fixture.observed()[mark:])
+	if steppedCompleted < len(slots) || steppedSettled != steppedCompleted || baseCompleted == 0 || baseSettled != baseCompleted {
+		t.Fatalf("State settled in %d of the configured strategy's %d completed Slots and %d of the other's %d, want every Slot of both",
+			steppedSettled, steppedCompleted, baseSettled, baseCompleted)
 	}
 }

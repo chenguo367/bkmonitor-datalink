@@ -165,6 +165,16 @@ type BoardRow struct {
 	SinceBasis  SinceBasis      `json:"since_basis,omitempty"`
 	SinceWord   string          `json:"since_word,omitempty"`
 	KBAnchor    string          `json:"kb_anchor"`
+	// QueryPause is the strategy's paused queries (queryPauseOf), absent
+	// when none of its objects is paused; SameTargetStrategies, beside it,
+	// how many paused strategies name the same request targets, itself
+	// included - what fixing the one table or field brings back - absent
+	// when its targets are not known.
+	QueryPause           *QueryPause `json:"query_pause,omitempty"`
+	SameTargetStrategies *BoardCount `json:"same_target_strategies,omitempty"`
+	// pauseKey is the request target key SameTargetStrategies counts by
+	// (pauseTargetsKey). Not a page field.
+	pauseKey string
 	// areas is the row's outcome in each capability area it has a record
 	// in, and reasons its refusal codes, counted as the Leader counts the
 	// overview's matrix (CountCapability): the overview's drill keys select
@@ -180,6 +190,8 @@ type BoardFacets struct {
 	Capability  map[string]int      `json:"capability"`
 	Punctuality map[Punctuality]int `json:"punctuality"`
 	Urgency     map[Urgency]int     `json:"urgency"`
+	// Paused is the strategies whose queries are paused (a QueryPause).
+	Paused int `json:"paused"`
 }
 
 // BoardCount is a count the page shows with how sure it is: AtLeast when a
@@ -203,6 +215,8 @@ type BoardFilter struct {
 	// refusal code the row carries.
 	Area   string
 	Reason string
+	// Paused selects the strategies whose queries are paused.
+	Paused bool
 }
 
 // BoardResponse is one page of the strategy board.
@@ -218,10 +232,13 @@ type BoardResponse struct {
 	LateObjects    BoardCount `json:"late_objects"`
 	LateStrategies BoardCount `json:"late_strategies"`
 	// AtLeastReason says why a count is a lower bound, in the page's words.
-	AtLeastReason string     `json:"at_least_reason,omitempty"`
-	Matched       int        `json:"matched"`
-	Rows          []BoardRow `json:"rows"`
-	NextCursor    string     `json:"next_cursor,omitempty"`
+	AtLeastReason string `json:"at_least_reason,omitempty"`
+	// Coverage is how many instances the computation read of how many
+	// there are; short of the whole, the pause counts are lower bounds.
+	Coverage   InstanceCoverage `json:"coverage"`
+	Matched    int              `json:"matched"`
+	Rows       []BoardRow       `json:"rows"`
+	NextCursor string           `json:"next_cursor,omitempty"`
 	// Reread says the cursor belonged to an earlier computation: this page is
 	// the first of the current one, and the page starts over rather than
 	// joining two computations' rows.
@@ -239,6 +256,7 @@ type boardIndex struct {
 	lateObjects BoardCount
 	lateStrats  BoardCount
 	atLeast     string
+	coverage    InstanceCoverage
 	// views is each strategy's drawer facts beyond its row.
 	views map[string]boardViewFacts
 	// outages is each strategy's windows lost to a store outage, and
@@ -307,13 +325,14 @@ func boardLine(row BoardRow) string {
 // order the words give and then longest standing first, and counts every
 // facet over the whole universe.
 func buildBoard(id string, at time.Time, digest string, universe []string, decide func(string) DiagnosisRow,
-	lines []StrategyLine, due *DueView, census *ScheduleCensus, waits *lateWaitIndex) *boardIndex {
+	lines []StrategyLine, due *DueView, census *ScheduleCensus, waits *lateWaitIndex, pauses pauseReading) *boardIndex {
 	words := ProductWords()
 	byStrategy := make(map[string]StrategyLine, len(lines))
 	for _, line := range lines {
 		byStrategy[line.StrategyID] = line
 	}
-	index := &boardIndex{id: id, at: at, digest: digest, rows: make([]BoardRow, 0, len(universe)), views: make(map[string]boardViewFacts, len(universe)),
+	index := &boardIndex{id: id, at: at, digest: digest, coverage: pauses.coverage,
+		rows: make([]BoardRow, 0, len(universe)), views: make(map[string]boardViewFacts, len(universe)),
 		facets: BoardFacets{State: map[StateWord]int{}, Action: map[ActionWord]int{}, Capability: map[string]int{},
 			Punctuality: map[Punctuality]int{}, Urgency: map[Urgency]int{}}}
 	for _, word := range DiagnosisVerdicts() {
@@ -348,6 +367,10 @@ func buildBoard(id string, at time.Time, digest string, universe []string, decid
 			}
 		}
 		row.Line = boardLine(row)
+		row.QueryPause, row.pauseKey = queryPauseOf(decided, pauses.atLeast())
+		if row.QueryPause != nil {
+			index.facets.Paused++
+		}
 		row.areas, row.reasons = capabilityFactsOf(decided)
 		index.rows = append(index.rows, row)
 		index.views[row.StrategyID] = viewFactsOf(decided, due, waits)
@@ -359,6 +382,7 @@ func buildBoard(id string, at time.Time, digest string, universe []string, decid
 		index.facets.Punctuality[row.Punctuality]++
 		index.facets.Urgency[row.Urgency]++
 	}
+	countSameTargets(index.rows, pauses.atLeast())
 	actionRank, urgencyRank := map[ActionWord]int{}, map[Urgency]int{}
 	for rank, word := range ActionWords {
 		actionRank[word] = rank
@@ -375,6 +399,12 @@ func buildBoard(id string, at time.Time, digest string, universe []string, decid
 		}
 		if actionRank[a.Action] != actionRank[b.Action] {
 			return actionRank[a.Action] < actionRank[b.Action]
+		}
+		// Paused strategies first, the one whose request targets more
+		// strategies share before the others: fixing that one table or field
+		// brings the most back.
+		if rankA, rankB := pauseRankOf(a), pauseRankOf(b); rankA != rankB {
+			return rankA > rankB
 		}
 		if (a.Since == nil) != (b.Since == nil) {
 			return a.Since != nil
@@ -428,6 +458,9 @@ func (filter BoardFilter) matches(row BoardRow) bool {
 	if len(filter.Urgency) > 0 && !filter.Urgency[row.Urgency] {
 		return false
 	}
+	if filter.Paused && row.QueryPause == nil {
+		return false
+	}
 	return true
 }
 
@@ -455,7 +488,8 @@ func (filter BoardFilter) key() string {
 	for word := range filter.Urgency {
 		urgencies[string(word)] = true
 	}
-	return strings.Join([]string{words(states), words(actions), words(filter.Capability), words(punctualities), filter.StrategyID, filter.Area, filter.Reason, words(urgencies)}, ";")
+	return strings.Join([]string{words(states), words(actions), words(filter.Capability), words(punctualities), filter.StrategyID, filter.Area, filter.Reason, words(urgencies),
+		strconv.FormatBool(filter.Paused)}, ";")
 }
 
 // boardCursor binds a position to one computation and one selection: the
@@ -482,7 +516,7 @@ func parseBoardCursor(raw string) (id, digest, selection string, offset int, ok 
 func (index *boardIndex) page(filter BoardFilter, cursor string, limit int, maxAge time.Duration) BoardResponse {
 	response := BoardResponse{GeneratedAt: index.at, MaxAgeSeconds: int(maxAge / time.Second), UniverseDigest: index.digest,
 		Universe: len(index.rows), Facets: index.facets, LateObjects: index.lateObjects, LateStrategies: index.lateStrats,
-		AtLeastReason: index.atLeast, Rows: []BoardRow{}}
+		AtLeastReason: index.atLeast, Coverage: index.coverage, Rows: []BoardRow{}}
 	offset, selection := 0, filter.key()
 	if cursor != "" {
 		id, digest, selected, at, ok := parseBoardCursor(cursor)

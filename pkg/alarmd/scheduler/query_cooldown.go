@@ -44,8 +44,11 @@ type queryCooldownState struct {
 	scheduleRevision           execution.ScheduleRevision
 	segmentStart               execution.EvaluationTime
 	until, wakeAt, lastQueryAt time.Time
-	// reason is why the latest failed query was unavailable.
-	reason execution.ReasonCode
+	// reason is why the latest failed query was unavailable, and targets
+	// what that query had asked for (execution.RequestTargetsOf), nil where
+	// the failure did not say.
+	reason  execution.ReasonCode
+	targets *observability.RequestTargetsFacts
 	// timeouts is how many of the failures were the backend not answering
 	// before the deadline (QUERY_TIMEOUT), and firstTimeoutAt when the first
 	// of them was: what a reader of the pool needs to say "in it since T
@@ -108,6 +111,10 @@ type QueryCooldownRecord struct {
 	ExitReason       string                       `json:"exit_reason,omitempty"`
 	Reentries        uint32                       `json:"reentries,omitempty"`
 	Reason           execution.ReasonCode         `json:"reason,omitempty"`
+	// RequestTargets is what the latest failed query had asked for: the
+	// table, field and space its reason is about, as the pages name them. A
+	// record written before it existed has none, and reads as unknown.
+	RequestTargets *observability.RequestTargetsFacts `json:"request_targets,omitempty"`
 	// Timeouts and FirstTimeoutAt are the failures that were timeouts and
 	// when the first of them was. A record written before they existed reads
 	// as none, which is what it had.
@@ -201,7 +208,7 @@ func (runner *Runner) restoreQueryCooldown(ctx context.Context, fence execution.
 	}
 	runner.queryCooldown = queryCooldownState{failures: record.Failures, queryRevision: record.QueryRevision,
 		scheduleRevision: record.ScheduleRevision, segmentStart: record.SegmentStart,
-		until: record.Until, lastQueryAt: record.LastQueryAt, reason: record.Reason,
+		until: record.Until, lastQueryAt: record.LastQueryAt, reason: record.Reason, targets: record.RequestTargets,
 		timeouts: record.Timeouts, firstTimeoutAt: record.FirstTimeoutAt, cuts: record.Cuts}
 	memory.enteredAt, memory.source = record.EnteredAt, QueryCooldownRestored
 	runner.emitQueryCooldown(ctx, QueryCooldownRestored)
@@ -220,7 +227,8 @@ func (runner *Runner) saveQueryCooldown(ctx context.Context) {
 		EnteredAt: memory.enteredAt, Until: state.until, LastQueryAt: state.lastQueryAt, Failures: state.failures,
 		QueryRevision: state.queryRevision, ScheduleRevision: state.scheduleRevision, SegmentStart: state.segmentStart,
 		ExitedAt: memory.exitedAt, ExitReason: memory.exitReason, Reentries: memory.reentries, Reason: state.reason,
-		Timeouts: state.timeouts, FirstTimeoutAt: state.firstTimeoutAt, Cuts: state.cuts, LastProbe: memory.lastProbe,
+		RequestTargets: state.targets,
+		Timeouts:       state.timeouts, FirstTimeoutAt: state.firstTimeoutAt, Cuts: state.cuts, LastProbe: memory.lastProbe,
 		RunQueryRevision: memory.runRevision, RunTimesMillis: append([]int64(nil), memory.runTimes...),
 		CeilingMillis: memory.ceiling, Probes: append([]observability.QueryCooldownProbe(nil), memory.probes...),
 		AnsweredInRow: memory.answeredInRow,
@@ -262,6 +270,82 @@ func queryCooldownHeld(ctx context.Context) bool {
 	return held
 }
 
+type queryCooldownPooledKey struct{}
+
+// withQueryCooldownPooled tells the Slot source that the degraded pool has
+// this Query Group, its hold running or run out and its probe still to come
+// (queryCooldownPooled), and what the pool's held_by says of it; nil, that it
+// has not. The hold alone does not say it: at the instant the cooldown ends
+// the hold is over, and the Slots given up then - the run the hold kept,
+// closed at once - are the pool's gap as much as any given up while it held.
+// The facts are the pool's word for an expiry the source reports
+// (expiryHeldBy) and for nothing else it reports: a span the timeline pruned,
+// or a read that failed, keeps what the round before it did.
+func withQueryCooldownPooled(ctx context.Context, pool *observability.HeldByFacts) context.Context {
+	if pool == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, queryCooldownPooledKey{}, *pool)
+}
+
+// queryCooldownPooledIn reports whether withQueryCooldownPooled said the pool
+// has the Query Group; false when nothing did.
+func queryCooldownPooledIn(ctx context.Context) bool {
+	_, pooled := ctx.Value(queryCooldownPooledKey{}).(observability.HeldByFacts)
+	return pooled
+}
+
+// expiryHeldBy is what an expiry the source reports was held by: the pool's
+// facts while the pool has the Query Group, what the round before this one
+// did otherwise.
+func expiryHeldBy(ctx context.Context) *observability.HeldByFacts {
+	if pool, pooled := ctx.Value(queryCooldownPooledKey{}).(observability.HeldByFacts); pooled {
+		return &pool
+	}
+	return HeldByFromContext(ctx)
+}
+
+// queryCooldownPooled reports whether the pool has this Query Group: held
+// now, or its hold run out and its probe still to decide.
+func (runner *Runner) queryCooldownPooled() bool {
+	return !runner.queryCooldown.until.IsZero()
+}
+
+// heldByQueryCooldown is what kept a pooled Query Group's Slots from running,
+// as rememberHeldBy words it, with the pool's facts: a Slot the pool gives up
+// says so whatever the round before it did.
+func (runner *Runner) heldByQueryCooldown() observability.HeldByFacts {
+	facts := observability.HeldByFacts{Decision: "query_cooldown", AtUnixMilli: runner.now().UnixMilli(),
+		QueryCooldownFailures: runner.queryCooldown.failures}
+	if until := runner.queryCooldown.until; !until.IsZero() {
+		facts.QueryCooldownUntilMilli = until.UnixMilli()
+	}
+	return facts
+}
+
+// heldPastDistance says whether a Slot the source gave up alone - for its
+// distance, or a wait that outlasts it - is one the pool's hold keeps
+// instead: while the hold runs such a Slot is not given up one grid point at a
+// time. The source builds no range then (ProductionSlotSource.Next), and what
+// the hold keeps is closed in one run when the cooldown ends. A Slot at its
+// recovery bound - its age, which is the bound - is let go by the bound
+// itself (deferUnavailableQuery), and a range by being one; the reason is not
+// read, since the pool names every expiry its own (pooledExpiry).
+func heldPastDistance(slot FrozenSlot) bool {
+	return slot.ExpiredRange == nil && slot.Recovery.Disposition == ReplayExpired
+}
+
+// pooledExpiry names an expiry decided while the degraded pool has the Query
+// Group the pool's (ReplayExpiredByQueryCooldown), whatever decided it: the
+// distance, the age or the wait stay on the facts beside it. Outside the pool
+// the expiry keeps its own reason.
+func pooledExpiry(ctx context.Context, facts SlotRecoveryFacts) SlotRecoveryFacts {
+	if queryCooldownPooledIn(ctx) && facts.Disposition == ReplayExpired {
+		facts.Reason = ReplayExpiredByQueryCooldown
+	}
+	return facts
+}
+
 // queryCooldownHolds reports whether the pool holds this Query Group's
 // queries now: the cooldown has not run out. The Slot's own
 // checks (deferUnavailableQuery) can still let one through -- an expired
@@ -301,7 +385,7 @@ func (runner *Runner) deferUnavailableQuery(ctx context.Context, slot FrozenSlot
 		}
 	}
 	if state.until.IsZero() || !runner.now().Before(state.until) ||
-		slot.ExpiredRange != nil || slot.Recovery.Disposition == ReplayExpired ||
+		slot.ExpiredRange != nil || (slot.Recovery.Disposition == ReplayExpired && !heldPastDistance(slot)) ||
 		runner.attempt != nil || runner.shareExceeded(slot) {
 		return false
 	}
@@ -309,14 +393,14 @@ func (runner *Runner) deferUnavailableQuery(ctx context.Context, slot FrozenSlot
 	if slot.RecoveryUntilUnixMilli <= runner.now().UnixMilli() {
 		return false
 	}
+	// The hold's end or the recovery bound, whichever comes first, and not the
+	// Slot's own recheck: that is the next grid point plus the read hold, and
+	// waking there gave up one Slot of the held run a grid point, every pooled
+	// Query Group in the same second. Nothing the hold keeps changes before
+	// the earlier of the two.
 	state.wakeAt = state.until
 	if deadline := time.UnixMilli(slot.RecoveryUntilUnixMilli); deadline.Before(state.wakeAt) {
 		state.wakeAt = deadline
-	}
-	if recheck := slot.Recovery.RecheckAtUnixMilli; recheck > runner.now().UnixMilli() {
-		if at := time.UnixMilli(recheck); at.Before(state.wakeAt) {
-			state.wakeAt = at
-		}
 	}
 	return true
 }
@@ -514,7 +598,7 @@ func (runner *Runner) recordQueryAvailability(ctx context.Context, slot FrozenSl
 	state.scheduleRevision = slot.Contract.ScheduleRevision
 	state.segmentStart = slot.Contract.ScheduleSegmentStart
 	state.lastQueryAt = runner.now()
-	state.reason = result.QueryUnavailableReason
+	state.reason, state.targets = result.QueryUnavailableReason, result.QueryUnavailableTargets
 	if state.failures < 32 {
 		state.failures++
 	}
@@ -584,10 +668,16 @@ func (runner *Runner) emitQueryCooldown(ctx context.Context, event string) {
 	runner.flights.observer.Observe(ctx, observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageQueryCooldown,
 		Result: result, ReasonCode: reason,
-		Trace: observability.TraceFields{QueryGroupKey: string(runner.queryGroup)},
+		// The owner's epoch, so a reader of two replicas' pools during a
+		// handover keeps the newer owner's word on the Query Group.
+		Trace: observability.TraceFields{QueryGroupKey: string(runner.queryGroup), OwnerEpoch: runner.cooldownFence.OwnerEpoch},
+		// What the failed query had asked for, under the same keys as the
+		// query and Slot lines.
+		RequestTargets: state.targets,
 		QueryCooldown: &observability.QueryCooldownFacts{Event: event, Until: state.until,
 			LastQueryAt: state.lastQueryAt, Failures: state.failures, Timeouts: state.timeouts, FirstTimeoutAt: state.firstTimeoutAt, Cuts: state.cuts,
 			EnteredAt: memory.enteredAt, Source: memory.source,
+			ScheduleRevision: string(state.scheduleRevision), SegmentStart: int64(state.segmentStart),
 			LastExitAt: memory.exitedAt, LastExitReason: memory.exitReason, Reentries: memory.reentries,
 			LastProbe: memory.lastProbe, CeilingMillis: memory.ceiling, RunSpreadMillis: runSpread(memory.runTimes),
 			Probes: append([]observability.QueryCooldownProbe(nil), memory.probes...)},

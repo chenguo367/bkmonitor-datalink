@@ -67,10 +67,12 @@ type StateWriteReuseKey struct {
 	Stored StateWriteReuseStored
 }
 
-// StateWriteReuseFacts counts, for one Plan's State apply, how the mutations
-// admitted for writing compared against what was already stored. It measures a
-// change that has not been made: nothing skips a write yet, and these counts
-// are the only way to size a skip before the write path is touched.
+// StateWriteReuseFacts counts, for one attempt of a Slot, how the mutations
+// it admitted for writing compared against what was already stored; the
+// attempt's census reports them, beside the same mutations' classes
+// (FrozenStateRenewalFacts.WriteReuse). It measures a change that has not
+// been made: nothing skips a write yet, and these counts are the only way to
+// size a skip before the write path is touched.
 //
 // The classes are reported separately and never summed into one "hit rate".
 // Identical and DecisionStable answer different questions: the first is what a
@@ -92,6 +94,16 @@ func (facts *StateWriteReuseFacts) Record(class StateWriteReuseClass, stored Sta
 		facts.Counts = map[StateWriteReuseKey]int64{}
 	}
 	facts.Counts[StateWriteReuseKey{Class: NormalizeStateWriteReuseClass(class), Stored: NormalizeStateWriteReuseStored(stored)}]++
+}
+
+// Add counts other's comparisons in too.
+func (facts *StateWriteReuseFacts) Add(other StateWriteReuseFacts) {
+	for key, count := range other.Counts {
+		if facts.Counts == nil {
+			facts.Counts = map[StateWriteReuseKey]int64{}
+		}
+		facts.Counts[key] += count
+	}
 }
 
 // Total is the population every class is counted out of. It is the positive

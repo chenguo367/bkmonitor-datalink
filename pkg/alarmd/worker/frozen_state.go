@@ -178,9 +178,16 @@ func (coordinator *SlotExecutionCoordinator) observeFrozenStateRenewal(
 		reason = observability.ReasonCode(contract.ReasonRedisUnavailable)
 	}
 	recorded := facts
-	coordinator.emitObservation(ctx, observability.Observation{
+	observation := observability.Observation{
 		Component: observability.ComponentState, Stage: observability.StageFrozenStateRenewed,
 		Operation: observability.Operation(operation),
 		Result:    result, ReasonCode: reason, FrozenStateRenewal: &recorded,
-	})
+	}
+	// The admitted mutations' write reuse goes with their classes, on this
+	// one observation (FrozenStateRenewalFacts.WriteReuse).
+	if !facts.WriteReuse.Empty() {
+		reuse := facts.WriteReuse
+		observation.StateWriteReuse = &reuse
+	}
+	coordinator.emitObservation(ctx, observation)
 }

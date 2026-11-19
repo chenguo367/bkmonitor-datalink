@@ -310,7 +310,7 @@ func (source *ProductionSlotSource) resumeExpiredRange(ctx context.Context, p ex
 		// content (declaredContentScope): its writes run under the lease.
 		Dispatch:         SlotDispatchContext{Operation: execution.OperationNormal, OwnerFence: current, AssignmentGeneration: assignment.AssignmentGeneration},
 		ExpectedNextSlot: p.First.Contract.Slot.EvaluationTime,
-		Recovery:         SlotRecoveryFacts{Disposition: ReplayExpired, Reason: ReplayExpiredRange, Distance: 1},
+		Recovery:         pooledExpiry(ctx, SlotRecoveryFacts{Disposition: ReplayExpired, Reason: ReplayExpiredRange, Distance: 1}),
 	}
 	if err := slot.Validate(source.queryGroup); err != nil {
 		return FrozenSlot{}, false, err

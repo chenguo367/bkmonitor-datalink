@@ -141,6 +141,9 @@ type DiagnosisRow struct {
 	// reason sentence (strategyReasonOf), which reads its facts; not a field
 	// of the answer.
 	deciding *Anomaly
+	// paused is the strategy's objects the degraded pool holds, each once,
+	// in no order (queryPauseOf orders them).
+	paused []Anomaly
 }
 
 // ProgressFacts is one object's persisted progress, as the runtime reads it.
@@ -305,6 +308,9 @@ func diagnoseStrategyRow(id string, facts StrategyLookupFacts, ctx diagnosisCont
 		advice = advice.withHold(plan.QueryGroup, plan.ReadHold)
 		for _, anomaly := range plan.Rows {
 			advice = advice.with(anomaly)
+			if anomaly.QueryCooldown != nil && !pausedHas(row.paused, anomaly.QueryGroup) {
+				row.paused = append(row.paused, anomaly)
+			}
 			words, given := standingForStrategy(anomaly, StrategyRef{StrategyID: id, BusinessID: plan.Business})
 			if !given {
 				if anomaly.Standing == nil {

@@ -55,11 +55,14 @@ type PhaseTwoControlConfig struct {
 	ReconcileInterval Duration `yaml:"-"`
 	CatalogTTL        Duration `yaml:"-"`
 	// SegmentSkip asks the Control Leader to let Slots leave their Plans'
-	// stable members' writes out (design 014 B3 stage 3). Off by default.
-	// The Leader sets the Assignments' segment skip word only while every
-	// ready worker declares ownership.CapabilitySegmentSkip; asked for and
-	// held, the round's rebalance facts carry SEGMENT_SKIP_HELD and the
-	// workers that do not.
+	// stable members' writes out (design 014 B3 stage 3). On by default:
+	// Default sets it, so a configuration that does not state the key - the
+	// chart renders none - asks for the skip, and segment_skip: false is the
+	// stop, an emergency's. The struct's zero value is off; a configuration
+	// is made by Default or Load. The Leader sets the Assignments' segment
+	// skip word only while every ready worker declares
+	// ownership.CapabilitySegmentSkip; asked for and held, the round's
+	// rebalance facts carry SEGMENT_SKIP_HELD and the workers that do not.
 	// A build without the key keeps it among the unknown keys and starts.
 	SegmentSkip bool `yaml:"segment_skip"`
 }
@@ -354,6 +357,8 @@ func defaultPhaseTwoRuntime() PhaseTwoRuntimeConfig {
 			Timezone:        DefaultTimezone,
 			RefreshInterval: Duration(30 * time.Second), ReconcileInterval: Duration(5 * time.Second),
 			CatalogTTL: Duration(24 * time.Hour),
+			// The skip is on once proved; the values key is left to stop it.
+			SegmentSkip: true,
 		},
 		Ownership: PhaseTwoOwnershipConfig{
 			ControlLeaderTTL: Duration(30 * time.Second), ControlLeaderRenewInterval: Duration(10 * time.Second),

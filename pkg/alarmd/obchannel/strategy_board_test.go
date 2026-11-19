@@ -98,3 +98,28 @@ func TestStrategyBoardPassesTheUrgencyFacet(t *testing.T) {
 		t.Fatalf("the next page dropped the urgency facet: %s", raw)
 	}
 }
+
+// paused=true passes through to the board and stays on the next page's call;
+// without it the board is asked for every strategy.
+func TestStrategyBoardPassesThePausedSelection(t *testing.T) {
+	var asked *url.URL
+	native := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked = r.URL
+		_, _ = w.Write([]byte(`{"generated_at":"2026-10-17T00:00:00Z","max_age_seconds":30,"universe_digest":"d","universe":3,` +
+			`"facets":{"state":{},"action":{},"capability":{},"punctuality":{},"urgency":{},"paused":2},"late_objects":{"value":0},"late_strategies":{"value":0},` +
+			`"coverage":{"counted":2,"expected":2},"matched":2,"rows":[],"next_cursor":"next"}`))
+	})
+	c := testChannel(t, &testAuth{}, NativeOperations(native)...)
+	_, out := call(t, c, envelope(c, "invoke", "strategy.board", Params{"paused": true}))
+	if asked == nil || asked.Query().Get("paused") != "true" {
+		t.Fatalf("asked %v, want paused=true", asked)
+	}
+	raw, _ := json.Marshal(out)
+	if !strings.Contains(string(raw), `"paused":true`) {
+		t.Fatalf("the next page dropped the paused selection: %s", raw)
+	}
+	_, _ = call(t, c, envelope(c, "invoke", "strategy.board", Params{}))
+	if asked.Query().Has("paused") {
+		t.Fatalf("a board asked for every strategy sent %q", asked.RawQuery)
+	}
+}

@@ -20,9 +20,10 @@ import (
 
 // A Query Group the degraded pool holds is not replayed past the distance
 // rule though its Slot was due before the takeover: the replay's query
-// would be held like every other, and the pool gives its Slots up for
-// distance as it did before takeovers were told apart. Nothing is reported
-// as a takeover replay for it.
+// would be held like every other, and the Slot is decided past its distance
+// as it was before takeovers were told apart - for the Runner to hold while
+// the pool holds (heldPastDistance). Nothing is reported as a takeover
+// replay for it.
 func TestAQueryGroupTheDegradedPoolHoldsIsNotReplayedPastTheDistanceRule(t *testing.T) {
 	const slot = execution.EvaluationTime(1_700_124_000)
 	deadline := int64(slot)*1000 + 25_000

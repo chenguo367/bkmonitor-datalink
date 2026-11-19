@@ -8,6 +8,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
 
@@ -68,7 +69,7 @@ func TestSnapshotScheduledRunnersFollowsEveryOwnedSetChange(t *testing.T) {
 	}
 
 	bundle.mu.Lock()
-	bundle.removeRunnerLocked("query-group-b")
+	bundle.removeRunnerLocked("query-group-b", lookback.ForgottenMoved)
 	bundle.mu.Unlock()
 	runners, removedRevision := bundle.snapshotScheduledRunners()
 	if removedRevision == replacedRevision {

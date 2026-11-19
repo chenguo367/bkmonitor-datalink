@@ -160,7 +160,7 @@ func TestAQueryGroupTheBundleStopsOwningLeavesTheLookback(t *testing.T) {
 		t.Fatalf("a read of an owned Query Group was not kept: pending %d coverage %+v", stats.Pending, stats.Coverage)
 	}
 	bundle.mu.Lock()
-	bundle.removeRunnerLocked(queryGroup)
+	bundle.removeRunnerLocked(queryGroup, lookback.ForgottenMoved)
 	bundle.mu.Unlock()
 	stats := engine.Stats()
 	if stats.Pending != 0 || stats.PendingBytes != 0 || stats.Sources[source].Rechecks[lookback.RungNames[0]][lookback.RecheckOwnerLost] != 1 ||
@@ -171,7 +171,7 @@ func TestAQueryGroupTheBundleStopsOwningLeavesTheLookback(t *testing.T) {
 	// A bundle without the lookback removes Runners as before.
 	plain := &phaseTwoWorkerBundle{runners: map[execution.QueryGroupIdentity]*phaseTwoQueryGroupLifecycle{queryGroup: {}}}
 	plain.mu.Lock()
-	plain.removeRunnerLocked(queryGroup)
+	plain.removeRunnerLocked(queryGroup, lookback.ForgottenMoved)
 	plain.mu.Unlock()
 }
 

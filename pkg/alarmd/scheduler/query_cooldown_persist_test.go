@@ -10,7 +10,9 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -374,5 +376,109 @@ func TestAnUndecodableRecordIsReadAsNoneAndWrittenOver(t *testing.T) {
 	failInto(runner, &slot)
 	if got := store.records["qg"]; store.saves != 1 || got.OwnerEpoch != 2 || got.Until.IsZero() {
 		t.Fatalf("%d saves, record %+v; want the entry written over the undecodable record", store.saves, got)
+	}
+}
+
+// Every pool line names the schedule the pool holds its Query Group under -
+// the entering Slot's revision and Segment start, and after a restart the
+// record's - for a replica to read the Plans it serves; neither is written
+// on the line.
+func TestThePoolsLinesNameTheScheduleItHoldsTheQueryGroupUnder(t *testing.T) {
+	store := newMemoryCooldownStore()
+	now := time.Unix(1_000, 0)
+	var lines []observability.Observation
+	runnerOn := func() *Runner {
+		runner := &Runner{queryGroup: "qg", now: func() time.Time { return now }, flights: &FlightCoordinator{
+			limits: RecoveryLimits{},
+			observer: observability.ObserverFunc(func(_ context.Context, o observability.Observation) {
+				if o.QueryCooldown != nil {
+					lines = append(lines, o)
+				}
+			}),
+		}}
+		return runner.WithQueryCooldownStore(store)
+	}
+	before := runnerOn()
+	before.restoreQueryCooldown(context.Background(), fenceAt(1))
+	slot := poolSlot()
+	slot.Contract.ScheduleRevision, slot.Contract.ScheduleSegmentStart = "schedule-r7", 900
+	for i := 0; i < unavailableThreshold; i++ {
+		slot.Contract.Slot.EvaluationTime++
+		before.recordQueryAvailability(context.Background(), slot, execution.OperationNormal, unavailableResult(), 60,
+			before.queryCooldownDecidedBy(execution.OperationNormal))
+	}
+	if len(lines) != 1 || lines[0].QueryCooldown.ScheduleRevision != "schedule-r7" || lines[0].QueryCooldown.SegmentStart != 900 {
+		t.Fatalf("entry lines %+v, want one naming schedule-r7 from 900", lines)
+	}
+	if encoded, _ := json.Marshal(lines[0].QueryCooldown); bytes.Contains(encoded, []byte("schedule-r7")) {
+		t.Fatalf("the line writes the schedule: %s", encoded)
+	}
+	lines = nil
+	after := runnerOn()
+	after.restoreQueryCooldown(context.Background(), fenceAt(2))
+	if len(lines) != 1 || lines[0].QueryCooldown.Event != QueryCooldownRestored ||
+		lines[0].QueryCooldown.ScheduleRevision != "schedule-r7" || lines[0].QueryCooldown.SegmentStart != 900 {
+		t.Fatalf("restored lines %+v, want the record's schedule-r7 from 900", lines)
+	}
+}
+
+// What the failed query had asked for is kept with its reason: on the
+// cooldown line, in the record, and back from the record to the next owner,
+// whose restored line names it as the entry's did. A record written before
+// it existed restores none.
+func TestTheRequestTargetsTravelWithThePoolRecord(t *testing.T) {
+	store := newMemoryCooldownStore()
+	now := time.Unix(1_000, 0)
+	asked := &observability.RequestTargetsFacts{Count: 1, Digest: "0123456789abcdef",
+		Targets: []observability.RequestTarget{{TableID: "system.cpu", FieldName: "usage", SpaceUID: "bkcc__2"}}}
+	var lines []observability.Observation
+	runnerOn := func() *Runner {
+		runner := &Runner{queryGroup: "qg", now: func() time.Time { return now }, flights: &FlightCoordinator{
+			limits: RecoveryLimits{},
+			observer: observability.ObserverFunc(func(_ context.Context, o observability.Observation) {
+				if o.QueryCooldown != nil {
+					lines = append(lines, o)
+				}
+			}),
+		}}
+		return runner.WithQueryCooldownStore(store)
+	}
+	before := runnerOn()
+	before.restoreQueryCooldown(context.Background(), fenceAt(1))
+	slot := poolSlot()
+	failed := unavailableResult()
+	failed.QueryUnavailableTargets = asked
+	for i := 0; i < unavailableThreshold; i++ {
+		slot.Contract.Slot.EvaluationTime++
+		before.recordQueryAvailability(context.Background(), slot, execution.OperationNormal, failed, 60, before.queryCooldownDecidedBy(execution.OperationNormal))
+	}
+	if len(lines) != 1 || lines[0].QueryCooldown.Event != QueryCooldownEntered || !reflect.DeepEqual(lines[0].RequestTargets, asked) {
+		t.Fatalf("entry lines = %+v, want one entered line naming %+v", lines, asked)
+	}
+	encoded, err := json.Marshal(store.records["qg"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded QueryCooldownRecord
+	if err := json.Unmarshal(encoded, &decoded); err != nil || !reflect.DeepEqual(decoded.RequestTargets, asked) {
+		t.Fatalf("the record carries %+v through its encoding (%v), want %+v", decoded.RequestTargets, err, asked)
+	}
+
+	lines = nil
+	after := runnerOn()
+	after.restoreQueryCooldown(context.Background(), fenceAt(2))
+	if !reflect.DeepEqual(after.queryCooldown.targets, asked) || len(lines) != 1 || !reflect.DeepEqual(lines[0].RequestTargets, asked) {
+		t.Fatalf("restored targets %+v, lines %+v; want %+v back from the record", after.queryCooldown.targets, lines, asked)
+	}
+
+	old := store.records["qg"]
+	old.RequestTargets = nil
+	old.OwnerEpoch = 2
+	store.records["qg"] = old
+	lines = nil
+	older := runnerOn()
+	older.restoreQueryCooldown(context.Background(), fenceAt(3))
+	if older.queryCooldown.until.IsZero() || older.queryCooldown.targets != nil || len(lines) != 1 || lines[0].RequestTargets != nil {
+		t.Fatalf("a record without targets restored %+v on %+v", older.queryCooldown.targets, lines)
 	}
 }

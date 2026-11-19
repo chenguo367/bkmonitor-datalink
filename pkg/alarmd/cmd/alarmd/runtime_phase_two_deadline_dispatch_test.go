@@ -17,6 +17,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
@@ -187,10 +188,10 @@ func TestPhaseTwoDispatcherFullReadyQueueGivesUpTheLatestDeadlineForAnEarlierOne
 		t.Fatalf("dispatch order = %v, want %v", order, want)
 	}
 	for labels, want := range map[[2]string]float64{
-		{"normal_queue_full", "other"}:    1,
-		{"normal_queue_evicted", "other"}: 1,
-		{"normal_queue_full", "10s"}:      0,
-		{"normal_queue_evicted", "10s"}:   0,
+		{"normal_queue_full", "60s"}:    1,
+		{"normal_queue_evicted", "60s"}: 1,
+		{"normal_queue_full", "10s"}:    0,
+		{"normal_queue_evicted", "10s"}: 0,
 	} {
 		got := counterValue(t, recorder, "alarmd_dispatch_queue_turnaways_total", map[string]string{"outcome": labels[0], "cohort": labels[1]})
 		if got != want {
@@ -241,7 +242,7 @@ func TestAOneShotRunEvictsAsProductionDoesAndRunsTheEvictedAtTheNextTick(t *test
 		t.Fatalf("dispatch order = %v, want %v: the evicted Query Group runs at the next tick, after the generation it was evicted from", order, want)
 	}
 	if got := counterValue(t, recorder, "alarmd_dispatch_queue_turnaways_total",
-		map[string]string{"outcome": "normal_queue_evicted", "cohort": "other"}); got != 1 {
+		map[string]string{"outcome": "normal_queue_evicted", "cohort": "60s"}); got != 1 {
 		t.Fatalf("normal_queue_evicted = %v, want 1", got)
 	}
 }
@@ -274,7 +275,7 @@ func TestAnEvictedQueryGroupWaitsForTheNextGenerationInAOneShotRunToo(t *testing
 	// starts over in the same generation.
 	dispatcher.markDispatched(dispatcher.normal[0].scheduled, false, -1, false)
 	bundle.mu.Lock()
-	bundle.removeRunnerLocked("query-group-1")
+	bundle.removeRunnerLocked("query-group-1", lookback.ForgottenMoved)
 	bundle.mu.Unlock()
 	runners, revision = bundle.snapshotScheduledRunners()
 	dispatcher.fillQueues(runners, revision)

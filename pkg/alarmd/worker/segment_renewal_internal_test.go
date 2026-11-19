@@ -32,8 +32,10 @@ type renewalRig struct {
 	wall  int64
 	key   segment.PlanKey
 	total observability.SegmentShadowFacts
-	// due is the Plan's due entry, shadowDue's one-minute Plan unless set.
-	due execution.DuePlan
+	// due is the Plan's due entry, shadowDue's one-minute Plan unless set;
+	// operation the rounds', normal unless set.
+	due       execution.DuePlan
+	operation execution.Operation
 }
 
 func newRenewalRig(t *testing.T, ttl time.Duration) *renewalRig {
@@ -70,9 +72,16 @@ func (rig *renewalRig) round(step time.Duration, present []int) observability.Se
 		}
 	}
 	rig.store.writeState(rig.key, written)
-	facts := runShadowFor(rig.t, rig.store, rig.due, rounds, false)
+	operation := rig.operation
+	if operation == "" {
+		operation = execution.OperationNormal
+	}
+	facts := runShadowForAs(rig.t, rig.store, rig.due, rounds, false, operation)
 	for result, count := range facts.Renewals {
 		rig.total.Renewal(result, count)
+	}
+	for _, elapsed := range facts.RenewScripts {
+		rig.total.RenewScript(elapsed)
 	}
 	rig.holdR()
 	return facts
@@ -131,6 +140,11 @@ func TestMembersRenewedByTheirPageAloneStayFoundPastTheirLifetime(t *testing.T) 
 	if rig.total.Renewals[observability.SegmentRenewalRenewed] < 10 || rig.total.Renewals[observability.SegmentRenewalFailed] != 0 ||
 		rig.total.Renewals[observability.SegmentRenewalMissing] != 0 || rig.total.Renewals[observability.SegmentRenewalFallbackWrite] != 0 {
 		t.Fatalf("renewals over four lifetimes %v, want one every quarter and nothing else", rig.total.Renewals)
+	}
+	// Each renewed page's script reaches the round's facts with its own run
+	// time, for the renewal script histogram.
+	if int64(len(rig.total.RenewScripts)) != rig.total.Renewals[observability.SegmentRenewalRenewed] {
+		t.Fatalf("%d script run times for %d renewed pages, want one each", len(rig.total.RenewScripts), rig.total.Renewals[observability.SegmentRenewalRenewed])
 	}
 }
 
@@ -220,6 +234,10 @@ func TestAPageUnrenewedForHalfItsLifetimeIsCountedForTheFallback(t *testing.T) {
 	}
 	if short := rig.total.Renewals[observability.SegmentRenewalFallbackUnrenewable]; short != 0 {
 		t.Fatalf("a one-minute Plan with ten minutes of life counted %d short-lived fallbacks", short)
+	}
+	// Every round settled, its position a step on: not stalled.
+	if stalled := rig.total.Renewals[observability.SegmentRenewalFallbackStalled]; stalled != 0 {
+		t.Fatalf("a Plan settling every round counted %d stalled fallbacks", stalled)
 	}
 }
 
@@ -334,6 +352,61 @@ func TestANewPageNoRoundCouldRenewBeforeHalfItsLifetimeIsCountedUnrenewable(t *t
 	written = rig.total.Renewals[observability.SegmentRenewalFallbackWrite] - written
 	if unrenewable != 1 || written != 0 {
 		t.Fatalf("the round after the page was made counted %d unrenewable and %d fallback_write, want the one page unrenewable", unrenewable,
+			written)
+	}
+}
+
+// A Plan whose rounds stopped - not active for a while, no round settled -
+// and came back with its pages past half their lifetime is counted
+// fallback_stalled, not fallback_write: the Slot's evaluation time is past
+// the round its mark was written in by more than its interval. Six minutes
+// of a ten-minute lifetime is past the interval and the quarter lifetime,
+// and past half of it.
+func TestAPlanThatStoppedFallsBackStalledNotWrite(t *testing.T) {
+	rig := newRenewalRig(t, 10*time.Minute)
+	rig.round(time.Minute, series(3))
+	rig.round(time.Minute, series(3))
+	stalled, written := rig.total.Renewals[observability.SegmentRenewalFallbackStalled], rig.total.Renewals[observability.SegmentRenewalFallbackWrite]
+	rig.store.at += 5 * 60
+	rig.round(6*time.Minute, series(3))
+	stalled = rig.total.Renewals[observability.SegmentRenewalFallbackStalled] - stalled
+	written = rig.total.Renewals[observability.SegmentRenewalFallbackWrite] - written
+	if stalled != 1 || written != 0 {
+		t.Fatalf("the round after six minutes without one counted %d stalled and %d fallback_write, want the page stalled", stalled, written)
+	}
+}
+
+// A Plan that stopped and is caught up by replays - its first replay's
+// position a step past its mark, as if nothing stopped - is counted
+// fallback_stalled too: the round is a replay, late for the time it was due.
+func TestAReplayAfterAStopFallsBackStalledNotWrite(t *testing.T) {
+	rig := newRenewalRig(t, 10*time.Minute)
+	rig.round(time.Minute, series(3))
+	rig.round(time.Minute, series(3))
+	stalled, written := rig.total.Renewals[observability.SegmentRenewalFallbackStalled], rig.total.Renewals[observability.SegmentRenewalFallbackWrite]
+	rig.operation = execution.OperationReplay
+	rig.round(6*time.Minute, series(3))
+	stalled = rig.total.Renewals[observability.SegmentRenewalFallbackStalled] - stalled
+	written = rig.total.Renewals[observability.SegmentRenewalFallbackWrite] - written
+	if stalled != 1 || written != 0 {
+		t.Fatalf("the replay six minutes on counted %d stalled and %d fallback_write, want the page stalled", stalled, written)
+	}
+}
+
+// A Plan none of whose members is present the round it comes back - its
+// position where its mark left it - shows its stop by the Slot's
+// evaluation time: its page is counted fallback_stalled, not fallback_write.
+func TestAPlanThatStoppedWithNoMemberBackFallsBackStalledNotWrite(t *testing.T) {
+	rig := newRenewalRig(t, 10*time.Minute)
+	rig.round(time.Minute, series(3))
+	rig.round(time.Minute, series(3))
+	stalled, written := rig.total.Renewals[observability.SegmentRenewalFallbackStalled], rig.total.Renewals[observability.SegmentRenewalFallbackWrite]
+	rig.store.at += 5 * 60
+	rig.round(6*time.Minute, nil)
+	stalled = rig.total.Renewals[observability.SegmentRenewalFallbackStalled] - stalled
+	written = rig.total.Renewals[observability.SegmentRenewalFallbackWrite] - written
+	if stalled == 0 || written != 0 {
+		t.Fatalf("the round six minutes on with no member back counted %d stalled and %d fallback_write, want its page stalled", stalled,
 			written)
 	}
 }

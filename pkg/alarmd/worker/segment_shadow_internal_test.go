@@ -99,6 +99,8 @@ func (store *memorySegments) RenewSegments(_ context.Context, request segment.Re
 				continue
 			}
 			renewed.Renewed[position] = true
+			// One script a page here, at a run time of its own.
+			renewed.Elapsed = append(renewed.Elapsed, time.Duration(len(page.Members)+1)*time.Microsecond)
 			if store.expiry == nil {
 				continue
 			}
@@ -245,7 +247,7 @@ func foldShadow(t *testing.T, store *memorySegments, round *segmentShadowRound, 
 		clock = func() time.Time { return time.UnixMilli(store.wall()) }
 	}
 	facts, folded := foldSegmentShadowRound(round, []execution.DuePlan{due}, withheld, nil)
-	writes := settleSegmentShadow(context.Background(), store, request, folded, &facts, clock)
+	writes, _ := settleSegmentShadow(context.Background(), store, request, folded, &facts, clock)
 	if _, err := store.WriteSegments(context.Background(), segment.WriteRequest{Contract: request.Contract, Plans: writes}); err != nil {
 		t.Fatal(err)
 	}
@@ -314,12 +316,19 @@ func runShadow(t *testing.T, store *memorySegments, written []shadowRoundOf, wit
 
 func runShadowFor(t *testing.T, store *memorySegments, due execution.DuePlan, written []shadowRoundOf, withheld bool) observability.SegmentShadowFacts {
 	t.Helper()
+	return runShadowForAs(t, store, due, written, withheld, execution.OperationNormal)
+}
+
+// runShadowForAs is runShadowFor under the operation given.
+func runShadowForAs(t *testing.T, store *memorySegments, due execution.DuePlan, written []shadowRoundOf, withheld bool,
+	operation execution.Operation) observability.SegmentShadowFacts {
+	t.Helper()
 	at := store.at + 60
 	for _, series := range written {
 		at = max(at, series.write.Points[len(series.write.Points)-1].SourceTime+60)
 	}
 	store.at = at
-	request := shadowRequest(execution.OperationNormal, at)
+	request := shadowRequest(operation, at)
 	round := newSegmentShadowRound(request, shadowSlot(t, store, request, due))
 	for _, series := range written {
 		round.observe(due, series.view, series.write, series.class, series.eventsSent)

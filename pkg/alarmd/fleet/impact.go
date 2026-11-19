@@ -31,7 +31,12 @@ package fleet
 type ColumnImpact struct {
 	Objects    int `json:"objects"`
 	Strategies int `json:"strategies"`
-	Businesses int `json:"businesses"`
+	// StrategiesUnlisted is how many of Strategies the rows' cut lists do
+	// not name - a pooled row whose schedule has more strategies than a row
+	// lists - counted from the rows' own counts, so a strategy two such rows
+	// share is counted twice; Businesses are the named ones'.
+	StrategiesUnlisted int `json:"strategies_unlisted,omitempty"`
+	Businesses         int `json:"businesses"`
 	// Partial says the objects these were counted from are a sample: a replica
 	// publishes at most what fits its byte budget, so on a bad enough deployment
 	// the list is already cut before anything here runs.
@@ -85,6 +90,11 @@ type Impact struct {
 	// affected" and means "we cannot say what is affected", and those are
 	// opposite instructions.
 	NoStrategies int `json:"no_strategies"`
+	// NoStrategiesBy is the pooled rows among NoStrategies whose schedule was
+	// not read, by why (StrategiesUnfilled): a row restored into the pool
+	// whose Plans this replica could not read yet says so, apart from a row
+	// nothing could name a strategy for.
+	NoStrategiesBy StrategiesUnfilledCounts `json:"no_strategies_by"`
 }
 
 // distinctObjects is the set of objects in a list: an object under two

@@ -14,6 +14,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 )
@@ -124,7 +125,7 @@ func TestTheUnreadableTimelineNamesAreBounded(t *testing.T) {
 			ownership.MaxReportedUnreadableTimelines, len(owned))
 	}
 	bundle.mu.Lock()
-	bundle.removeRunnerLocked(owned[0])
+	bundle.removeRunnerLocked(owned[0], lookback.ForgottenMoved)
 	bundle.mu.Unlock()
 	if names, total := bundle.unreadableTimelinesRegistration(); total != len(owned)-1 || len(names) == 0 || names[0] != string(owned[1]) {
 		t.Fatalf("after the first Query Group left: names %v, total %d; want it gone", names, total)

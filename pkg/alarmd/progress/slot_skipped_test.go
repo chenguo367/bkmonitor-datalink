@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -80,6 +81,12 @@ func TestAnAbandonedUnfinishedSlotWritesOneSlotSkippedLine(t *testing.T) {
 			if line["finalizing_path"] != observability.SlotSkippedProgressStore || line["skip_gap_guard"] != observability.SkipGapProgressOnly ||
 				line["skipped_first_slot"] != float64(120) || line["owner_epoch"] != float64(4) || line["query_group_key"] != "q" {
 				t.Fatalf("abandon line = %v", line)
+			}
+			// Whose the abandoned Slot was, from its own due Plans: the one
+			// strategy and business of the fixture.
+			if !reflect.DeepEqual(line["strategy_ids"], []any{"strategy"}) || line["strategy_count"] != float64(1) ||
+				!reflect.DeepEqual(line["business_ids"], []any{"business"}) || line["business_count"] != float64(1) {
+				t.Fatalf("abandon line plan scope %v %v %v %v", line["strategy_ids"], line["strategy_count"], line["business_ids"], line["business_count"])
 			}
 			if test.heldBy {
 				if line["held_by"] != "query_cooldown" || line["held_by_lookback"] != true || line["lookback_probation_rereads"] != float64(1) {

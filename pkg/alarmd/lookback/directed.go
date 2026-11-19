@@ -567,7 +567,8 @@ func (engine *Engine) slotRereadTimeout(slot *directedSlot) time.Duration {
 // disjoint, so what each finds new is its own; their kept batches make one
 // kept read of the physical query (mergeKeptSinks). It stops at the first
 // read that fails, whose completion and error it returns; refused counts
-// the slices whose reread the share refused.
+// the slices whose reread the share refused. readCtx carries the kind of
+// read its caller makes: the reread at the rung or the early read.
 func (engine *Engine) rereadSlices(readCtx context.Context, slot *directedSlot) (
 	queries []*directedQuery, sinks []*keptSink, completion execution.ProviderCompletion, err error, refused int,
 ) {
@@ -656,7 +657,7 @@ func (engine *Engine) directedRead(ctx context.Context, slot *directedSlot, rele
 			}
 		}()
 	}
-	queries, sinks, completion, err, refused := engine.rereadSlices(readCtx, slot)
+	queries, sinks, completion, err, refused := engine.rereadSlices(execution.WithLookbackRead(readCtx, execution.LookbackReadDirected), slot)
 	close(back)
 	release()
 	cancel()

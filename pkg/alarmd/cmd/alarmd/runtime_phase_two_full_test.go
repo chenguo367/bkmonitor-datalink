@@ -2505,9 +2505,12 @@ func TestProductionRunOneReadsControlBodiesOncePerRevisionAndVersion(t *testing.
 	if len(beforeDeferred) > 0 {
 		deferredLastID = beforeDeferred[0].ID
 	}
+	// The next round, before its read: the source answers it not due and
+	// names the read, so no Slot is frozen and nothing is queried.
 	deferredResult, deferredAttempted, err := settledRunner(bundle, queryGroupsByStrategy["1002"]).RunOne(ctx)
-	if err != nil || !deferredAttempted || deferredResult.Completed || uqCalls.Load() != beforeDeferredCalls {
-		t.Fatalf("expected readiness deferral before Query: %+v %v calls=%d", deferredResult, err, uqCalls.Load())
+	if err != nil || deferredAttempted || deferredResult.Completed || uqCalls.Load() != beforeDeferredCalls {
+		t.Fatalf("expected the next round answered not due before its read, without a Query: %+v attempted=%v %v calls=%d",
+			deferredResult, deferredAttempted, err, uqCalls.Load())
 	}
 	deferredEntries, err := redisClient.SlowLogGet(ctx, 2048).Result()
 	if err != nil {
@@ -2520,6 +2523,11 @@ func TestProductionRunOneReadsControlBodiesOncePerRevisionAndVersion(t *testing.
 	}
 	// The Snapshot facts are lost as a whole - the body and the catalog
 	// object the Segment names - and this process has not kept the object.
+	// The round at the read cannot freeze its Slot without them: the source
+	// answers a retry, and nothing is queried. A Slot frozen before they were
+	// lost re-enters as SNAPSHOT_RETRY_PENDING instead, which the production
+	// query-free finalization cases cover; no round is frozen before its read
+	// to make that case here.
 	deferredSchedule, err := production.dependencies.Catalog.ReadInitialFrozenSchedule(ctx, queryGroupsByStrategy["1002"])
 	if err != nil || deferredSchedule.Segment.ObjectDigest == "" {
 		t.Fatalf("deferred Query Group schedule=(%+v, %v), want a Segment naming its object", deferredSchedule.Segment, err)
@@ -2530,10 +2538,16 @@ func TestProductionRunOneReadsControlBodiesOncePerRevisionAndVersion(t *testing.
 	if err := repository.ConfigureObjectCache(1, 1); err != nil {
 		t.Fatal(err)
 	}
-	clock.Store(bundle.runners[queryGroupsByStrategy["1002"]].runner.NextReadyAt().UnixMilli())
+	// At the read: the bound is the second before the one the read falls in,
+	// so the whole second after that is past it.
+	bound := bundle.runners[queryGroupsByStrategy["1002"]].runner.DueBound().NotDueUntilUnix
+	if bound == 0 {
+		t.Fatal("the round before its read left no bound naming it")
+	}
+	clock.Store((bound + 2) * 1000)
 	reentry, _, err := settledRunner(bundle, queryGroupsByStrategy["1002"]).RunOne(ctx)
-	if err != nil || reentry.Completed || reentry.ReasonCode != execution.ReasonCode(contract.ReasonSnapshotRetryPending) || uqCalls.Load() != beforeDeferredCalls {
-		t.Fatalf("deferred reentry result=%+v error=%v clock=%v", reentry, err, now())
+	if err != nil || reentry.Completed || reentry.ReasonCode != execution.ReasonCode(contract.ReasonSlotSourceRetry) || uqCalls.Load() != beforeDeferredCalls {
+		t.Fatalf("round at the read with the Snapshot facts lost: result=%+v error=%v clock=%v, want a source retry and no Query", reentry, err, now())
 	}
 }
 

@@ -161,6 +161,9 @@ type SlotExecutionCoordinator struct {
 	// permanent class in its owner's term, and the ones stopped by it
 	// (segment_shadow.go).
 	segmentDegradations segmentDegradations
+	// segmentFallbackLines is when each Query Group's Plans last wrote their
+	// fallback line (segment_fallback_lines.go).
+	segmentFallbackLines segmentFallbackLines
 	// noDataSkips is how long each Plan's no-data detection has been skipping.
 	// One per process, because a streak is about rounds rather than about one
 	// Slot. See no_data_skip_streak.go.

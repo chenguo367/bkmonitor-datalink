@@ -31,6 +31,11 @@ var QueryDurationBuckets = []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30
 // minute: a one-minute round's query window runs to about 45 s.
 var QueryAnswerBuckets = []float64{0.1, 0.25, 0.5, 1, 2.5, 5, 10, 15, 20, 25, 30, 35, 40, 45, 60}
 
+// QueryAnswerSeriesBuckets is the bounds of a physical query's answered
+// series: 0 first, so an answer with no series is told apart from one with a
+// single series, then powers of 4 from 1.
+var QueryAnswerSeriesBuckets = append([]float64{0}, prometheus.ExponentialBuckets(1, 4, 11)...)
+
 // DecisionLagBuckets reach five minutes: a held round lags tens of seconds
 // and a long-period Slot minutes. They are dense between 10 and 60 seconds
 // because that is where decisions land: one deployment's 5220 decisions all
@@ -128,7 +133,7 @@ func newFlowMetrics(work *prometheus.CounterVec) flowMetrics {
 	m.answerBytes = answer("access_query_answer_bytes", "Bytes of each physical query's answer as read."+outcomes,
 		prometheus.ExponentialBuckets(1<<10, 4, 12))
 	m.answerSeries = answer("access_query_answer_series", "Series in each physical query's answer."+outcomes,
-		prometheus.ExponentialBuckets(1, 4, 11))
+		QueryAnswerSeriesBuckets)
 	m.answerRecords = answer("access_query_answer_records", "Records (points) in each physical query's answer."+outcomes,
 		prometheus.ExponentialBuckets(1, 4, 14))
 	m.answerSeconds = answer("access_query_answer_seconds", "Seconds each physical query's provider took, to 60 s: "+

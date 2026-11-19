@@ -344,3 +344,69 @@ func TestThisBuildDeclaresTheSegmentSkipContract(t *testing.T) {
 		t.Fatalf("beside a replica of the build before: %+v, want it held, the replica named", gate)
 	}
 }
+
+// The round's segment skip gate is news when it moves, and only then: the
+// Leader's first round, held by a replica that does not declare the
+// contract, is; the same round again is not; the values' ask going away
+// while it is held, no word set to take back, is - the round's facts say so
+// though nothing is asked for - and the ask coming back is; the replica
+// declaring and the word set is; a steady round after it is not; the ask
+// going away again takes the word back, and the unasked round after it says
+// nothing. The rebalance_planned line is written for each that is news
+// (observability roundChanged), as for a move.
+func TestTheSegmentSkipGateIsNewsWhenItMoves(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	groups := []execution.QueryGroupIdentity{"query-group-1"}
+	store := &rebalanceOwnershipStore{
+		fakePhaseTwoOwnershipStore: &fakePhaseTwoOwnershipStore{now: now, renewed: make(chan struct{}), leaderEpoch: 9},
+		workers:                    []ownership.WorkerRegistration{segmentSkipWorker("worker-1", true, now), segmentSkipWorker("worker-2", false, now)},
+		assignments: map[execution.QueryGroupIdentity]ownership.AssignmentRecord{"query-group-1": {
+			QueryGroup: "query-group-1", DesiredWorkerID: "worker-1", AssignmentGeneration: 1, RecordRevision: 1,
+			ControlEpoch: 1, PlacementReason: ownership.PlacementRendezvous, AssignedAt: now,
+		}},
+	}
+	var observations []observability.Observation
+	production, _ := segmentSkipLeader(t, store, true, now, &observations)
+	at := now
+	round := func(name string, wantChanged bool) observability.SegmentSkipFacts {
+		t.Helper()
+		at = at.Add(40 * time.Second)
+		if err := production.PublishAssignments(context.Background(), groups, at); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		facts := lastSegmentSkip(t, observations)
+		if facts.Changed != wantChanged {
+			t.Fatalf("%s: %+v, want changed %t", name, facts, wantChanged)
+		}
+		return facts
+	}
+	if facts := round("the first round, held", true); facts.Held != ownership.SegmentSkipHeld || !reflect.DeepEqual(facts.Unaware, []string{"worker-2"}) {
+		t.Fatalf("the first round = %+v, want held by worker-2", facts)
+	}
+	round("the same round again", false)
+	production.dependencies.SegmentSkip = false
+	if facts := round("the ask goes away while held", true); facts.Asked || facts.Withdrawn != 0 || facts.Held != "" {
+		t.Fatalf("the ask going away while held = %+v, want the gate unasked and nothing to take back", facts)
+	}
+	production.dependencies.SegmentSkip = true
+	round("the ask comes back", true)
+	store.workers[1] = segmentSkipWorker("worker-2", true, at)
+	if facts := round("worker-2 declares", true); facts.Set != 1 || facts.Held != "" {
+		t.Fatalf("worker-2 declaring = %+v, want the word set", facts)
+	}
+	round("steady", false)
+	production.dependencies.SegmentSkip = false
+	if facts := round("the ask goes away again", true); facts.Asked || facts.Withdrawn != 1 {
+		t.Fatalf("the ask going away = %+v, want the word taken back", facts)
+	}
+	observations = nil
+	at = at.Add(40 * time.Second)
+	if err := production.PublishAssignments(context.Background(), groups, at); err != nil {
+		t.Fatal(err)
+	}
+	for _, observation := range observations {
+		if observation.Stage == observability.StageRebalancePlanned && observation.Rebalance != nil && observation.Rebalance.SegmentSkip != nil {
+			t.Fatalf("an unasked steady round carries the word's facts %+v", observation.Rebalance.SegmentSkip)
+		}
+	}
+}

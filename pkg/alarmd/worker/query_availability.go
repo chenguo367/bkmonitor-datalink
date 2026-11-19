@@ -5,6 +5,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // queryAvailabilityEvidence folds the existing validated binding traversal.
@@ -16,8 +17,10 @@ type queryAvailabilityEvidence struct {
 	available             bool
 	primaryDelivered      bool
 	nonBackendFailure     bool
-	// reason is the first unavailable primary's own reason.
-	reason execution.ReasonCode
+	// reason is the first unavailable primary's own reason, and targets
+	// what that query had asked for.
+	reason  execution.ReasonCode
+	targets *observability.RequestTargetsFacts
 	// primaryEmptiedOutside says a primary query came back empty only
 	// because every series it returned was withheld as outside the
 	// monitoring target; primaryWithheldOtherwise that a primary query
@@ -82,6 +85,7 @@ func (e *queryAvailabilityEvidence) observe(binding execution.NamedInputBinding,
 	}
 	if physical.Completeness == execution.CompletenessUnavailable && e.reason == "" {
 		e.reason = execution.AttributedReason(binding.ReasonCode, binding.UnavailableAttribution)
+		e.targets = physical.RouteFacts.RequestTargets
 	}
 	// FULL_EMPTY establishes availability too, even when a local consumer or
 	// algorithm fails. PARTIAL needs actual usable data, not merely an empty
@@ -267,6 +271,15 @@ func (e queryAvailabilityEvidence) unavailableReason() execution.ReasonCode {
 		return ""
 	}
 	return e.reason
+}
+
+// unavailableTargets is what the query unavailableReason is about had asked
+// for, on a round whose primary query was unavailable; nil on any other.
+func (e queryAvailabilityEvidence) unavailableTargets() *observability.RequestTargetsFacts {
+	if e.availability() != execution.QueryAvailabilityUnavailable {
+		return nil
+	}
+	return e.targets
 }
 
 // unknownReason is why a primary query failed when the failure proved

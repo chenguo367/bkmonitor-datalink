@@ -27,6 +27,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
@@ -972,7 +973,7 @@ func TestPhaseTwoRunnerDispatcherPrunesRemovedGenerationState(t *testing.T) {
 		t.Fatalf("dispatcher generation state = %d/%d, want 1/1", len(dispatcher.lastQueued), len(dispatcher.queued))
 	}
 	bundle.mu.Lock()
-	bundle.removeRunnerLocked(queryGroup)
+	bundle.removeRunnerLocked(queryGroup, lookback.ForgottenMoved)
 	bundle.mu.Unlock()
 	_, revision = bundle.snapshotScheduledRunners()
 	dispatcher.dropStaleQueued(revision)
@@ -1184,7 +1185,7 @@ func TestPhaseTwoWorkerBundleDispatcherDropsReplacedLifecycleBeforeDispatch(t *t
 	}
 	newCallsBeforeNextTick := newCalls.Load()
 	bundle.mu.Lock()
-	bundle.removeRunnerLocked("query-group-a-blocking")
+	bundle.removeRunnerLocked("query-group-a-blocking", lookback.ForgottenMoved)
 	bundle.mu.Unlock()
 	if err := runScheduledOnceSettled(context.Background(), bundle); err != nil {
 		t.Fatalf("runScheduledOnce(current replacement) error = %v", err)

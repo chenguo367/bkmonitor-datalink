@@ -12,6 +12,7 @@ package fleet
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 )
@@ -47,14 +48,22 @@ var ImpactParts = []ImpactPart{ImpactAnomalies, ImpactOurs, ImpactDemoted, Impac
 type ImpactTally struct {
 	Parts        map[ImpactPart]*ImpactPartTally
 	NoStrategies int
+	// NoStrategiesBy is the pooled rows among NoStrategies whose schedule was
+	// not read, by why (StrategiesUnfilled); the rest are rows nothing could
+	// name a strategy for.
+	NoStrategiesBy map[string]int
 }
 
 // ImpactPartTally is one part: how many objects it has, how many rows it
-// was counted from, and the strategies those rows named.
+// was counted from, and the strategies those rows named. Unlisted is the
+// strategies of rows whose list was cut that the lists do not name
+// (Anomaly.StrategiesTotal): counted, as a row's own count is over every
+// Plan, though two cut rows sharing one is counted twice.
 type ImpactPartTally struct {
 	Objects    int
 	Listed     int
 	Strategies map[StrategyRef]struct{}
+	Unlisted   int
 }
 
 // impactTallyWire is a tally as a replica publishes it: each strategy its
@@ -63,15 +72,17 @@ type ImpactPartTally struct {
 // and written out in every one it took four times the bytes -- nine tenths
 // of a replica's summary.
 type impactTallyWire struct {
-	Strategies   [][2]string                   `json:"strategies,omitempty"`
-	Parts        map[ImpactPart]impactPartWire `json:"parts"`
-	NoStrategies int                           `json:"no_strategies"`
+	Strategies     [][2]string                   `json:"strategies,omitempty"`
+	Parts          map[ImpactPart]impactPartWire `json:"parts"`
+	NoStrategies   int                           `json:"no_strategies"`
+	NoStrategiesBy map[string]int                `json:"no_strategies_by,omitempty"`
 }
 
 type impactPartWire struct {
 	Objects    int   `json:"objects"`
 	Listed     int   `json:"listed"`
 	Strategies []int `json:"strategies,omitempty"`
+	Unlisted   int   `json:"unlisted,omitempty"`
 }
 
 // MarshalJSON writes the tally with its strategies once, in order, so one
@@ -95,6 +106,14 @@ func (tally ImpactTally) MarshalJSON() ([]byte, error) {
 	})
 	wire := impactTallyWire{Strategies: make([][2]string, 0, len(ordered)), Parts: make(map[ImpactPart]impactPartWire, len(tally.Parts)),
 		NoStrategies: tally.NoStrategies}
+	for reason, count := range tally.NoStrategiesBy {
+		if count > 0 {
+			if wire.NoStrategiesBy == nil {
+				wire.NoStrategiesBy = map[string]int{}
+			}
+			wire.NoStrategiesBy[reason] = count
+		}
+	}
 	for position, strategy := range ordered {
 		distinct[strategy] = position
 		wire.Strategies = append(wire.Strategies, [2]string{strategy.StrategyID, strategy.BusinessID})
@@ -105,7 +124,7 @@ func (tally ImpactTally) MarshalJSON() ([]byte, error) {
 			positions = append(positions, distinct[strategy])
 		}
 		sort.Ints(positions)
-		wire.Parts[name] = impactPartWire{Objects: part.Objects, Listed: part.Listed, Strategies: positions}
+		wire.Parts[name] = impactPartWire{Objects: part.Objects, Listed: part.Listed, Strategies: positions, Unlisted: part.Unlisted}
 	}
 	return json.Marshal(wire)
 }
@@ -118,9 +137,17 @@ func (tally *ImpactTally) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	tally.NoStrategies = wire.NoStrategies
+	tally.NoStrategiesBy = make(map[string]int, len(wire.NoStrategiesBy))
+	for reason, count := range wire.NoStrategiesBy {
+		if !slices.Contains(StrategiesUnfilled, reason) {
+			return fmt.Errorf("impact tally counts rows without strategies under %q, not a reason a row is", reason)
+		}
+		tally.NoStrategiesBy[reason] = count
+	}
 	tally.Parts = make(map[ImpactPart]*ImpactPartTally, len(wire.Parts))
 	for name, part := range wire.Parts {
-		read := &ImpactPartTally{Objects: part.Objects, Listed: part.Listed, Strategies: make(map[StrategyRef]struct{}, len(part.Strategies))}
+		read := &ImpactPartTally{Objects: part.Objects, Listed: part.Listed, Strategies: make(map[StrategyRef]struct{}, len(part.Strategies)),
+			Unlisted: part.Unlisted}
 		for _, position := range part.Strategies {
 			if position < 0 || position >= len(wire.Strategies) {
 				return fmt.Errorf("impact part %s names strategy %d of %d", name, position, len(wire.Strategies))
@@ -134,7 +161,7 @@ func (tally *ImpactTally) UnmarshalJSON(data []byte) error {
 }
 
 func newImpactTally() ImpactTally {
-	tally := ImpactTally{Parts: make(map[ImpactPart]*ImpactPartTally, len(ImpactParts))}
+	tally := ImpactTally{Parts: make(map[ImpactPart]*ImpactPartTally, len(ImpactParts)), NoStrategiesBy: map[string]int{}}
 	for _, part := range ImpactParts {
 		tally.Parts[part] = &ImpactPartTally{Strategies: map[StrategyRef]struct{}{}}
 	}
@@ -154,6 +181,7 @@ func (part *ImpactPartTally) add(rows ...[]Anomaly) int {
 			for _, strategy := range row.Strategies {
 				part.Strategies[strategy] = struct{}{}
 			}
+			part.Unlisted += unlistedStrategies(row)
 		}
 	}
 	return unnamed
@@ -184,6 +212,11 @@ func ImpactTallyOf(view View, now time.Time) ImpactTally {
 		part := tally.Parts[column.part]
 		part.Objects = column.total
 		tally.NoStrategies += part.add(column.rows)
+		for _, row := range column.rows {
+			if reason, unfilled := strategiesUnfilledReason(row); unfilled {
+				tally.NoStrategiesBy[reason]++
+			}
+		}
 	}
 	blind := tally.Parts[ImpactBlind]
 	blind.Objects = view.AnomaliesTotal + view.DemotedTotal
@@ -241,6 +274,9 @@ func MergeImpactTallies(tallies ...ImpactTally) ImpactTally {
 	merged := newImpactTally()
 	for _, tally := range tallies {
 		merged.NoStrategies += tally.NoStrategies
+		for reason, count := range tally.NoStrategiesBy {
+			merged.NoStrategiesBy[reason] += count
+		}
 		for name, part := range tally.Parts {
 			into := merged.Parts[name]
 			if into == nil {
@@ -248,6 +284,7 @@ func MergeImpactTallies(tallies ...ImpactTally) ImpactTally {
 			}
 			into.Objects += part.Objects
 			into.Listed += part.Listed
+			into.Unlisted += part.Unlisted
 			for strategy := range part.Strategies {
 				into.Strategies[strategy] = struct{}{}
 			}
@@ -271,13 +308,16 @@ func (tally ImpactTally) Impact() Impact {
 				businesses[strategy.BusinessID] = struct{}{}
 			}
 		}
-		return ColumnImpact{Objects: counted.Objects, Strategies: len(counted.Strategies), Businesses: len(businesses),
-			Partial: counted.Objects > counted.Listed}
+		return ColumnImpact{Objects: counted.Objects, Strategies: len(counted.Strategies) + counted.Unlisted,
+			StrategiesUnlisted: counted.Unlisted, Businesses: len(businesses), Partial: counted.Objects > counted.Listed}
 	}
 	impact := Impact{
 		Anomalies: column(ImpactAnomalies), Demoted: column(ImpactDemoted), Undecidable: column(ImpactUndecidable),
 		ByDesign: column(ImpactByDesign), Blind: column(ImpactBlind), Ours: column(ImpactOurs),
 		NoStrategies: tally.NoStrategies,
+	}
+	for reason, count := range tally.NoStrategiesBy {
+		impact.NoStrategiesBy.add(reason, count)
 	}
 	// Ours is counted off the published list, so it is a lower bound whenever
 	// that list was cut -- the same limit as the column it sits in.

@@ -22,6 +22,10 @@ func mergeCheckTallies(into, from checkTallies) {
 		entry.objects += part.objects
 		unionInto(entry.strategies, part.strategies)
 		unionInto(entry.businesses, part.businesses)
+		entry.unlisted += part.unlisted
+		for key, unlisted := range part.groupUnlisted {
+			entry.groupUnlisted[key] += unlisted
+		}
 		entry.columns |= part.columns
 		entry.demoted += part.demoted
 		entry.current += part.current

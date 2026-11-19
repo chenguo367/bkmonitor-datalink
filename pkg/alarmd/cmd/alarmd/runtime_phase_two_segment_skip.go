@@ -12,7 +12,10 @@ package main
 import (
 	"context"
 	"errors"
+	"slices"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -76,5 +79,30 @@ func (runtime *productionPhaseTwoOwnership) reconcileSegmentSkip(
 			facts.Failed++
 		}
 	}
+	facts.Changed = runtime.segmentSkipGateChanged(authority.Fence.OwnerEpoch, facts)
 	return facts, nil
+}
+
+// segmentSkipGate is the gate a Leader's latest round found: under which
+// epoch, and the gate itself - asked, held, the ready replicas not declaring
+// the contract.
+type segmentSkipGate struct {
+	epoch uint64
+	key   string
+}
+
+// segmentSkipGateChanged says the round's segment skip gate is news, for its
+// rebalance_planned line to be written: the round set, took back or failed
+// to write a word, or the gate is not what this Leader's previous round
+// found. A Leader's first round always is: a gate held from the start by a
+// replica that never declares the contract is said once, by name, when the
+// Leader takes over, and again whenever it moves. It keeps this round's for
+// the next.
+func (runtime *productionPhaseTwoOwnership) segmentSkipGateChanged(epoch uint64, facts observability.SegmentSkipFacts) bool {
+	unaware := slices.Clone(facts.Unaware)
+	slices.Sort(unaware)
+	key := strconv.FormatBool(facts.Asked) + "\x00" + facts.Held + "\x00" + strings.Join(unaware, "\x00")
+	previous := runtime.segmentSkipGate
+	runtime.segmentSkipGate = segmentSkipGate{epoch: epoch, key: key}
+	return facts.Set > 0 || facts.Withdrawn > 0 || facts.Failed > 0 || previous.epoch != epoch || previous.key != key
 }

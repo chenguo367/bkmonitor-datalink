@@ -91,6 +91,7 @@ type counters struct {
 	refusals        map[string]uint64 // reason: permits refused
 	faults          map[string]uint64 // reason
 	plans           map[string]uint64 // outcome (PlanOutcomes)
+	forgotten       map[string]uint64 // reason (ForgottenReasons): groups forgotten
 	// Per source: the latest completion seen, the bytes rechecks read back,
 	// and samples whose query's lookback could not be read.
 	maxCompletion   map[string]time.Duration
@@ -126,6 +127,10 @@ func newCounters(sources, refusals []string) counters {
 	}
 	for _, outcome := range PlanOutcomes {
 		c.plans[outcome] = 0
+	}
+	c.forgotten = make(map[string]uint64, len(ForgottenReasons))
+	for _, reason := range ForgottenReasons {
+		c.forgotten[reason] = 0
 	}
 	for _, source := range sources {
 		c.firstReads[source] = 0
@@ -290,6 +295,14 @@ type Stats struct {
 	Faults map[string]uint64 `json:"faults"`
 	// Plans: outcome -> plan entries by what became of them (PlanOutcomes).
 	Plans map[string]uint64 `json:"plans"`
+	// GroupsForgotten: reason -> Query Groups whose state was dropped as no
+	// longer this process's, by why (ForgottenReasons).
+	GroupsForgotten map[string]uint64 `json:"groups_forgotten"`
+	// Uncovered: reason -> the owned Query Groups without a fresh measurement,
+	// by why (UncoveredReasons), every reason present. They add up to
+	// Coverage.Owned less Coverage.Covered, the groups a moving Runner set
+	// takes away between its two reads aside.
+	Uncovered map[string]int `json:"uncovered"`
 	// Pending is the samples in flight - one at most per Query Group, and
 	// one waiting for its deep recheck - and PendingBytes what their
 	// summaries hold: computed, not a budget.
@@ -572,6 +585,13 @@ type GroupReading struct {
 	// (FloorProbeRoundOutcomes), and FloorProbe its probe now, if any.
 	FloorProbeRounds map[string]uint64 `json:"floor_probe_rounds"`
 	FloorProbe       *GroupFloorProbe  `json:"floor_probe,omitempty"`
+	// TrialSlot is the Slot of the earlier-read trial the group has reserved,
+	// done or not, 0 with none: one of a Slot before its latest stands where
+	// its next sample would be taken (UncoveredTrialBlocking). NextAt is when
+	// its next sample may be taken; Uncovered says why it has none fresh.
+	TrialSlot execution.EvaluationTime `json:"trial_slot,omitempty"`
+	NextAt    time.Time                `json:"next_at"`
+	Uncovered string                   `json:"uncovered,omitempty"`
 }
 
 // ReadHoldGroups is one source's Query Groups this process holds by their
@@ -609,13 +629,19 @@ func (engine *Engine) GroupReading(queryGroup execution.QueryGroupIdentity) (Gro
 	if engine == nil {
 		return GroupReading{}, false
 	}
+	now := engine.options.Now()
 	engine.mu.Lock()
 	state := engine.groups[queryGroup]
 	if state == nil {
 		engine.mu.Unlock()
 		return GroupReading{}, false
 	}
-	counts, source := state.reading, state.source
+	counts, source, nextAt := state.reading, state.source, state.nextAt
+	trialSlot := execution.EvaluationTime(0)
+	if trial := state.prepared; trial != nil {
+		trialSlot = trial.query.Contract.Slot.EvaluationTime
+	}
+	_, uncovered := coverageLocked(state, now)
 	var probe *GroupFloorProbe
 	if current := state.floorProbe; current != nil {
 		probe = &GroupFloorProbe{FloorMillis: current.floor.Milliseconds(), Kind: current.kind, HoldMillis: current.hold.Milliseconds(),
@@ -627,6 +653,7 @@ func (engine *Engine) GroupReading(queryGroup execution.QueryGroupIdentity) (Gro
 		return GroupReading{}, false
 	}
 	reading := GroupReading{QueryGroup: queryGroup, Source: source, Since: counts.since,
+		TrialSlot: trialSlot, NextAt: nextAt, Uncovered: uncovered,
 		Compared: map[string]map[string]uint64{}, ChangedWindows: map[string]map[string]uint64{},
 		Classes: map[string]uint64{}, ReadHoldIgnored: map[string]uint64{}, EarlierReads: map[string]uint64{}, EarlierOvertaken: map[string]uint64{},
 		EarlierAhead: map[string]uint64{}, EarlierSkipped: map[string]uint64{}, EarlierReadBytes: counts.earlierBytes}
@@ -665,7 +692,7 @@ func (engine *Engine) GroupReading(queryGroup execution.QueryGroupIdentity) (Gro
 // Stats reads the lookback now. Ownership is asked outside the engine's
 // lock: the Runner set that answers it calls Forget while holding its own.
 func (engine *Engine) Stats() Stats {
-	stats := Stats{Sources: map[string]SourceStats{}, PermitRefusals: map[string]uint64{}, Faults: map[string]uint64{}, Plans: map[string]uint64{},
+	stats := Stats{Sources: map[string]SourceStats{}, PermitRefusals: map[string]uint64{}, Faults: map[string]uint64{}, Plans: map[string]uint64{}, GroupsForgotten: map[string]uint64{},
 		Latest: []GroupLateness{}, ReadEarly: []ReadEarlyReading{}, Recent: []Recent{}, NeverCompleteFirstRead: []NeverCompleteGroup{},
 		Supplements: []SupplementReading{}, LatePastRound: []LatePastRoundReading{}, ResidualMisses: []ResidualMissReading{}}
 	if engine == nil {
@@ -675,6 +702,7 @@ func (engine *Engine) Stats() Stats {
 	type candidate struct {
 		queryGroup    execution.QueryGroupIdentity
 		fresh         bool
+		uncovered     string
 		lateness      *GroupLateness
 		readEarly     *ReadEarlyReading
 		latePastRound *LatePastRoundReading
@@ -699,16 +727,7 @@ func (engine *Engine) Stats() Stats {
 		}
 		entry := candidate{queryGroup: queryGroup}
 		rest := min(time.Duration(state.rest*float64(state.step)), restCap)
-		switch {
-		case state.capturing || state.sample != nil || state.probe != nil:
-			entry.fresh = true
-		case state.measured:
-			// Fresh within twice the longest a sample of it can take: its
-			// rest at the most spread, its deepest rung, and the wait for
-			// its next first read.
-			cycle := rest*5/4 + rungDelay(state.depth-1, state.step) + state.period
-			entry.fresh = now.Sub(state.measuredAt) <= 2*cycle
-		}
+		entry.fresh, entry.uncovered = coverageLocked(state, now)
 		if state.source != "" {
 			sum := sums[state.source]
 			if sum == nil {
@@ -733,9 +752,7 @@ func (engine *Engine) Stats() Stats {
 			}
 		}
 		if state.incompleteFirstReads > 0 && !state.completeFirstRead {
-			// A read in flight is not a measurement for a group none of
-			// whose reads has been whole.
-			entry.fresh = false
+			// Not fresh either (coverageLocked).
 			entry.neverComplete = &NeverCompleteGroup{QueryGroup: queryGroup, Source: state.source,
 				IncompleteFirstReads: state.incompleteFirstReads}
 		}
@@ -891,6 +908,9 @@ func (engine *Engine) Stats() Stats {
 	for outcome, n := range engine.counts.plans {
 		stats.Plans[outcome] = n
 	}
+	for reason, n := range engine.counts.forgotten {
+		stats.GroupsForgotten[reason] = n
+	}
 	stats.PlanEntries = len(engine.plans)
 	for reason, n := range engine.counts.faults {
 		stats.Faults[reason] = n
@@ -899,12 +919,17 @@ func (engine *Engine) Stats() Stats {
 	engine.mu.Unlock()
 
 	stats.Coverage.Owned = engine.options.Owned()
+	stats.Uncovered = uncoveredCounts()
+	seen := 0
 	for _, entry := range candidates {
 		if !engine.options.Owns(entry.queryGroup) {
 			continue
 		}
+		seen++
 		if entry.fresh {
 			stats.Coverage.Covered++
+		} else {
+			stats.Uncovered[entry.uncovered]++
 		}
 		if entry.neverComplete != nil {
 			stats.Coverage.NeverCompleteFirstRead++
@@ -926,6 +951,9 @@ func (engine *Engine) Stats() Stats {
 			stats.Supplements = append(stats.Supplements, *entry.supplement)
 		}
 	}
+	// Owned and Owns are two reads of a Runner set that may move between
+	// them; a group gone in between is not counted unseen.
+	stats.Uncovered[UncoveredNotSeen] = max(stats.Coverage.Owned-seen, 0)
 	sort.Slice(stats.Supplements, func(i, j int) bool {
 		if stats.Supplements[i].Coverage != stats.Supplements[j].Coverage {
 			return stats.Supplements[i].Coverage < stats.Supplements[j].Coverage

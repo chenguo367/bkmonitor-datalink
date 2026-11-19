@@ -425,6 +425,10 @@ type group struct {
 	// for that, counted once.
 	sampled  bool
 	planKept bool
+	// captured says a sample of it has been taken in this process, whatever
+	// it came to: one taken and never completed is a group sampled and not
+	// measured (UncoveredUnmeasured).
+	captured bool
 	prepared *earlierSample
 	// floorProbe is its shadow probe of its floor while one runs
 	// (floor_probe.go): apart from prepared, which its trials ride on.
@@ -646,6 +650,19 @@ func (engine *Engine) Begin(query Query) *Read {
 	if read.probation || read.floorProbe != nil {
 		engine.trackLocked(read, query, step, now, state.depth)
 	}
+	// A trial is of this Slot or a later one. One left by an earlier Slot
+	// whose formal read never came to take it - the Slot's first attempt
+	// failed before its query and the retry is no first read, the Slot was
+	// let go, its slice's digest moved, or it was read as a secondary - ends
+	// at the next Slot's first read, resting or not: the next Slot's Prepare
+	// returns early on no hold, no candidate or a floor probe, and nothing
+	// else would end it, where it stands in the way of every later sample. A
+	// trial reserved ahead for a later Slot stands, and so does one a formal
+	// read has taken, which that read's Complete or Discard ends.
+	if trial := state.prepared; trial != nil && !trial.formal && trial.query.Contract.Slot.EvaluationTime < slot.EvaluationTime {
+		engine.retireTrialLocked(trial, EarlierOvertaken, OvertakenNextSlot)
+		state.prepared = nil
+	}
 	if state.capturing || state.sample != nil || now.Before(state.nextAt) {
 		return read
 	}
@@ -666,7 +683,7 @@ func (engine *Engine) Begin(query Query) *Read {
 			}
 		}
 	}
-	state.capturing, read.sampled = true, true
+	state.capturing, state.captured, read.sampled = true, true, true
 	if read.summary == nil {
 		engine.trackLocked(read, query, step, now, state.depth)
 	}
@@ -757,8 +774,7 @@ func (read *Read) Discard() {
 	// slice of the Slot may take it. The formal read that overtook a trial
 	// still running is no read either, so the slice is what ends it.
 	if read.earlier != nil {
-		read.earlier.overtakenBy = OvertakenSliceDiscarded
-		engine.dropTrialLocked(read.earlier, OvertakenSliceDiscarded)
+		engine.discardTrialLocked(read.earlier)
 		if state := engine.groups[read.queryGroup]; state != nil && state.prepared == read.earlier {
 			state.prepared = nil
 		}
@@ -799,8 +815,7 @@ func (engine *Engine) DiscardSlice(queryGroup execution.QueryGroupIdentity, eval
 	// A trial of the slice ends with it, as in Read.Discard.
 	if trial := state.prepared; trial != nil && trial.query.Contract.Slot.EvaluationTime == evaluation &&
 		!trial.query.Slice.IsZero() && trial.query.Slice.Digest() == digest {
-		trial.overtakenBy = OvertakenSliceDiscarded
-		engine.dropTrialLocked(trial, OvertakenSliceDiscarded)
+		engine.discardTrialLocked(trial)
 		state.prepared = nil
 	}
 	if probe := state.floorProbe; probe != nil {
@@ -1087,8 +1102,32 @@ func minTime(left, right time.Time) time.Time {
 	return left
 }
 
-// Forget drops a Query Group this process no longer owns, with its samples.
-func (engine *Engine) Forget(queryGroup execution.QueryGroupIdentity) {
+// Why the lookback forgets a Query Group (Forget), closed:
+//   - moved: the Assignment gave it to another replica.
+//   - lease_lost: its lease ended, other than at a content switch.
+//   - content_switch: its lease ended at a content switch, as planned
+//     (ownership.LeaseEndedAtContentSwitch).
+//   - declined_hung: its execution hung past its deadline and was let go.
+//   - shutdown: the process is stopping.
+//   - not_owned: the lookback found it no longer this process's as it went to
+//     read it.
+const (
+	ForgottenMoved         = "moved"
+	ForgottenLeaseLost     = "lease_lost"
+	ForgottenContentSwitch = "content_switch"
+	ForgottenDeclinedHung  = "declined_hung"
+	ForgottenShutdown      = "shutdown"
+	ForgottenNotOwned      = "not_owned"
+)
+
+// ForgottenReasons is every reason the lookback forgets a group.
+var ForgottenReasons = []string{ForgottenMoved, ForgottenLeaseLost, ForgottenContentSwitch, ForgottenDeclinedHung,
+	ForgottenShutdown, ForgottenNotOwned}
+
+// Forget drops a Query Group this process no longer owns, with its samples,
+// counted by why (ForgottenReasons) when it had state to drop; a reason not
+// named is counted not_owned.
+func (engine *Engine) Forget(queryGroup execution.QueryGroupIdentity, reason string) {
 	if engine == nil {
 		return
 	}
@@ -1098,14 +1137,24 @@ func (engine *Engine) Forget(queryGroup execution.QueryGroupIdentity) {
 	if state == nil {
 		return
 	}
+	if _, named := engine.counts.forgotten[reason]; !named {
+		reason = ForgottenNotOwned
+	}
+	engine.counts.forgotten[reason]++
 	if trial := state.prepared; trial != nil {
-		trial.done, trial.outcome, trial.summary = true, EarlierOwnerLost, nil
-		if trial.cancel != nil {
-			trial.cancel()
-		}
-		if !trial.formal {
-			engine.counts.earlierReads[key2(trial.source, EarlierOwnerLost)]++
-			trial.group.reading.earlier[wordIndex(EarlierReadOutcomes, EarlierOwnerLost)]++
+		if trial.formal {
+			// Taken by a formal read still in flight: that read's Complete
+			// or Discard counts it, owner_lost unless it came to an outcome
+			// first.
+			if trial.outcome == "" {
+				trial.outcome = EarlierOwnerLost
+			}
+			trial.done, trial.summary = true, nil
+			if trial.cancel != nil {
+				trial.cancel()
+			}
+		} else {
+			engine.retireTrialLocked(trial, EarlierOwnerLost, "")
 		}
 	}
 	for _, candidate := range [...]*sample{state.sample, state.probe} {
@@ -1223,7 +1272,7 @@ func (engine *Engine) Step(ctx context.Context) {
 	// which measure and can wait for their next rung.
 	for _, slot := range directed {
 		if !engine.options.Owns(slot.queryGroup) {
-			engine.Forget(slot.queryGroup)
+			engine.Forget(slot.queryGroup, ForgottenNotOwned)
 			continue
 		}
 		release, yield, refused := engine.options.Permit()
@@ -1248,7 +1297,7 @@ func (engine *Engine) Step(ctx context.Context) {
 	}
 	for _, candidate := range due {
 		if !engine.options.Owns(candidate.queryGroup) {
-			engine.Forget(candidate.queryGroup)
+			engine.Forget(candidate.queryGroup, ForgottenNotOwned)
 			continue
 		}
 		release, yield, refused := engine.options.Permit()
@@ -1269,9 +1318,9 @@ func (engine *Engine) Step(ctx context.Context) {
 			continue
 		}
 		candidate.running = true
-		rung := candidate.rung
+		rung, kind := candidate.rung, candidate.lookbackRead()
 		engine.mu.Unlock()
-		go engine.recheck(ctx, candidate, rung, release, yield)
+		go engine.recheck(ctx, candidate, rung, kind, release, yield)
 	}
 	engine.StepEarly(ctx)
 }
@@ -1436,11 +1485,25 @@ func recheckFrom(candidate *sample) int64 {
 	return max(candidate.spec.LogicalWindow.Start, candidate.keptFrom-int64(candidate.lookback/time.Second))
 }
 
-// rung is the sample's rung as it was launched, read under the lock: the
-// sample is not read outside it while the reread runs.
-func (engine *Engine) recheck(ctx context.Context, candidate *sample, at int, release func(), yield <-chan struct{}) {
+// lookbackRead is the kind of read the sample's next rung is, read under the
+// lock: its probation round's reread, its deep recheck, or a rung of its
+// recheck. A probation reread is never probing (advanceLocked).
+func (candidate *sample) lookbackRead() execution.LookbackRead {
+	switch {
+	case candidate.probation:
+		return execution.LookbackReadProbation
+	case candidate.probing:
+		return execution.LookbackReadDeepRecheck
+	}
+	return execution.LookbackReadRecheck
+}
+
+// rung is the sample's rung as it was launched, and kind the read it is
+// (lookbackRead), read under the lock: the sample is not read outside it
+// while the reread runs.
+func (engine *Engine) recheck(ctx context.Context, candidate *sample, at int, kind execution.LookbackRead, release func(), yield <-chan struct{}) {
 	defer engine.publishReadHold()
-	readCtx, cancel := context.WithTimeout(ctx, engine.rereadTimeout(candidate.queryGroup))
+	readCtx, cancel := context.WithTimeout(execution.WithLookbackRead(ctx, kind), engine.rereadTimeout(candidate.queryGroup))
 	// The watcher waits for the read to come back, not for the read's
 	// context: a read that honours neither the yield nor its deadline is
 	// still holding its permit after its context ended, and a yield that

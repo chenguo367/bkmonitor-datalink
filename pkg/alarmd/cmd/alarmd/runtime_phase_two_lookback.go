@@ -430,6 +430,24 @@ func lookbackPlansInto(engine *lookback.Engine) viewstream.LookbackPlansHandler 
 	}
 }
 
+// lookbackUncovered is the given owned Query Groups the lookback has no
+// fresh measurement of, each with why, for the snapshot to rank and name; nil
+// on a process that runs no lookback.
+func lookbackUncovered(engine *lookback.Engine) func([]execution.QueryGroupIdentity) []fleet.LookbackUncoveredFacts {
+	if engine == nil {
+		return nil
+	}
+	return func(owned []execution.QueryGroupIdentity) []fleet.LookbackUncoveredFacts {
+		groups := engine.Uncovered(owned)
+		facts := make([]fleet.LookbackUncoveredFacts, 0, len(groups))
+		for _, group := range groups {
+			facts = append(facts, fleet.LookbackUncoveredFacts{QueryGroup: string(group.QueryGroup), Reason: group.Reason,
+				Since: group.Since, NextAt: group.NextAt})
+		}
+		return facts
+	}
+}
+
 // lookbackLateRungs is the Query Groups the lookback reads directed on its
 // own evidence, by the rung their late series were seen at, keyed as the
 // fleet keys objects; nil when there is no engine.

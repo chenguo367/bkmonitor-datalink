@@ -19,7 +19,14 @@ import (
 // of every family exists from the start, so a zero is a reading.
 type segmentShadowMetrics struct {
 	outcomes, members, pageWrites, pageBytes, skipped, renewals, skipFlagIgnored, samples, degraded *prometheus.CounterVec
+	renewScript                                                                                     prometheus.Histogram
 }
+
+// segmentRenewScriptBuckets are dense about the renewal script's 2.5 ms
+// budget (segment.RenewScriptBudget), where the over_budget bar is read; 2.2
+// ms is the budget less the slow log's margin over the script's own clock,
+// rounded down to a bucket, the bound the slow log's share is read from.
+var segmentRenewScriptBuckets = []float64{0.0005, 0.001, 0.0015, 0.002, 0.0022, 0.00225, 0.0024, 0.0025, 0.005}
 
 func newSegmentShadowMetrics() segmentShadowMetrics {
 	metrics := segmentShadowMetrics{
@@ -80,8 +87,14 @@ func newSegmentShadowMetrics() segmentShadowMetrics {
 				"a page no earlier round could have renewed - unrenewed for less than its Plan's interval past the " +
 				"quarter lifetime it falls due by - by design: a lifetime of two intervals or less (a Plan keeping one " +
 				"point, or one its horizon cuts short), or a new page, made staggered, of a Plan whose keys live under " +
-				"four intervals. missing, over_budget and fallback_write all zero over every lifetime tier is the third " +
-				"stage's bar; fallback_unrenewable is not read in it.",
+				"four intervals; fallback_stalled, the same of a Plan whose rounds stopped - the Slot's evaluation time " +
+				"past its mark's round by more than its interval, or the round a replay or a retry - whatever its " +
+				"renewals did. " +
+				"missing and fallback_write zero, and over_budget at most 1e-4 of the state_segment_renew scripts " +
+				"that ran (redis_script_total{script=\"state_segment_renew\",command=~\"eval|evalsha\",outcome=\"ok\"}, " +
+				"one per script, pipeline members included, over the same window), over " +
+				"every lifetime tier is the third stage's bar: over_budget is the script's own clock and a lower bound, " +
+				"the server's slow log the reading of its tail; fallback_unrenewable and fallback_stalled are not read in it.",
 		}, []string{"result"}),
 		skipFlagIgnored: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: metricSubsystem, Name: "state_segment_skip_flag_ignored_total",
@@ -111,6 +124,23 @@ func newSegmentShadowMetrics() segmentShadowMetrics {
 				"\"stopped\" names it. Zero is the reading; undecodable or stopped growing is segments being lost.",
 		}, []string{"reason"}),
 	}
+	metrics.renewScript = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Subsystem: metricSubsystem, Name: "state_segment_renew_script_seconds",
+		Help: "How long each state_segment_renew script that renewed its keys ran, by the server's clock as the " +
+			"script measures it, from its first TIME to its last: the same reading over_budget counts past 2.5 ms " +
+			"(state_segment_renewal_total), with no Redis call of its own. A script a stale fence refused ran no " +
+			"renewal and is not counted, so the count is the scripts that ran less those refusals. The script's " +
+			"clock misses what the server spends before its first line and after its last: against the server's " +
+			"slow log for the same 11,200 scripts of 1 to 256 keys on Redis 5.0.9, the slow log was longer by " +
+			"256 us at p99.99 and 262 us at most (delta_max). A script the slow log puts past 2.5 ms ran past " +
+			"2.5 ms less delta_max, 2.238 ms, by its own clock, so the share of scripts past the 0.0022 bucket " +
+			"bounds from above the share past 2.5 ms the slow log would show. " +
+			"The 0.002 bucket is the conservative reading: it holds for a margin up to 500 us, twice the one " +
+			"measured on an idle host, for a server whose core is slower. " +
+			"Both shares within the bar is the bar met; the 0.0022 share alone within it is met per the " +
+			"calibration, with less than twofold headroom.",
+		Buckets: segmentRenewScriptBuckets,
+	})
 	for _, reason := range observability.AllSegmentDegradations() {
 		metrics.degraded.WithLabelValues(reason)
 	}
@@ -141,7 +171,7 @@ func newSegmentShadowMetrics() segmentShadowMetrics {
 
 func (m segmentShadowMetrics) collectors() []prometheus.Collector {
 	return []prometheus.Collector{m.outcomes, m.members, m.pageWrites, m.pageBytes, m.skipped, m.renewals, m.skipFlagIgnored, m.samples,
-		m.degraded}
+		m.degraded, m.renewScript}
 }
 
 func (m segmentShadowMetrics) observe(facts *observability.SegmentShadowFacts) {
@@ -163,6 +193,9 @@ func (m segmentShadowMetrics) observe(facts *observability.SegmentShadowFacts) {
 	}
 	for result, count := range facts.Renewals {
 		m.renewals.WithLabelValues(result).Add(float64(count))
+	}
+	for _, elapsed := range facts.RenewScripts {
+		m.renewScript.Observe(elapsed.Seconds())
 	}
 	for reason, count := range facts.SkipFlagIgnored {
 		m.skipFlagIgnored.WithLabelValues(reason).Add(float64(count))

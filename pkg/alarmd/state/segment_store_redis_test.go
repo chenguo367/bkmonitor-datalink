@@ -788,8 +788,9 @@ func renewSegments(t *testing.T, store *ExecutionStore, fence execution.StateApp
 // A Slot's due pages are renewed on their Plan's own target, the members'
 // State keys given the Plan's lifetime in scripts of at most RenewKeys keys:
 // 600 members of two pages, three scripts; a page renewed once every script
-// carrying it answered. A key already gone is counted, not made again, and
-// lets the Plan's cache go; a stale fence renews nothing and no page.
+// carrying it answered, and each script's own run time named once. A key
+// already gone is counted, not made again, and lets the Plan's cache go; a
+// stale fence renews nothing and no page, and names no run time.
 func TestDuePagesAreRenewedInScriptsOfAtMostRenewKeysKeys(t *testing.T) {
 	rig := newSegmentRedis(t)
 	store := rig.store(t, 1<<20)
@@ -811,6 +812,15 @@ func TestDuePagesAreRenewedInScriptsOfAtMostRenewKeysKeys(t *testing.T) {
 	rig.targets[0].renewMu.Unlock()
 	if len(chunks) != 3 || chunks[0] != segment.RenewKeys || chunks[2] != 601-2*segment.RenewKeys {
 		t.Fatalf("601 member keys in scripts of %v, want %d, %d and the rest", chunks, segment.RenewKeys, segment.RenewKeys)
+	}
+	if len(renewed[0].Elapsed) != len(chunks) || len(renewed[1].Elapsed) != 1 {
+		t.Fatalf("run times %v and %v, want one for each of the %d scripts that renewed and the other target's one",
+			renewed[0].Elapsed, renewed[1].Elapsed, len(chunks))
+	}
+	for _, elapsed := range append(append([]time.Duration{}, renewed[0].Elapsed...), renewed[1].Elapsed...) {
+		if elapsed <= 0 || elapsed > time.Second {
+			t.Fatalf("a script's run time %v, want what the server's clock measured", elapsed)
+		}
 	}
 	ttl, _, _ := store.segmentLife(segmentLifetime())
 	for _, key := range append(append(append([]string{}, firstKeys...), secondKeys...), elsewhereKeys[0]) {
@@ -834,8 +844,8 @@ func TestDuePagesAreRenewedInScriptsOfAtMostRenewKeysKeys(t *testing.T) {
 	rig.clients[0].PExpire(ctx, firstKeys[0], 30*time.Second)
 	refused := renewSegments(t, store, stale, segment.PlanRenewal{Key: plan, Lifetime: segmentLifetime(),
 		Pages: []segment.PageRenewal{{Page: 0, Members: first}}})
-	if refused[0].Renewed[0] {
-		t.Fatal("a stale fence's renewal renewed its page")
+	if refused[0].Renewed[0] || len(refused[0].Elapsed) != 0 {
+		t.Fatalf("a stale fence's renewal: %+v, want no page renewed and no run time", refused[0])
 	}
 	if left := rig.clients[0].PTTL(ctx, firstKeys[0]).Val(); left > time.Minute {
 		t.Fatalf("a stale fence's renewal gave a key %v", left)

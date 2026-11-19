@@ -45,9 +45,16 @@ func TestTheProductionPublisherIsGivenItsOverdueSourceAndStrategyNames(t *testin
 		{"strategies:", "strategy names, without which parked objects arrive as bare hashes"},
 		{"lateSeries: lookbackLateSeries(", "the late series the supplements could not recover, without which their rows never appear"},
 		{"scheduleObjects: recorder.SetScheduleObjects", "the census as alarmd_schedule_objects, without which the trends' late-objects chart reads no series"},
+		{"pooled: pooled", "the pooled rows' strategies from their frozen schedules, without which every Query Group restored into the pool names no strategy"},
+		{"lookbackUncovered: lookbackUncovered(lookbackEngine)", "the owned Query Groups the lookback has no fresh measurement of, without which the snapshot names none of them"},
 	} {
 		if !strings.Contains(literal, wire.field) {
 			t.Errorf("the production publisher is not given %s -- %s", wire.field, wire.why)
 		}
+	}
+	// The pooled rows are read from the catalog the Runners read their frozen
+	// schedules from, built before the literal.
+	if !strings.Contains(source[:start], "pooled = newPooledStrategies(catalog)") {
+		t.Error("the production publisher's pooled rows are not read from the Runners' catalog")
 	}
 }

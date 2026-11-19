@@ -18,6 +18,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 func boardPlan(queryGroup, replica string) DiagnosisPlan {
@@ -49,7 +51,7 @@ func boardFixture(cut bool) ([]string, map[string]DiagnosisRow, *DueView, *Sched
 func boardOf(t *testing.T, cut bool) *boardIndex {
 	t.Helper()
 	universe, rows, due, census := boardFixture(cut)
-	return buildBoard("c1", time.Unix(10_000, 0), "digest-1", universe, func(id string) DiagnosisRow { return rows[id] }, nil, due, census, nil)
+	return buildBoard("c1", time.Unix(10_000, 0), "digest-1", universe, func(id string) DiagnosisRow { return rows[id] }, nil, due, census, nil, pauseReading{})
 }
 
 func boardRows(index *boardIndex) map[string]BoardRow {
@@ -115,7 +117,7 @@ func TestBoardReplicaWithoutNamesReadsUnknown(t *testing.T) {
 	aggregateDue(view, []Snapshot{{Replica: "old", Owned: 1, OwnedObjects: []string{"qg"}, Schedule: &ScheduleCensus{}}})
 	index := buildBoard("c1", time.Unix(1, 0), "d", []string{"1"}, func(string) DiagnosisRow {
 		return DiagnosisRow{StrategyID: "1", Verdict: StateDetecting, Plans: []DiagnosisPlan{boardPlan("qg", "old")}}
-	}, nil, view.Due, &ScheduleCensus{}, nil)
+	}, nil, view.Due, &ScheduleCensus{}, nil, pauseReading{})
 	if index.rows[0].Punctuality != PunctualityUnknown || !index.lateStrats.AtLeast {
 		t.Fatalf("row %+v strategies %+v; want unknown and at least", index.rows[0], index.lateStrats)
 	}
@@ -168,7 +170,7 @@ func TestBoardOrdersByActionThenLongestStanding(t *testing.T) {
 		"d": {StrategyID: "d", Verdict: StateDefect, Action: ActionServiceFix},
 	}
 	lines := []StrategyLine{{StrategyID: "b", Since: &later}, {StrategyID: "c", Since: &earlier}}
-	index := buildBoard("c1", time.Unix(1, 0), "d", []string{"a", "b", "c", "d"}, func(id string) DiagnosisRow { return rows[id] }, lines, nil, nil, nil)
+	index := buildBoard("c1", time.Unix(1, 0), "d", []string{"a", "b", "c", "d"}, func(id string) DiagnosisRow { return rows[id] }, lines, nil, nil, nil, pauseReading{})
 	got := []string{}
 	for _, row := range index.rows {
 		got = append(got, row.StrategyID)
@@ -199,7 +201,7 @@ func TestBoardPagesWithinOneComputationAndRereadsOtherwise(t *testing.T) {
 	}
 	other := buildBoard("c2", time.Unix(10_030, 0), "digest-1", []string{"1"}, func(string) DiagnosisRow {
 		return DiagnosisRow{StrategyID: "1", Verdict: StateDetecting}
-	}, nil, nil, nil, nil)
+	}, nil, nil, nil, nil, pauseReading{})
 	reread := other.page(BoardFilter{}, first.NextCursor, 3, DiagnosisSummaryFreshFor)
 	if !reread.Reread || len(reread.Rows) != 1 || reread.Rows[0].StrategyID != "1" {
 		t.Fatalf("a foreign cursor: %+v", reread)
@@ -213,16 +215,19 @@ func TestBoardPagesWithinOneComputationAndRereadsOtherwise(t *testing.T) {
 // boardAllowed is the board's page-facing keys at every level, and nothing
 // else: a field added here without the page's agreement fails.
 var boardAllowed = map[string][]string{
-	"":       {"generated_at", "max_age_seconds", "universe_digest", "universe", "facets", "late_objects", "late_strategies", "at_least_reason", "matched", "rows", "next_cursor", "reread"},
-	"facets": {"state", "action", "capability", "punctuality", "urgency"},
+	"":       {"generated_at", "max_age_seconds", "universe_digest", "universe", "facets", "late_objects", "late_strategies", "at_least_reason", "matched", "rows", "next_cursor", "reread", "coverage"},
+	"facets": {"state", "action", "capability", "punctuality", "urgency", "paused"},
 	"count":  {"value", "at_least"},
 	"row": {"strategy_id", "tenant", "business_id", "state", "state_word", "action", "action_word", "watch", "watch_word",
 		"capability_class", "line", "punctuality", "late_wait", "since", "since_basis", "since_word", "open_alerts", "kb_anchor",
-		"urgency", "urgency_word", "reason"},
-	"late_wait": {"stage", "reason", "since", "unknown", "warming"},
-	"warming":   {"short", "short_fresh", "empty", "guarded"},
-	"reason":    {"code", "sentence", "facts"},
-	"facts":     {"read_hold", "read_early", "data_absent", "window", "refusal", "withheld"},
+		"urgency", "urgency_word", "reason", "query_pause", "same_target_strategies"},
+	"coverage":       {"counted", "expected"},
+	"query_pause":    {"since", "until", "failures", "reason", "objects", "request_targets", "request_target_count"},
+	"request_target": {"table_id", "field_name", "space_uid", "truncated"},
+	"late_wait":      {"stage", "reason", "since", "unknown", "warming"},
+	"warming":        {"short", "short_fresh", "empty", "guarded"},
+	"reason":         {"code", "sentence", "facts"},
+	"facts":          {"read_hold", "read_early", "data_absent", "window", "refusal", "withheld"},
 	"read_hold": {"arrival_latest_seconds", "hold_seconds", "hold_limit_seconds", "at_limit", "time_delay_seconds",
 		"suggested_time_delay_seconds", "settling_wait_seconds"},
 }
@@ -265,6 +270,12 @@ func TestBoardCarriesOnlyPageFields(t *testing.T) {
 	index.rows[0].Since, index.rows[0].SinceBasis, index.rows[0].SinceWord = &since, SinceAtLeast, "只会更久"
 	index.rows[0].Watch, index.rows[0].WatchWord = WatchWindowFilling, "窗口在补"
 	index.rows[0].Reason, _, _ = readHoldReasonForTest()
+	until := time.Unix(400, 0)
+	index.rows[0].QueryPause = &QueryPause{Since: since, Until: &until, Failures: 16, Reason: "QUERY_TARGET_MISSING",
+		Objects: BoardCount{Value: 1}, RequestTargetCount: 1, RequestTargets: []observability.RequestTarget{
+			{TableID: "system.cpu_detail", FieldName: "usage", SpaceUID: "bkcc__2", Truncated: []string{"table_id"}}}}
+	index.rows[0].SameTargetStrategies = &BoardCount{Value: 3, AtLeast: true}
+	index.coverage = InstanceCoverage{Counted: 2, Expected: 3}
 	page := index.page(BoardFilter{}, "", 2, DiagnosisSummaryFreshFor)
 	encoded, err := json.Marshal(page)
 	if err != nil {
@@ -282,17 +293,31 @@ func TestBoardCarriesOnlyPageFields(t *testing.T) {
 	}
 	subset(t, "", keysOf(t, encoded))
 	subset(t, "facets", keysOf(t, top["facets"]))
+	subset(t, "coverage", keysOf(t, top["coverage"]))
 	subset(t, "count", keysOf(t, top["late_objects"]))
 	subset(t, "count", keysOf(t, top["late_strategies"]))
 	var rows []json.RawMessage
 	if err := json.Unmarshal(top["rows"], &rows); err != nil {
 		t.Fatal(err)
 	}
-	waits, reasons := 0, 0
+	waits, reasons, pauses := 0, 0, 0
 	for _, row := range rows {
 		subset(t, "row", keysOf(t, row))
 		var fields map[string]json.RawMessage
 		_ = json.Unmarshal(row, &fields)
+		if pause, present := fields["query_pause"]; present {
+			pauses++
+			subset(t, "query_pause", keysOf(t, pause))
+			var parts map[string]json.RawMessage
+			_ = json.Unmarshal(pause, &parts)
+			subset(t, "count", keysOf(t, parts["objects"]))
+			var targets []json.RawMessage
+			_ = json.Unmarshal(parts["request_targets"], &targets)
+			for _, target := range targets {
+				subset(t, "request_target", keysOf(t, target))
+			}
+			subset(t, "count", keysOf(t, fields["same_target_strategies"]))
+		}
 		if wait, present := fields["late_wait"]; present {
 			waits++
 			subset(t, "late_wait", keysOf(t, wait))
@@ -317,6 +342,9 @@ func TestBoardCarriesOnlyPageFields(t *testing.T) {
 	}
 	if waits == 0 {
 		t.Fatal("no row carried a late wait, so its fields went unchecked")
+	}
+	if pauses == 0 {
+		t.Fatal("no row carried a query pause, so its fields went unchecked")
 	}
 	hex := regexp.MustCompile(`[0-9a-f]{64}`)
 	for _, forbidden := range []string{"查询组", "Slot", "副本", "修订", "query_group", "replica"} {
@@ -354,7 +382,7 @@ func TestBoardCutOwnedSetReadsUnknown(t *testing.T) {
 	aggregateDue(view, []Snapshot{{Replica: "r1", Owned: 3, OwnedObjects: []string{"qg-a"}, Schedule: &ScheduleCensus{}, Due: &DueClasses{}}})
 	index := buildBoard("c1", time.Unix(1, 0), "d", []string{"1"}, func(string) DiagnosisRow {
 		return DiagnosisRow{StrategyID: "1", Verdict: StateDetecting, Plans: []DiagnosisPlan{boardPlan("qg-a", "r1")}}
-	}, nil, view.Due, &ScheduleCensus{}, nil)
+	}, nil, view.Due, &ScheduleCensus{}, nil, pauseReading{})
 	if index.rows[0].Punctuality != PunctualityUnknown || !index.lateObjects.AtLeast {
 		t.Fatalf("row %+v objects %+v; want unknown and at least when the owned set was cut", index.rows[0], index.lateObjects)
 	}
@@ -369,7 +397,7 @@ func TestBoardLineIsWrittenInTheTableWords(t *testing.T) {
 		"2": {StrategyID: "2", Verdict: StateResultUntrusted, Action: ActionWatch},
 	}
 	lines := []StrategyLine{{StrategyID: "2", Standing: Standing{State: StateResultUntrusted, Action: ActionWatch, Watch: WatchWindowFilling}}}
-	index := buildBoard("c1", time.Unix(1, 0), "d", []string{"1", "2"}, func(id string) DiagnosisRow { return rows[id] }, lines, nil, nil, nil)
+	index := buildBoard("c1", time.Unix(1, 0), "d", []string{"1", "2"}, func(id string) DiagnosisRow { return rows[id] }, lines, nil, nil, nil, pauseReading{})
 	got := boardRows(index)
 	if want := words.State[StateDataAbsent] + "，" + words.Action[ActionDataCheck]; got["1"].Line != want {
 		t.Errorf("line = %q, want %q", got["1"].Line, want)
@@ -425,7 +453,7 @@ func TestBoardReadsAnObjectFromItsOwnReplica(t *testing.T) {
 	})
 	index := buildBoard("c1", time.Unix(1, 0), "d", []string{"1"}, func(string) DiagnosisRow {
 		return DiagnosisRow{StrategyID: "1", Verdict: StateDetecting, Plans: []DiagnosisPlan{boardPlan("g", "b")}}
-	}, nil, view.Due, &ScheduleCensus{}, nil)
+	}, nil, view.Due, &ScheduleCensus{}, nil, pauseReading{})
 	if index.rows[0].Punctuality != PunctualityOnTime {
 		t.Fatalf("punctuality %s, want on time from the replica that holds g", index.rows[0].Punctuality)
 	}

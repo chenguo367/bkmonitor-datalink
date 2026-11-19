@@ -3085,14 +3085,107 @@ func TestEveryQueryFreeFinalizationNamesWhyNoQueryRan(t *testing.T) {
 		{"a Snapshot unreadable until the bound", false, controlplane.ErrSnapshotUnavailable, []int64{before, bound}, execution.FinalizationSnapshotUnavailable, execution.CauseSnapshotUnavailablePastBound},
 		{"another resolve failure until the bound", false, errors.New("store refused"), []int64{before, bound}, execution.FinalizationSnapshotUnavailable, execution.CauseResolveFailedPastBound},
 	} {
-		instants, catalog.readErr = test.instants, test.readErr
-		request.ReplayExpired = test.expired
-		finalization, err := resolver.ResolveFinalization(context.Background(), request)
-		if err != nil || finalization.Mode != test.mode || finalization.Cause != test.cause {
-			t.Fatalf("%s: %+v, %v; want %s under %s", test.name, finalization, err, test.mode, test.cause)
+		// The degraded pool having the Query Group, held or still to probe,
+		// names a Slot given up as an expired replay the pool's; it changes
+		// nothing a failed read decided.
+		var outsidePool execution.QueryFreeFinalization
+		for _, pool := range []struct{ held, probe bool }{{}, {held: true}, {probe: true}} {
+			instants, catalog.readErr = test.instants, test.readErr
+			request.ReplayExpired = test.expired
+			request.QueryCooldownHeld, request.QueryCooldownProbe = pool.held, pool.probe
+			want := test.cause
+			if (pool.held || pool.probe) && want == execution.CauseExpiredReplay {
+				want = execution.CauseQueryCooldown
+			}
+			finalization, err := resolver.ResolveFinalization(context.Background(), request)
+			if err != nil || finalization.Mode != test.mode || finalization.Cause != want {
+				t.Fatalf("%s, pool %+v: %+v, %v; want %s under %s", test.name, pool, finalization, err, test.mode, want)
+			}
+			if err := finalization.Validate(request); err != nil {
+				t.Fatalf("%s, pool %+v: the finalization is not valid: %v", test.name, pool, err)
+			}
+			// The pool changes the cause and nothing written down: the
+			// completion's word, and so the gap marker's, is the same.
+			if !pool.held && !pool.probe {
+				outsidePool = finalization
+			} else if finalization.ReasonCode != outsidePool.ReasonCode || finalization.Mode != outsidePool.Mode {
+				t.Fatalf("%s, pool %+v: %s %s, outside the pool %s %s", test.name, pool,
+					finalization.Mode, finalization.ReasonCode, outsidePool.Mode, outsidePool.ReasonCode)
+			}
 		}
-		if err := finalization.Validate(request); err != nil {
-			t.Fatalf("%s: the finalization is not valid: %v", test.name, err)
+	}
+}
+
+// The completion line names whose the Slot is, from the request's due Plans:
+// each strategy once, sorted and bounded, with the counts over every Plan.
+// A request without Plans names none.
+func TestTheSlotCompletionLineNamesItsStrategies(t *testing.T) {
+	var observations []observability.Observation
+	executor := observedProductionSlotExecutor{
+		next: slotExecutorFunc(func(context.Context, execution.SlotExecutionRequest) (execution.SlotExecutionResult, error) {
+			return execution.SlotExecutionResult{Completed: true, CompletionKind: execution.CompletionFull}, nil
+		}),
+		observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+			observations = append(observations, observation)
+		}),
+	}
+	plan := func(business, strategy string, shard int) execution.PlanKey {
+		return execution.PlanKey{PlanIdentity: execution.PlanIdentity{TenantID: "system", BusinessID: business, StrategyID: strategy}, ShardIndex: shard}
+	}
+	request := execution.SlotExecutionRequest{DuePlanTargets: execution.FrozenDuePlanTargets{Plans: []execution.PlanKey{
+		plan("3", "17", 0), plan("2", "12", 0), plan("2", "11", 1), plan("3", "16", 0),
+		plan("2", "11", 0), plan("3", "14", 0), plan("2", "15", 0), plan("3", "13", 0),
+	}}}
+	if _, err := executor.Execute(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if len(observations) != 2 || observations[1].Stage != observability.StageSlotCompleted {
+		t.Fatalf("observations=%+v", observations)
+	}
+	scope := observations[1].PlanScope
+	if scope == nil || !reflect.DeepEqual(scope.StrategyIDs, []string{"11", "12", "13", "14", "15"}) || scope.StrategyCount != 7 ||
+		!reflect.DeepEqual(scope.BusinessIDs, []string{"2", "3"}) || scope.BusinessCount != 2 {
+		t.Fatalf("slot_completed plan scope = %+v, want strategies 11-15 of 7 and businesses 2, 3 of 2", scope)
+	}
+	observations = nil
+	if _, err := executor.Execute(context.Background(), execution.SlotExecutionRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(observations) != 2 || observations[1].PlanScope != nil {
+		t.Fatalf("a request without Plans scoped its line as %+v", observations[len(observations)-1].PlanScope)
+	}
+}
+
+// The completion line names what its primary query had asked for when that
+// query came back unavailable, from the result; a Slot whose queries
+// answered names none.
+func TestTheSlotCompletionLineNamesTheRequestTargetsOfAnUnavailableQuery(t *testing.T) {
+	asked := &observability.RequestTargetsFacts{Count: 1, Digest: "0123456789abcdef",
+		Targets: []observability.RequestTarget{{TableID: "system.cpu", FieldName: "usage", SpaceUID: "bkcc__2"}}}
+	for _, test := range []struct {
+		name   string
+		result execution.SlotExecutionResult
+		want   *observability.RequestTargetsFacts
+	}{
+		{"unavailable", execution.SlotExecutionResult{Completed: true, CompletionKind: execution.CompletionUnavailable,
+			QueryAvailability: execution.QueryAvailabilityUnavailable, QueryUnavailableTargets: asked}, asked},
+		{"answered", execution.SlotExecutionResult{Completed: true, CompletionKind: execution.CompletionFull,
+			QueryAvailability: execution.QueryAvailabilityAvailable}, nil},
+	} {
+		var observations []observability.Observation
+		executor := observedProductionSlotExecutor{
+			next: slotExecutorFunc(func(context.Context, execution.SlotExecutionRequest) (execution.SlotExecutionResult, error) {
+				return test.result, nil
+			}),
+			observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+				observations = append(observations, observation)
+			}),
+		}
+		if _, err := executor.Execute(context.Background(), execution.SlotExecutionRequest{}); err != nil {
+			t.Fatal(err)
+		}
+		if len(observations) != 2 || observations[1].Stage != observability.StageSlotCompleted || observations[1].RequestTargets != test.want {
+			t.Fatalf("%s: slot_completed request targets %+v, want %+v", test.name, observations[len(observations)-1].RequestTargets, test.want)
 		}
 	}
 }

@@ -26,11 +26,18 @@ type QueryCooldownFacts struct {
 	// failed queries) or restored (read back from its record). LastExitAt and
 	// LastExitReason are its last exit, and Reentries how many times it came
 	// back within QueryCooldownReentryWindow of one.
-	EnteredAt      time.Time `json:"entered_at,omitempty"`
-	Source         string    `json:"source,omitempty"`
-	LastExitAt     time.Time `json:"last_exit_at,omitempty"`
-	LastExitReason string    `json:"last_exit_reason,omitempty"`
-	Reentries      uint32    `json:"reentries,omitempty"`
+	EnteredAt time.Time `json:"entered_at,omitempty"`
+	Source    string    `json:"source,omitempty"`
+	// ScheduleRevision and SegmentStart are the schedule the pool holds the
+	// Query Group under: the Segment its held Slots belong to, which a Slot
+	// of another schedule moves the pool to. A replica reads the Plans that
+	// schedule serves from the frozen schedule, for a pooled row no round
+	// named a strategy of. Neither is written on the line or the row.
+	ScheduleRevision string    `json:"-"`
+	SegmentStart     int64     `json:"-"`
+	LastExitAt       time.Time `json:"last_exit_at,omitempty"`
+	LastExitReason   string    `json:"last_exit_reason,omitempty"`
+	Reentries        uint32    `json:"reentries,omitempty"`
 	// LastProbe is the latest execution the pool let run, the one whose
 	// answer decides whether the Query Group stays or leaves: kept across
 	// the exit it caused, so a reader sees what the leaving answer had and

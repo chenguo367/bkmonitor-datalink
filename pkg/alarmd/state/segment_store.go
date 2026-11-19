@@ -731,6 +731,7 @@ func (store *ExecutionStore) RenewSegments(ctx context.Context, request segment.
 				continue
 			}
 			plan.Missing += outcome.missing
+			plan.Elapsed = append(plan.Elapsed, outcome.elapsed)
 			if outcome.elapsed > segment.RenewScriptBudget {
 				plan.OverBudget++
 			}

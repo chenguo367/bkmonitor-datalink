@@ -75,6 +75,31 @@ func (targets FrozenDuePlanTargets) Clone() FrozenDuePlanTargets {
 	}
 }
 
+// PlanScope is whose the Slot is, as its lines name it
+// (observability.PlanScopeFacts): the distinct strategy and business ids of
+// the due Plans, sorted, the first observability.PlanScopeSample of each, and
+// how many distinct there are over every Plan. Sorted, every line of a Query
+// Group names the same few whatever order its Plans were frozen in, so a
+// reader counting across lines does not count one strategy twice. Nil
+// without Plans.
+func (targets FrozenDuePlanTargets) PlanScope() *observability.PlanScopeFacts {
+	if len(targets.Plans) == 0 {
+		return nil
+	}
+	strategies := make([]string, 0, len(targets.Plans))
+	businesses := make([]string, 0, len(targets.Plans))
+	for _, plan := range targets.Plans {
+		strategies, businesses = append(strategies, plan.StrategyID), append(businesses, plan.BusinessID)
+	}
+	slices.Sort(strategies)
+	slices.Sort(businesses)
+	strategies, businesses = slices.Compact(strategies), slices.Compact(businesses)
+	return &observability.PlanScopeFacts{
+		StrategyIDs: slices.Clone(strategies[:min(len(strategies), observability.PlanScopeSample)]), StrategyCount: len(strategies),
+		BusinessIDs: slices.Clone(businesses[:min(len(businesses), observability.PlanScopeSample)]), BusinessCount: len(businesses),
+	}
+}
+
 func (targets FrozenDuePlanTargets) Validate(contractRef FrozenExecutionContractRef) error {
 	if targets.DuePlanSetDigest != contractRef.DuePlanSetDigest || len(targets.Plans) == 0 {
 		return errors.New("alarmd execution: frozen due Plan targets do not match the Slot contract")

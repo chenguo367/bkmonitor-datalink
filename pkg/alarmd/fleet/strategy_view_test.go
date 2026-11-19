@@ -22,6 +22,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // A strategy's drawer counts its objects by punctuality, each from its own
@@ -32,7 +33,7 @@ func TestAStrategyViewCountsItsObjectsByPunctuality(t *testing.T) {
 	decided := rows["2"]
 	decided.Check = CheckSlotsOverdue
 	rows["2"] = decided
-	index := buildBoard("c1", time.Unix(10_000, 0), "digest-1", universe, func(id string) DiagnosisRow { return rows[id] }, nil, due, census, nil)
+	index := buildBoard("c1", time.Unix(10_000, 0), "digest-1", universe, func(id string) DiagnosisRow { return rows[id] }, nil, due, census, nil, pauseReading{})
 	want := map[string]map[Punctuality]int{
 		"1": {PunctualityOverdue: 1, PunctualityOnTime: 1},
 		"2": {PunctualityLate: 1, PunctualityNotStarted: 1},
@@ -269,8 +270,25 @@ func TestExpectedDetectionHasAWordForEveryKnownKind(t *testing.T) {
 
 // The drawer carries words and counts only: no query text, table, plan,
 // revision, query group or replica, and decodes strictly into its type.
+//
+// One exemption, and only one: a paused strategy's request targets name the
+// table, field and space its query asked for, which is what the drawer is
+// for - the fixture's table, system.cpu_summary, is itself on the forbidden
+// list below. So the values of table_id, field_name and space_uid inside
+// request_targets alone are exempt: their keys are exactly those three and
+// truncated, none of the values is a 64-hex identity or a query group's key,
+// and with them taken out the drawer is held to the whole list as before.
+// The request targets' digest is a grouping key and is not in the drawer.
 func TestStrategyViewCarriesNoDeveloperCoordinates(t *testing.T) {
-	index := boardOf(t, false)
+	universe, rows, due, census := boardFixture(false)
+	paused := rows["1"]
+	paused.paused = []Anomaly{{QueryGroup: "qg-overdue", PoolReason: "QUERY_TARGET_MISSING",
+		QueryCooldown: &observability.QueryCooldownFacts{EnteredAt: time.Unix(9_000, 0), Until: time.Unix(10_100, 0), Failures: 16},
+		RequestTargets: &observability.RequestTargetsFacts{Count: 1, Digest: "0123456789abcdef",
+			Targets: []observability.RequestTarget{{TableID: "system.cpu_summary", FieldName: "usage", SpaceUID: "bkcc__2", Truncated: []string{"table_id"}}}}}}
+	rows["1"] = paused
+	index := buildBoard("c1", time.Unix(10_000, 0), "digest-1", universe, func(id string) DiagnosisRow { return rows[id] }, nil, due, census, nil,
+		pauseReading{coverage: InstanceCoverage{Counted: 2, Expected: 2}})
 	actual, _ := index.view("1", DiagnosisSummaryFreshFor)
 	view := ComposeStrategyView(actual, viewStanding())
 	encoded, err := json.Marshal(view)
@@ -283,6 +301,81 @@ func TestStrategyViewCarriesNoDeveloperCoordinates(t *testing.T) {
 	if err := decoder.Decode(&strict); err != nil {
 		t.Fatalf("strict decode: %v", err)
 	}
+	if view.Conclusion.QueryPause == nil || len(view.Actual.QueryPauseObjects) != 1 {
+		t.Fatalf("the paused strategy's drawer = %+v / %+v, want its pause and its one paused object", view.Conclusion.QueryPause, view.Actual.QueryPauseObjects)
+	}
+	queryGroups := map[string]bool{}
+	for _, plan := range rows["1"].Plans {
+		queryGroups[plan.QueryGroup] = true
+	}
+	var tree any
+	if err := json.Unmarshal(encoded, &tree); err != nil {
+		t.Fatal(err)
+	}
+	exempted := 0
+	var redact func(node any) any
+	redact = func(node any) any {
+		switch value := node.(type) {
+		case map[string]any:
+			for key, child := range value {
+				if key != "request_targets" {
+					value[key] = redact(child)
+					continue
+				}
+				targets, _ := child.([]any)
+				for _, raw := range targets {
+					target, _ := raw.(map[string]any)
+					for field := range target {
+						if field != "table_id" && field != "field_name" && field != "space_uid" && field != "truncated" {
+							t.Errorf("a request target carries %q", field)
+						}
+					}
+					// truncated names keys, not user data: held to the key
+					// set, each once, in key order.
+					if raw, present := target["truncated"]; present {
+						keys, _ := raw.([]any)
+						order := map[string]int{"table_id": 0, "field_name": 1, "space_uid": 2}
+						last := -1
+						for _, key := range keys {
+							name, _ := key.(string)
+							position, known := order[name]
+							if !known || position <= last {
+								t.Errorf("a request target's truncated is %v, want keys of the target once each in order", keys)
+							}
+							last = position
+						}
+					}
+					for _, field := range []string{"table_id", "field_name", "space_uid"} {
+						name, _ := target[field].(string)
+						if regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(name) || queryGroups[name] {
+							t.Errorf("request target %s is %q, an identity", field, name)
+						}
+					}
+					exempted++
+				}
+				value[key] = []any{}
+			}
+			return value
+		case []any:
+			for index, child := range value {
+				value[index] = redact(child)
+			}
+			return value
+		default:
+			return node
+		}
+	}
+	redacted, err := json.Marshal(redact(tree))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exempted != 2 {
+		t.Fatalf("exempted %d request targets, want the row's and the object's", exempted)
+	}
+	if strings.Contains(string(encoded), "0123456789abcdef") {
+		t.Errorf("the drawer carries the request targets' digest: %s", encoded)
+	}
+	encoded = redacted
 	for _, forbidden := range []string{"plan-secret-id", "gen-r9", "system.cpu_summary", "usage", "promql", "table", "plan_id",
 		"query_group", "qg-", "replica", "revision", "r1", "Threshold", "bk_monitor/time_series", "查询组", "副本", "修订"} {
 		if strings.Contains(string(encoded), forbidden) {
@@ -292,7 +385,8 @@ func TestStrategyViewCarriesNoDeveloperCoordinates(t *testing.T) {
 	if regexp.MustCompile(`[0-9a-f]{64}`).Match(encoded) {
 		t.Error("the drawer carries a 64-hex identity")
 	}
-	if view.Actual.Punctuality != PunctualityOverdue || view.Actual.PunctualityWord != "超期" || view.Actual.Objects.Total != 2 ||
+	if view.Coverage != (InstanceCoverage{Counted: 2, Expected: 2}) ||
+		view.Actual.Punctuality != PunctualityOverdue || view.Actual.PunctualityWord != "超期" || view.Actual.Objects.Total != 2 ||
 		view.KBAnchor != actual.Row.KBAnchor || view.Conclusion.Line == "" || !view.Expected.Known ||
 		view.MaxAgeSeconds != actual.MaxAgeSeconds {
 		t.Fatalf("view %+v", view)

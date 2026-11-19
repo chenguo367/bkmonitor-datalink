@@ -155,6 +155,9 @@ type phaseTwoMetrics struct {
 	drainingCursorPrunedQueryGroups *loadedGauge
 	rebalancePlannedMoves           *loadedGauge
 	shardUnawareReadyReplicas       *loadedGauge
+	segmentSkipAsked                *loadedGauge
+	segmentSkipHeld                 *loadedGauge
+	segmentSkipUnawareReplicas      *loadedGauge
 	rebalanceGap                    *loadedGauge
 	assignmentMoves                 *prometheus.CounterVec
 	byteOverloadedWorkers           *loadedGauge
@@ -416,7 +419,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			Subsystem: metricSubsystem, Name: "state_series_class_total",
 			Help: "Runtime State mutations admitted for writing, by what their series decided this round, " +
 				"one per mutation per attempt, counted where state_write_reuse_total counts them, so the two " +
-				"families sum alike. Each Level is classed from its own result and windows, never from the " +
+				"families sum alike. Both are reported at the attempt's census, so an attempt whose census was " +
+				"never reported - a Slot still running when its process stopped - is in neither. " +
+				"Each Level is classed from its own result and windows, never from the " +
 				"Level metadata the stored record keeps: transition decided ABNORMAL; a RECOVERY is classed as a " +
 				"NORMAL is, since the recovery walk decides one on every quiet series and the round that ends an " +
 				"alert is not told apart from the rounds after it. counting_recovery decided NORMAL while its " +
@@ -444,7 +449,8 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"admission refused by name; state_apply_failed is a write the store failed or refused; " +
 				"segment_member_skipped is not an exit but the skip (014 B3 stage 3): an open member of its Plan's " +
 				"stable segments, steady, normal and quiet on the grid, its State left as it was and read through " +
-				"the segment; " +
+				"the segment - on by default, held while a ready worker does not declare it, stopped by the " +
+				"Control's phase_two.control.segment_skip: false; " +
 				"slot_failed is the rest the attempt admitted when it ended with an error by any other exit, " +
 				"its own Plan's or a later one's; unaccounted stays zero, each non-zero attempt saying so on a " +
 				"line with reason internal_unknown: admitted mutations no named exit counted on an attempt that " +
@@ -456,7 +462,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		stateWriteReuse: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: metricSubsystem, Name: "state_write_reuse_total",
 			Help: "Runtime State mutations admitted for writing, by how much of what the write carries was " +
-				"already stored. Nothing is skipped: this measures what a skip could save before the write " +
+				"already stored, reported with state_series_class_total at the attempt's census. Nothing is skipped: this measures what a skip could save before the write " +
 				"path changes. identical is the whole blob reproduced; decision_stable is a series that " +
 				"decided stable_normal this round (state_series_class_total) with its Level state and series " +
 				"guard unchanged but for the processed event time, which advances every round: the upper " +
@@ -934,7 +940,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.queryCodec = newQueryCodecMetrics()
 	metrics.queryTruncation = newQueryTruncationMetrics()
 	metrics.queryUnavailable = newQueryUnavailableMetrics()
-	metrics.queryCooldown = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "query_cooldown_events_total", Help: "External source_backend query cooldown transitions and failed real probes by bounded event."}, []string{"event"})
+	metrics.queryCooldown = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "query_cooldown_events_total", Help: "External source_backend query cooldown transitions and failed real probes by bounded event. " +
+		"What a Query Group's failed query had asked for - its tables, fields and space - is on its query_cooldown, " +
+		"query_completed and slot_completed lines and its cooldown record (request_targets), never in a label."}, []string{"event"})
 	// Every event and other at zero from the start: a Runner restores its
 	// pool record on its first round, before the first scrape, and a series
 	// created by that restore would read as no increase.
@@ -1258,10 +1266,15 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	}
 	metrics.replayExpiries = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: metricSubsystem, Name: "replay_expired_total",
-		Help: "Slots the scheduler gave up replaying, by reason. REPLAY_AGE_EXCEEDED and " +
+		Help: "Slots the scheduler gave up replaying, by reason, counted when a Slot is given up. REPLAY_AGE_EXCEEDED and " +
 			"REPLAY_DISTANCE_EXCEEDED are ordinary: the Slot is older than the replay window, or too " +
 			"many grid points have passed since it. REPLAY_RANGE_EXPIRED is a persisted range of such " +
-			"Slots being finalized after a restart or handoff. " +
+			"Slots being finalized after a restart or handoff. QUERY_COOLDOWN_GAP is any of these while " +
+			"the degraded pool has the Query Group - its queries did not run, and the gap is the pool's: " +
+			"while the pool holds it, a Slot past its distance is held rather than given up and is not " +
+			"counted, and the run the hold kept is given up, and counted, when the hold ends. Builds " +
+			"without the QUERY_COOLDOWN_GAP series counted a held Slot every grid point it was decided, " +
+			"and the pool's gap under REPLAY_DISTANCE_EXCEEDED: the two readings do not compare. " +
 			"REPLAY_WAIT_EXCEEDS_DISTANCE is a defect report and must stay at zero: the Slot was " +
 			"still inside its replay window and the readiness rule would have held the read until " +
 			"after that window closed, so the replay would have been dispatched, made to wait, and " +
@@ -1278,7 +1291,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		Subsystem: metricSubsystem, Name: "replay_takeover_slots_total",
 		Help: "Slots evaluated before this process took their Query Group over from another owner, by outcome, " +
 			"counted once per Slot and outcome however often it is classified, and not for a Query Group the " +
-			"degraded pool holds, whose Slots are given up on for distance as before: " +
+			"degraded pool holds, whose Slots past their distance the hold keeps and gives up when it ends: " +
 			"replayed, because nobody here could have run them and they are within the replay age; " +
 			"age_exceeded, given up on like any Slot that old; diverted, not yet at its query deadline but with " +
 			"less budget left than its query takes (the group's own reading, the previous owner's as the group's read-hold record keeps it, or the configured floor), sent to " +
@@ -1422,6 +1435,20 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"is collapsed to one piece per strategy while it is not. Across a rolling release it goes 0, n, 0; a rollback puts " +
 			"the rolled-back replica back on it. Which replicas they are is on /api/health rebalance.shard_aware.unaware. " +
 			"Meaningful on the Control Leader only; aggregate replicas with max, not sum."})
+	metrics.segmentSkipAsked = newLoadedGauge(prometheus.GaugeOpts{Subsystem: metricSubsystem, Name: "segment_skip_asked",
+		Help: "1 while the values ask the Control Leader for the segment skip word (014 B3 stage 3), 0 otherwise, as its " +
+			"latest reconcile round read them. Meaningful on the Control Leader only; aggregate replicas with max, not sum."})
+	metrics.segmentSkipHeld = newLoadedGauge(prometheus.GaugeOpts{Subsystem: metricSubsystem, Name: "segment_skip_held",
+		Help: "1 while the segment skip word is asked for and held - not set on the records - because a ready replica does " +
+			"not declare the contract (segment-skip.v1), 0 otherwise, as the latest reconcile round on this Control Leader " +
+			"saw it. Read with segment_skip_unaware_ready_replicas: held at one is a replica a rollout left behind, whose name " +
+			"is on the round's rebalance_planned line (segment_skip.unaware). Meaningful on the Control Leader only; " +
+			"aggregate replicas with max, not sum."})
+	metrics.segmentSkipUnawareReplicas = newLoadedGauge(prometheus.GaugeOpts{Subsystem: metricSubsystem, Name: "segment_skip_unaware_ready_replicas",
+		Help: "Ready replicas whose registration does not declare the segment skip contract (segment-skip.v1), as the " +
+			"latest reconcile round on this Control Leader saw them while the word is asked for; zero while it is not, the " +
+			"gate not being read then. The word is set only while this is zero. Meaningful on the Control Leader only; " +
+			"aggregate replicas with max, not sum."})
 	metrics.rebalanceGap = newLoadedGauge(prometheus.GaugeOpts{Subsystem: metricSubsystem, Name: "rebalance_gap", Help: "Owned Query Groups on the most loaded ready worker minus those on the least loaded, as the latest rebalance round on this Control Leader saw them. Zero is even; a gap that stays above five percent of the even share across rounds is a writer that is not moving. Meaningful on the Control Leader only; aggregate replicas with max, not sum."})
 	metrics.assignmentMoves = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "assignment_moves_total", Help: "Assignments the Control Leader moved to another ready worker, by reason: rebalance, a move to even the owned counts out; bytes, a feasibility move off a worker whose Query Groups' retained-byte peaks sum past its share of the pool, one per overloaded worker per round; ineligible, a move off a holder alive and READY but not eligible (a rollout that changed the capability digest); holder_gone, a placement off a holder not in the round's ready set (not READY, registration lapsed, or declining the Query Group). A Query Group placed for the first time is not a move. Each costs the Query Group at most one Slot on the old holder. holder is what held the Query Group's lease: session for a holder holding it under a worker session, no_session for one renewing its own lease (an older binary) or none."}, []string{"reason", "holder"})
 	metrics.rebalancePaused = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "rebalance_paused_total", Help: "Rebalance rounds that planned moves and published none, by reason. reason=set_unstable is the ready set having changed within the stabilisation window, which is what a rolling update or a replica joining looks like; rising without end is a set that never settles."}, []string{"reason"})
@@ -2386,7 +2413,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.scheduleCutoverFirstTimelines, m.replayExpiries, m.replayTakeovers, m.slotDiversions, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
 		m.queryFailures,
 		m.objectCatalogObjects, m.catalogRenewals, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectCatalogWrittenBytes, m.objectReads, m.stateGenerationSkew, m.stateCarry,
-		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.byteOverloadedWorkers, m.byteMostLoadedShare, m.byteUnreadGroups, m.placementUnfit, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlRecordReads, m.controlRecordMismatches, m.controlRecordConflicts, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
+		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.segmentSkipAsked, m.segmentSkipHeld, m.segmentSkipUnawareReplicas, m.rebalanceGap, m.assignmentMoves, m.byteOverloadedWorkers, m.byteMostLoadedShare, m.byteUnreadGroups, m.placementUnfit, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlRecordReads, m.controlRecordMismatches, m.controlRecordConflicts, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.recoveryWithheld, m.noDataEnd, m.openAlertGate,
 	}...), append(append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), append(append(m.handover.collectors(), m.slotProgress.collectors()...), m.sreActions.actions, m.sreActions.rollouts, m.sreActions.watched, m.sreActions.receipts, m.cliAuth.total, m.cliAuth.rosterApplied)...), append(append(m.controlFacts.collectors(), m.traceExport.collectors()...), m.segmentShadow.collectors()...)...),
 		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.activeCopy, m.fleetTracker, m.effectiveTimeRefresh, m.activationRebuild, m.timelineRepair, m.activationSkippedTimelines, m.timelineUnreadableReports, m.activationHeader, m.activationBlocked, m.liveReserve, m.roundMemory, m.stateSeriesHeld, m.targetGroup, m.effectiveClose, m.logLines, m.observerPanics, m.absentClose, m.editClose, m.noDataCloseAPI, m.linkdFilterClose, m.linkdFilterCloseRequests, m.openEpisodeRecord, m.newOpens, m.frontRefused, m.processMemory, m.strategyScopeClose, m.targetScopeClose, m.controlSourceRounds, m.apmCarried, m.apmCarriedBytes, m.sourceLivenessChecks, m.sourceLivenessSeconds, m.sourceLivenessDeferred, m.sourceLivenessEvicted, m.sourceLivenessHeldEvicted, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.controlFactsWrites, m.planCarriesReads, m.planSegmentsReads, m.queryCooldownLoads, m.eventBusinessAttribution, m.detectionSnapshots, m.detectionSnapshotStates, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
@@ -2479,6 +2506,17 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		if facts.ShardAware != nil {
 			m.shardUnawareReadyReplicas.Set(float64(len(facts.ShardAware.Unaware)))
 		}
+		// The segment skip gate, every round: no facts on the round is no
+		// ask.
+		skip := facts.SegmentSkip
+		asked := skip != nil && skip.Asked
+		m.segmentSkipAsked.Set(gaugeOne(asked))
+		m.segmentSkipHeld.Set(gaugeOne(asked && skip.Held != ""))
+		unaware := 0
+		if asked {
+			unaware = len(skip.Unaware)
+		}
+		m.segmentSkipUnawareReplicas.Set(float64(unaware))
 		m.addAssignmentMoves(AssignmentMoveRebalance, facts.PublishedMoves, facts.PublishedFromSessionHolders)
 		m.addAssignmentMoves(AssignmentMoveIneligible, facts.Replaced, facts.ReplacedFromSessionHolders)
 		m.addAssignmentMoves(AssignmentMoveHolderGone, facts.Placed, facts.PlacedFromSessionHolders)
@@ -3237,6 +3275,14 @@ type loadedGauge struct {
 	loaded atomic.Bool
 }
 
+// gaugeOne is a yes-or-no reading as a gauge: 1 or 0.
+func gaugeOne(yes bool) float64 {
+	if yes {
+		return 1
+	}
+	return 0
+}
+
 func newLoadedGauge(opts prometheus.GaugeOpts) *loadedGauge {
 	return &loadedGauge{gauge: prometheus.NewGauge(opts)}
 }
@@ -3332,6 +3378,7 @@ func (r *Recorder) ControlLeaderStepDown() {
 	}
 	for _, gauge := range []*loadedGauge{
 		r.phaseTwo.rebalancePlannedMoves, r.phaseTwo.rebalanceGap, r.phaseTwo.shardUnawareReadyReplicas,
+		r.phaseTwo.segmentSkipAsked, r.phaseTwo.segmentSkipHeld, r.phaseTwo.segmentSkipUnawareReplicas,
 		r.phaseTwo.activationHeldQueryGroups, r.phaseTwo.activationHeldAgeSecondsMax,
 		r.phaseTwo.byteOverloadedWorkers, r.phaseTwo.byteMostLoadedShare, r.phaseTwo.byteUnreadGroups,
 	} {

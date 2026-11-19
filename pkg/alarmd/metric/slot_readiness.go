@@ -36,7 +36,8 @@ func newSlotReadinessMetrics() slotReadinessMetrics {
 				"direction only, and the two have to be read together: a scheduler that stops arriving " +
 				"early by arriving late shows no deferrals at all and looks like a success. It does not " +
 				"say why the time was lost -- sleeping too long and waiting for dispatch capacity produce " +
-				"the same figure, and the dispatcher's own queue wait is what tells them apart.",
+				"the same figure; the operation=\"normal\" cells of scheduler_execution_slot_wait_seconds_total " +
+				"are the part of it spent waiting for an execution slot while every one was in use.",
 			Buckets: slotReadinessSlackBuckets,
 		}),
 		boundary: prometheus.NewCounterVec(prometheus.CounterOpts{

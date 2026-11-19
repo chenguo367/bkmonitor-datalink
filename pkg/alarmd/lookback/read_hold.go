@@ -299,20 +299,44 @@ type earlierSample struct {
 	probe *floorProbeState
 }
 
-// dropTrialLocked ends a trial whose Slot will not compare it, counted
-// overtaken by path unless something overtook it first.
-func (engine *Engine) dropTrialLocked(trial *earlierSample, path string) {
-	if trial.overtakenBy == "" {
+// retireTrialLocked ends a trial and counts it, once, by the outcome it came
+// to first: one already decided - its permit refused, its read failed or
+// refused memory, overtaken as it was prepared or read - stands, and a trial
+// that came to none is counted outcome, overtaken by path. What overtook a
+// trial is likewise the first thing that did. Every way a trial ends goes
+// through here: the next Slot's Prepare or first read, its slice let go, its
+// group forgotten, and its formal read's completion.
+//
+// One outcome is decided on a condition: formal_read_first holds only if the
+// formal read that overtook the trial counts as a read. Let go past its limit
+// (Read.Discard, Engine.DiscardSlice), it does not, and the slice is what
+// ended the trial; those two set the path right before they retire it.
+func (engine *Engine) retireTrialLocked(trial *earlierSample, outcome, path string) {
+	if trial.outcome != "" {
+		outcome = trial.outcome
+	}
+	if outcome == EarlierOvertaken && trial.overtakenBy == "" {
 		trial.overtakenBy = path
 	}
-	trial.done, trial.outcome = true, EarlierOvertaken
+	trial.done, trial.outcome, trial.summary = true, outcome, nil
 	if trial.cancel != nil {
 		trial.cancel()
 	}
-	engine.counts.earlierReads[key2(trial.source, EarlierOvertaken)]++
-	engine.countOvertakenLocked(trial)
-	trial.group.reading.earlier[wordIndex(EarlierReadOutcomes, EarlierOvertaken)]++
-	engine.endTrialLocked(trial, EarlierOvertaken)
+	engine.counts.earlierReads[key2(trial.source, outcome)]++
+	if outcome == EarlierOvertaken {
+		engine.countOvertakenLocked(trial)
+	}
+	trial.group.reading.earlier[wordIndex(EarlierReadOutcomes, outcome)]++
+	engine.endTrialLocked(trial, outcome)
+}
+
+// discardTrialLocked retires a trial whose slice was let go past its limit,
+// a formal read that overtook it no read (retireTrialLocked).
+func (engine *Engine) discardTrialLocked(trial *earlierSample) {
+	if trial.overtakenBy == OvertakenFormalFirst {
+		trial.overtakenBy = OvertakenSliceDiscarded
+	}
+	engine.retireTrialLocked(trial, EarlierOvertaken, OvertakenSliceDiscarded)
 }
 
 // trialStart is when a trial of candidate starts: as long before its point
@@ -547,8 +571,9 @@ func (engine *Engine) Prepare(query Query) {
 		// A frozen Slot that never reached a first read supplies no evidence.
 		if !previous.formal {
 			// A trial that finished still waits for its Slot's formal read;
-			// the next Slot's arrival overtakes it whatever its own outcome.
-			engine.dropTrialLocked(previous, OvertakenNextSlot)
+			// the next Slot's arrival ends it, counted by the outcome it came
+			// to first.
+			engine.retireTrialLocked(previous, EarlierOvertaken, OvertakenNextSlot)
 		}
 		state.prepared = nil
 	}
@@ -627,29 +652,27 @@ func (read *Read) completeEarlier(completion execution.ProviderCompletion, err e
 	engine.mu.Lock()
 	outcome := trial.outcome
 	switch {
+	case outcome != "":
+		// Decided first - its permit refused, its read failed, overtaken as
+		// it was prepared or by this read, its owner lost while this read
+		// ran - and it stands (retireTrialLocked).
 	case !owned:
 		outcome = EarlierOwnerLost
 	case err != nil || completion.Completeness != execution.CompletenessFull || read.summary == nil || read.summary.faulted:
 		outcome = EarlierFirstIncomplete
-	case outcome == "" && !candidateCurrent:
+	case !candidateCurrent:
 		outcome = EarlierOvertaken
 		trial.overtakenBy = OvertakenHoldMoved
-	case outcome == "":
+	default:
 		outcome = EarlierEqual
 		if len(compareSummaries(trial.summary, trimSummary(read.summary.buckets, trial.keptFrom))) > 0 {
 			outcome = EarlierDifferent
 		}
 	}
-	trial.summary = nil
 	if state := engine.groups[trial.query.Contract.Slot.QueryGroup]; state != nil && state.prepared == trial {
 		state.prepared = nil
 	}
-	engine.counts.earlierReads[key2(trial.source, outcome)]++
-	if outcome == EarlierOvertaken {
-		engine.countOvertakenLocked(trial)
-	}
-	trial.group.reading.earlier[wordIndex(EarlierReadOutcomes, outcome)]++
-	engine.endTrialLocked(trial, outcome)
+	engine.retireTrialLocked(trial, outcome, "")
 	engine.mu.Unlock()
 	defer engine.publishTrialEnds()
 	engine.options.OnEarlierRead(EarlierReadEvidence{Contract: trial.query.Contract, CandidateHold: trial.candidateHold,
@@ -756,18 +779,24 @@ type earlierReadOf struct {
 	slice      execution.InputSlice
 	readyAt    time.Time
 	keptFrom   int64
+	// kind is a floor probe's round, read at the floor, or a trial.
+	kind execution.LookbackRead
 }
 
 func (trial *earlierSample) readOfLocked() earlierReadOf {
+	kind := execution.LookbackReadEarlier
+	if trial.probe != nil {
+		kind = execution.LookbackReadFloorProbe
+	}
 	return earlierReadOf{queryGroup: trial.query.Contract.Slot.QueryGroup, spec: trial.query.Spec, slice: trial.query.Slice, readyAt: trial.readyAt,
-		keptFrom: trial.keptFrom}
+		keptFrom: trial.keptFrom, kind: kind}
 }
 
 func (engine *Engine) earlierRead(ctx context.Context, trial *earlierSample, read earlierReadOf, release func(), yield <-chan struct{}) {
 	// As long as a read of the group's query takes, never past the candidate
 	// readiness point: the trial can never delay the formal read.
 	budget := min(engine.rereadTimeout(read.queryGroup), max(read.readyAt.Sub(engine.options.Now()), 0))
-	readCtx, cancel := context.WithTimeout(ctx, budget)
+	readCtx, cancel := context.WithTimeout(execution.WithLookbackRead(ctx, read.kind), budget)
 	engine.mu.Lock()
 	trial.cancel = cancel
 	if engine.options.Now().UnixMilli() > trial.readyAt.UnixMilli() && !trial.formal {

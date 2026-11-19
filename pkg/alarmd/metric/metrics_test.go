@@ -820,7 +820,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		// reasons, one label-free counter
 		fqName("access_query_duration_seconds"):     13,
 		fqName("access_query_answer_bytes"):         histogramSeries(len(observability.PhysicalQueryOutcomes), 12),
-		fqName("access_query_answer_series"):        histogramSeries(len(observability.PhysicalQueryOutcomes), 11),
+		fqName("access_query_answer_series"):        histogramSeries(len(observability.PhysicalQueryOutcomes), len(QueryAnswerSeriesBuckets)),
 		fqName("access_query_answer_records"):       histogramSeries(len(observability.PhysicalQueryOutcomes), 14),
 		fqName("access_query_answer_seconds"):       histogramSeries(len(observability.PhysicalQueryOutcomes), len(QueryAnswerBuckets)),
 		fqName("access_query_answer_phase_seconds"): histogramSeries(len(observability.PhysicalQueryOutcomes)*len(QueryAnswerPhases), len(QueryAnswerBuckets)),
@@ -848,6 +848,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("expired_slots_finalized_total"):                2,
 		fqName("unfinished_slots_abandoned_total"):             1,
 		fqName("share_refusal_gaps_total"):                     1,
+		fqName("slot_gaps_total"):                              (len(observability.QueryFreeCompletionKinds) + 1) * (len(observability.QueryFreeCompletionCauses) + 1),
 		fqName("execute_return_total"):                         6,
 		fqName("progress_completed_total"):                     7,
 		fqName("progress_completion_causes_total"):             2 * (len(observability.ProgressCompletionCauses) + 2) * observability.NormalizedReasonCount() * 2,
@@ -863,6 +864,10 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("schedule_timeline_bytes_max"):                  1,
 		fqName("schedule_timeline_bytes"):                      histogramSeries(1, len(scheduleTimelineBytesBuckets)),
 		fqName("schedule_segments_pruned_total"):               1,
+		// Every operation, waited or not, and cohort; the seconds by
+		// operation and cohort.
+		fqName("scheduler_execution_slot_waits_total"):        len(observability.ExecutionSlotWaitOperations) * 2 * len(dispatchTurnawayCohorts),
+		fqName("scheduler_execution_slot_wait_seconds_total"): len(observability.ExecutionSlotWaitOperations) * len(dispatchTurnawayCohorts),
 		// Two fixed results each, and the two are separate metrics on purpose:
 		// rotations and object-turns are different populations counted at
 		// different rates, and one metric holding both invites a ratio between
@@ -943,6 +948,10 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("rebalance_planned_moves"):             1,
 		fqName("level_outcome_total"):                 3 + 3*len(observability.LevelOutcomeReasons()) + len(observability.RecoveryWithheldReasons),
 		fqName("shard_unaware_ready_replicas"):        1,
+		fqName("segment_skip_asked"):                  1,
+		fqName("segment_skip_held"):                   1,
+		fqName("segment_skip_unaware_ready_replicas"): 1,
+		fqName("state_segment_renew_script_seconds"):  histogramSeries(1, len(segmentRenewScriptBuckets)),
 		fqName("rebalance_gap"):                       1,
 		fqName("dispatch_queue_turnaways_total"):      len(dispatchTurnawayOutcomes) * len(dispatchTurnawayCohorts),
 		fqName("handover_drains_total"):               len(handoverDrainOutcomes()),
@@ -1239,6 +1248,9 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// typed constants are held to that list by a test of its own.
 	bounds[fqName("replay_expired_total")] = len(observability.ReplayExpiryReasons)
 	bounds[fqName("replay_takeover_slots_total")] = len(observability.ReplayTakeoverOutcomes)
+	// Each query-free kind and cause, and other for each: the labels are
+	// written only from the two lists observability publishes.
+	bounds[fqName("slot_gaps_total")] = (len(observability.QueryFreeCompletionKinds) + 1) * (len(observability.QueryFreeCompletionCauses) + 1)
 	bounds[fqName("slot_diversions_total")] = len(observability.SlotDiversionReasons)
 	// One per word the range gate can put on a round, applied included, and
 	// no more: the label is written from the facts after normalization, which

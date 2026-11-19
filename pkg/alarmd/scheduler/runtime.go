@@ -261,10 +261,16 @@ type SlotDueFacts struct {
 	// return; zero means the call carries no bound and the Query Group must be
 	// treated as due now. Truncation to the second is toward the past, which is
 	// the safe direction: an early bound costs one more call, a late one would
-	// hold back a Slot that is already due. A Slot waiting for its read is the
-	// exception: its bound is rounded up, and the source judges by the same second,
-	// so the bound is still the second it first answers due.
+	// hold back a Slot that is already due. A Slot waiting for its read is
+	// judged by the millisecond (DueAtUnixMilli) and carries the second before
+	// the one its read falls in, so the due index offers its Query Group ahead
+	// of the read rather than at the tick after it.
 	NotDueUntilUnix int64
+	// DueAtUnixMilli is the instant a first round waiting for its read first
+	// answers due, on a not-due return of that wait; zero otherwise. The Runner
+	// reports it as its readiness once it is near (NextReadyAt), and the
+	// dispatcher's recovery queue starts the round at it.
+	DueAtUnixMilli int64
 	// IntervalSeconds is the shortest evaluation interval among the Plans due at
 	// the Slot this call resolved. It is the number shortPeriodCohort already
 	// derives its cohort from, so carrying it out costs no extra read, and it is
@@ -584,6 +590,10 @@ type Runner struct {
 	shareRefusal   *shareRefusalState
 	sourceFailures uint32
 	sourceNextAt   time.Time
+	// nextDueAt is the read the next Slot's first round waits for, from the
+	// source's last not-due answer (SlotDueFacts.DueAtUnixMilli); zero when
+	// that answer named none.
+	nextDueAt time.Time
 	// lastExecutionReturnedAt is when this Runner's latest execution came
 	// back: until then the Runner could start nothing else of its Query Group.
 	lastExecutionReturnedAt time.Time
@@ -829,8 +839,23 @@ func (runner *Runner) NextReadyAt() time.Time {
 	if runner.attempt != nil && runner.attempt.nextAt.After(nextAt) {
 		nextAt = runner.attempt.nextAt
 	}
+	// The read a first round waits for, once it is near: the dispatcher then
+	// queues the Query Group for that instant and its timer starts the round
+	// there, rather than on the tick after the second it falls in. Further
+	// off it is not a readiness - the Query Group would wait the rest of its
+	// period in the recovery queue - and the due index's bound, the second
+	// before the read's, brings the walk to it inside this lead.
+	if !runner.nextDueAt.IsZero() && runner.nextDueAt.Sub(runner.now()) <= nextDueLead && runner.nextDueAt.After(nextAt) {
+		nextAt = runner.nextDueAt
+	}
 	return nextAt
 }
+
+// nextDueLead is how near a first round's read must be for the Runner to
+// report it as its readiness: the two seconds within which a walk on the
+// dispatcher's one-second tick, offered the Query Group at the second before
+// the read's, reaches it.
+const nextDueLead = 2 * time.Second
 
 func (runner *Runner) RunOne(
 	ctx context.Context,
@@ -968,8 +993,9 @@ func (runner *Runner) runOneTracked(
 	// returns sets a new one or none; one left behind would be a ready time
 	// already gone, and the dispatcher queues a Runner ready since then again
 	// on every return, without asking the index. The failed attempt itself is
-	// kept, so its failure count still grows its next backoff.
-	runner.sourceNextAt = time.Time{}
+	// kept, so its failure count still grows its next backoff. The read a
+	// first round waited for is spent the same way: this round asks again.
+	runner.sourceNextAt, runner.nextDueAt = time.Time{}, time.Time{}
 	if runner.attempt != nil && !runner.now().Before(runner.attempt.nextAt) {
 		runner.attempt.nextAt = time.Time{}
 	}
@@ -987,7 +1013,20 @@ func (runner *Runner) runOneTracked(
 	ctx = withVerifiedOwnership(ctx, runner.queryGroup, confirmedAssignment, confirmedFence)
 	runner.restoreQueryCooldown(ctx, confirmedFence)
 	decision = "source_next"
-	slot, due, facts, err := runner.source.Next(withQueryCooldownHeld(ctx, runner.queryCooldownHolds()), runner.queryGroup)
+	// What the source gives up for a pooled Query Group names the pool
+	// (held_by) on its expiry, whatever the round before this one did.
+	var pool *observability.HeldByFacts
+	if runner.queryCooldownPooled() {
+		facts := runner.heldByQueryCooldown()
+		pool = &facts
+	}
+	sourceCtx := withQueryCooldownPooled(withQueryCooldownHeld(ctx, runner.queryCooldownHolds()), pool)
+	slot, due, facts, err := runner.source.Next(sourceCtx, runner.queryGroup)
+	if pool != nil && err == nil && due && (slot.ExpiredRange != nil || slot.Recovery.Disposition == ReplayExpired) {
+		// And so do the skip and completion lines of a Slot it gives up; a
+		// probe that runs keeps what the round before it did.
+		ctx = withHeldBy(ctx, *pool)
+	}
 	sourceFacts = facts
 	if err != nil {
 		if isViewNotExecutable(err) {
@@ -1022,6 +1061,9 @@ func (runner *Runner) runOneTracked(
 			// The source answered, so the failures that grew its backoff are
 			// over, as they are below for a due Slot.
 			runner.sourceFailures = 0
+			if facts.DueAtUnixMilli > 0 {
+				runner.nextDueAt = time.UnixMilli(facts.DueAtUnixMilli)
+			}
 		}
 		return execution.SlotExecutionResult{}, false, err
 	}

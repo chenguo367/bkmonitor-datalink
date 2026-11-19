@@ -54,6 +54,10 @@ type StrategyViewActual struct {
 	// StoreOutages is the strategy's windows lost to this deployment's own
 	// store outages, with the interval it speaks for.
 	StoreOutages StoreOutageSummary `json:"store_outages"`
+	// QueryPauseObjects is each of its paused objects (queryPauseObjectsOf),
+	// first paused first; Coverage how many instances the computation read.
+	QueryPauseObjects []QueryPauseObject `json:"query_pause_objects,omitempty"`
+	Coverage          InstanceCoverage   `json:"coverage"`
 }
 
 // boardViewFacts is what the drawer reads of a strategy beyond its row.
@@ -61,13 +65,14 @@ type boardViewFacts struct {
 	objects   ViewObjects
 	check     Check
 	lateWaits []LateWaitGroup
+	paused    []QueryPauseObject
 }
 
 // viewFactsOf counts the decided strategy's objects by punctuality, each read
 // from its own replica as the row's punctuality is.
 func viewFactsOf(decided DiagnosisRow, due *DueView, waits *lateWaitIndex) boardViewFacts {
 	facts := boardViewFacts{objects: ViewObjects{ByPunctuality: map[Punctuality]int{}}, check: decided.Check,
-		lateWaits: strategyLateWaits(decided, due, waits)}
+		lateWaits: strategyLateWaits(decided, due, waits), paused: queryPauseObjectsOf(decided)}
 	for _, punctuality := range Punctualities {
 		facts.objects.ByPunctuality[punctuality] = 0
 	}
@@ -97,7 +102,8 @@ func (index *boardIndex) view(strategyID string, maxAge time.Duration) (Strategy
 			outages = unknownStoreOutage()
 		}
 		return StrategyViewActual{GeneratedAt: index.at, MaxAgeSeconds: int(maxAge / time.Second), Row: row,
-			Objects: facts.objects, Check: facts.check, LateWaits: facts.lateWaits, StoreOutages: outages}, true
+			Objects: facts.objects, Check: facts.check, LateWaits: facts.lateWaits, StoreOutages: outages,
+			QueryPauseObjects: facts.paused, Coverage: index.coverage}, true
 	}
 	return StrategyViewActual{}, false
 }
@@ -458,6 +464,9 @@ type ActualDetection struct {
 	Objects         ViewObjects `json:"objects"`
 	// LateWaits is what the late and overdue objects waited on, grouped.
 	LateWaits []LateWaitGroup `json:"late_waits,omitempty"`
+	// QueryPauseObjects is each paused object, first paused first, with its
+	// own next retry and request targets.
+	QueryPauseObjects []QueryPauseObject `json:"query_pause_objects,omitempty"`
 }
 
 // StrategyView is the drawer: conclusion, what it should detect, what it
@@ -473,6 +482,9 @@ type StrategyView struct {
 	StoreOutages StoreOutageSummary `json:"store_outages"`
 	Check        Check              `json:"check,omitempty"`
 	KBAnchor     string             `json:"kb_anchor"`
+	// Coverage is how many instances the computation read of how many
+	// there are; short of the whole, the pause counts are lower bounds.
+	Coverage InstanceCoverage `json:"coverage"`
 }
 
 // ComposeStrategyView joins the diagnosis's view of a strategy with its
@@ -481,6 +493,6 @@ func ComposeStrategyView(actual StrategyViewActual, standing *StrategyStanding) 
 	return StrategyView{GeneratedAt: actual.GeneratedAt, MaxAgeSeconds: actual.MaxAgeSeconds, Conclusion: actual.Row,
 		Expected: ExpectedOf(standing),
 		Actual: ActualDetection{Punctuality: actual.Row.Punctuality, PunctualityWord: PunctualityWords[actual.Row.Punctuality],
-			Objects: actual.Objects, LateWaits: actual.LateWaits},
-		StoreOutages: actual.StoreOutages, Check: actual.Check, KBAnchor: actual.Row.KBAnchor}
+			Objects: actual.Objects, LateWaits: actual.LateWaits, QueryPauseObjects: actual.QueryPauseObjects},
+		StoreOutages: actual.StoreOutages, Check: actual.Check, KBAnchor: actual.Row.KBAnchor, Coverage: actual.Coverage}
 }

@@ -9,6 +9,8 @@
 
 package observability
 
+import "time"
+
 // The shadow of a Plan's stable segments (014 B3, first stage): every State
 // is written as before, and beside it the worker keeps, in process, the
 // member pages and mark a round would leave were the steady members not
@@ -144,7 +146,13 @@ func AllSegmentShadowSkips() []string {
 // lifetime it falls due by - by design, not for renewals failing: a page
 // whose lifetime is no more than two intervals (a Plan keeping one point, or
 // one its horizon cuts short), or a new page, made staggered earlier by up to
-// a quarter lifetime, of a Plan whose keys live under four intervals.
+// a quarter lifetime, of a Plan whose keys live under four intervals;
+// fallback_stalled, the same of a Plan whose rounds stopped: the Slot's
+// evaluation time past the one its mark was written in by more than its
+// interval (a round not settled between - a Plan not active for a while),
+// or the round a replay or a retry, late for the time it was due. fallback_write is the rest, renewals that did not
+// keep a page of a Plan settling every round alive, and the third stage's
+// bar reads it alone.
 const (
 	SegmentRenewalRenewed             = "renewed"
 	SegmentRenewalFailed              = "failed"
@@ -152,6 +160,7 @@ const (
 	SegmentRenewalOverBudget          = "over_budget"
 	SegmentRenewalFallbackWrite       = "fallback_write"
 	SegmentRenewalFallbackUnrenewable = "fallback_unrenewable"
+	SegmentRenewalFallbackStalled     = "fallback_stalled"
 	SegmentRenewalOther               = "other"
 )
 
@@ -159,7 +168,7 @@ const (
 // the start.
 func AllSegmentRenewalResults() []string {
 	return []string{SegmentRenewalRenewed, SegmentRenewalFailed, SegmentRenewalMissing, SegmentRenewalOverBudget,
-		SegmentRenewalFallbackWrite, SegmentRenewalFallbackUnrenewable, SegmentRenewalOther}
+		SegmentRenewalFallbackWrite, SegmentRenewalFallbackUnrenewable, SegmentRenewalFallbackStalled, SegmentRenewalOther}
 }
 
 // Period classes, closed: the band a Plan's evaluation interval falls in, so
@@ -263,6 +272,10 @@ type SegmentShadowFacts struct {
 	Skipped map[string]int64 `json:"skipped,omitempty"`
 	// Renewals is the round's page renewals, by result.
 	Renewals map[string]int64 `json:"renewals,omitempty"`
+	// RenewScripts is how long each renewal script that renewed its keys ran,
+	// by the server's clock as the script measured it; counted on the
+	// renewal script histogram, not on the line.
+	RenewScripts []time.Duration `json:"-"`
 	// SkipFlagIgnored is the Slots dispatched with a segment skip word that
 	// did not follow it, by why (AllSegmentSkipIgnoredReasons).
 	SkipFlagIgnored map[string]int64 `json:"skip_flag_ignored,omitempty"`
@@ -309,6 +322,11 @@ func (facts *SegmentShadowFacts) IgnoreSkipFlag(reason string) {
 			return
 		}
 	}
+}
+
+// RenewScript adds one renewal script's own run time.
+func (facts *SegmentShadowFacts) RenewScript(elapsed time.Duration) {
+	facts.RenewScripts = append(facts.RenewScripts, elapsed)
 }
 
 // Renewal adds count to a renewal result's cell, its word normalised.
@@ -385,7 +403,8 @@ func (facts *SegmentShadowFacts) Pages(class string, pages, bytes int64) {
 // Empty is whether nothing was counted, so the facts are left off.
 func (facts SegmentShadowFacts) Empty() bool {
 	return len(facts.Outcomes) == 0 && len(facts.Members) == 0 && len(facts.PageWrites) == 0 && len(facts.Skipped) == 0 &&
-		len(facts.Renewals) == 0 && len(facts.SkipFlagIgnored) == 0 && len(facts.Samples) == 0 && len(facts.Degraded) == 0
+		len(facts.Renewals) == 0 && len(facts.SkipFlagIgnored) == 0 && len(facts.Samples) == 0 && len(facts.Degraded) == 0 &&
+		len(facts.RenewScripts) == 0
 }
 
 func normalizeSegmentShadowOutcome(outcome SegmentShadowOutcome) SegmentShadowOutcome {

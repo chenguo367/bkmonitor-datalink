@@ -94,6 +94,9 @@ func NativeOperationsWith(handler http.Handler, options NativeOptions) []Operati
 								next[facet] = value
 							}
 						}
+						if p.Bool("paused") {
+							next["paused"] = true
+						}
 						out.Next = append(out.Next, Call{Operation: "strategy.board", Params: next,
 							Reason: "下一页；计算换过（约 30 秒）时答 reread，从第一页重读。"})
 					}
@@ -156,6 +159,7 @@ func NativeOperationsWith(handler http.Handler, options NativeOptions) []Operati
 			"strategy_id": text("只看这一条策略。", "用户给定或此前的看板行"),
 			"area":        text("能力方面（source、target、algorithm、output、config），与 capability 一起用：按该方面的处理结果筛，没有该方面记录的算支持，与总览能力矩阵同一算法。", "overview.get capability.matrix[].drill"),
 			"reason":      text("拒绝原因码：只看带这个码的策略。", "overview.get capability.reasons[].drill"),
+			"paused":      {Type: "boolean", Description: "true 只看暂停查询的策略（行上带 query_pause）；分面 paused 是它们的条数。", Source: "overview.get runtime.query_pause"},
 			"limit":       integer("每页行数；默认50，上限与 diagnose.environment 一页相同。分面总是按全集。", 1, fleet.BoardMaxRows),
 			"cursor":      text("上一页 next_call 的 cursor，不自行构造。", "上一页 next_call 的 cursor"),
 		}, nil, fleet.BoardResponse{}, func(p Params) (string, url.Values) {
@@ -164,6 +168,9 @@ func NativeOperationsWith(handler http.Handler, options NativeOptions) []Operati
 				if value := p.String(facet); value != "" {
 					query.Set(facet, value)
 				}
+			}
+			if p.Bool("paused") {
+				query.Set("paused", "true")
 			}
 			return "/api/diagnose", query
 		}),

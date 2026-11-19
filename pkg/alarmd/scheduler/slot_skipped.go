@@ -62,7 +62,8 @@ func (runner *Runner) observeSlotSkipped(ctx context.Context, slot FrozenSlot, o
 		facts.Path, facts.SlotCount = observability.SlotSkippedExpiredRange, r.Count
 		facts.FirstSlot, facts.LastSlot = int64(r.First.Contract.Slot.EvaluationTime), int64(r.Last.Contract.Slot.EvaluationTime)
 	}
-	facts.GapGuard, facts.GapPlans, facts.GapStrategies = skipGapPlans(slot.DuePlanTargets)
+	facts.GapGuard, facts.GapPlans = skipGapPlans(slot.DuePlanTargets)
+	facts.PlanScope = slot.DuePlanTargets.PlanScope()
 	if recovery := slot.Recovery; recovery.Disposition == ReplayExpired {
 		facts.Replay = &observability.SlotSkipReplayFacts{
 			Reason: string(recovery.Reason), AgeMillis: recovery.SlotAgeMillis,
@@ -77,16 +78,10 @@ func (runner *Runner) observeSlotSkipped(ctx context.Context, slot FrozenSlot, o
 }
 
 // skipGapPlans is the gap marker a query-free finalization writes: a
-// whole-Plan scope on each due Plan, named by its strategy id.
-func skipGapPlans(targets execution.FrozenDuePlanTargets) (string, int, []string) {
-	strategies := make([]string, 0, min(len(targets.Plans), 4))
-	for _, plan := range targets.Plans {
-		if len(strategies) == cap(strategies) {
-			break
-		}
-		strategies = append(strategies, plan.StrategyID)
-	}
-	return observability.SkipGapPlanMarkers, len(targets.Plans), strategies
+// whole-Plan scope on each due Plan, one marker a Plan. Whose the Plans are
+// is the line's plan scope (FrozenDuePlanTargets.PlanScope).
+func skipGapPlans(targets execution.FrozenDuePlanTargets) (string, int) {
+	return observability.SkipGapPlanMarkers, len(targets.Plans)
 }
 
 func frozenSkipTrace(contractRef execution.FrozenExecutionContractRef, fence execution.OwnerFence) observability.TraceFields {

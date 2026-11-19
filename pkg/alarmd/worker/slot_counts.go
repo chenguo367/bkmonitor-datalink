@@ -223,6 +223,7 @@ func ForgetQueryGroup(coordinator *SlotExecutionCoordinator, queryGroup executio
 	coordinator.notEvaluatedLines.mu.Unlock()
 	coordinator.segmentWriteFailures.forget(queryGroup)
 	coordinator.segmentDegradations.forget(queryGroup)
+	coordinator.segmentFallbackLines.forget(queryGroup)
 }
 
 // reportSeriesNotEvaluated names, for a completed Slot that bound series it

@@ -80,8 +80,10 @@ func TestTheProductionObserverWritesTheHourlyWarmingLine(t *testing.T) {
 		}
 		facts.Record(observability.StateWriteReuseDecisionStable, observability.StateWriteReuseStoredReady)
 		traced := observability.ContextWithTraceFields(ctx, observability.TraceFields{QueryGroupKey: "qg-wiring", StrategyID: "7"})
+		// The observation the worker reports an attempt's write reuse on: its
+		// census, beside the classes of the same mutations.
 		bundle.dependencies.Observer.Observe(traced, observability.Observation{
-			Component: observability.ComponentState, Stage: observability.StageMutationCompared,
+			Component: observability.ComponentState, Stage: observability.StageFrozenStateRenewed,
 			Result: observability.ResultSuccess, StateWriteReuse: facts,
 		})
 	}

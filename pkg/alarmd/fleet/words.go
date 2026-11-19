@@ -9,7 +9,10 @@
 
 package fleet
 
-import "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+import (
+	model "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+)
 
 // The product vocabulary: the words a reader of the page sees, decided here
 // and sent with every response, so the page carries no table of its own.
@@ -129,7 +132,20 @@ type Words struct {
 	// UrgencyOrder is the page's order of the facet.
 	Urgency      map[Urgency]string `json:"urgency"`
 	UrgencyOrder []Urgency          `json:"urgency_order"`
+	// QueryPauseReason renders why a strategy's queries are paused: each
+	// reason the degraded pool holds a Query Group under
+	// (execution.QueryCooldownReasons), and other for one outside it.
+	QueryPauseReason map[string]string `json:"query_pause_reason"`
+	// StrategiesFrom renders where a pooled row's strategies came from, or
+	// why they could not be read (StrategiesFromValues); a check report's
+	// group of the rows of each reason is named by its word.
+	StrategiesFrom map[string]string `json:"strategies_from"`
 }
+
+// QueryPauseReasonOther is the pause reason a page shows for a reason
+// outside execution.QueryCooldownReasons, which should never be: counted,
+// not dropped.
+const QueryPauseReasonOther = "other"
 
 // ProductWords is the one rendering of the vocabulary.
 func ProductWords() Words {
@@ -190,7 +206,39 @@ func ProductWords() Words {
 		Watch: map[WatchReason]string{
 			WatchWindowFilling: "窗口在补", WatchGuardMoving: "保护在解除", WatchNextRound: "等后续轮次",
 		},
+		QueryPauseReason: map[string]string{
+			"QUERY_TARGET_MISSING":                "查询引用的表或字段不存在",
+			"QUERY_REJECTED":                      "查询服务拒绝了查询",
+			"QUERY_TIMEOUT":                       "查询服务答复超时",
+			"QUERY_UNAVAILABLE":                   "查询服务不可用",
+			"QUERY_PARTIAL":                       "查询只返回了部分结果",
+			"DETECT_INTERVAL_STORAGE_NOT_SLIDING": "存储不能按检测间隔滑动读取",
+			"QUERY_NAMED_OUTPUT_DUPLICATE_KEY":    "查询结果有重复的维度",
+			"EXECUTION_BUDGET_EXHAUSTED":          "超出本次检测的执行时限",
+			"READINESS_BUDGET_INVALID":            "等待数据就绪超出查询时限",
+			"QUERY_NOT_ATTEMPTED":                 "查询没有发出",
+			"QUERY_REASON_UNRECORDED":             "查询失败，原因未记录",
+			QueryPauseReasonOther:                 "其他原因",
+		},
+		StrategiesFrom: map[string]string{
+			StrategiesFromSchedule:                "策略取自冻结排程",
+			StrategiesFromScheduleUnread:          "策略未补齐：排程没有读到",
+			StrategiesFromScheduleRevisionMoved:   "策略未补齐：排程修订已变",
+			StrategiesFromScheduleRevisionUnknown: "策略未补齐：冷却记录没有排程修订",
+			StrategiesFromSchedulePending:         "策略未补齐：排程等待读取",
+		},
 	}
+}
+
+// QueryPauseReasonOf is a pool reason as the pages name it: itself when it
+// is one of execution.QueryCooldownReasons, other otherwise.
+func QueryPauseReasonOf(reason string) string {
+	for _, known := range model.QueryCooldownReasons {
+		if string(known) == reason {
+			return reason
+		}
+	}
+	return QueryPauseReasonOther
 }
 
 // wordPair is one check's pair.

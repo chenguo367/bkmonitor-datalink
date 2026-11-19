@@ -33,6 +33,21 @@ func (client *Client) Recheck(ctx context.Context, spec execution.PhysicalQueryS
 		return execution.ProviderCompletion{}, errors.New("alarmd access uq: a recheck needs a deadline")
 	}
 	// A slice's read is rechecked as the slice: the slice ctx carries
-	// (execution.WithInputSlice), the whole Query Group without one.
-	return client.execute(ctx, ctx, queryIdentity{Spec: spec, AttemptNo: 1, Slice: execution.InputSliceFrom(ctx)}, sink, nil)
+	// (execution.WithInputSlice), the whole Query Group without one. The
+	// request names the kind of the lookback's read ctx carries
+	// (execution.WithLookbackRead).
+	return client.execute(ctx, ctx, queryIdentity{Spec: spec, AttemptNo: 1, Slice: execution.InputSliceFrom(ctx),
+		LookbackRead: execution.LookbackReadFrom(ctx)}, sink, nil)
+}
+
+// lookbackUserAgent is the User-Agent a lookback read is requested under,
+// alarmd (lookback=<kind>) with the kind's name: the provider's trace keeps a
+// request's User-Agent, so the lookback's reads are told from a Slot's own
+// there. A Slot's own read, and a value outside the kinds, set none.
+func lookbackUserAgent(kind execution.LookbackRead) (string, bool) {
+	name, ok := kind.Name()
+	if !ok {
+		return "", false
+	}
+	return "alarmd (lookback=" + name + ")", true
 }

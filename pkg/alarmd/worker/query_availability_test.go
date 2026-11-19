@@ -2,10 +2,12 @@ package worker_test
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 func assertQueryAvailability(t *testing.T, result execution.SlotExecutionResult, want execution.QueryAvailability) {
@@ -15,8 +17,11 @@ func assertQueryAvailability(t *testing.T, result execution.SlotExecutionResult,
 	}
 }
 
-// An unavailable result also says why, in the primary binding's own words:
-// the query cooldown it feeds reports its entries under that reason.
+// An unavailable result also says why, in the primary binding's own words,
+// and what that query had asked for: the query cooldown it feeds reports its
+// entries under that reason and keeps those targets. A result that is not
+// unavailable carries neither; the query line names the targets of any query
+// that came back unavailable, whichever the result.
 func TestUnavailableQueryAvailabilityRequiresBackendFailure(t *testing.T) {
 	unavailable, targetMissing := execution.ReasonCode(contract.ReasonQueryUnavailable), execution.ReasonCode(contract.ReasonQueryTargetMissing)
 	timeout := execution.ReasonCode("QUERY_TIMEOUT")
@@ -67,11 +72,14 @@ func TestUnavailableQueryAvailabilityRequiresBackendFailure(t *testing.T) {
 		{"delivery timeout however the window went", execution.DeliveryTimeoutRouteDetail, timeout, execution.QueryAvailabilityUnknown, window(200, 40_000, 40_000, 0)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			asked := &observability.RequestTargetsFacts{Count: 1, Digest: "0123456789abcdef",
+				Targets: []observability.RequestTarget{{TableID: "system.cpu", FieldName: "usage", SpaceUID: "bkcc__2"}}}
 			plans, requirements := baseDuePlanAndRequirements()
 			fixture, request := newCompletionOnlyFixture(t, plans, requirements, func(completion *execution.QueryExecutionCompletion) {
 				physical := &completion.PhysicalQueries[0]
 				physical.Completeness, physical.DataState = execution.CompletenessUnavailable, execution.DataStateUnknown
 				physical.RouteFacts.Attempts = []execution.RouteAttemptFact{{AttemptNo: 1, Result: execution.RouteAttemptFailed, ReasonCode: test.reason, Detail: test.detail, Timing: test.timing}}
+				physical.RouteFacts.RequestTargets = asked
 				for i := range completion.CompletionBindings {
 					binding := &completion.CompletionBindings[i]
 					binding.Dataset, binding.View = nil, nil
@@ -87,6 +95,21 @@ func TestUnavailableQueryAvailabilityRequiresBackendFailure(t *testing.T) {
 			if want := map[bool]execution.ReasonCode{true: test.reason}[test.want == execution.QueryAvailabilityUnavailable]; result.QueryUnavailableReason != want {
 				t.Fatalf("QueryUnavailableReason=%q, want %q", result.QueryUnavailableReason, want)
 			}
+			if want := map[bool]*observability.RequestTargetsFacts{true: asked}[test.want == execution.QueryAvailabilityUnavailable]; result.QueryUnavailableTargets != want {
+				t.Fatalf("QueryUnavailableTargets=%+v, want %+v", result.QueryUnavailableTargets, want)
+			}
+			lines := 0
+			for _, observation := range *fixture.observations {
+				if observation.Stage == observability.StageQueryCompleted {
+					lines++
+					if !reflect.DeepEqual(observation.RequestTargets, asked) {
+						t.Fatalf("query_completed request targets = %+v, want %+v", observation.RequestTargets, asked)
+					}
+				}
+			}
+			if lines == 0 {
+				t.Fatal("no query_completed line")
+			}
 		})
 	}
 }
@@ -100,4 +123,27 @@ func TestQueryAvailabilityRequiresProgressCommit(t *testing.T) {
 		t.Fatalf("Execute() result=%+v error=%v", result, err)
 	}
 	assertQueryAvailability(t, result, execution.QueryAvailabilityUnknown)
+}
+
+// A round whose queries all answered names no request targets, on its result
+// or its query line, though its route carried them.
+func TestAnAnsweredRoundCarriesNoRequestTargets(t *testing.T) {
+	plans, requirements := baseDuePlanAndRequirements()
+	fixture, request := newCompletionOnlyFixture(t, plans, requirements, func(completion *execution.QueryExecutionCompletion) {
+		completion.PhysicalQueries[0].RouteFacts.RequestTargets = &observability.RequestTargetsFacts{Count: 1,
+			Targets: []observability.RequestTarget{{TableID: "system.cpu", FieldName: "usage", SpaceUID: "bkcc__2"}}}
+	})
+	result, err := fixture.coordinator.Execute(context.Background(), request)
+	if err != nil || !result.Completed {
+		t.Fatalf("Execute() result=%+v error=%v", result, err)
+	}
+	assertQueryAvailability(t, result, execution.QueryAvailabilityAvailable)
+	if result.QueryUnavailableTargets != nil {
+		t.Fatalf("an answered round kept request targets %+v", result.QueryUnavailableTargets)
+	}
+	for _, observation := range *fixture.observations {
+		if observation.Stage == observability.StageQueryCompleted && observation.RequestTargets != nil {
+			t.Fatalf("an answered query line carries request targets %+v", observation.RequestTargets)
+		}
+	}
 }

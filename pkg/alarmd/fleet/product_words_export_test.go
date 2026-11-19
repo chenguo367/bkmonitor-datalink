@@ -15,6 +15,8 @@ import (
 	"flag"
 	"os"
 	"testing"
+
+	model "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
 var updateProductWords = flag.Bool("update-product-words", false, "rewrite product_words.json from ProductWords()")
@@ -38,6 +40,11 @@ type productWordsExport struct {
 	Health       map[Health]string      `json:"health"`
 	Urgency      map[Urgency]string     `json:"urgency"`
 	UrgencyOrder []Urgency              `json:"urgency_order"`
+	// QueryPauseReason is the reason a strategy's queries are paused.
+	QueryPauseReason map[string]string `json:"query_pause_reason"`
+	// StrategiesFrom is where a pooled row's strategies came from, or why
+	// they could not be read: the badge on the row and its check group.
+	StrategiesFrom map[string]string `json:"strategies_from"`
 }
 
 func productWordsExportBytes(t *testing.T) []byte {
@@ -46,7 +53,8 @@ func productWordsExportBytes(t *testing.T) []byte {
 	encoded, err := json.MarshalIndent(productWordsExport{
 		State: words.State, StateOrder: words.StateOrder, Action: words.Action, ActionOrder: words.ActionOrder,
 		Watch: words.Watch, SinceBasis: words.SinceBasis, Health: words.Health,
-		Urgency: words.Urgency, UrgencyOrder: words.UrgencyOrder,
+		Urgency: words.Urgency, UrgencyOrder: words.UrgencyOrder, QueryPauseReason: words.QueryPauseReason,
+		StrategiesFrom: words.StrategiesFrom,
 	}, "", "  ")
 	if err != nil {
 		t.Fatal(err)
@@ -103,5 +111,32 @@ func TestProductWordsFileCoversEveryPageWord(t *testing.T) {
 		if file.SinceBasis[basis] == "" {
 			t.Errorf("since basis %s has no word in %s", basis, productWordsFile)
 		}
+	}
+}
+
+// The pause reasons a page names are exactly the reasons the degraded pool
+// can hold a Query Group under (execution.QueryCooldownReasons, which the
+// access layer's test holds to their writers), and other: a reason added
+// there without its word fails here, and a word left for a reason gone too.
+// A reason outside the list reads as other.
+func TestThePauseReasonWordsAreThePoolsReasons(t *testing.T) {
+	words := ProductWords().QueryPauseReason
+	want := map[string]bool{QueryPauseReasonOther: true}
+	for _, reason := range model.QueryCooldownReasons {
+		want[string(reason)] = true
+	}
+	for reason := range want {
+		if words[reason] == "" {
+			t.Errorf("pause reason %s has no word", reason)
+		}
+	}
+	for reason := range words {
+		if !want[reason] {
+			t.Errorf("pause reason word for %s, which is not a pool reason", reason)
+		}
+	}
+	if QueryPauseReasonOf("QUERY_TARGET_MISSING") != "QUERY_TARGET_MISSING" || QueryPauseReasonOf("A_WORD_NOBODY_WROTE") != QueryPauseReasonOther ||
+		QueryPauseReasonOf("") != QueryPauseReasonOther {
+		t.Fatal("a pool reason is not read as itself, or one outside the list not as other")
 	}
 }

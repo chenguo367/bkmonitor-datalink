@@ -390,6 +390,10 @@ type OverviewRuntime struct {
 	// Summary counts the replicas by the roles they run and their version,
 	// ready and not: what the page shows without opening the replica table.
 	Summary []OverviewReplicaGroup `json:"summary"`
+	// QueryPause is the strategies whose queries are paused, the line that
+	// leads to the board's paused selection; absent when the health route
+	// had none to say.
+	QueryPause *OverviewQueryPause `json:"query_pause,omitempty"`
 }
 
 type OverviewReplicaGroup struct {
@@ -528,7 +532,7 @@ func overviewOf(health HealthResponse, running map[StateWord]int, runningKnown b
 		overview.Resources.Scale.MergedQueries = overviewMeasured(float64(*health.Expected), "merged_queries")
 	}
 	overview.Tracing = overviewTracingOf(health.Tracings)
-	overview.Runtime = OverviewRuntime{Replicas: []OverviewReplica{}, Attention: []OverviewNotice{}}
+	overview.Runtime = OverviewRuntime{Replicas: []OverviewReplica{}, Attention: []OverviewNotice{}, QueryPause: overviewQueryPauseOf(health)}
 	for _, replica := range health.PerReplica {
 		resource := OverviewReplicaResource{Name: replica.Replica, MemoryRatio: overviewUnmeasured("ratio"),
 			LiveHeapBytes: overviewUnmeasured("bytes"), LiveHeapReservedBytes: overviewUnmeasured("bytes"),

@@ -674,9 +674,12 @@ func (source *ProductionSlotSource) Next(
 	// below can carry it out. An empty due Plan set has already returned, so a
 	// Slot that reaches this line always has an interval to report.
 	dueInterval := minimumAlignedInterval(schedule, nextSlot)
-	if notDueUntil := source.firstRoundSecond(schedule, nextSlot, dueInterval, load.Progress); at.Unix() < notDueUntil {
+	if dueAt := source.firstRoundAt(schedule, nextSlot, load.Progress); at.UnixMilli() < dueAt {
 		decision = "future_slot"
-		return FrozenSlot{}, false, SlotDueFacts{NotDueUntilUnix: notDueUntil, NextSlotUnix: int64(nextSlot), IntervalSeconds: dueInterval}, nil
+		// The second before the one the round is due in, so the walk reaches
+		// the Query Group ahead of it and the recovery queue starts it there.
+		return FrozenSlot{}, false, SlotDueFacts{NotDueUntilUnix: dueAt/1000 - 1, DueAtUnixMilli: dueAt,
+			NextSlotUnix: int64(nextSlot), IntervalSeconds: dueInterval}, nil
 	}
 	decision = "read_hold"
 	hold, err := source.slotReadHoldMillis(ctx, schedule, load.Progress, nextSlot, initialFence)
@@ -786,7 +789,16 @@ func (source *ProductionSlotSource) Next(
 		Recovery:         recovery,
 		FollowingSlot:    followingSlot(schedule, nextSlot),
 	}
-	if load.Progress != nil && load.Progress.NextSlot == nextSlot && load.Progress.UnfinishedSlot == nil &&
+	if queryCooldownHeld(ctx) && at.UnixMilli() < recoveryUntil {
+		// While the pool holds the Query Group and before the Slot's recovery
+		// bound, a Slot past its distance (or its wait) is the hold's to keep,
+		// not to give up: no range is built - built here, one step a grid
+		// point, the Runner let each go - and no gate refusal is reported, the
+		// pool and the COOLING schedule already saying why the group is behind.
+		// The Runner holds the Slot (heldPastDistance); when the cooldown ends
+		// the hold is over and the range below closes the run at once. At the
+		// recovery bound the range's age branch is built as before.
+	} else if load.Progress != nil && load.Progress.NextSlot == nextSlot && load.Progress.UnfinishedSlot == nil &&
 		ctx.Value(rangeFlightContextKey{}) == queryGroup && recovery.Disposition == ReplayExpired {
 		outcome := refusedRange(observability.RangeGateApplied)
 		if rangeSlot, refusal, rangeErr := source.buildExpiredRange(ctx, slot, schedule, at); rangeErr != nil {
@@ -937,13 +949,19 @@ func followingSlot(schedule execution.FrozenQueryGroupSchedule, at execution.Eva
 
 // ShortPeriodCohortForInterval names the cohort of an evaluation interval as
 // the dispatcher labels its queue decisions: the three short cohorts by
-// name, "other" for any other interval, "unknown" for none.
+// name, "60s" for one minute, "other" for any other interval, "unknown" for
+// none. One minute has a cohort of its own because the single-strategy
+// limit is judged on it, and folded into other it could not be read apart
+// from the longer periods.
 func ShortPeriodCohortForInterval(interval int64) string {
 	if interval <= 0 {
 		return "unknown"
 	}
 	if cohort := shortPeriodCohortForInterval(interval); cohort != "" {
 		return cohort
+	}
+	if interval == 60 {
+		return "60s"
 	}
 	return "other"
 }
@@ -1174,7 +1192,7 @@ func (source *ProductionSlotSource) classifyRecoveryOf(
 			Distance:    1,
 			Age:         age,
 		}
-		aged = source.expiryDecided(aged, evaluationTime, at)
+		aged = pooledExpiry(ctx, source.expiryDecided(aged, evaluationTime, at))
 		source.observeReplayExpiry(ctx, evaluationTime, aged)
 		if beforeTakeover {
 			source.observeReplayTakeover(ctx, evaluationTime, observability.ReplayTakeoverAgeExceeded, age, at.Sub(takenOver))
@@ -1203,16 +1221,24 @@ func (source *ProductionSlotSource) classifyRecoveryOf(
 	if err != nil {
 		return "", SlotRecoveryFacts{}, err
 	}
+	// An expiry the pool's hold keeps is decided and not reported: the Runner
+	// holds the Slot rather than giving it up, and it is reported once, when
+	// it is (heldPastDistance). Reported every time it was decided, a held
+	// Slot counted an expiry a grid point.
 	if expired {
-		facts = source.expiryDecided(facts, evaluationTime, at)
-		source.observeReplayExpiry(ctx, evaluationTime, facts)
+		facts = pooledExpiry(ctx, source.expiryDecided(facts, evaluationTime, at))
+		if !queryCooldownHeld(ctx) {
+			source.observeReplayExpiry(ctx, evaluationTime, facts)
+		}
 		return execution.OperationNormal, facts, nil
 	}
 	if distance > source.recovery.MaxReplaySlots {
 		facts.Disposition = ReplayExpired
 		facts.Reason = ReplayExpiredByDistance
-		facts = source.expiryDecided(facts, evaluationTime, at)
-		source.observeReplayExpiry(ctx, evaluationTime, facts)
+		facts = pooledExpiry(ctx, source.expiryDecided(facts, evaluationTime, at))
+		if !queryCooldownHeld(ctx) {
+			source.observeReplayExpiry(ctx, evaluationTime, facts)
+		}
 		return execution.OperationNormal, facts, nil
 	}
 	return execution.OperationReplay, facts, nil
@@ -1259,7 +1285,7 @@ func (source *ProductionSlotSource) observeReplayExpiry(
 			// given up on for distance says nothing about how it got that far
 			// behind, and the four Query Groups that did this for hours were
 			// being held every round by something this line never named.
-			HeldBy: HeldByFromContext(ctx),
+			HeldBy: expiryHeldBy(ctx),
 		},
 	})
 }
@@ -1517,18 +1543,13 @@ func (source *ProductionSlotSource) slotReadAtUnixMilli(evaluationTime execution
 		Add(execution.ReadWaitWithinQueryBudget(source.queryGroup, queryBudget, source.settlingWait)).UnixMilli() + hold
 }
 
-// firstRoundMinimumInterval is the shortest evaluation interval whose first
-// round waits for its read. A round waiting for the second and the tick reads up
-// to two seconds after the data is ready. A minute's Slot has more than thirty
-// left after its read and can spare them. A shorter one reads close to its
-// deadline, or past it, and is run at its grid point as it always was.
-const firstRoundMinimumInterval = 60
-
-// firstRoundSecond is the second before which a round of this Slot has nothing
-// to do. The grid point used to be, and a Slot run there froze, fenced and wrote
-// its projection, all to be told by access to come back when its data had landed,
-// and then did it again: six round trips and some forty commands, for most of the
-// Slots of a deployment. Now the first round is the read.
+// firstRoundAt is the instant, in Unix milliseconds, before which a round of this
+// Slot has nothing to do: its read, whatever its period. The grid point used to be
+// that instant, and a Slot
+// run there froze, fenced and wrote its projection, all to be told by access to
+// come back when its data had landed, and then did it again: six round trips and
+// some forty commands, for most of the Slots of a deployment. Now the first round
+// is the read.
 //
 // It leaves the read hold out. A held Slot's first round is still turned away by
 // access, by name: the hold is frozen in that round, and the few it would save do
@@ -1538,27 +1559,46 @@ const firstRoundMinimumInterval = 60
 // the grid point. It now reads with the primary, and the wait in place it used to
 // spend inside its execution goes away.
 //
-// The grid point stands for a Slot already begun, whose round is a recovery, and for
-// a schedule whose deadline cannot be derived, which the round goes on to name. A
-// source that was not told the settling wait reads at the grid point by the same sum.
-func (source *ProductionSlotSource) firstRoundSecond(
+// A period under a minute kept its grid point while a round waiting for its read
+// started on the tick after the whole second the read fell in, up to two seconds
+// late, which a short window could not spare. Its grid-point round was turned
+// away by access and let in again at the read by the recovery queue's timer: a
+// freeze and a turn-away every round, for the periods that run most often. With
+// the round started at the instant it is due at, it waits for its read as a
+// minute's does. A ten-second period reads at most sixteen seconds past its grid
+// point, ten to settle and up to six of its phase, against a query deadline at
+// twenty-five, and keeps nine seconds after its read.
+//
+// The grid point stands for a Slot already begun, whose round is a recovery; for
+// a schedule whose deadline cannot be derived, which the round goes on to name;
+// and for a read at or past its query deadline - a period too short for the
+// settling wait and the reserve - whose round at the grid point is bound
+// unavailable, as it was. A source that was not told the settling wait reads at
+// the grid point by the same sum. Either way the instant is named, and the round
+// is started at it the same way.
+//
+// The instant is not rounded: the round is judged by the millisecond it is due
+// at. The bound the due index is given is the second before the one that instant
+// falls in, earlier than the instant, so the index never holds back a Query Group
+// the source would answer due, and a dispatch it predicts due is not read as an
+// overshoot.
+func (source *ProductionSlotSource) firstRoundAt(
 	schedule execution.FrozenQueryGroupSchedule,
 	slot execution.EvaluationTime,
-	interval int64,
 	progress *execution.ScheduleProgress,
 ) int64 {
-	first := int64(slot)
-	if interval < firstRoundMinimumInterval ||
-		(progress != nil && progress.UnfinishedSlot != nil && progress.UnfinishedSlot.Contract.Slot.EvaluationTime == slot) {
+	first := int64(slot) * 1000
+	if progress != nil && progress.UnfinishedSlot != nil && progress.UnfinishedSlot.Contract.Slot.EvaluationTime == slot {
 		return first
 	}
 	deadline, err := source.scheduleQueryDeadline(schedule, slot)
 	if err != nil {
 		return first
 	}
-	// Up to the second, as the due index compares: the bound stays the second the
-	// source first answers due, so a dispatch inside it is not read as an overshoot.
-	return (source.slotReadAtUnixMilli(slot, deadline, 0) + 999) / 1000
+	if read := source.slotReadAtUnixMilli(slot, deadline, 0); read < deadline {
+		return read
+	}
+	return first
 }
 
 // replayDistanceBoundary is the grid point at which this Slot's replay

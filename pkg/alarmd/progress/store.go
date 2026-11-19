@@ -993,5 +993,6 @@ func (store *Store) observeAbandonedSlot(ctx context.Context, request execution.
 	}, observability.OperationWrite, observability.SlotSkippedFacts{
 		Path: observability.SlotSkippedProgressStore, FirstSlot: evaluation, LastSlot: evaluation, SlotCount: 1,
 		Reason: contract.ReasonGapSkipped, GapGuard: observability.SkipGapProgressOnly,
+		PlanScope: abandoned.DuePlanTargets.PlanScope(),
 	})
 }

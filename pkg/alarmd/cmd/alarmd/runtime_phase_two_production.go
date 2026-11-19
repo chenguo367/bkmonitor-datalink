@@ -138,7 +138,7 @@ func (source *productionFrozenExecution) ResolveFinalization(
 		return execution.QueryFreeFinalization{
 			Contract: request.Contract, Mode: execution.FinalizationGapSkipped,
 			ReasonCode: execution.ReasonCode(contract.ReasonGapSkipped),
-			Targets:    request.DuePlanTargets.Clone(), Cause: execution.CauseExpiredReplay,
+			Targets:    request.DuePlanTargets.Clone(), Cause: execution.ExpiredReplayCause(request),
 		}, nil
 	}
 	// The Coordinator has already persisted this validated request as the unfinished
@@ -147,7 +147,7 @@ func (source *productionFrozenExecution) ResolveFinalization(
 		return execution.QueryFreeFinalization{
 			Contract: request.Contract, Mode: execution.FinalizationSnapshotUnavailable,
 			ReasonCode: execution.ReasonCode(contract.ReasonSnapshotUnavailable),
-			Targets:    request.DuePlanTargets.Clone(), Cause: execution.CauseExpiredReplay,
+			Targets:    request.DuePlanTargets.Clone(), Cause: execution.ExpiredReplayCause(request),
 		}, nil
 	}
 	fact, _, err := source.resolveFrozenFact(ctx, request.Contract)
@@ -198,7 +198,7 @@ func (source *productionFrozenExecution) ResolveFinalization(
 			Mode:       execution.FinalizationSnapshotUnavailable,
 			ReasonCode: execution.ReasonCode(contract.ReasonSnapshotUnavailable),
 			Targets:    request.DuePlanTargets.Clone(),
-			Cause:      execution.CauseExpiredReplay,
+			Cause:      execution.ExpiredReplayCause(request),
 		}, nil
 	}
 	if request.Operation == execution.OperationNormal {
@@ -1413,6 +1413,9 @@ type productionPhaseTwoOwnership struct {
 	// fleet snapshot this replica publishes. Nil until this process has
 	// planned a round, which only a Leader does.
 	lastRebalance *fleet.RebalanceFacts
+	// segmentSkipGate is the segment skip gate this Leader's latest round
+	// found (segmentSkipGateChanged).
+	segmentSkipGate segmentSkipGate
 	// lastAssignmentScope is the same round's census of the content scope
 	// on the records it settled, for the fleet snapshot. Nil until a round.
 	lastAssignmentScope *fleet.AssignmentScopeFacts
@@ -2096,10 +2099,11 @@ func (runtime *productionPhaseTwoOwnership) observeRebalance(
 		Bytes:      byteConstraintFacts(bytePlan, byteOutcome),
 		ShardAware: &observability.ShardAwareFacts{Ready: shardGate.Ready, Unaware: shardGate.Unaware},
 	}
-	// The word's facts only when they say something: asked for, or a
-	// round that took words back or failed to. Without the ask every
-	// worker is one that does not declare it, which is not news.
-	if skip.Asked || skip.Withdrawn > 0 || skip.Failed > 0 {
+	// The word's facts only when they say something: asked for, a round
+	// that took words back or failed to, or a gate that moved - the ask
+	// going away among them. Without the ask every worker is one that does
+	// not declare it, which is not news.
+	if skip.Asked || skip.Withdrawn > 0 || skip.Failed > 0 || skip.Changed {
 		facts.SegmentSkip = &skip
 	}
 	workerIDs := make([]string, 0, len(plan.Owned))
@@ -3073,6 +3077,9 @@ func (executor observedProductionSlotExecutor) Execute(
 		Component: observability.ComponentScheduler, Stage: observability.StageSlotStarted,
 		Operation: observability.Operation(request.Operation),
 		Result:    observability.ResultStarted, Trace: trace,
+		// What the dispatch that started this Slot waited for an execution
+		// slot, counted here where the operation is known.
+		ExecutionSlotWait: takeDispatchSlotWait(ctx),
 	})
 	started := time.Now()
 	// The Slot's span, when the export samples it; its queries and their
@@ -3237,6 +3244,11 @@ func (executor observedProductionSlotExecutor) Execute(
 		// The series this attempt left to the later Slot that had written
 		// them, and one of them with both versions.
 		SlotSuperseded: result.Superseded.Facts(),
+		// Whose the Slot is: its strategies and businesses.
+		PlanScope: request.DuePlanTargets.PlanScope(),
+		// What its primary query had asked for, when it came back
+		// unavailable; a Slot whose queries answered carries none.
+		RequestTargets: result.QueryUnavailableTargets,
 	})
 	observability.EmitTargetFlow(ctx, "execution_outcome", trace, observability.TargetFlowFacts{ExecutionOutcomeKnown: true, Attempted: true, Completed: result.Completed, Completion: string(result.CompletionKind)})
 	return result, err

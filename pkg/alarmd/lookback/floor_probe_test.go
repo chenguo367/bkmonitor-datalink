@@ -354,6 +354,9 @@ func TestEachRoundOfAProbeIsReadAtTheFloorAndPassesTheProbe(t *testing.T) {
 			if sources[EarlierSkipNoCandidate] != 0 || sources[EarlierSkipFloorProbe] != slots || group[EarlierSkipFloorProbe] != slots || r.refused != 0 {
 				t.Fatalf("skipped %v, on its group %v, refusals heard %d; want every Slot floor_probe and none refused", sources, group, r.refused)
 			}
+			if kinds := r.f.readKinds(); len(kinds) == 0 || r.f.readsOf(execution.LookbackReadFloorProbe) != len(kinds) {
+				t.Fatalf("reads %v, want each round asked as the floor probe's", kinds)
+			}
 		})
 	}
 }
@@ -486,7 +489,7 @@ func TestAProbeEndsWhenWhatItReadsMoves(t *testing.T) {
 		{"floor moved", func(r *probeRun) { r.set(func() { r.floor = 10 * time.Second }) }, FloorProbeHoldMoved, true},
 		{"near a failed floor now", func(r *probeRun) { r.set(func() { r.edge = true }) }, FloorProbeHoldMoved, true},
 		{"another kind now", func(r *probeRun) { r.set(func() { r.kind = "verify" }) }, FloorProbeHoldMoved, true},
-		{"owner lost", func(r *probeRun) { r.f.engine.Forget("qg") }, FloorProbeOwnerLost, true},
+		{"owner lost", func(r *probeRun) { r.f.engine.Forget("qg", ForgottenMoved) }, FloorProbeOwnerLost, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := newProbeRun(t, 2*time.Minute, 0, 50)

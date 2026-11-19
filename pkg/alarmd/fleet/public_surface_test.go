@@ -39,7 +39,7 @@ var publicHealthFields = map[string]bool{
 }
 
 var redactedHealthFields = map[string]bool{
-	"Impact": true, "StrategyLinkBase": true, "PrunedSkips": true, "RetainedShare": true, "ReadEarly": true, "Workers": true,
+	"Impact": true, "StrategyLinkBase": true, "QueryCooldown": true, "PrunedSkips": true, "RetainedShare": true, "ReadEarly": true, "Workers": true,
 	"PrunedSkipsTotal": true, "RetainedShareTotal": true, "ReadEarlyTotal": true,
 	"Builds": true, "OutputProtocols": true, "Tracings": true, "Retentions": true, "OutputPath": true, "Cooling": true, "Degradations": true,
 	"Activation": true, "NoDataHorizon": true, "Load": true, "ActivationReplica": true, "Rebalance": true,
@@ -48,7 +48,7 @@ var redactedHealthFields = map[string]bool{
 	"SourceReplica": true, "SourceStanding": true, "ControlFacts": true, "NoDataTracking": true, "Dependencies": true,
 	"DependenciesReplica": true, "LinkdConsole": true, "Coverage": true, "PerReplica": true, "Overdue": true,
 	"Dispatch": true, "Schedule": true, "Gaps": true, "Capacity": true, "AddressDiffers": true, "TrackerDropped": true, "EffectiveTimeUnread": true, "EffectiveTimeUnreadTotal": true,
-	"AwaitingFirstRound": true, "Undetermined": true, "UndeterminedTotal": true,
+	"AwaitingFirstRound": true, "LookbackUncovered": true, "Undetermined": true, "UndeterminedTotal": true,
 	"VerdictHistory": true, "VerdictHistorySince": true, "VerdictHistoryReplica": true,
 	"LeaderRound": true, "LeaderRoundReplica": true, "PlatformSettingFields": true,
 }

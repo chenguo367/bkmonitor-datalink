@@ -124,6 +124,12 @@ const (
 	// already past their replay window, which carries one set of facts for the
 	// range rather than per Slot.
 	ReplayExpiredRange ReplayExpiryReason = "REPLAY_RANGE_EXPIRED"
+	// ReplayExpiredByQueryCooldown is any of the above while the degraded pool
+	// has the Query Group, held or still to probe: its queries did not run,
+	// and the Slots it gives up are the pool's gap, not a Query Group fallen
+	// behind (withQueryCooldownPooled). The distance, the age and the wait
+	// that decided it are on the Slot's facts beside it.
+	ReplayExpiredByQueryCooldown ReplayExpiryReason = "QUERY_COOLDOWN_GAP"
 )
 
 type SlotRecoveryFacts struct {

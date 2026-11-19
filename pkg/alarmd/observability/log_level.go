@@ -98,8 +98,8 @@ var warnCursorRefusals = makeReasonSet([]ReasonCode{
 // up: a wait inside it that outlasted a settling wait, written at WARN as
 // reason_not_reported before it had a word and keeping it; and a completed
 // Slot that bound series to a Plan and never took them up, a defect of this
-// deployment's own.
-var warnSlotPathReasons = makeReasonSet([]ReasonCode{ReasonSlotWaitSlow, ReasonSeriesNotEvaluated})
+// deployment's own; and a Plan's page renewals did not keep alive.
+var warnSlotPathReasons = makeReasonSet([]ReasonCode{ReasonSlotWaitSlow, ReasonSeriesNotEvaluated, ReasonSegmentRenewalFallback})
 
 // warnDecisionReasons are the scheduler decisions that say it could not
 // decide or could not do what it decided; the others are a replay or range
@@ -261,7 +261,8 @@ func cutoverChanged(observation Observation) bool {
 }
 
 // roundChanged says a Control Leader round line has something new on it: the
-// round moved, rewrote or found missing something, read the source changed,
+// round moved, rewrote or found missing something, found its segment skip
+// gate moved (SegmentSkipFacts.Changed), read the source changed,
 // holds Query Groups draining, or found a record changed under it. Two of the
 // stages carry no facts at all on their line and never have anything new.
 func roundChanged(observation Observation) bool {
@@ -269,7 +270,8 @@ func roundChanged(observation Observation) bool {
 	case StageRebalancePlanned:
 		facts := observation.Rebalance
 		return facts != nil && (facts.PlannedMoves > 0 || facts.PublishedMoves > 0 || facts.Conflicts > 0 || facts.Paused ||
-			facts.Placed > 0 || facts.Replaced > 0 || facts.Unfit > 0 || (facts.Bytes != nil && facts.Bytes.PublishedMoves > 0))
+			facts.Placed > 0 || facts.Replaced > 0 || facts.Unfit > 0 || (facts.Bytes != nil && facts.Bytes.PublishedMoves > 0) ||
+			(facts.SegmentSkip != nil && facts.SegmentSkip.Changed))
 	case StageAssignmentIndexRead:
 		// A worker that reads just before the Leader writes sees the previous
 		// round once: stale for one round is the ordinary race, the same

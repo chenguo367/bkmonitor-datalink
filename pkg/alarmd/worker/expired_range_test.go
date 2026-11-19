@@ -88,11 +88,18 @@ func workerRangeRequest(t *testing.T) execution.SlotExecutionRequest {
 }
 
 func TestExpiredRangeTailGuardCommitConflictRestartsSameProof(t *testing.T) {
-	testRangeTailGuardCommitConflict(t, false, false)
+	testRangeTailGuardCommitConflict(t, false, false, false)
 }
 
 func TestExpiredRangeV2DistanceGuardCommitConflictRestartsSameProof(t *testing.T) {
-	testRangeTailGuardCommitConflict(t, true, false)
+	testRangeTailGuardCommitConflict(t, true, false, false)
+}
+
+// A range given up while the degraded pool has its Query Group is the pool's
+// gap: committed under the cause QUERY_COOLDOWN, its completion's kind and
+// reason the proof's as for any other range.
+func TestARangeThePoolGivesUpIsCommittedUnderTheCooldownsCause(t *testing.T) {
+	testRangeTailGuardCommitConflict(t, true, false, true)
 }
 
 // A range another attempt committed between this one's begin and its commit
@@ -100,7 +107,7 @@ func TestExpiredRangeV2DistanceGuardCommitConflictRestartsSameProof(t *testing.T
 // cause, so the range's slot_skipped line is written once, by the attempt
 // that wrote it down.
 func TestARangeAnotherAttemptCommittedFirstNamesNoQueryFreeCause(t *testing.T) {
-	testRangeTailGuardCommitConflict(t, false, true)
+	testRangeTailGuardCommitConflict(t, false, true, false)
 }
 
 // committedFirstRanges is a store where another attempt's commit of the same
@@ -114,9 +121,12 @@ func (store committedFirstRanges) CommitRange(ctx context.Context, request execu
 	return store.Store.CommitRange(ctx, request)
 }
 
-func testRangeTailGuardCommitConflict(t *testing.T, distance, committedFirst bool) {
+func testRangeTailGuardCommitConflict(t *testing.T, distance, committedFirst, pooled bool) {
 	ctx := context.Background()
 	request := workerRangeRequest(t)
+	// The Runner's word that the degraded pool has the Query Group, its hold
+	// run out and its probe still to come: the instant the run is given up.
+	request.QueryCooldownProbe = pooled
 	if distance {
 		p := request.ExpiredRange.Clone()
 		p.JudgedAtMillis = p.Last.EarliestQueryDeadlineUnixMilli + 180000
@@ -191,6 +201,9 @@ func testRangeTailGuardCommitConflict(t *testing.T, distance, committedFirst boo
 	// The commit that wrote the range down says so, once: run again, the
 	// range is already committed and the result carries no cause.
 	wantCause := execution.CauseExpiredReplay
+	if pooled {
+		wantCause = execution.CauseQueryCooldown
+	}
 	if committedFirst {
 		wantCause = ""
 	}

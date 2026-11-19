@@ -360,11 +360,9 @@ func TestSlotExecutionCoordinatorOrdersRequiredSideEffects(t *testing.T) {
 		observability.StageNoDataDecided,
 		observability.StageQueryCompleted,
 		observability.StageSideEffectAdmission,
-		observability.StageMutationCompared,
-		// Two compares: one per mutation, then one carrying the Plan's
-		// write-reuse counts. What this test pins is the order the side effects
-		// are committed in, and that is unchanged -- the second compare sits
-		// inside the same compare phase and writes nothing.
+		// One compare per mutation. The Plan's write-reuse counts are no
+		// longer a compare of their own: they are reported with the series
+		// classes at the attempt's census (frozen_state_renewed below).
 		observability.StageMutationCompared,
 		observability.StageSideEffectAdmission,
 		observability.StageStateAdmission,
@@ -1557,6 +1555,12 @@ type recordingPorts struct {
 	// written window by window.
 	failEventAckAt, failStateApplyAt int
 	eventAckCalls                    int
+	// stateApplyEntered, when set, hears each State apply as it begins,
+	// which then waits for stateApplyReleased to close: a Slot held past its
+	// admission and before its census, as one still running when its
+	// process stops.
+	stateApplyEntered  chan struct{}
+	stateApplyReleased chan struct{}
 	// eventBatches is the series of every event batch the sink took, and
 	// appliedKeys every State key a write sent, in the order they came.
 	eventBatches [][]string
@@ -2251,6 +2255,13 @@ func (ports *recordingPorts) AdmitRuntime(_ context.Context, request execution.S
 }
 
 func (ports *recordingPorts) ApplyRuntime(_ context.Context, request execution.StateApplyRequest) (execution.StateApplyResult, error) {
+	if ports.stateApplyEntered != nil {
+		select {
+		case ports.stateApplyEntered <- struct{}{}:
+		default:
+		}
+		<-ports.stateApplyReleased
+	}
 	ports.record("state_apply")
 	ports.stateApplyCalls++
 	ports.lastStateApply = request

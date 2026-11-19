@@ -578,6 +578,12 @@ type queryGroupState struct {
 	// blocked" is read from this end.
 	reasonLastAt  time.Time
 	queryCooldown *observability.QueryCooldownFacts
+	// requestTargets is what the pool's latest failed query had asked for,
+	// and cooldownEpoch the epoch of the owner that said so: a handover's two
+	// owners both report the Query Group for a moment, and the newer one's
+	// word is kept (aggregate). Both clear with the pool.
+	requestTargets *observability.RequestTargetsFacts
+	cooldownEpoch  uint64
 	// demotedSince is when the object entered the pool: the first entered or
 	// extended event with no cooldown standing. Zero outside the pool. It is
 	// the bound a retained record is read against to decide whether the
@@ -1549,7 +1555,8 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		return
 	}
 	// A Slot that came after its recovery bound is committed without a query,
-	// under SNAPSHOT_UNAVAILABLE and the cause EXPIRED_REPLAY. It ran nothing,
+	// under SNAPSHOT_UNAVAILABLE and the cause EXPIRED_REPLAY, or QUERY_COOLDOWN
+	// when the degraded pool had its Query Group then. It ran nothing,
 	// so it says nothing about the query or any dependency, and it is not a
 	// round: it is a skip, on the record of what was never evaluated, and the
 	// row stays as the rounds left it. Read as a round it put the object on
@@ -1559,7 +1566,8 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	// Snapshot (filed under its cause, a defect) or one that could not be read
 	// until the bound (the dependency down it always read as). A line with no
 	// cause, from a build before causes, is read as it was.
-	if completion == snapshotUnavailableCompletion && observation.ProgressCompletionCause == string(model.CauseExpiredReplay) {
+	if completion == snapshotUnavailableCompletion && (observation.ProgressCompletionCause == string(model.CauseExpiredReplay) ||
+		observation.ProgressCompletionCause == string(model.CauseQueryCooldown)) {
 		tracker.extendSkipSpan(state, trace.EvaluationTime, trace.EvaluationTime, 1, true, at)
 		state.gapSkip.HeldBy = heldByOf(observation)
 		tracker.noteCatchUpSkip(state, at)
@@ -1627,6 +1635,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 				tracker.demotionExtensions++
 			}
 			state.queryCooldown = &copy
+			state.requestTargets, state.cooldownEpoch = observation.RequestTargets, observation.Trace.OwnerEpoch
 			state.cooldownExposed = true
 		case "recovered", "query_revision_changed":
 			// Counted only on the way out of the pool, not on every event that
@@ -1642,6 +1651,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 				tracker.lastDemotionExit = at
 			}
 			state.queryCooldown = nil
+			state.requestTargets, state.cooldownEpoch = nil, 0
 			state.demotedSince = time.Time{}
 			state.poolReason = ""
 		}
@@ -2498,11 +2508,12 @@ func terminalCompletion(kind string) bool {
 // rowOf is the object's row as the list publishes it. Caller holds the lock.
 func (tracker *Tracker) rowOf(queryGroup string, state *queryGroupState) Anomaly {
 	anomaly := Anomaly{
-		QueryGroup:    queryGroup,
-		QueryCooldown: state.queryCooldown,
-		DemotedSince:  state.demotedSince,
-		Kind:          state.currentKind,
-		ReasonCode:    state.reasonCode, Cause: state.cause, CauseReason: state.causeReason, CauseScope: state.causeScope,
+		QueryGroup:     queryGroup,
+		QueryCooldown:  state.queryCooldown,
+		DemotedSince:   state.demotedSince,
+		RequestTargets: state.requestTargets, CooldownOwnerEpoch: state.cooldownEpoch, PoolReason: state.poolReason,
+		Kind:       state.currentKind,
+		ReasonCode: state.reasonCode, Cause: state.cause, CauseReason: state.causeReason, CauseScope: state.causeScope,
 		CauseOrigin:      state.causeOrigin,
 		Coverage:         state.coverage,
 		CoverageRejected: state.coverageRejected,
@@ -2943,17 +2954,24 @@ func (tracker *Tracker) SeriesMatchedIn(held map[string]struct{}, within time.Du
 	since := tracker.now().Add(-within)
 	total := uint64(0)
 	for queryGroup := range held {
-		state := tracker.groups[queryGroup]
-		if state == nil {
-			continue
-		}
-		for _, plan := range state.planSeries {
-			if plan.Matched > 0 && !plan.LastSeenAt.Before(since) {
-				total += uint64(plan.Matched)
-			}
-		}
+		total += tracker.seriesMatchedLocked(queryGroup, since)
 	}
 	return total
+}
+
+// seriesMatchedLocked is the series an object's Plans seen since then bound.
+func (tracker *Tracker) seriesMatchedLocked(queryGroup string, since time.Time) uint64 {
+	state := tracker.groups[queryGroup]
+	if state == nil {
+		return 0
+	}
+	matched := uint64(0)
+	for _, plan := range state.planSeries {
+		if plan.Matched > 0 && !plan.LastSeenAt.Before(since) {
+			matched += uint64(plan.Matched)
+		}
+	}
+	return matched
 }
 
 // HasConclusion reports whether the object already has conclusive evidence.

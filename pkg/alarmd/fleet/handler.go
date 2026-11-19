@@ -199,9 +199,13 @@ type HealthResponse struct {
 	// past its own retry deadline. The count alone reads the same whether the
 	// retry path is working or stopped; this is what separates them.
 	DemotedDueOldestSeconds int `json:"demoted_due_oldest_seconds,omitempty"`
-	DemotionEntries         int `json:"demotion_entries"`
-	DemotionExtensions      int `json:"demotion_extensions"`
-	DemotionExits           int `json:"demotion_exits"`
+	// QueryCooldown is the paused objects by pool reason
+	// (HealthQueryCooldown): counts, not names, and not on the public
+	// summary.
+	QueryCooldown      *HealthQueryCooldown `json:"query_cooldown,omitempty"`
+	DemotionEntries    int                  `json:"demotion_entries"`
+	DemotionExtensions int                  `json:"demotion_extensions"`
+	DemotionExits      int                  `json:"demotion_exits"`
 	// DemotionRestored, DemotionHandovers and DemotionReentries: see View.
 	// Entries plus restored equal exits plus handovers plus the pool now.
 	DemotionRestored  int `json:"demotion_restored"`
@@ -377,6 +381,11 @@ type HealthResponse struct {
 	// which strategy, Query Group and host, and both addresses. The count
 	// admission_cmdb_address_differs_total says how often.
 	AddressDiffers []AddressDiffersSample `json:"address_differs_samples,omitempty"`
+	// LookbackUncovered names the owned objects, across the replicas, the
+	// late-data lookback has no fresh measurement of: the largest by the
+	// series their Plans bound, at most MaxLookbackUncovered, each with its
+	// replica and why (alarmd_lookback_uncovered_groups counts them all).
+	LookbackUncovered []LookbackUncoveredFacts `json:"lookback_uncovered,omitempty"`
 	// TrackerDropped is what the replicas' object tables lost because they
 	// were full: rounds, truncations and ranges never recorded, with the
 	// latest objects named. Absent while nothing was lost.
@@ -1078,6 +1087,7 @@ func healthOf(view *View, part ReplicaPart, at time.Time) HealthResponse {
 		Unattributed:         part.Attribution.Unknown,
 		Impact:               part.Impact.Impact(),
 		DemotedDue:           view.DemotedDue, DemotedDueOldestSeconds: view.DemotedDueOldestSeconds,
+		QueryCooldown:      healthQueryCooldownOf(view, part.QueryPause),
 		DemotionEntries:    view.DemotionEntries,
 		DemotionExtensions: view.DemotionExtensions, DemotionExits: view.DemotionExits,
 		DemotionRestored: view.DemotionRestored, DemotionHandovers: view.DemotionHandovers,
@@ -1105,6 +1115,7 @@ func healthOf(view *View, part ReplicaPart, at time.Time) HealthResponse {
 		Dependencies:   dependencyList(view.Dependencies), DependenciesReplica: view.DependenciesReplica,
 		DependenciesReplicas: view.DependenciesReplicas, ReplicasNotReady: view.ReplicasNotReady,
 		Overdue: view.Overdue, Dispatch: view.Dispatch, Schedule: view.Schedule, AddressDiffers: view.AddressDiffers, TrackerDropped: view.TrackerDropped,
+		LookbackUncovered:   view.LookbackUncovered,
 		EffectiveTimeUnread: view.EffectiveTimeUnread, EffectiveTimeUnreadTotal: view.EffectiveTimeUnreadTotal,
 		AwaitingFirstRound: view.AwaitingFirstRound, Undetermined: view.Undetermined, UndeterminedTotal: view.UndeterminedTotal,
 		Gaps: view.Gaps, Capacity: view.Capacity,

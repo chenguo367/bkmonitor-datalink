@@ -212,6 +212,9 @@ type queryIdentity struct {
 	NoAppCarry bool
 	// Strategies are the strategy ids the query serves (headerStrategy).
 	Strategies []string
+	// LookbackRead is the kind of the lookback's read a recheck is, named on
+	// the request (lookbackUserAgent); none for a Slot's own read.
+	LookbackRead execution.LookbackRead
 	// NamedOutputs reserves what aligning the named outputs holds
 	// (namedOutputReserver); nil reserves nothing.
 	NamedOutputs execution.RetainedBytesReserver
@@ -244,10 +247,7 @@ func scopeHeaders(facts execution.QueryPlanFacts) map[string]string {
 // global business Plan leaves it empty as well as the header; the body's
 // space alone would scope the query exactly as the header would.
 func bodySpace(facts execution.QueryPlanFacts) string {
-	if facts.GlobalBusiness {
-		return ""
-	}
-	return facts.SpaceScope
+	return facts.RequestSpaceUID()
 }
 
 func buildWireRequest(spec execution.PhysicalQuerySpec) (string, []byte, error) {
@@ -334,6 +334,9 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 	request.Header.Set("Content-Type", "application/json")
 	if attempt.SharedSchema {
 		request.Header.Set("Accept", sharedSchemaAccept)
+	}
+	if agent, ok := lookbackUserAgent(attempt.LookbackRead); ok {
+		request.Header.Set("User-Agent", agent)
 	}
 	request.Header.Set(headerQuerySource, client.querySource)
 	for name, value := range scopeHeaders(attempt.Spec.PlanFacts) {
@@ -582,6 +585,9 @@ func (client *Client) unavailableCompletion(attempt queryIdentity, reason execut
 				AttemptNo: attempt.AttemptNo, Endpoint: client.endpoint,
 				Result: execution.RouteAttemptFailed, ReasonCode: reason, Detail: detail,
 			}},
+			// What the query asked for, from the request sent: the
+			// provider's status names no table.
+			RequestTargets: execution.RequestTargetsOf(attempt.Spec.PlanFacts),
 		},
 	}
 }

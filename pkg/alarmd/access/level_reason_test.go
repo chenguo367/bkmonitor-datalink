@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
 // Every reason the access layer names is one it puts on a query's outcome, and
@@ -142,4 +143,43 @@ func goSources(t *testing.T, directory string) []string {
 		paths = append(paths, filepath.Join(directory, name))
 	}
 	return paths
+}
+
+// The degraded pool's reasons are exactly the reasons a primary query can be
+// unavailable for, read from where each is written: every reason this layer
+// names (the scan above, the layer whose binding reason the pool keeps), the
+// two AttributedReason puts in place of a reason no attempt gave, and the
+// timeout the scheduler reads a backend that did not answer as. A reason this
+// layer starts naming is missing from the list until it is added, and the
+// pages name every pool reason from it.
+func TestTheQueryCooldownReasonsAreEveryReasonAPrimaryQueryIsUnavailableFor(t *testing.T) {
+	values := contractReasonValues(t)
+	want := map[string]bool{string(execution.ReasonQueryNotAttempted): true, string(execution.ReasonQueryReasonUnrecorded): true,
+		contract.ReasonQueryTimeout: true}
+	for _, directory := range []string{".", "uq"} {
+		for _, name := range reasonsNamedIn(t, directory) {
+			value, ok := values[name]
+			if !ok {
+				t.Fatalf("contract.%s is not a string constant of the contract package", name)
+			}
+			want[value] = true
+		}
+	}
+	got := map[string]bool{}
+	for _, reason := range execution.QueryCooldownReasons {
+		if got[string(reason)] {
+			t.Fatalf("%s is listed twice", reason)
+		}
+		got[string(reason)] = true
+	}
+	for reason := range want {
+		if !got[reason] {
+			t.Errorf("%s can be a pool's reason and is not in execution.QueryCooldownReasons", reason)
+		}
+	}
+	for reason := range got {
+		if !want[reason] {
+			t.Errorf("execution.QueryCooldownReasons lists %s, which no writer of a pool's reason names", reason)
+		}
+	}
 }

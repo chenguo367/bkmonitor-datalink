@@ -67,5 +67,26 @@
     "UNKNOWN",
     "OPTIONAL",
     "NONE"
-  ]
+  ],
+  "query_pause_reason": {
+    "DETECT_INTERVAL_STORAGE_NOT_SLIDING": "存储不能按检测间隔滑动读取",
+    "EXECUTION_BUDGET_EXHAUSTED": "超出本次检测的执行时限",
+    "QUERY_NAMED_OUTPUT_DUPLICATE_KEY": "查询结果有重复的维度",
+    "QUERY_NOT_ATTEMPTED": "查询没有发出",
+    "QUERY_PARTIAL": "查询只返回了部分结果",
+    "QUERY_REASON_UNRECORDED": "查询失败，原因未记录",
+    "QUERY_REJECTED": "查询服务拒绝了查询",
+    "QUERY_TARGET_MISSING": "查询引用的表或字段不存在",
+    "QUERY_TIMEOUT": "查询服务答复超时",
+    "QUERY_UNAVAILABLE": "查询服务不可用",
+    "READINESS_BUDGET_INVALID": "等待数据就绪超出查询时限",
+    "other": "其他原因"
+  },
+  "strategies_from": {
+    "schedule": "策略取自冻结排程",
+    "schedule_pending": "策略未补齐：排程等待读取",
+    "schedule_revision_moved": "策略未补齐：排程修订已变",
+    "schedule_revision_unknown": "策略未补齐：冷却记录没有排程修订",
+    "schedule_unread": "策略未补齐：排程没有读到"
+  }
 }

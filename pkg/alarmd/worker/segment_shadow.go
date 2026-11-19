@@ -940,7 +940,8 @@ func (coordinator *SlotExecutionCoordinator) foldSegmentShadow(ctx context.Conte
 	}
 	round.slot.folded.Store(true)
 	facts, folded := foldSegmentShadowRound(round, due, withheld, coordinator.segmentJoinAdmission(ctx))
-	writes := settleSegmentShadow(ctx, round.slot.store, request, folded, &facts, coordinator.now)
+	writes, fallbacks := settleSegmentShadow(ctx, round.slot.store, request, folded, &facts, coordinator.now)
+	coordinator.reportSegmentFallbacks(ctx, request, fallbacks)
 	landed := map[segment.PlanKey]bool{}
 	if len(writes) > 0 {
 		written, err := round.slot.store.WriteSegments(ctx, segment.WriteRequest{Contract: request.Contract,
@@ -1194,10 +1195,13 @@ func foldSegmentShadowRound(round *segmentShadowRound, due []execution.DuePlan, 
 // renewed whole next round. A page unrenewed for half its lifetime is
 // counted fallback_write, a page each; in a round that skips, its present
 // members were written whole (leaves) and leave it, its departing ones are
-// renewed whole, and a round that writes every State does nothing more.
+// renewed whole, and a round that writes every State does nothing more. The
+// fallback pages are returned beside the writes, each with the times that
+// decided it, for their Plans' lines.
 func settleSegmentShadow(ctx context.Context, store segment.Store, request execution.SlotExecutionRequest, folded []*segmentFolded,
-	facts *observability.SegmentShadowFacts, clock func() time.Time) []segment.PlanWrite {
+	facts *observability.SegmentShadowFacts, clock func() time.Time) ([]segment.PlanWrite, []segmentFallback) {
 	now := clock().UnixMilli()
+	var fallbacks []segmentFallback
 	var renewals []segment.PlanRenewal
 	var renewing []*segmentFolded
 	for _, fold := range folded {
@@ -1218,16 +1222,32 @@ func settleSegmentShadow(ctx context.Context, store segment.Store, request execu
 		var pages []segment.PageRenewal
 		for page, renewal := range fold.renewed {
 			if renewal.Fallback(now) {
-				// A page no earlier round could have renewed - the round
-				// before came before it fell due, a quarter of its shorter
-				// lifetime after its renewal - went half its lifetime by
-				// design, not for renewals failing: counted apart from
-				// fallback_write, which the third stage's bar reads.
+				// Counted apart from fallback_write, which the third
+				// stage's bar reads, when the reason is not renewals
+				// failing: first a Plan whose rounds stopped - this Slot's
+				// evaluation time past the one its mark was written in by
+				// more than its interval, a round between not settled, or a
+				// replay or retry late for its time - then a page no earlier
+				// round could have renewed, the round before coming before
+				// it fell due, a quarter of its shorter lifetime after its
+				// renewal. The mark is written every round that settles,
+				// members present or not, so a Plan with none present, or an
+				// empty page, shows its stop as well.
 				result := observability.SegmentRenewalFallbackWrite
-				if now-renewal.At < state.interval*1000+min(renewal.TTL, ttl)/4 {
+				switch {
+				case state.hadMark && (int64(request.Contract.Slot.EvaluationTime-state.mark.Version.EvaluationTime) > state.interval ||
+					request.Operation == execution.OperationReplay || request.Operation == execution.OperationRetry):
+					result = observability.SegmentRenewalFallbackStalled
+				case now-renewal.At < state.interval*1000+min(renewal.TTL, ttl)/4:
 					result = observability.SegmentRenewalFallbackUnrenewable
 				}
 				facts.Renewal(result, 1)
+				fallback := segmentFallback{key: state.key, page: page, result: result, sinceRenewal: now - renewal.At,
+					renewalTTL: renewal.TTL, ttlNow: ttl, interval: state.interval}
+				if state.hadMark {
+					fallback.lastMarkEvaluationTime = int64(state.mark.Version.EvaluationTime)
+				}
+				fallbacks = append(fallbacks, fallback)
 			}
 			if !renewal.Due(now, ttl) {
 				continue
@@ -1265,6 +1285,9 @@ func settleSegmentShadow(ctx context.Context, store segment.Store, request execu
 			}
 			facts.Renewal(observability.SegmentRenewalMissing, int64(plan.Missing))
 			facts.Renewal(observability.SegmentRenewalOverBudget, int64(plan.OverBudget))
+			for _, elapsed := range plan.Elapsed {
+				facts.RenewScript(elapsed)
+			}
 		}
 	}
 	var writes []segment.PlanWrite
@@ -1273,7 +1296,7 @@ func settleSegmentShadow(ctx context.Context, store segment.Store, request execu
 			writes = append(writes, write)
 		}
 	}
-	return writes
+	return writes, fallbacks
 }
 
 // segmentPlanName is what a Plan's new pages' renewal times are staggered

@@ -1445,9 +1445,14 @@ func openProductionPhaseTwoBundleAssembly(
 	})
 	// Bound after the bundle exists: the snapshot reports what this replica
 	// currently owns, which only the bundle knows.
+	var pooled *pooledStrategies
+	if catalog != nil {
+		// The catalog the Runners read their frozen schedules from.
+		pooled = newPooledStrategies(catalog)
+	}
 	publisher = fleetPublisher{
 		tracker: fleetTracker, store: fleetStore, replica: cfg.PhaseTwo.Worker.ID,
-		owned: bundle.ownedQueryGroups, now: external.Now, contentScope: bundle.ownedContentScope,
+		owned: bundle.ownedQueryGroups, now: external.Now, contentScope: bundle.ownedContentScope, pooled: pooled,
 		// Captured once, here, rather than read per publish. It is the ceiling
 		// on every duration this replica reports, and a ceiling that moves is
 		// not one.
@@ -1464,9 +1469,9 @@ func openProductionPhaseTwoBundleAssembly(
 		capacity:  capacitySnapshotSource(flights, cfg, rejectionTally, bundle.rotationFacts, seriesPullTally, bundle.shaper.facts),
 		flow:      flowFactsSource(recorder, cfg.EffectiveRoles()),
 		readEarly: lookbackReadEarly(lookbackEngine, readHolds), lateSeries: lookbackLateSeries(lookbackEngine, readHolds),
-		lookbackLate: lookbackLateRungs(lookbackEngine),
-		readHolds:    readHolds.fleetFacts,
-		holdOf:       readHolds.holdOf, onOverdue: overdueEpisodeObserver(logger, recorder),
+		lookbackLate: lookbackLateRungs(lookbackEngine), lookbackUncovered: lookbackUncovered(lookbackEngine),
+		readHolds: readHolds.fleetFacts,
+		holdOf:    readHolds.holdOf, onOverdue: overdueEpisodeObserver(logger, recorder),
 		onRestoreUnread: recorder.FleetRestoreUnread,
 		applied:         repository.AppliedActivationRevision,
 		// The due index is the only thing that knows an object was passed over

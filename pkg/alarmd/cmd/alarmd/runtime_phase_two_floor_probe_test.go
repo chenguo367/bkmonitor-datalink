@@ -387,7 +387,7 @@ func TestAProbeGoesOnFromItsKeptRoundsWhenItsGroupComesBack(t *testing.T) {
 		t.Fatalf("fixture: %d rounds kept, probe %+v; want a midpoint's 20 rounds kept", rounds, before.FloorProbe)
 	}
 	// The group leaves this process and comes back.
-	engine.Forget(f.queryGroup)
+	engine.Forget(f.queryGroup, lookback.ForgottenMoved)
 	heldRounds(t, f, time.Hour, func(time.Duration) bool {
 		reading, _ := engine.GroupReading(f.queryGroup)
 		return reading.FloorProbe != nil

@@ -159,6 +159,9 @@ func TestASeriesLateGroupsSlotIsReadAgainAndItsLateSeriesSupplemented(t *testing
 		stats.Supplements[0].Series.Admitted != 1 || stats.Supplements[0].Coverage != 1 || stats.Supplements[0].Rung != RungNames[0] {
 		t.Fatalf("supplements %+v", stats.Supplements)
 	}
+	if f.readsOf(execution.LookbackReadDirected) != 1 || f.readsOf(execution.LookbackReadDirectedEarly) != 0 {
+		t.Fatalf("reads %v, want the Slot's reread asked once as a directed read and none as an early one", f.readKinds())
+	}
 }
 
 // A Slot whose read again has no series its first read did not is nothing

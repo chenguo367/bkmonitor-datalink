@@ -11,19 +11,25 @@ package worker_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/worker"
 )
 
-// slotCensus is one attempt's census as its one observation reports it.
+// slotCensus is one attempt's census as its one observation reports it:
+// writeReuse is the write reuse that observation carries, reuseElsewhere the
+// write reuse any other observation carried.
 type slotCensus struct {
-	reports    int
-	admitted   int64
-	written    int64
-	notWritten map[observability.StateNotWrittenReason]int64
+	reports        int
+	admitted       int64
+	written        int64
+	notWritten     map[observability.StateNotWrittenReason]int64
+	writeReuse     int64
+	reuseElsewhere int64
 }
 
 func censusOf(t *testing.T, observations []observability.Observation) slotCensus {
@@ -32,9 +38,15 @@ func censusOf(t *testing.T, observations []observability.Observation) slotCensus
 	for _, observation := range observations {
 		facts := observation.FrozenStateRenewal
 		if observation.Stage != observability.StageFrozenStateRenewed || facts == nil {
+			if observation.StateWriteReuse != nil {
+				census.reuseElsewhere += observation.StateWriteReuse.Total()
+			}
 			continue
 		}
 		census.reports++
+		if observation.StateWriteReuse != nil {
+			census.writeReuse += observation.StateWriteReuse.Total()
+		}
 		census.admitted += facts.Admitted()
 		census.written += int64(facts.Written)
 		for reason, count := range facts.NotWritten {
@@ -45,12 +57,17 @@ func censusOf(t *testing.T, observations []observability.Observation) slotCensus
 }
 
 // assertSlotCensus holds the Slot's reading - the classes sum to what it
-// wrote plus what it did not - and that the attempt reported it once, with
-// the numbers this case built.
+// wrote plus what it did not, and the write reuse of the same mutations,
+// reported on the census's own observation and nowhere else, sums alike -
+// and that the attempt reported it once, with the numbers this case built.
 func assertSlotCensus(t *testing.T, census slotCensus, admitted, written int64, notWritten map[observability.StateNotWrittenReason]int64) {
 	t.Helper()
 	if census.reports != 1 {
 		t.Fatalf("the attempt reported its census %d times, want once whichever way it ended", census.reports)
+	}
+	if census.writeReuse != census.admitted || census.reuseElsewhere != 0 {
+		t.Fatalf("write reuse %d on the census and %d elsewhere, want the %d mutations the classes count, on the census alone",
+			census.writeReuse, census.reuseElsewhere, census.admitted)
 	}
 	total := int64(0)
 	for _, count := range census.notWritten {
@@ -166,4 +183,50 @@ func TestAWindowedSlotsCensusCountsEachWindowAsItLeft(t *testing.T) {
 	}
 	assertSlotCensus(t, censusOf(t, observations), 4, 2,
 		map[observability.StateNotWrittenReason]int64{observability.StateNotWrittenApplyFailed: 2})
+}
+
+// A Slot held after its admission and before its census - one still running
+// when its process stops - has reported neither its write reuse nor its
+// classes: the two are reported together, at the census, or not at all.
+// Reported apart, the reuse went at the admission and the classes with the
+// census, and a process's last minute read more reuse than classes.
+func TestASlotStillRunningPastItsAdmissionHasReportedNeitherItsReuseNorItsClasses(t *testing.T) {
+	var mu sync.Mutex
+	observations := make([]observability.Observation, 0)
+	fixture := newFixtureWithObserver(t, true, "", observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+		mu.Lock()
+		defer mu.Unlock()
+		observations = append(observations, observability.NormalizeObservation(observation))
+	}))
+	fixture.ports.reverseStateReceipts = true
+	fixture.ports.stateApplyEntered, fixture.ports.stateApplyReleased = make(chan struct{}, 1), make(chan struct{})
+	ran := make(chan error, 1)
+	go func() {
+		_, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
+		ran <- err
+	}()
+	select {
+	case <-fixture.ports.stateApplyEntered:
+	case <-testwait.Expired(t):
+		t.Fatal("the Slot never reached its State write")
+	}
+	mu.Lock()
+	held := censusOf(t, observations)
+	mu.Unlock()
+	if held.reports != 0 || held.writeReuse != 0 || held.reuseElsewhere != 0 {
+		t.Fatalf("held past its admission, the Slot has reported %d censuses, write reuse %d on them and %d elsewhere: want none of either",
+			held.reports, held.writeReuse, held.reuseElsewhere)
+	}
+	close(fixture.ports.stateApplyReleased)
+	select {
+	case err := <-ran:
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+	case <-testwait.Expired(t):
+		t.Fatal("the released Slot did not complete")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	assertSlotCensus(t, censusOf(t, observations), 2, 2, nil)
 }

@@ -525,6 +525,11 @@ type ProviderRouteFacts struct {
 	// it may have dropped are not known absent. Omitted when not suspected,
 	// so every other route encodes as it did.
 	Truncation *ProviderTruncationFact `json:",omitempty"`
+	// RequestTargets is what the query had asked for, on a query that came
+	// back unavailable (RequestTargetsOf): the table, field and space the
+	// provider's refusal is about, which its status alone does not name.
+	// Omitted on every other route.
+	RequestTargets *observability.RequestTargetsFacts `json:",omitempty"`
 }
 
 // ProviderTruncationFact names a suspected cut: its kind (TruncationTermsCut),

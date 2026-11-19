@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 )
 
 // One generation is one rotation, so a walk that reaches every owned Query
@@ -133,7 +134,7 @@ func TestTheRecoveryQueueCannotTurnAnythingAwayWhileTheStaleEntriesAreDropped(t 
 	// The owned set shrinks and grows in one step -- the moment that looks like
 	// it should overflow the queue, and the one the drop exists to clear.
 	dispatcher.bundle.mu.Lock()
-	dispatcher.bundle.removeRunnerLocked("query-group-c")
+	dispatcher.bundle.removeRunnerLocked("query-group-c", lookback.ForgottenMoved)
 	delete(dispatcher.bundle.assigned, "query-group-c")
 	dispatcher.bundle.setRunnerLocked("query-group-d",
 		&phaseTwoQueryGroupLifecycle{runner: walkRunner{readyAt: at.Add(9 * time.Second)}})
@@ -167,7 +168,7 @@ func TestTheRecoveryQueueCannotTurnAnythingAwayWhileTheStaleEntriesAreDropped(t 
 	first, firstRevision := bypass.bundle.snapshotScheduledRunners()
 	bypass.fillQueues(first, firstRevision)
 	bypass.bundle.mu.Lock()
-	bypass.bundle.removeRunnerLocked("query-group-c")
+	bypass.bundle.removeRunnerLocked("query-group-c", lookback.ForgottenMoved)
 	delete(bypass.bundle.assigned, "query-group-c")
 	bypass.bundle.setRunnerLocked("query-group-d",
 		&phaseTwoQueryGroupLifecycle{runner: walkRunner{readyAt: at.Add(9 * time.Second)}})
@@ -266,7 +267,7 @@ func TestRotationStillCountsATruncatedWalkWhenTheOwnedSetShrinks(t *testing.T) {
 
 	dispatcher.bundle.mu.Lock()
 	for _, queryGroup := range []execution.QueryGroupIdentity{"query-group-b", "query-group-c"} {
-		dispatcher.bundle.removeRunnerLocked(queryGroup)
+		dispatcher.bundle.removeRunnerLocked(queryGroup, lookback.ForgottenMoved)
 		delete(dispatcher.bundle.assigned, queryGroup)
 	}
 	dispatcher.bundle.mu.Unlock()

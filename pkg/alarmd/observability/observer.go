@@ -748,14 +748,22 @@ type FrozenStateRenewalFacts struct {
 	Missing int `json:"missing"`
 	Failed  int `json:"failed"`
 	// SeriesClasses is the mutations this attempt admitted for writing, by
-	// what their series decided (StateSeriesClass), counted at the admission
-	// where state_write_reuse counts them; NotWritten is those of them the
-	// attempt did not write, by the exit it left at. They are here, beside
-	// Written, so that one observation carries all three and the Slot's
-	// reading holds by construction: the classes sum to Written plus every
-	// NotWritten, on an attempt that completed and on one that failed.
+	// what their series decided (StateSeriesClass), counted at the admission;
+	// NotWritten is those of them the attempt did not write, by the exit it
+	// left at. They are here, beside Written, so that one observation carries
+	// all three and the Slot's reading holds by construction: the classes sum
+	// to Written plus every NotWritten, on an attempt that completed and on
+	// one that failed.
 	SeriesClasses map[StateSeriesKind]map[StateSeriesClass]int64 `json:"series_classes,omitempty"`
 	NotWritten    map[StateNotWrittenReason]int64                `json:"not_written,omitempty"`
+	// WriteReuse is the same admitted mutations by how much of what each
+	// write carries was already stored (state_write_reuse), counted at the
+	// same admission and reported on the observation the classes are, as
+	// its StateWriteReuse: the two sum alike on every observation. Reported
+	// apart at the admission, the write reuse of a Slot still running when
+	// its process stopped was counted and its classes never were, and the
+	// process's last minute read more reuse than classes.
+	WriteReuse StateWriteReuseFacts `json:"-"`
 }
 
 // RecordSeriesClass counts one admitted mutation under its series' class.
@@ -780,6 +788,7 @@ func (facts *FrozenStateRenewalFacts) CloneSeriesWrites() {
 		classes = nil
 	}
 	facts.SeriesClasses, facts.NotWritten = classes, maps.Clone(facts.NotWritten)
+	facts.WriteReuse.Counts = maps.Clone(facts.WriteReuse.Counts)
 }
 
 // RecordNotWritten counts admitted mutations the attempt did not write.
@@ -1345,6 +1354,7 @@ const ReasonSlotWaitSlow ReasonCode = "SLOT_WAIT_SLOW"
 // hand, so a new reason cannot arrive without a series to count it.
 var ReplayExpiryReasons = []string{
 	"REPLAY_AGE_EXCEEDED", "REPLAY_DISTANCE_EXCEEDED", "REPLAY_WAIT_EXCEEDS_DISTANCE", "REPLAY_RANGE_EXPIRED",
+	"QUERY_COOLDOWN_GAP",
 }
 
 // ReplayTakeoverFacts is one Slot evaluated before this process took its
@@ -1695,7 +1705,11 @@ type RebalanceFacts struct {
 // asked; Held, the word SEGMENT_SKIP_HELD when asked for and not set because
 // a ready worker does not declare the contract; and the records the round
 // restated: Set to this Leader's epoch, Withdrawn, and Failed - a conflict
-// with another write or an error, restated by the next round.
+// with another write or an error, restated by the next round. Changed says
+// the gate is news - a word written or not, or the ask, the hold or the
+// replicas not declaring the contract other than this Leader's previous
+// round found them, a new Leader's first round always - and the round's line
+// is written for it as for a move.
 type SegmentSkipFacts struct {
 	Asked     bool     `json:"asked"`
 	Ready     int      `json:"ready,omitempty"`
@@ -1704,6 +1718,7 @@ type SegmentSkipFacts struct {
 	Set       int      `json:"set"`
 	Withdrawn int      `json:"withdrawn"`
 	Failed    int      `json:"failed"`
+	Changed   bool     `json:"changed"`
 }
 
 // ShardAwareFacts is one round's split-contract census over the ready set.
@@ -1933,6 +1948,17 @@ func normalizeRebalanceFacts(facts *RebalanceFacts) *RebalanceFacts {
 			bounded.SplitsHeld = 0
 		}
 		normalized.ShardAware = &bounded
+	}
+	if skip := facts.SegmentSkip; skip != nil {
+		// The same copy and bound as the split gate's.
+		bounded := *skip
+		bounded.Unaware = append([]string(nil), skip.Unaware...)
+		if len(bounded.Unaware) > MaxRebalanceOwnedSamples {
+			bounded.Unaware = bounded.Unaware[:MaxRebalanceOwnedSamples]
+		}
+		bounded.Ready, bounded.Set, bounded.Withdrawn, bounded.Failed = max(bounded.Ready, 0), max(bounded.Set, 0),
+			max(bounded.Withdrawn, 0), max(bounded.Failed, 0)
+		normalized.SegmentSkip = &bounded
 	}
 	return &normalized
 }
@@ -3017,10 +3043,21 @@ type Observation struct {
 	SlotCompletionKind string
 	RangeDistance      *RangeDistanceFacts
 	// SlotSkipped is one Slot, or range, finalised as skipped.
-	SlotSkipped         *SlotSkippedFacts
-	RangeGate           *RangeGateFacts
-	SlotWait            *SlotWaitFacts
-	SeriesNotEvaluated  *SeriesNotEvaluatedFacts
+	SlotSkipped *SlotSkippedFacts
+	// PlanScope is whose the Slot is, on its slot_completed and
+	// slot_skipped lines.
+	PlanScope *PlanScopeFacts
+	// RequestTargets is what a query that came back unavailable had asked
+	// for, on its query_completed and slot_completed lines.
+	RequestTargets     *RequestTargetsFacts
+	RangeGate          *RangeGateFacts
+	SlotWait           *SlotWaitFacts
+	SeriesNotEvaluated *SeriesNotEvaluatedFacts
+	// ExecutionSlotWait is what a Slot's dispatch waited for an execution
+	// slot (StageSlotStarted); nil for a Slot started without a dispatch.
+	ExecutionSlotWait *ExecutionSlotWaitFacts
+	// SegmentFallback is one Plan's fallback page (StageSegmentRenewalFallback).
+	SegmentFallback     *SegmentFallbackFacts
 	ObjectCatalog       *ObjectCatalogFacts
 	ObjectRead          *ObjectReadFacts
 	StateGenerationSkew *StateGenerationSkewFacts
@@ -3209,6 +3246,8 @@ func NormalizeObservation(observation Observation) Observation {
 	observation.ControlReads = normalizeControlReadFacts(observation.ControlReads)
 	observation.RangeDistance = normalizeRangeDistanceFacts(observation.RangeDistance)
 	observation.SlotSkipped = normalizeSlotSkippedFacts(observation.SlotSkipped)
+	observation.PlanScope = normalizePlanScope(observation.PlanScope)
+	observation.RequestTargets = normalizeRequestTargets(observation.RequestTargets)
 	observation.RangeGate = normalizeRangeGateFacts(observation.RangeGate)
 	observation.HeldBy = normalizeHeldByFacts(observation.HeldBy)
 	if observation.ReplayExpiry != nil {
@@ -4135,6 +4174,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentScheduler, StageRangeGateDecided},
 	{ComponentScheduler, StageSlotWait},
 	{ComponentScheduler, StageSeriesNotEvaluated},
+	{ComponentState, StageSegmentRenewalFallback},
 	{ComponentAccess, StageQueryCompleted},
 	{ComponentAccess, StageQueryBudgetResolved},
 	{ComponentAccess, StageSlotReadinessArrival},
@@ -4425,11 +4465,11 @@ var SchedulerDecisionReasons = func() []ReasonCode {
 // and the refusal a store found against skipping a pruned cursor
 // (CursorRefusals), which said retrying with none; and a slow wait inside a
 // Slot attempt, which said degraded with none; and an execution declined as
-// hung, which said failed with none; and a completed Slot that bound series
-// it never took up.
+// hung, which said failed with none; a completed Slot that bound series it
+// never took up; and a Plan's page that went half its lifetime unrenewed.
 var SlotPathReasons = func() []ReasonCode {
-	reasons := make([]ReasonCode, 0, len(RunOutcomes)+len(CursorRefusals)+3)
-	reasons = append(reasons, ReasonSlotWaitSlow, ReasonExecutionHung, ReasonSeriesNotEvaluated)
+	reasons := make([]ReasonCode, 0, len(RunOutcomes)+len(CursorRefusals)+4)
+	reasons = append(reasons, ReasonSlotWaitSlow, ReasonExecutionHung, ReasonSeriesNotEvaluated, ReasonSegmentRenewalFallback)
 	for _, outcome := range RunOutcomes {
 		reasons = append(reasons, ReasonCode(outcome))
 	}

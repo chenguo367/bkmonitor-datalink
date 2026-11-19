@@ -695,6 +695,36 @@ func TestTheUnawareReplicaGaugeFollowsTheRoundsSplitGate(t *testing.T) {
 	}
 }
 
+// The Leader's round says whether the segment skip word is asked for, held,
+// and how many ready replicas hold it, and the three gauges follow it every
+// round: held by one replica mid-roll, set once it declares, and nothing of
+// the gate while the values do not ask - a round whose facts carry no word.
+func TestTheSegmentSkipGaugesFollowTheRoundsGate(t *testing.T) {
+	recorder := NewRecorder(BuildInfo{})
+	observe := func(skip *observability.SegmentSkipFacts) {
+		recorder.Observe(context.Background(), observability.Observation{
+			Component: observability.ComponentOwnership, Stage: observability.StageRebalancePlanned, Result: observability.ResultSuccess,
+			Operation: observability.OperationLoad, Rebalance: &observability.RebalanceFacts{SegmentSkip: skip},
+		})
+	}
+	read := func() [3]float64 {
+		return [3]float64{testutil.ToFloat64(recorder.phaseTwo.segmentSkipAsked), testutil.ToFloat64(recorder.phaseTwo.segmentSkipHeld),
+			testutil.ToFloat64(recorder.phaseTwo.segmentSkipUnawareReplicas)}
+	}
+	observe(&observability.SegmentSkipFacts{Asked: true, Ready: 3, Unaware: []string{"worker-2"}, Held: "SEGMENT_SKIP_HELD"})
+	if got := read(); got != [3]float64{1, 1, 1} {
+		t.Fatalf("held by one replica: asked, held, unaware = %v, want 1 1 1", got)
+	}
+	observe(&observability.SegmentSkipFacts{Asked: true, Ready: 3, Set: 2})
+	if got := read(); got != [3]float64{1, 0, 0} {
+		t.Fatalf("set: asked, held, unaware = %v, want 1 0 0", got)
+	}
+	observe(nil)
+	if got := read(); got != [3]float64{0, 0, 0} {
+		t.Fatalf("not asked: asked, held, unaware = %v, want 0 0 0", got)
+	}
+}
+
 // Level outcomes reach the counter by kind and, for the kinds that carry a
 // reason, by reason - a coverage reason by name, any other as other, so the
 // label set stays the closed list the metric pre-creates.
@@ -754,6 +784,7 @@ func TestSteppingDownAsLeaderTakesTheLeaderReadingsOffTheScrape(t *testing.T) {
 	})
 	recorder.phaseTwo.undrainedDrainingQueryGroups.Set(2)
 	leaderReadings := []string{"alarmd_rebalance_planned_moves", "alarmd_rebalance_gap", "alarmd_shard_unaware_ready_replicas",
+		"alarmd_segment_skip_asked", "alarmd_segment_skip_held", "alarmd_segment_skip_unaware_ready_replicas",
 		"alarmd_rebalance_byte_overloaded_workers", "alarmd_rebalance_byte_most_loaded_share", "alarmd_rebalance_byte_unread_groups"}
 	scraped := scrape(t, recorder)
 	for _, reading := range leaderReadings {

@@ -3693,11 +3693,29 @@ const (
 	// A capacity defect of the strategy - it has to be sharded - and every
 	// later Slot of the group meets it until it is.
 	CauseResourceShareExceeded CompletionCause = "RESOURCE_SHARE_EXCEEDED"
+	// CauseQueryCooldown is a Slot given up - for its distance, its wait or
+	// its age, alone or in a range - while the degraded pool had its Query
+	// Group (SlotExecutionRequest.QueryCooldownHeld or QueryCooldownProbe):
+	// its queries did not run because the pool held them, and the gap is the
+	// pool's. CauseExpiredReplay is then left to Query Groups that fell
+	// behind. The completion's kind and reason are what they were; the cause
+	// alone tells the two apart.
+	CauseQueryCooldown CompletionCause = "QUERY_COOLDOWN"
 )
 
 // QueryFreeCauses are the causes a query-free finalization may name.
 var QueryFreeCauses = []CompletionCause{CauseExpiredReplay, CauseSnapshotCorrupt, CauseSnapshotUnavailablePastBound,
-	CauseResolveFailedPastBound, CauseResourceShareExceeded}
+	CauseResolveFailedPastBound, CauseResourceShareExceeded, CauseQueryCooldown}
+
+// ExpiredReplayCause is the cause a Slot given up as an expired replay is
+// finalized under: the pool's (CauseQueryCooldown) while the degraded pool
+// has its Query Group, CauseExpiredReplay otherwise.
+func ExpiredReplayCause(request SlotExecutionRequest) CompletionCause {
+	if request.QueryCooldownHeld || request.QueryCooldownProbe {
+		return CauseQueryCooldown
+	}
+	return CauseExpiredReplay
+}
 
 // CompletionAttribution is why a Slot completed the way it did: the condition
 // that folded into the kind, and that condition's own reason.
@@ -4653,6 +4671,10 @@ type SlotExecutionResult struct {
 	// (AttributedReason): what the query cooldown that this result feeds
 	// reports its entries and exits under.
 	QueryUnavailableReason ReasonCode
+	// QueryUnavailableTargets is, with QueryAvailabilityUnavailable, what
+	// that primary query had asked for (ProviderRouteFacts.RequestTargets):
+	// the cooldown record keeps it beside the reason. Nil otherwise.
+	QueryUnavailableTargets *observability.RequestTargetsFacts
 	// QueryUnknownReason is, with QueryAvailabilityUnknown, QUERY_TIMEOUT
 	// when a primary query timed out after being sent late, which the worker
 	// does not count against the backend; empty otherwise. The query

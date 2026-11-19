@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -453,5 +454,42 @@ func TestAHungExecutionIsWrittenAtError(t *testing.T) {
 		Result: ResultFailed, ReasonCode: ReasonExecutionHung, ExecutionHung: &ExecutionHungFacts{Outcome: ExecutionHungDeclined}})
 	if declined.ReasonCode != ReasonExecutionHung || observationLevel(declined) != slog.LevelError {
 		t.Fatalf("declined: reason %s level %s, want EXECUTION_HUNG at ERROR", declined.ReasonCode, observationLevel(declined))
+	}
+}
+
+// A round whose segment skip gate moved writes its line as a round that
+// moved does, naming the replicas that hold the word; the same gate in a
+// round that moved nothing else is counted and not written.
+func TestARoundWhoseSegmentSkipGateMovedIsWritten(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	now := time.Unix(1_000, 0)
+	observer := levelObserver(t, &output, &now)
+	round := func(changed bool) Observation {
+		return Observation{Component: ComponentOwnership, Stage: StageRebalancePlanned, Result: ResultSuccess,
+			Rebalance: &RebalanceFacts{Assigned: 4, SegmentSkip: &SegmentSkipFacts{Asked: true, Ready: 2, Unaware: []string{"worker-2"},
+				Held: "SEGMENT_SKIP_HELD", Changed: changed}}}
+	}
+	observer.Observe(context.Background(), round(true))
+	lines := decodeLines(t, &output)
+	if len(lines) != 1 {
+		t.Fatalf("a moved gate wrote %d lines, want one", len(lines))
+	}
+	line := lines[0]
+	if line["segment_skip_held"] != "SEGMENT_SKIP_HELD" || line["segment_skip_changed"] != true || line["segment_skip_asked"] != true ||
+		line["segment_skip_unaware_replicas"] != float64(1) || !reflect.DeepEqual(line["segment_skip_unaware"], []any{"worker-2"}) ||
+		line["segment_skip_set"] != float64(0) {
+		t.Fatalf("the line's segment skip = %v, want held by worker-2", line)
+	}
+	observer.Observe(context.Background(), round(false))
+	if lines := decodeLines(t, &output); len(lines) != 0 {
+		t.Fatalf("an unmoved gate wrote %v", lines)
+	}
+	// A round that moved, its facts without the word, names none of it.
+	observer.Observe(context.Background(), Observation{Component: ComponentOwnership, Stage: StageRebalancePlanned, Result: ResultSuccess,
+		Rebalance: &RebalanceFacts{PlannedMoves: 2}})
+	if lines := decodeLines(t, &output); len(lines) != 1 || lines[0]["segment_skip_asked"] != nil {
+		t.Fatalf("a round without the word = %v, want its line and no segment skip keys", lines)
 	}
 }

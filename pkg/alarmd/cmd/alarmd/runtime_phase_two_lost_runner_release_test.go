@@ -26,6 +26,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
@@ -143,7 +144,7 @@ func TestALostRunnersLateReleaseLeavesItsSuccessorRunning(t *testing.T) {
 	bundle.mu.RLock()
 	lost := bundle.runners[queryGroup]
 	bundle.mu.RUnlock()
-	if !bundle.detachQueryGroup(queryGroup, lost) {
+	if !bundle.detachQueryGroup(queryGroup, lost, lookback.ForgottenLeaseLost) {
 		t.Fatal("the Runner was not detached")
 	}
 	// Its lease lapses - the deadline is kept on Redis's own clock, so it is

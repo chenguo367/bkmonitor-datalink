@@ -41,6 +41,7 @@ func healthFromSnapshots(view View, at time.Time, stallAfter time.Duration) Heal
 		Ours:                 attributed(view.Anomalies, AttributionOurs), Unattributed: attributed(view.Anomalies, AttributionUnknown),
 		Impact:     ImpactTallyOf(view, at).Impact(),
 		DemotedDue: view.DemotedDue, DemotedDueOldestSeconds: view.DemotedDueOldestSeconds,
+		QueryCooldown:   healthQueryCooldownOf(&view, queryPausePartOf(view)),
 		DemotionEntries: view.DemotionEntries, DemotionExtensions: view.DemotionExtensions, DemotionExits: view.DemotionExits,
 		DemotionRestored: view.DemotionRestored, DemotionHandovers: view.DemotionHandovers,
 		DemotionReentries: view.DemotionReentries, LastDemotionExit: momentOrNil(view.LastDemotionExit),

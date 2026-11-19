@@ -50,9 +50,6 @@ const (
 	SkipGapProgressOnly = "progress_recent_gap"
 )
 
-// slotSkippedPlanSample bounds the strategy ids a line names.
-const slotSkippedPlanSample = 4
-
 // LookbackBusyFacts is what the lookback had of the Query Group in flight or
 // reserved at the moment the skip was reported, read under its lock. The
 // lookback samples a group about once an hour and its reads take the same
@@ -121,9 +118,11 @@ type SlotSkippedFacts struct {
 	// named here because it has no slot_completed line of its own. Zero when
 	// there was none.
 	InFlightSlot int64
-	// GapStrategies is the first few due Plans' strategy ids.
-	GapStrategies []string
-	Replay        *SlotSkipReplayFacts
+	// PlanScope is whose the Slot is, rendered as the line's plan scope
+	// (Observation.PlanScope); nil where the Slot's due Plans are not known
+	// to the site, a span a cursor skip pruned.
+	PlanScope *PlanScopeFacts
+	Replay    *SlotSkipReplayFacts
 	// Share is set on a Slot finalized as RESOURCE_SHARE_EXCEEDED.
 	Share *SlotSkipShareFacts
 	// Range is the distance a range was sized by, when it was built this
@@ -144,9 +143,6 @@ func normalizeSlotSkippedFacts(facts *SlotSkippedFacts) *SlotSkippedFacts {
 	}
 	if !known {
 		normalized.Path = SlotSkippedOther
-	}
-	if len(normalized.GapStrategies) > slotSkippedPlanSample {
-		normalized.GapStrategies = normalized.GapStrategies[:slotSkippedPlanSample]
 	}
 	return &normalized
 }
@@ -197,6 +193,7 @@ func ObserveSlotSkipped(ctx context.Context, observer Observer, trace TraceField
 		Component: ComponentScheduler, Stage: StageSlotSkipped, Operation: operation,
 		Result: ResultDegraded, ReasonCode: ReasonCode(facts.Reason),
 		Trace: trace, HeldBy: HeldByFromContext(ctx), SlotSkipped: &facts, RangeDistance: facts.Range,
+		PlanScope: facts.PlanScope,
 	})
 }
 
@@ -215,7 +212,6 @@ func appendSlotSkippedAttributes(attributes []slog.Attr, facts *SlotSkippedFacts
 		slog.String("skip_cause", facts.Cause),
 		slog.String("skip_gap_guard", facts.GapGuard),
 		slog.Int("skip_gap_plans", facts.GapPlans),
-		slog.Any("skip_gap_strategies", facts.GapStrategies),
 	)
 	if facts.InFlightSlot != 0 {
 		attributes = append(attributes, slog.Int64("in_flight_slot", facts.InFlightSlot))

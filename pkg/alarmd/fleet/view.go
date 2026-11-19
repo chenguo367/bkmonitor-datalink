@@ -1570,11 +1570,42 @@ type AwaitingView struct {
 	BoundSeconds  int64     `json:"bound_seconds"`
 }
 
+// newestOwnerPerQueryGroup keeps one pooled row a Query Group: the one its
+// newest owner reported (CooldownOwnerEpoch), the first listed of equal
+// epochs. Rolling or changing owner, a Query Group is in the old owner's
+// snapshot and the new one's for a moment; counted twice it would read as
+// two strategies' worth of a pool. It says how many rows it dropped.
+func newestOwnerPerQueryGroup(rows []Anomaly) ([]Anomaly, int) {
+	at := make(map[string]int, len(rows))
+	kept := rows[:0:0]
+	for _, row := range rows {
+		if index, seen := at[row.QueryGroup]; seen {
+			if row.CooldownOwnerEpoch > kept[index].CooldownOwnerEpoch {
+				kept[index] = row
+			}
+			continue
+		}
+		at[row.QueryGroup] = len(kept)
+		kept = append(kept, row)
+	}
+	return kept, len(rows) - len(kept)
+}
+
 type Anomaly struct {
 	QueryCooldown *observability.QueryCooldownFacts `json:"query_cooldown,omitempty"`
-	QueryGroup    string                            `json:"query_group"`
-	Kind          string                            `json:"kind"`
-	ReasonCode    string                            `json:"reason_code,omitempty"`
+	// RequestTargets is what the pool's latest failed query had asked for,
+	// and CooldownOwnerEpoch the epoch of the owner that reported the pool:
+	// of two replicas listing one Query Group in a handover, the row of the
+	// newer owner is kept (aggregate). Zero for a row of a build before it,
+	// which any epoch outranks.
+	RequestTargets     *observability.RequestTargetsFacts `json:"request_targets,omitempty"`
+	CooldownOwnerEpoch uint64                             `json:"cooldown_owner_epoch,omitempty"`
+	// PoolReason is the reason the pool holds the Query Group under, as its
+	// entry, record or probes said it; empty outside the pool.
+	PoolReason string `json:"pool_reason,omitempty"`
+	QueryGroup string `json:"query_group"`
+	Kind       string `json:"kind"`
+	ReasonCode string `json:"reason_code,omitempty"`
 	// Cause separates the conditions that share one completion kind. Without it
 	// a page can list hundreds of objects as degraded and give the reader no
 	// way to tell which ones anyone can do something about, which is the same
@@ -1863,6 +1894,14 @@ type Anomaly struct {
 	// after a restart rather than over-reports.
 	Stalled    bool          `json:"stalled,omitempty"`
 	Strategies []StrategyRef `json:"strategies,omitempty"`
+	// StrategiesFrom is where Strategies came from when not from the rounds
+	// this replica watched - a pooled row's frozen schedule - or why a pooled
+	// row's could not be read (strategies_from.go); empty for a row whose
+	// strategies are the rounds'. StrategiesTotal is how many strategies the
+	// schedule's Plans have, all of them: more than Strategies lists when its
+	// list was cut.
+	StrategiesFrom  string `json:"strategies_from,omitempty"`
+	StrategiesTotal int    `json:"strategies_total,omitempty"`
 }
 
 // MarshalJSON leaves failing_since off the wire while it is zero. The outer
@@ -1916,8 +1955,13 @@ type Snapshot struct {
 	// It is not part of the snapshot's body: the store writes it to a key of
 	// its own beside it, for the control plane's lookback planning to read
 	// without loading every snapshot (RedisStore.LoadLookbackLate).
-	LookbackLate map[string]int           `json:"-"`
-	ReadHolds    map[string]ReadHoldFacts `json:"read_holds,omitempty"`
+	LookbackLate map[string]int `json:"-"`
+	// LookbackUncovered is the owned objects the late-data lookback has no
+	// fresh measurement of, the largest first, at most MaxLookbackUncovered,
+	// each with why: what the coverage gauge counts, named. Bounded, it rides
+	// in the summary's head, for the deployment's health to read.
+	LookbackUncovered []LookbackUncoveredFacts `json:"lookback_uncovered,omitempty"`
+	ReadHolds         map[string]ReadHoldFacts `json:"read_holds,omitempty"`
 	// ReadHoldsCut says ReadHolds was cut to its budget, so a group it does
 	// not list may hold one (ReadHoldFacts).
 	ReadHoldsCut bool `json:"read_holds_cut,omitempty"`
@@ -3095,9 +3139,12 @@ type View struct {
 	// off the wire and shared read-only, so detail can distinguish a quiet
 	// active object from an absent one without another control-plane read.
 	expectation Expectation
-	Health      Health `json:"health"`
-	Expected    *int   `json:"expected"`
-	Covered     int    `json:"covered"`
+	// expectedReplicas is how many replicas the view was read from the
+	// registry as expecting, whether or not each was counted.
+	expectedReplicas int
+	Health           Health `json:"health"`
+	Expected         *int   `json:"expected"`
+	Covered          int    `json:"covered"`
 	// Determined is the subset of Covered whose owning replica has actually
 	// observed a conclusive round. Covered minus Determined is counted into
 	// Unknown, not into health.
@@ -3154,7 +3201,11 @@ type View struct {
 	// AddressDiffers is every replica's latest records whose address is not
 	// their host's, newest first and bounded.
 	AddressDiffers []AddressDiffersSample `json:"address_differs_samples,omitempty"`
-	Anomalies      []Anomaly              `json:"anomalies"`
+	// LookbackUncovered is every replica's owned objects its lookback has no
+	// fresh measurement of, the largest first and bounded
+	// (aggregateLookbackUncovered).
+	LookbackUncovered []LookbackUncoveredFacts `json:"lookback_uncovered,omitempty"`
+	Anomalies         []Anomaly                `json:"anomalies"`
 	// Healthy is Determined minus the listed columns. It is computed here
 	// rather than left to the page because it is the column a reader trusts
 	// most, and a page that derives it by subtraction can be made to show a
@@ -3428,6 +3479,7 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	if len(expectedReplicas) == 0 {
 		view.Gaps = append(view.Gaps, Gap{Kind: GapNoReplicas})
 	}
+	view.expectedReplicas = len(expectedReplicas)
 
 	for _, replica := range expectedReplicas {
 		snapshot, published := byReplica[replica]
@@ -3723,6 +3775,7 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	aggregateDue(&view, counted)
 	aggregateDispatchSuppression(&view, counted)
 	aggregateAddressDiffers(&view, counted)
+	aggregateLookbackUncovered(&view, counted)
 	aggregateTrackerDropped(&view, counted)
 	aggregateEffectiveTimeUnread(&view, counted)
 	aggregateUndetermined(&view, counted)
@@ -3780,6 +3833,11 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		}
 	}
 
+	// A Query Group a handover's two owners both list is one Query Group:
+	// the newer owner's row stays, and the total counts it once.
+	var twice int
+	view.Demoted, twice = newestOwnerPerQueryGroup(view.Demoted)
+	view.DemotedTotal = max(view.DemotedTotal-twice, len(view.Demoted))
 	sortAnomalies(view.Anomalies)
 	sortAnomalies(view.Demoted)
 	sortAnomalies(view.Undecidable)

@@ -49,15 +49,16 @@ func inPlaceWaitStrategy(t *testing.T, period int64) []byte {
 }
 
 // A ring-ratio strategy reads a history window that ends before its primary
-// window, so its history query is readable before the primary one and its
-// Slot is not deferred as a whole: the execution sends the history query and
-// waits in place, holding its slot, for the primary. Through the production
-// bundle, a round run 200 ms before the primary is readable makes that wait:
-// its slot_completed line carries it and the counter counts it, in the
-// shortest bucket. A round run once both are readable makes none. A period of
-// under a minute is what still does this: a minute's Slot has its first round
-// at the primary's read (TestAMinuteMixedSlotHasNoInPlaceWait).
-func TestAnInPlaceReadinessWaitIsOnTheSlotLineAndCounted(t *testing.T) {
+// window, so its history query is readable before the primary one. Its Slot
+// used to send the history query at the grid point and wait in place,
+// holding its execution slot, for the primary. A period under a minute now
+// has its first round at its primary's read, as a minute's does
+// (TestAMinuteMixedSlotHasNoInPlaceWait): through the production bundle, a
+// round run 200 ms before the primary is readable starts nothing, and the
+// round run at the read reads both and waits for nothing - no slot_completed
+// line carries a wait and the counter counts none. A wait in place is left to
+// a round that keeps its grid point: a recovery of a Slot already begun.
+func TestAPeriodUnderAMinuteMixedSlotHasNoInPlaceWait(t *testing.T) {
 	address, client := startPhaseTwoRedis(t)
 	ctx := context.Background()
 	document := inPlaceWaitStrategy(t, inPlaceWaitPeriod)
@@ -127,17 +128,58 @@ func TestAnInPlaceReadinessWaitIsOnTheSlotLineAndCounted(t *testing.T) {
 	if got, done := round(0, -500*time.Millisecond); done == 0 || len(got) != 0 {
 		t.Fatalf("minute 0, run once both queries are readable: %d Slots completed with waits %+v, want a Slot and no wait", done, got)
 	}
-	got, done := round(1, 200*time.Millisecond)
-	if done == 0 || len(got) != 1 {
-		t.Fatalf("minute 1, run 200 ms before the primary is readable: %d Slots completed with waits %+v, want one wait", done, got)
+	if got, done := round(1, 200*time.Millisecond); done != 0 || len(got) != 0 {
+		t.Fatalf("minute 1, run 200 ms before the primary is readable: %d Slots completed with waits %+v, want nothing started before the read", done, got)
 	}
-	wait := got[0]
-	if wait.Waits != 1 || wait.TotalMillis < 150 || wait.TotalMillis > 250 || wait.SentBeforeFirstWait != 1 ||
-		wait.BeforeAnySentMillis != 0 || wait.HeldPreparedBytes == 0 || wait.HeldInputBytes == 0 {
-		t.Fatalf("the wait on the line %+v, want one of about 200 ms after the history query was sent, holding the history "+
-			"answer that came back during it, with a prepared estimate", wait)
+	if got, done := round(1, -500*time.Millisecond); done == 0 || len(got) != 0 {
+		t.Fatalf("minute 1, run once the primary is readable: %d Slots completed with waits %+v, want a Slot and no wait", done, got)
+	}
+	if got := counterValue(t, recorder, "alarmd_access_inplace_readiness_waits_total", map[string]string{"wait": "le5s"}); got != 0 {
+		t.Fatalf("access_inplace_readiness_waits_total{wait=le5s} = %v, want 0", got)
+	}
+}
+
+// A wait in place access measured reaches the Slot's completion line and the
+// counter through the production Slot executor, its observer the Recorder as
+// production wires it. No scheduled round of the production bundle makes one
+// any more - every round of every period starts at its primary's read, and a
+// held Slot is deferred whole - so the case starts from the execution result
+// access returns, which access's own cases make from a real wait; what is
+// under test is the hand-off from that result to the line and the counter,
+// every field of the wait carried.
+func TestAnInPlaceWaitAccessMeasuredIsOnTheSlotLineAndCounted(t *testing.T) {
+	recorder := metric.NewRecorder(metric.BuildInfo{})
+	var completions []observability.Observation
+	// Every field its own value, none zero, so a field the hand-off drops or
+	// swaps is told apart.
+	measured := execution.InPlaceWaitFacts{Waits: 2, TotalMillis: 300, LongestMillis: 200, SentBeforeFirstWait: 1,
+		BeforeAnySentMillis: 100, HeldInputBytes: 4096, HeldPreparedBytes: 8192}
+	executor := observedProductionSlotExecutor{
+		next: slotExecutorFunc(func(context.Context, execution.SlotExecutionRequest) (execution.SlotExecutionResult, error) {
+			wait := measured
+			return execution.SlotExecutionResult{Completed: true, CompletionKind: execution.CompletionFull,
+				Result: observability.ResultSuccess, InPlaceWait: &wait}, nil
+		}),
+		observer: observability.Multi(recorder, observability.ObserverFunc(func(_ context.Context, o observability.Observation) {
+			if o.Stage == observability.StageSlotCompleted {
+				completions = append(completions, o)
+			}
+		})),
+	}
+	if _, err := executor.Execute(context.Background(), execution.SlotExecutionRequest{Operation: execution.OperationNormal}); err != nil {
+		t.Fatalf("Execute() error=%v", err)
+	}
+	if len(completions) != 1 || completions[0].InPlaceWait == nil {
+		t.Fatalf("completion lines %+v, want one carrying the wait", completions)
+	}
+	want := observability.InPlaceWaitFacts{Waits: measured.Waits, TotalMillis: measured.TotalMillis,
+		LongestMillis: measured.LongestMillis, SentBeforeFirstWait: measured.SentBeforeFirstWait,
+		BeforeAnySentMillis: measured.BeforeAnySentMillis, HeldInputBytes: measured.HeldInputBytes,
+		HeldPreparedBytes: measured.HeldPreparedBytes}
+	if got := *completions[0].InPlaceWait; got != want {
+		t.Fatalf("the wait on the line %+v, want the one access measured %+v", got, want)
 	}
 	if got := counterValue(t, recorder, "alarmd_access_inplace_readiness_waits_total", map[string]string{"wait": "le5s"}); got != 1 {
-		t.Fatalf("access_inplace_readiness_waits_total{wait=le5s} = %v, want 1", got)
+		t.Fatalf("access_inplace_readiness_waits_total{wait=le5s} = %v, want 1: waits of 300 ms in all, in the shortest bucket", got)
 	}
 }

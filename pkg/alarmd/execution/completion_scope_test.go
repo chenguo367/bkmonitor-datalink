@@ -103,13 +103,24 @@ func TestTheCounterTakesEveryCompletionCause(t *testing.T) {
 	causes := []execution.CompletionCause{execution.CauseDataNotReady, execution.CausePlanUnavailable, execution.CausePrimaryInputUnavailable,
 		execution.CauseLevelOutcomeUnknown, execution.CauseGapGuardWarming, execution.CausePrimaryInputPartial, execution.CauseConfigDrift,
 		execution.CausePlanReactivated, execution.CausePlanNotActive, execution.CauseExpiredReplay, execution.CauseSnapshotCorrupt,
-		execution.CauseSnapshotUnavailablePastBound, execution.CauseResolveFailedPastBound, execution.CauseResourceShareExceeded}
+		execution.CauseSnapshotUnavailablePastBound, execution.CauseResolveFailedPastBound, execution.CauseResourceShareExceeded,
+		execution.CauseQueryCooldown}
 	if len(causes) != len(observability.ProgressCompletionCauses) {
 		t.Fatalf("%d causes, the counter takes %d", len(causes), len(observability.ProgressCompletionCauses))
 	}
 	for _, cause := range causes {
 		if !slices.Contains(observability.ProgressCompletionCauses, string(cause)) {
 			t.Fatalf("the counter does not take %s", cause)
+		}
+	}
+	// And the causes a query-free finalization may name are the gaps
+	// counter's cause label, no more and no fewer.
+	if len(execution.QueryFreeCauses) != len(observability.QueryFreeCompletionCauses) {
+		t.Fatalf("%d query-free causes, the gaps counter takes %d", len(execution.QueryFreeCauses), len(observability.QueryFreeCompletionCauses))
+	}
+	for _, cause := range execution.QueryFreeCauses {
+		if !slices.Contains(observability.QueryFreeCompletionCauses, string(cause)) {
+			t.Fatalf("the gaps counter does not take %s", cause)
 		}
 	}
 }

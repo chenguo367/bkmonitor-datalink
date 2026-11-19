@@ -147,3 +147,31 @@ func TestAPhysicalQueryAnswerIsCountedByHowItEnded(t *testing.T) {
 		}
 	}
 }
+
+// An answer with no series lands in the 0 bucket and one with a series does
+// not: the empty answers are read apart from the single-series ones.
+func TestAnAnswerWithNoSeriesIsCountedApartFromOneWithASeries(t *testing.T) {
+	if QueryAnswerSeriesBuckets[0] != 0 || QueryAnswerSeriesBuckets[1] != 1 {
+		t.Fatalf("bounds start %v, want 0 then 1", QueryAnswerSeriesBuckets[:2])
+	}
+	for _, c := range []struct {
+		series    uint64
+		inZero    uint64
+		inOneOnly uint64
+	}{{0, 1, 0}, {1, 0, 1}} {
+		r := NewRecorder(BuildInfo{})
+		r.RecordPhysicalQueryAnswer(observability.PhysicalQueryAnswer{Outcome: observability.PhysicalQueryOK, Series: c.series})
+		metric := &dto.Metric{}
+		if err := r.phaseTwo.flow.answerSeries.WithLabelValues(observability.PhysicalQueryOK).(prometheus.Histogram).Write(metric); err != nil {
+			t.Fatal(err)
+		}
+		buckets := metric.GetHistogram().GetBucket()
+		if buckets[0].GetUpperBound() != 0 || buckets[1].GetUpperBound() != 1 {
+			t.Fatalf("bounds %v, %v", buckets[0].GetUpperBound(), buckets[1].GetUpperBound())
+		}
+		zero, one := buckets[0].GetCumulativeCount(), buckets[1].GetCumulativeCount()-buckets[0].GetCumulativeCount()
+		if zero != c.inZero || one != c.inOneOnly {
+			t.Errorf("an answer of %d series: %d at le=0 and %d in (0, 1], want %d and %d", c.series, zero, one, c.inZero, c.inOneOnly)
+		}
+	}
+}

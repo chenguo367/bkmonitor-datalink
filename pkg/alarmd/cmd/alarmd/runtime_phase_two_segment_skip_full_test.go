@@ -30,6 +30,7 @@ import (
 	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
 )
 
@@ -61,7 +62,9 @@ func (full *segmentSkipFull) restartControl(asked bool) {
 	full.control = openSplitControlForFullPipeline(full.t, cfg, full.now, observability.NopObserver{}, full.uq)
 }
 
-func openSegmentSkipFull(t *testing.T, asked bool) *segmentSkipFull {
+// openSegmentSkipFull opens the processes with the values' ask as given;
+// nil states none, the configuration's default.
+func openSegmentSkipFull(t *testing.T, asked *bool) *segmentSkipFull {
 	t.Helper()
 	address, redisClient := startPhaseTwoRedis(t)
 	ctx := context.Background()
@@ -93,7 +96,9 @@ func openSegmentSkipFull(t *testing.T, asked bool) *segmentSkipFull {
 	withCompatibilityOutput(&cfg, address)
 	cfg.Redis.StatePrefix = "alarmd-segment-skip-full"
 	cfg.PhaseTwo.Control.RefreshInterval = config.Duration(time.Millisecond)
-	cfg.PhaseTwo.Control.SegmentSkip = asked
+	if asked != nil {
+		cfg.PhaseTwo.Control.SegmentSkip = *asked
+	}
 	cfg.PhaseTwo.Access.UQEndpoint = uq.URL
 	cfg.PhaseTwo.Access.MinReadyDelay = config.Duration(time.Millisecond)
 	cfg.PhaseTwo.Access.DownstreamExecutionReserve = config.Duration(time.Millisecond)
@@ -167,7 +172,7 @@ func (full *segmentSkipFull) ignored(reason string) float64 {
 // write out. Without the ask the same rounds write every State.
 func TestTheProductionProcessesLeaveAStableSeriesWriteOutUnderTheLeadersWord(t *testing.T) {
 	for _, asked := range []bool{true, false} {
-		full := openSegmentSkipFull(t, asked)
+		full := openSegmentSkipFull(t, &asked)
 		for round := 0; round < 8 && full.skipped() == 0; round++ {
 			full.round()
 		}
@@ -201,7 +206,8 @@ func TestTheProductionProcessesLeaveAStableSeriesWriteOutUnderTheLeadersWord(t *
 // no member left, no word ignored.
 func TestADrainingQueryGroupsNextSlotWritesWholeOnceTheAskGoesAway(t *testing.T) {
 	ctx := context.Background()
-	full := openSegmentSkipFull(t, true)
+	asked := true
+	full := openSegmentSkipFull(t, &asked)
 	for round := 0; round < 8 && full.skipped() == 0; round++ {
 		full.round()
 	}
@@ -296,4 +302,83 @@ func ownershipOf(t *testing.T, bundle *phaseTwoWorkerBundle) *productionPhaseTwo
 		t.Fatalf("ownership %T", bundle.dependencies.Ownership)
 	}
 	return production
+}
+
+// The segment skip is on by default: the processes opened with a
+// configuration that does not state it - the chart renders none - leave
+// the quiet series' State write out under the Leader's word. A replica of a
+// build without the contract joining the ready set holds it: the Leader
+// takes the word back in its next round, naming the skip held, and the
+// Worker's next Slot of the same Query Group, still its own, writes every
+// State.
+func TestTheDefaultConfigurationLeavesAStableSeriesWriteOutUntilAReplicaCannot(t *testing.T) {
+	ctx := context.Background()
+	full := openSegmentSkipFull(t, nil)
+	for round := 0; round < 8 && full.skipped() == 0; round++ {
+		full.round()
+	}
+	if full.skipped() == 0 || len(full.worker.queryGroups) != 1 {
+		t.Fatalf("by default: %v writes left out, Query Groups %v; want the quiet series' write left out",
+			full.skipped(), full.worker.queryGroups)
+	}
+	group := full.worker.queryGroups[0]
+	control := ownershipOf(t, full.control)
+	word := func() ownership.AssignmentRecord {
+		t.Helper()
+		record, err := control.dependencies.Store.ReadAssignment(ctx, group)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return record
+	}
+	if word().SegmentSkip == 0 {
+		t.Fatal("the Query Group skipped without a word on its record")
+	}
+	// The replica: the Worker's own registration, ready and compatible,
+	// declaring every contract but the skip, as a build before it does.
+	reader, ok := control.dependencies.Store.(interface {
+		ReadWorker(context.Context, string) (ownership.WorkerRegistration, bool, error)
+	})
+	if !ok {
+		t.Fatalf("the Control's store %T reads no registration", control.dependencies.Store)
+	}
+	registration, found, err := reader.ReadWorker(ctx, full.cfg.PhaseTwo.Worker.ID)
+	if err != nil || !found {
+		t.Fatalf("the Worker's registration = (%v, %v)", found, err)
+	}
+	older := registration
+	older.WorkerID = "alarmd-worker-without-the-skip"
+	older.Capabilities = nil
+	for _, capability := range registration.Capabilities {
+		if capability != ownership.CapabilitySegmentSkip {
+			older.Capabilities = append(older.Capabilities, capability)
+		}
+	}
+	if len(older.Capabilities) != len(registration.Capabilities)-1 {
+		t.Fatalf("the Worker declares %v, want the skip among them", registration.Capabilities)
+	}
+	if err := control.dependencies.Store.RegisterWorker(ctx, older); err != nil {
+		t.Fatal(err)
+	}
+	ran := func() execution.EvaluationTime {
+		t.Helper()
+		loaded, err := ownershipOf(t, full.worker).dependencies.Progress.LoadProgress(ctx, execution.ProgressIdentity{QueryGroup: group})
+		if err != nil || loaded.Progress == nil {
+			t.Fatalf("the Query Group's Progress = (%+v, %v)", loaded, err)
+		}
+		return loaded.Progress.LastFullSlot
+	}
+	skipped, before := full.skipped(), ran()
+	full.round()
+	if record := word(); record.SegmentSkip != 0 || record.DesiredWorkerID != full.cfg.PhaseTwo.Worker.ID {
+		t.Fatalf("after the replica joined: the record's word %d, its worker %q; want no word, still the Worker's",
+			record.SegmentSkip, record.DesiredWorkerID)
+	}
+	if published := control.LastRebalance(); published == nil || published.SegmentSkip == nil ||
+		published.SegmentSkip.Held != ownership.SegmentSkipHeld || !slices.Contains(published.SegmentSkip.Unaware, older.WorkerID) {
+		t.Fatalf("the Leader's round facts %+v, want the skip held, naming the replica", published)
+	}
+	if ran() <= before || full.skipped() != skipped {
+		t.Fatalf("the next Slot: ran %v, left %v more; want it run with every State written", ran() > before, full.skipped()-skipped)
+	}
 }

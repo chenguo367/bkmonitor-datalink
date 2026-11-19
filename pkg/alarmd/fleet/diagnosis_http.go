@@ -638,7 +638,7 @@ func countDiagnosis(counted *summaryCache, entry *diagnosisEntry, replica string
 	}
 	summary.Timing.RowsMillis = time.Since(started).Milliseconds()
 	counted.at, counted.body = at, &summary
-	counted.board = buildBoard(entry.id, at, entry.digest, entry.universe, row, lines, due, census, waits)
+	counted.board = buildBoard(entry.id, at, entry.digest, entry.universe, row, lines, due, census, waits, pauseReadingOf(entry.view))
 	if entry.view != nil {
 		counted.board.outages = strategyStoreOutages(entry.view, at, entry.stallAfter)
 		counted.board.noOutage = noStrategyStoreOutage(entry.view, at)
@@ -766,6 +766,15 @@ func parseBoardQuery(query url.Values) (BoardFilter, int, map[string]any) {
 			filter.Urgency = map[Urgency]bool{}
 		}
 		filter.Urgency[Urgency(word)] = true
+	}
+	// paused=true selects the strategies whose queries are paused; false,
+	// or none, every strategy.
+	switch paused := query.Get("paused"); paused {
+	case "", "false":
+	case "true":
+		filter.Paused = true
+	default:
+		return filter, 0, map[string]any{"error": "BOARD_FILTER_UNKNOWN", "facet": "paused", "value": paused[:min(len(paused), 64)]}
 	}
 	limit := BoardDefaultRows
 	if raw := query.Get("limit"); raw != "" {

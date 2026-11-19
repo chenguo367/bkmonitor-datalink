@@ -217,6 +217,9 @@ type fleetPublisher struct {
 	// lookbackLate is the Query Groups the lookback reads directed on its
 	// own evidence, by rung: what the control plane plans from.
 	lookbackLate func() map[string]int
+	// lookbackUncovered is the owned Query Groups the lookback has no fresh
+	// measurement of, by why; nil without a lookback.
+	lookbackUncovered func([]execution.QueryGroupIdentity) []fleet.LookbackUncoveredFacts
 	// applied is the Activation record revision this replica executes by,
 	// published on every snapshot so the page can compare it with what the
 	// control plane published.
@@ -230,6 +233,10 @@ type fleetPublisher struct {
 	// cycle and how the rounds have been finishing. Nil with overdue, and the
 	// snapshot then carries no census and no wake facts on its rows.
 	schedule fleet.ScheduleSource
+	// pooled names the strategies of the pooled rows no round named one of,
+	// from the frozen schedule the pool holds each under; nil leaves them
+	// as the tracker made them.
+	pooled *pooledStrategies
 	// scheduleObjects hears the census's late and overdue counts at each
 	// publish, the series the trends read late objects from; nil hears none.
 	scheduleObjects func(late, overdue int)
@@ -708,6 +715,7 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 
 	anomalies := publisher.tracker.Anomalies()
 	demoted := publisher.tracker.Demoted()
+	publisher.pooled.apply(ctx, demoted)
 	// Overdue objects are appended to the same list rather than reported beside
 	// it. They are anomalies about the same objects, and a reader looking at
 	// "what is wrong right now" should not have to know that one kind of wrong
@@ -889,6 +897,12 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	}
 	if publisher.lookbackLate != nil {
 		snapshot.LookbackLate = publisher.lookbackLate()
+	}
+	// And the owned objects the lookback has no fresh measurement of, the
+	// largest first, with why: one read of the replica names them.
+	if publisher.lookbackUncovered != nil {
+		snapshot.LookbackUncovered = publisher.tracker.LargestUncovered(publisher.lookbackUncovered(owned),
+			phaseTwoMaxSupportedEvaluationInterval)
 	}
 	// And the problems whose objects recovered within the hour: the evidence
 	// the RECOVERED reading is made of, which nothing on the current lines

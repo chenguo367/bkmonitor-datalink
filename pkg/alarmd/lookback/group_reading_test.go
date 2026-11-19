@@ -140,7 +140,7 @@ func TestGroupReadingIsOwnedAndForgetClearsTheCumulativeFacts(t *testing.T) {
 	if _, found := f.engine.GroupReading("qg"); found {
 		t.Fatal("an unowned group supplied a reading")
 	}
-	f.engine.Forget("qg")
+	f.engine.Forget("qg", ForgottenMoved)
 	f.set(func() { f.owned["qg"] = true })
 	if _, found := f.engine.GroupReading("qg"); found {
 		t.Fatal("Forget retained a group's counters")
@@ -194,7 +194,7 @@ func TestGroupReadingOwnershipCanReenterStatsAndForget(t *testing.T) {
 		if !called {
 			called = true
 			f.engine.Stats()
-			f.engine.Forget(qg)
+			f.engine.Forget(qg, ForgottenMoved)
 		}
 		return false
 	}

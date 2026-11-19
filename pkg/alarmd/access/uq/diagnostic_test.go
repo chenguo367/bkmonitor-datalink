@@ -249,15 +249,26 @@ func TestDiagnosticBudgetsAreTheProductionOnesAndErrorsAreSafe(t *testing.T) {
 func TestDiagnosticCancellationConcurrencyAndNoRetry(t *testing.T) {
 	started := make(chan struct{}, 2)
 	var calls atomic.Int32
+	// The server watches for a client gone only once it has read the
+	// request's body to its end, which it does itself at the first flush; a
+	// cancellation that reset the connection before that read kept it from
+	// ever watching. The body is read before the case can cancel, and the
+	// handler ends with the case whatever the server learnt.
+	finished := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
 		calls.Add(1)
 		started <- struct{}{}
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, `{"series":[`)
 		w.(http.Flusher).Flush()
-		<-r.Context().Done()
+		select {
+		case <-r.Context().Done():
+		case <-finished:
+		}
 	}))
 	defer server.Close()
+	defer close(finished)
 	client, _ := NewDiagnosticClient(server.URL, "alarmd-diagnostic", server.Client())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

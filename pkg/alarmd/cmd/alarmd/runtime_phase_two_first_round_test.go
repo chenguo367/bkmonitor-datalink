@@ -22,6 +22,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -135,11 +136,12 @@ func newFirstRoundRun(t *testing.T, settling time.Duration, strategyDocument fun
 }
 
 // at runs the scheduler once at second, and returns the second the Query Group's
-// bound then says.
+// bound then says. The run is bounded by the case's wait: a one-shot run that
+// never ends fails the case with its round, not the test binary by its timeout.
 func (run *firstRoundRun) at(t *testing.T, second int64) int64 {
 	t.Helper()
 	run.clock.Store(second)
-	if err := runScheduledOnceSettled(context.Background(), run.bundle); err != nil {
+	if err := runScheduledOnceSettled(testwait.Context(t), run.bundle); err != nil {
 		t.Fatalf("round at %+d: %v", second-run.base, err)
 	}
 	run.bundle.mu.RLock()
@@ -153,8 +155,11 @@ func (run *firstRoundRun) at(t *testing.T, second int64) int64 {
 
 // From its grid point to its event, a minute's Slot without a hold has one round:
 // nothing is started before its read, it is not turned away there, and it writes
-// its event once. What says it is the read is access, by how long the data had
-// been readable when the round arrived: under a second, the second it is rounded up to.
+// its event once. Its bound is the second before its read's: there the walk queues
+// it for its read and nothing starts, the read not having come. What says the
+// round is at the read is access, by how long the data had been readable when it
+// arrived: no more than the step this clock takes past the read, to the whole
+// second after it.
 func TestAMinuteSlotWithoutAHoldRunsOnceAtItsRead(t *testing.T) {
 	// A settling wait at the floor seeds no hold.
 	run := newFirstRoundRun(t, execution.MinimumSettlingWait, firstRoundThreshold)
@@ -172,14 +177,19 @@ func TestAMinuteSlotWithoutAHoldRunsOnceAtItsRead(t *testing.T) {
 		t.Fatalf("a second before the bound %d Slots started", started)
 	}
 	run.at(t, bound)
+	if started, _, _ := run.counts(); started != 0 {
+		t.Fatalf("at the bound, before its read, %d Slots started", started)
+	}
+	// The read falls in the second after the bound; this is the whole second past it.
+	run.at(t, bound+2)
 	if started, deferred, done := run.counts(); started != 1 || deferred != 0 || done != 1 {
-		t.Fatalf("at the bound started=%d deferred=%d done=%d, want one round that ran the Slot", started, deferred, done)
+		t.Fatalf("past the read started=%d deferred=%d done=%d, want one round that ran the Slot", started, deferred, done)
 	}
 	run.mu.Lock()
 	slack := append([]float64(nil), run.slack...)
 	run.mu.Unlock()
-	if len(slack) != 1 || slack[0] < 0 || slack[0] >= 1 {
-		t.Fatalf("access says the data had been readable for %v s, want one arrival under a second", slack)
+	if len(slack) != 1 || slack[0] < 0 || slack[0] > 1 {
+		t.Fatalf("access says the data had been readable for %v s, want one arrival within the clock's step past the read", slack)
 	}
 	if events := run.events.snapshot(); len(events) != 1 || events[0].EvaluationTime != run.base {
 		t.Fatalf("events = %d, want the Slot's one event", len(events))
@@ -198,7 +208,8 @@ func TestAHeldMinuteSlotIsTurnedAwayOnce(t *testing.T) {
 	if started, _, _ := run.counts(); started != 0 {
 		t.Fatalf("at its grid point %d Slots started", started)
 	}
-	held := run.at(t, bound)
+	// The whole second past the read, which falls in the second after the bound.
+	held := run.at(t, bound+2)
 	if started, deferred, done := run.counts(); started != 1 || deferred != 1 || done != 0 {
 		t.Fatalf("at the read without the hold started=%d deferred=%d done=%d, want one round turned away", started, deferred, done)
 	}
@@ -228,9 +239,10 @@ func TestAMinuteMixedSlotHasNoInPlaceWait(t *testing.T) {
 	if started, _, _ := run.counts(); started != 0 {
 		t.Fatalf("at its grid point %d Slots started", started)
 	}
-	run.at(t, bound)
+	// The whole second past the read, which falls in the second after the bound.
+	run.at(t, bound+2)
 	if started, deferred, done := run.counts(); started != 1 || deferred != 0 || done != 1 {
-		t.Fatalf("at the bound started=%d deferred=%d done=%d, want one round that ran the Slot", started, deferred, done)
+		t.Fatalf("past the read started=%d deferred=%d done=%d, want one round that ran the Slot", started, deferred, done)
 	}
 	run.mu.Lock()
 	defer run.mu.Unlock()

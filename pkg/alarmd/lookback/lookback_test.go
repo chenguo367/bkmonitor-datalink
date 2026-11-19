@@ -153,8 +153,32 @@ type fixture struct {
 	yield   chan struct{}
 	owned   map[execution.QueryGroupIdentity]bool
 	faults  []string
-	// specs is every query a recheck or directed read asked for.
+	// specs is every query a recheck or directed read asked for, and reads
+	// the kind of the lookback's read each was asked as.
 	specs []execution.PhysicalQuerySpec
+	reads []execution.LookbackRead
+}
+
+// readKinds is the kind of each read the fixture's provider was asked for,
+// in the order they were asked.
+func (f *fixture) readKinds() []execution.LookbackRead {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]execution.LookbackRead(nil), f.reads...)
+}
+
+// readsOf is how many of the reads the fixture's provider was asked for were
+// of kind.
+func (f *fixture) readsOf(kind execution.LookbackRead) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, read := range f.reads {
+		if read == kind {
+			n++
+		}
+	}
+	return n
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -164,11 +188,16 @@ func newFixture(t *testing.T) *fixture {
 	engine, err := New(Options{Now: f.clock.now,
 		Refusals: []string{"waiters", "full"}, UnspreadFirstSamples: true, ProbeFirstSamples: true,
 		Recheck: func(ctx context.Context, spec execution.PhysicalQuerySpec, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
+			kind := execution.LookbackReadFrom(ctx)
 			f.mu.Lock()
-			f.specs = append(f.specs, spec)
+			f.specs, f.reads = append(f.specs, spec), append(f.reads, kind)
 			f.mu.Unlock()
 			if _, ok := ctx.Deadline(); !ok {
 				t.Error("a recheck ran without a deadline")
+			}
+			// Every read the lookback makes names which of its reads it is.
+			if _, ok := kind.Name(); !ok {
+				t.Errorf("a lookback read of kind %d, want one of its kinds", kind)
 			}
 			select {
 			case next := <-f.answers:
@@ -796,7 +825,7 @@ func TestAnUnobservedSampleChangesNothingItDidNotSee(t *testing.T) {
 		f.capture(query("qg", slot, minute, sourceLog), point(slot, "1"))
 		f.clock.set(f.clock.now().Add(rungDelay(0, minute)))
 		f.engine.Step(context.Background())
-		f.engine.Forget("qg")
+		f.engine.Forget("qg", ForgottenMoved)
 	}
 	stats = f.engine.Stats()
 	if stats.PermitRefusals[RefusedOther] != 1 || stats.PermitRefusals["full"] != 1 || stats.Faults[FaultYieldOverdue] != 0 {
@@ -866,7 +895,7 @@ func TestCoverageCountsOnlyOwnedQueryGroupsWithAFreshMeasurement(t *testing.T) {
 	if got := f.engine.Stats().Coverage; got != (Coverage{Owned: 1, Covered: 1, Ratio: 1, CoverableRatio: 1}) {
 		t.Fatalf("coverage with qg-b no longer owned: %+v", got)
 	}
-	f.engine.Forget("qg-b")
+	f.engine.Forget("qg-b", ForgottenMoved)
 	stats := f.recheck(sourceLog, readAt, 0, minute, full(dataset("h1", steady)), RecheckCompared)
 	if stats.Sources[sourceLog].Samples[OutcomeOwnerLost] != 1 || stats.Sources[sourceLog].Rechecks[RungNames[0]][RecheckOwnerLost] != 1 {
 		t.Fatalf("samples %v", stats.Sources[sourceLog].Samples)
@@ -1328,7 +1357,7 @@ func TestAForgottenQueryGroupDropsTheSampleWaitingForItsDeepRecheck(t *testing.T
 	slot := f.clock.now().Unix()
 	f.capture(query("qg", slot, minute, sourceLog), point(slot, "1"))
 	f.recheck(sourceLog, f.clock.now(), 0, minute, full(point(slot, "1")), RecheckCompared)
-	f.engine.Forget("qg")
+	f.engine.Forget("qg", ForgottenMoved)
 	stats := f.engine.Stats()
 	source := stats.Sources[sourceLog]
 	if source.Samples[OutcomeOwnerLost] != 1 || source.Rechecks[RungNames[len(RungNames)-1]][RecheckOwnerLost] != 1 || stats.Pending != 0 {

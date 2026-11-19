@@ -147,7 +147,8 @@ func newDueIndexMetrics() dueIndexMetrics {
 				"held back, the walk resuming from it once a dispatch frees a place; normal_queue_evicted " +
 				"is the entry expiring last that a full ready queue gave up for an arrival expiring " +
 				"earlier; delayed_not_better and delayed_evicted are the same two on the recovery queue, " +
-				"ordered by readiness. Queues order by deadline, so the short cohorts should never be the " +
+				"ordered by readiness, which also holds a first round within two seconds of the instant it " +
+				"is due at. Queues order by deadline, so the short cohorts should never be the " +
 				"ones held back or evicted: a 10s or 15s series rising here is the ordering not being " +
 				"applied. This is not dispatch_crowded_out_total, which counts an object still busy from " +
 				"its previous round.",
@@ -330,7 +331,7 @@ func (r *Recorder) RecordDispatchSkipped(reason string) {
 // construction so a zero is a zero and not an absent series.
 var (
 	dispatchTurnawayOutcomes = []string{"normal_queue_full", "normal_queue_evicted", "delayed_not_better", "delayed_evicted"}
-	dispatchTurnawayCohorts  = []string{"10s", "15s", "30s", "other", "unknown"}
+	dispatchTurnawayCohorts  = []string{"10s", "15s", "30s", "60s", "other", "unknown"}
 )
 
 // RecordDispatchTurnaway counts one Query Group a dispatcher queue turned

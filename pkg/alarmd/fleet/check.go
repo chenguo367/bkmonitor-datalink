@@ -649,6 +649,12 @@ func groupKeyOf(anomaly Anomaly, check Check) string {
 			}
 		}
 		if key == "" {
+			// A pooled row whose schedule was not read is grouped by why,
+			// under the word its reason renders as; the absence group is
+			// the rows nothing could name a strategy for.
+			if reason, unfilled := strategiesUnfilledReason(anomaly); unfilled {
+				return "(" + ProductWords().StrategiesFrom[reason] + ")"
+			}
 			return groupNoStrategy
 		}
 		return key
@@ -765,6 +771,8 @@ type CheckReport struct {
 	// Objects, Strategies and Businesses are over every object under this
 	// check, across every column. Strategies and Businesses are distinct
 	// counts, not sums over groups: a strategy in two groups is one strategy.
+	// A row whose list was cut adds the strategies its list does not name
+	// (Anomaly.StrategiesTotal) to Strategies, its own and its group's.
 	Objects    int `json:"objects"`
 	Strategies int `json:"strategies"`
 	Businesses int `json:"businesses"`
@@ -1132,6 +1140,12 @@ type checkTally struct {
 	businesses map[string]struct{}
 	groups     map[string]*CheckGroup
 	groupSets  map[string][2]map[string]struct{}
+	// unlisted and groupUnlisted are the strategies of rows whose list was
+	// cut that the lists do not name (Anomaly.StrategiesTotal), over the
+	// check and by group: counted with the named ones, as the impact tally
+	// counts them.
+	unlisted      int
+	groupUnlisted map[string]int
 	// columns is the columns its rows came from, a bit per position in
 	// columnNames: the line is a sample when any of them was published cut,
 	// on any replica, whichever replica its own rows came from.
@@ -1173,7 +1187,7 @@ func (tallies checkTallies) ensure(check Check) *checkTally {
 	entry := tallies[check]
 	if entry == nil {
 		entry = &checkTally{strategies: map[string]struct{}{}, businesses: map[string]struct{}{},
-			groups: map[string]*CheckGroup{}, groupSets: map[string][2]map[string]struct{}{}}
+			groups: map[string]*CheckGroup{}, groupSets: map[string][2]map[string]struct{}{}, groupUnlisted: map[string]int{}}
 		tallies[check] = entry
 	}
 	return entry
@@ -1195,6 +1209,10 @@ func (entry *checkTally) addAs(key string, anomaly *Anomaly, code string, now ti
 		return
 	}
 	noteProblem(group, anomaly, code, now)
+	if unlisted := unlistedStrategies(*anomaly); unlisted > 0 {
+		entry.unlisted += unlisted
+		entry.groupUnlisted[key] += unlisted
+	}
 	sets := entry.groupSets[key]
 	for _, strategy := range anomaly.Strategies {
 		entry.strategies[strategy.StrategyID] = struct{}{}
@@ -1525,7 +1543,7 @@ func reportChecksFrom(tallies checkTallies, truncated uint8, view *View, now tim
 	reports := make([]CheckReport, 0, len(tallies))
 	for check, entry := range tallies {
 		report := CheckReport{Code: check, Owner: checkAnswers[check].Owner, GroupBy: checkAnswers[check].GroupBy,
-			Objects: entry.objects, Strategies: len(entry.strategies), Businesses: len(entry.businesses),
+			Objects: entry.objects, Strategies: len(entry.strategies) + entry.unlisted, Businesses: len(entry.businesses),
 			Partial: entry.columns&truncated != 0, Demoted: entry.demoted, MemoryGap: entry.memoryGap, MemoryGapUntil: timeOrNil(entry.memoryGapUntil),
 			Activation: entry.activation, Replica: entry.replica,
 			Current: entry.current, Retained: entry.retained, RetainedLastHour: entry.lastHour,
@@ -1548,7 +1566,7 @@ func reportChecksFrom(tallies checkTallies, truncated uint8, view *View, now tim
 		}
 		for key, group := range entry.groups {
 			if sets, known := entry.groupSets[key]; known {
-				group.Strategies, group.Businesses = len(sets[0]), len(sets[1])
+				group.Strategies, group.Businesses = len(sets[0])+entry.groupUnlisted[key], len(sets[1])
 			}
 			// A fold with object rows behind it gets its recovery reading; a
 			// standing's fold and a gap's have no rows and no reading. Record

@@ -9,12 +9,13 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
-// TestNextReportsTheFutureSlotAsABound pins the one fact a caller needs to stop
-// asking: the second the Slot becomes due, and the cadence it belongs to.
+// TestNextReportsTheFutureSlotAsABound pins the facts a caller needs to stop
+// asking: when the Slot becomes due, and the cadence it belongs to.
 //
-// The bound is the same number the not-due decision is made on, so it is exact
-// rather than an estimate, and the interval is the one the cohort is chosen
-// from, so neither costs a read.
+// The read is the same number the not-due decision is made on, so it is exact
+// rather than an estimate; the bound is the second before the read's, so the
+// due index offers the Query Group ahead of it. The interval is the one the
+// cohort is chosen from, so none of them costs a read.
 func TestNextReportsTheFutureSlotAsABound(t *testing.T) {
 	schedule := schedulerSchedule(t, 60, 60, nil, "snapshot-1", 1)
 	catalog := &fakeSlotCatalog{t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}}
@@ -24,8 +25,9 @@ func TestNextReportsTheFutureSlotAsABound(t *testing.T) {
 	if err != nil || due {
 		t.Fatalf("Next() due=%v error=%v", due, err)
 	}
-	if want := (firstRoundRead(60, 60) + 999) / 1000; facts.NotDueUntilUnix != want || facts.NextSlotUnix != 60 {
-		t.Fatalf("not-due bound = %d, next Slot %d, want the Slot's read %d and its second 60", facts.NotDueUntilUnix, facts.NextSlotUnix, want)
+	if read := firstRoundRead(60, 60); facts.NotDueUntilUnix != read/1000-1 || facts.DueAtUnixMilli != read || facts.NextSlotUnix != 60 {
+		t.Fatalf("not-due bound = %d, read %d, next Slot %d, want the second before the Slot's read %d, the read, and its second 60",
+			facts.NotDueUntilUnix, facts.DueAtUnixMilli, facts.NextSlotUnix, read)
 	}
 	if facts.IntervalSeconds != 60 {
 		t.Fatalf("interval = %d, want 60; without it a late wake cannot be scaled to its cadence",

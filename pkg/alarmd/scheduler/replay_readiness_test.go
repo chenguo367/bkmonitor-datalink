@@ -267,3 +267,36 @@ func (observer *recordingReplayObserver) Observe(_ context.Context, observation 
 		observer.facts = append(observer.facts, *observation.ReplayExpiry)
 	}
 }
+
+// The same contradiction while the degraded pool holds the Query Group is the
+// hold's to keep: decided, under the pool's word, and not reported, the Runner
+// holding the Slot (heldPastDistance). With the hold over and the probe still
+// to come it is reported once, as the pool's gap.
+func TestAReplayHeldPastItsWindowWhileThePoolHoldsIsKeptAndNotReported(t *testing.T) {
+	const slot = execution.EvaluationTime(1_700_124_000)
+	limits := testRecoveryLimits()
+	limits.MaxReplaySlots = 3
+	pool := withQueryCooldownPooled(context.Background(), &observability.HeldByFacts{Decision: "query_cooldown"})
+	for _, test := range []struct {
+		name    string
+		ctx     context.Context
+		reports int
+	}{
+		{"held", withQueryCooldownHeld(pool, true), 0},
+		{"hold over", pool, 1},
+	} {
+		source, _ := replayClassificationSource(t, 3, slot, 30*time.Second, limits)
+		observer := &recordingReplayObserver{}
+		source.observer = observer
+		operation, facts, err := source.classifyRecovery(test.ctx, slot, (int64(slot)+2)*1000, 0, time.Unix(int64(slot)+3, 0), execution.OwnerFence{})
+		if err != nil {
+			t.Fatalf("%s: classifyRecovery() error = %v", test.name, err)
+		}
+		if operation != execution.OperationNormal || facts.Disposition != ReplayExpired || facts.Reason != ReplayExpiredByQueryCooldown {
+			t.Fatalf("%s: classifyRecovery() = %s %+v, want the replay refused as the pool's gap", test.name, operation, facts)
+		}
+		if len(observer.facts) != test.reports || (test.reports == 1 && observer.facts[0].Reason != string(ReplayExpiredByQueryCooldown)) {
+			t.Fatalf("%s: reported %+v, want %d report under the pool's word", test.name, observer.facts, test.reports)
+		}
+	}
+}

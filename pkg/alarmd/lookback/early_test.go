@@ -140,6 +140,9 @@ func TestAnEarlyReadSupplementsBeforeTheNextSlotReads(t *testing.T) {
 		reading.TookMaxSeconds != took.Seconds() || reading.HoldMaxSeconds != 0.05 || reading.LeadSeconds != took.Seconds()+0.05 {
 		t.Fatalf("reading %+v, want the early read counted and the lead its took and hold", reading)
 	}
+	if f.readsOf(execution.LookbackReadDirectedEarly) != 1 || f.readsOf(execution.LookbackReadDirected) != 1 {
+		t.Fatalf("reads %v, want the early read asked as one and the read at the rung as a directed read", f.readKinds())
+	}
 }
 
 // Series arriving after the next Slot's first read are the read at the

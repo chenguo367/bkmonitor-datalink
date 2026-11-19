@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // A non-partial UQ status code is a deterministic answer for the queried table
@@ -47,6 +49,12 @@ func TestDeterministicQueryStatusCompletesAsUnavailableWithBoundedDetail(t *test
 			if strings.Contains(attempt.Detail, "secret") || strings.Contains(attempt.Detail, " ") {
 				t.Fatalf("detail leaked response content: %q", attempt.Detail)
 			}
+			// What the query had asked for, from the request sent: the
+			// fixture's one table, field and space, whatever the status.
+			if targets := completion.RouteFacts.RequestTargets; targets == nil || targets.Count != 1 || len(targets.Targets) != 1 ||
+				!reflect.DeepEqual(targets.Targets[0], observability.RequestTarget{TableID: "system.cpu", FieldName: "usage", SpaceUID: "bkcc__2"}) || targets.Digest == "" {
+				t.Fatalf("request targets = %+v, want system.cpu usage in bkcc__2", targets)
+			}
 		})
 	}
 }
@@ -78,6 +86,9 @@ func TestAbsentIdentityFieldAfterHealthyPrefixAndSinkError(t *testing.T) {
 	if err != nil || len(sink.batches) != 2 || completion.Completeness != execution.CompletenessFull ||
 		completion.DataState != execution.DataStateData || completion.Stats.NullIdentityFields != 1 {
 		t.Fatalf("completion=%+v err=%v batches=%d, want both series delivered with one null identity field", completion, err, len(sink.batches))
+	}
+	if completion.RouteFacts.RequestTargets != nil {
+		t.Fatalf("a query that answered carries request targets %+v", completion.RouteFacts.RequestTargets)
 	}
 	original := errors.New("consumer budget https://user:secret@example.test")
 	_, err = c.decode(context.Background(), strings.NewReader(`{"series":[`+good+`],"is_partial":false}`), validAttempt(t), rejectingDiagnosticSink{original})

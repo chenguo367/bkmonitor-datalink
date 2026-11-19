@@ -196,6 +196,31 @@ func TestAnExpiredReplaysCommitIsNotARound(t *testing.T) {
 	}
 }
 
+// The same commit under the pool's cause - a Slot past its recovery bound
+// given up while the degraded pool had its Query Group - is the same skip:
+// it ran nothing and is not a round, on a healthy object or a degraded one.
+// Read as a round, a pooled object's held run put it on this deployment's
+// dependency line when the hold ended.
+func TestThePoolsCommitPastItsBoundIsNotARound(t *testing.T) {
+	healthy := newPoolRows(t)
+	healthy.tick()
+	healthy.tracker.Observe(context.Background(), observability.Observation{ProgressCompletionKind: "FULL_COMPLETED", Trace: healthy.trace(60)})
+	healthy.queryFree(120, "QUERY_COOLDOWN")
+	if row := healthy.row(); row != nil {
+		t.Fatalf("a healthy object after the pool's commit is listed as %+v", row)
+	}
+	if _, ok := healthy.tracker.GapSkips()[healthy.group]; !ok {
+		t.Fatal("the pool's Slot is not on the skip record")
+	}
+	degraded := newPoolRows(t)
+	degraded.complete(60, "COMPLETED_WITH_UNAVAILABLE")
+	degraded.complete(120, "COMPLETED_WITH_UNAVAILABLE")
+	degraded.queryFree(180, "QUERY_COOLDOWN")
+	if row := degraded.row(); row != nil {
+		t.Fatalf("two degraded rounds and the pool's commit listed the object as %+v: the commit was counted as a round", row)
+	}
+}
+
 // A snapshot that cannot be read while the Slot is live is a retry, not a
 // commit, and is this deployment's dependency failing, as before.
 func TestALiveSnapshotReadFailureIsStillADependencyDown(t *testing.T) {
@@ -452,5 +477,36 @@ func TestAPooledRowCarriesItsCuts(t *testing.T) {
 	encoded, err := json.Marshal(row)
 	if err != nil || !strings.Contains(string(encoded), `"cuts":3`) {
 		t.Fatalf("the row on the wire (%v) lacks its cuts:\n%s", err, encoded)
+	}
+}
+
+// A Query Group the degraded pool holds runs no round for longer than the
+// replay age and gives the run it held up when the hold ends. Neither starts
+// the clock Stalled is judged by - rounds that reached execution and did not
+// end - so the object is never failing to finish for the hold. The same span
+// of rounds that did reach execution and failed starts it.
+func TestAGroupThePoolHoldsPastTheReplayAgeIsNotFailingToFinish(t *testing.T) {
+	held := newPoolRows(t)
+	held.refusedRound(60)
+	for minute := 0; minute < 15; minute++ {
+		held.tick()
+		held.tracker.Observe(context.Background(), observability.Observation{RunOutcome: "query_cooldown", Trace: held.trace(0)})
+	}
+	held.tick()
+	held.tracker.Observe(context.Background(), observability.Observation{
+		Component: observability.ComponentProgress, Stage: observability.StageProgressCommitted,
+		Result: observability.ResultDegraded, ReasonCode: "GAP_SKIPPED",
+		ProgressCompletionKind: "GAP_SKIPPED", ProgressCompletionCause: "QUERY_COOLDOWN", Trace: held.trace(120),
+	})
+	if row := held.row(); row != nil && !row.FailingSince.IsZero() {
+		t.Fatalf("held fifteen minutes and its run given up: failing to finish since %v (%+v)", row.FailingSince, row)
+	}
+
+	failing := newPoolRows(t)
+	for minute := int64(0); minute < 15; minute++ {
+		failing.fail(60+minute*60, "QUERY_TIMEOUT", "the round's query timed out")
+	}
+	if row := failing.row(); row == nil || row.FailingSince.IsZero() {
+		t.Fatalf("fifteen rounds that reached execution and failed: %+v, want failing to finish", row)
 	}
 }

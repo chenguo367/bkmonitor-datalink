@@ -711,6 +711,26 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 				slog.Uint64("series_not_evaluated_suppressed_series", facts.SuppressedSeries))
 		}
 	}
+	if facts := observation.ExecutionSlotWait; facts != nil && facts.Waited() {
+		// Only a dispatch that waited: the line of a Slot that found a slot
+		// free has nothing to say about it.
+		attributes = append(attributes, slog.Float64("execution_slot_wait_ms", facts.WaitMillis),
+			slog.String("execution_slot_wait_cohort", facts.Cohort))
+	}
+	if facts := observation.SegmentFallback; facts != nil {
+		attributes = append(attributes,
+			slog.String("segment_fallback_tenant_id", facts.TenantID), slog.String("segment_fallback_business_id", facts.BusinessID),
+			slog.String("segment_fallback_strategy_id", facts.StrategyID), slog.String("segment_fallback_generation", facts.Generation),
+			slog.Int("segment_fallback_page", facts.Page), slog.String("segment_fallback_result", facts.Result),
+			slog.Int64("segment_fallback_since_renewal_ms", facts.SinceRenewalMillis),
+			slog.Int64("segment_fallback_renewal_ttl_ms", facts.RenewalTTLMillis), slog.Int64("segment_fallback_ttl_now_ms", facts.TTLNowMillis),
+			slog.Int64("segment_fallback_interval_s", facts.IntervalSeconds),
+			slog.Int64("segment_fallback_last_mark_evaluation_time", facts.LastMarkEvaluationTime),
+			slog.Uint64("segment_fallback_suppressed", facts.Suppressed))
+		if facts.Shard != "" {
+			attributes = append(attributes, slog.String("segment_fallback_shard", facts.Shard))
+		}
+	}
 	if facts := observation.RangeGate; facts != nil {
 		// The word plus the values it was derived from. Without the values the
 		// word cannot be checked, and this word exists precisely because the
@@ -775,6 +795,8 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		attributes = appendHeldByAttributes(attributes, facts.HeldBy)
 	}
 	attributes = appendSlotSkippedAttributes(attributes, observation.SlotSkipped)
+	attributes = appendPlanScopeAttributes(attributes, observation.PlanScope)
+	attributes = appendRequestTargetsAttributes(attributes, observation.RequestTargets)
 	attributes = appendHeldByAttributes(attributes, observation.HeldBy)
 	attributes = appendDivertDecisionAttributes(attributes, observation.DivertDecision)
 	attributes = appendQueryBudgetAttributes(attributes, observation.QueryBudget)
@@ -1020,6 +1042,23 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 				slog.Int("shard_unaware_replicas", len(gate.Unaware)),
 				slog.Any("shard_unaware", gate.Unaware),
 				slog.Int("shard_splits_held", gate.SplitsHeld),
+			)
+		}
+		if skip := facts.SegmentSkip; skip != nil {
+			// The segment skip word's gate whenever the round carries it,
+			// zeros included, as the split's: asked, held and by which
+			// replicas, and what the round restated. Without these a line
+			// that names no hold proved nothing about the gate.
+			attributes = append(attributes,
+				slog.Bool("segment_skip_asked", skip.Asked),
+				slog.Int("segment_skip_ready", skip.Ready),
+				slog.String("segment_skip_held", skip.Held),
+				slog.Int("segment_skip_unaware_replicas", len(skip.Unaware)),
+				slog.Any("segment_skip_unaware", skip.Unaware),
+				slog.Int("segment_skip_set", skip.Set),
+				slog.Int("segment_skip_withdrawn", skip.Withdrawn),
+				slog.Int("segment_skip_failed", skip.Failed),
+				slog.Bool("segment_skip_changed", skip.Changed),
 			)
 		}
 	}
@@ -1461,6 +1500,11 @@ func mandatoryLogStage(stage Stage) bool {
 		// One line per completed Slot that lost series, at most one per Slot
 		// per Query Group: bounded by the Slot rate, and a sampled line would
 		// name the first Query Group and Plan it met and none after.
+		return true
+	case StageSegmentRenewalFallback:
+		// At most one line a Plan in a lifetime, the rest counted on it: a
+		// sampled line would name the first Plan and none after, and the
+		// counts it explains have no Plan.
 		return true
 	case StageSlotSkipped:
 		// Every Slot finalised as skipped, one line each: the gap guard a

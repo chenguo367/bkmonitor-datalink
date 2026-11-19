@@ -408,8 +408,9 @@ func (apply *slotApply) applyPlanState(
 				storedStateLabel(view.Status),
 			)
 			// Counted where write_reuse counts it, once per admitted
-			// mutation, and added to the census where write_reuse is
-			// emitted: the census settles each against how it left.
+			// mutation, and both added to the census below: the census
+			// settles each against how it left, and reports the two on
+			// one observation.
 			admittedClasses = append(admittedClasses, observability.StateSeriesClassKey{
 				Class: seriesClassLabel(stateResult.Class), Series: seriesKindLabel(stateResult.NoData)})
 			coordinator.observe(ctx, observability.ComponentState, observability.StageMutationCompared, request.Operation, started, observability.ResultSuccess, observability.ReasonNone, nil)
@@ -459,15 +460,7 @@ func (apply *slotApply) applyPlanState(
 	for _, admittedClass := range admittedClasses {
 		apply.frozenRenewals.RecordSeriesClass(admittedClass.Class, admittedClass.Series)
 	}
-	if !writeReuse.Empty() {
-		facts := writeReuse
-		coordinator.emitObservation(ctx, observability.Observation{
-			Component: observability.ComponentState, Stage: observability.StageMutationCompared,
-			Result: observability.ResultSuccess, Operation: observability.Operation(request.Operation),
-			ReasonCode:      observability.ReasonNone,
-			StateWriteReuse: &facts,
-		})
-	}
+	apply.frozenRenewals.WriteReuse.Add(writeReuse)
 	if !alreadyApplied.Empty() {
 		coordinator.emitAlreadyApplied(ctx, request.Operation, alreadyApplied)
 	}
@@ -818,6 +811,7 @@ func (apply *slotApply) complete(
 	result, err := coordinator.commitProgress(ctx, request, completion, attribution)
 	if err == nil && result.Completed {
 		result.QueryAvailability, result.QueryUnavailableReason = query.availability(), query.unavailableReason()
+		result.QueryUnavailableTargets = query.unavailableTargets()
 		result.QueryUnknownReason = query.unknownReason()
 		result.PrimaryQueryClock = query.clock
 	}

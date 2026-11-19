@@ -260,6 +260,7 @@ func (coordinator *SlotExecutionCoordinator) observeQueryCompleted(
 		QueryFailure: facts, QueryStatus: providerStatusFacts(completion), QueryCodec: providerCodecFacts(completion),
 		QueryUnavailable: providerUnavailableFacts(completion), QueryTruncation: providerTruncationFacts(completion),
 		QueryRanges: providerRangeFacts(completion), QueryPointsDropped: pointsDroppedFacts(completion),
+		RequestTargets:   providerRequestTargets(completion),
 		EvaluationResult: evaluationResult, EvaluationReason: evaluationReason,
 		CarriedReason: execution.CarriedReasonFacts(evaluated.ReasonCarried && evaluationReason != observability.ReasonNone,
 			evaluated.ReasonOrigin),
@@ -467,6 +468,18 @@ func providerUnavailableFacts(completion execution.QueryExecutionCompletion) []o
 		facts = append(facts, observability.QueryUnavailableFacts{Attribution: string(attribution), HTTPClass: observability.QueryHTTPClassOf(status)})
 	}
 	return facts
+}
+
+// providerRequestTargets is what the first UNAVAILABLE physical query had
+// asked for, the query providerFailureFacts reports; nil when every query
+// answered, so a line whose queries all came back carries none.
+func providerRequestTargets(completion execution.QueryExecutionCompletion) *observability.RequestTargetsFacts {
+	for _, item := range completion.PhysicalQueries {
+		if item.Completeness == execution.CompletenessUnavailable {
+			return item.RouteFacts.RequestTargets
+		}
+	}
+	return nil
 }
 
 // providerFailureFacts projects the first UNAVAILABLE physical completion onto

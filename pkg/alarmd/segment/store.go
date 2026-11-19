@@ -180,11 +180,15 @@ type RenewRequest struct {
 // PlanRenewed is how one Plan's renewal came back: Renewed, by page in
 // request order, whether every segment carrying its members answered - only
 // then does its renewal time move on (3.5 rule 3); Missing, the keys already
-// gone; OverBudget, the segments that ran longer than RenewScriptBudget.
+// gone; OverBudget, the segments that ran longer than RenewScriptBudget;
+// Elapsed, each segment's script that renewed its keys, how long it ran by
+// the server's clock as the script itself measured it - a script a stale
+// fence refused ran no renewal and names no time.
 type PlanRenewed struct {
 	Renewed    []bool
 	Missing    int
 	OverBudget int
+	Elapsed    []time.Duration
 }
 
 // RenewResult is each Plan's renewal, in request order.

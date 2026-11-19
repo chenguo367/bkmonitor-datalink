@@ -142,6 +142,9 @@ func TestALoweredHoldPutsEveryRoundOnProbation(t *testing.T) {
 			t.Fatalf("a probation reread counted as a sample class %s", class)
 		}
 	}
+	if n := f.readsOf(execution.LookbackReadProbation); n != 5 || n != len(f.readKinds()) {
+		t.Fatalf("reads %v, want the five rereads each asked as a probation reread", f.readKinds())
+	}
 }
 
 // Whether a group's decisions are kept, read without the engine's lock,
@@ -165,7 +168,7 @@ func TestTheGroupsWhoseDecisionsAreKeptFollowTheirProbation(t *testing.T) {
 	kept(false, "its rounds read clean")
 	f.cleanRound(time.Minute)
 	kept(true, "lowered again")
-	f.engine.Forget("qg")
+	f.engine.Forget("qg", ForgottenMoved)
 	kept(false, "forgotten")
 }
 

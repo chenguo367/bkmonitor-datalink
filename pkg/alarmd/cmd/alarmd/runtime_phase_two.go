@@ -925,6 +925,10 @@ type phaseTwoScheduledRunner struct {
 	// result, so a Slot that returns unfinished is requeued in the place it
 	// had rather than a new one. Empty until the Runner is first queued.
 	place phaseTwoQueuePlace
+	// slotWait is how long this dispatch was ready to go while every
+	// execution slot was in use (executionSlotsFull), set as it is
+	// dispatched and handed to the Slot it starts (withDispatchSlotWait).
+	slotWait time.Duration
 }
 
 // phaseTwoQueuePlace is one Slot's standing in the queue, given when the
@@ -965,6 +969,44 @@ type phaseTwoQueuedRunner struct {
 	deadline time.Time
 	sequence uint64
 	cohort   string
+	// readyFull is executionSlotsFull at the moment the entry could first be
+	// dispatched - queued and past its readiness - once readyStamped; its
+	// wait for an execution slot is the full time since (slotWaitOf).
+	readyFull    time.Duration
+	readyStamped bool
+}
+
+// executionSlotsFull is F: how long every execution slot has been in use, on
+// the dispatcher's clock. Whether they are is the condition that holds a
+// dispatch back (slotsFull), and it changes only where the loop dispatches
+// or takes a result back. A dispatch takes a slot, so F takes the new state
+// there, at the pass's reading of the clock, the instant the dispatch was
+// decided; left to the next pass, the moments between would count under the
+// state before it. A result gives a slot back while the loop sleeps waiting
+// for one, so F is brought up to date at the top of every pass under the
+// state the loop slept in, full or not.
+type executionSlotsFull struct {
+	total time.Duration
+	at    time.Time
+	full  bool
+}
+
+// until is F at t, for t at or after the last pass: the state the last pass
+// saw holds until the next one.
+func (slots *executionSlotsFull) until(t time.Time) time.Duration {
+	if slots.full && !slots.at.IsZero() && t.After(slots.at) {
+		return slots.total + t.Sub(slots.at)
+	}
+	return slots.total
+}
+
+// advance brings F to now and takes the state the slots are in now.
+func (slots *executionSlotsFull) advance(now time.Time, full bool) {
+	slots.total = slots.until(now)
+	if slots.at.IsZero() || now.After(slots.at) {
+		slots.at = now
+	}
+	slots.full = full
 }
 
 // deadlineBefore orders two queued Runners by when their work expires:
@@ -1032,6 +1074,10 @@ type phaseTwoRunnerDispatcher struct {
 	// says the ready queue took entries since it was last ordered.
 	queueSequence uint64
 	normalDirty   bool
+
+	// slotsFullFor is F, the time every execution slot has been in use
+	// (executionSlotsFull), from which each dispatch's wait for one is read.
+	slotsFullFor executionSlotsFull
 
 	// preferDelayed alternates the two queues only when neither candidate
 	// carries a deadline; whenever one does, the deadline decides.
@@ -1474,6 +1520,24 @@ func (dispatcher *phaseTwoRunnerDispatcher) oneShotTargetsUnqueued() bool {
 	return true
 }
 
+// oneShotTargetsWaitForLater says every target of a one-shot run still to
+// run waits in the recovery queue for an instant after now: a first round
+// queued for its read, which a running dispatcher's timer starts at the read.
+// A one-shot run is one instant of its clock, so it ends there, and a run at
+// or past the read dispatches the round.
+func (dispatcher *phaseTwoRunnerDispatcher) oneShotTargetsWaitForLater(now time.Time) bool {
+	if len(dispatcher.oneShotTargets) == 0 {
+		return false
+	}
+	waiting := 0
+	for _, entry := range dispatcher.delayed {
+		if entry.readyAt.After(now) && dispatcher.oneShotTargets[entry.scheduled.queryGroup] == entry.scheduled.lifecycle {
+			waiting++
+		}
+	}
+	return waiting == len(dispatcher.oneShotTargets)
+}
+
 // oneShotGenerationLimit bounds the ticks a one-shot run issues itself: a
 // target still not dispatched after this many is one the dispatcher never
 // reaches, which the run reports rather than waits on.
@@ -1629,6 +1693,7 @@ func (dispatcher *phaseTwoRunnerDispatcher) executeScheduled(ctx context.Context
 	dispatcher.changeExecuting(1)
 	result := phaseTwoScheduledResult{scheduled: scheduled}
 	runCtx := dispatcher.bundle.dependencies.TargetFlow.Context(ctx, string(scheduled.queryGroup))
+	runCtx = withDispatchSlotWait(runCtx, scheduled.slotWait, scheduled.place.cohort)
 	if observability.TargetFlowEnabled(runCtx) {
 		runCtx = observability.ContextWithTraceFields(runCtx, observability.TraceFields{QueryGroupKey: string(scheduled.queryGroup)})
 		observability.EmitTargetFlow(runCtx, "runner_dispatch", observability.TraceFields{},
@@ -1676,6 +1741,7 @@ func (dispatcher *phaseTwoRunnerDispatcher) run(ctx context.Context, wake <-chan
 	}
 	for {
 		began := liveness.clock()
+		dispatcher.accountSlotsFull(dispatcher.bundle.schedulerNow())
 		dispatcher.observeOccupancy(ctx)
 		if canceled != nil && len(dispatcher.active) == 0 {
 			return canceled
@@ -1696,6 +1762,11 @@ func (dispatcher *phaseTwoRunnerDispatcher) run(ctx context.Context, wake <-chan
 			}
 			dispatcher.beginGeneration()
 			continue
+		}
+		if dispatcher.oneShot && dispatcher.generation > 0 && len(dispatcher.active) == 0 && len(dispatcher.normal) == 0 &&
+			dispatcher.walkGeneration == dispatcher.generation && dispatcher.walked >= dispatcher.walkSize &&
+			dispatcher.oneShotTargetsWaitForLater(dispatcher.bundle.schedulerNow()) {
+			return nil
 		}
 
 		// Consume completed work before admitting another normal item. This
@@ -1756,9 +1827,11 @@ func (dispatcher *phaseTwoRunnerDispatcher) run(ctx context.Context, wake <-chan
 		if selectDelayed {
 			dispatch = dispatcher.jobs
 			scheduled = dispatcher.delayed[delayedIndex].scheduled
+			scheduled.slotWait = dispatcher.slotWaitOf(dispatcher.delayed[delayedIndex], now)
 		} else if selectNormal {
 			dispatch = dispatcher.jobs
 			scheduled = dispatcher.normal[0].scheduled
+			scheduled.slotWait = dispatcher.slotWaitOf(dispatcher.normal[0], now)
 		}
 
 		var retryTimer *time.Timer
@@ -1781,6 +1854,7 @@ func (dispatcher *phaseTwoRunnerDispatcher) run(ctx context.Context, wake <-chan
 		select {
 		case dispatch <- scheduled:
 			dispatcher.markDispatched(scheduled, selectDelayed, delayedIndex, delayedDue)
+			dispatcher.slotsFullFor.advance(now, dispatcher.slotsFull())
 		case result := <-dispatcher.results:
 			dispatcher.handleResult(ctx, result, canceled == nil)
 		case <-wake:
@@ -2461,10 +2535,44 @@ func (dispatcher *phaseTwoRunnerDispatcher) queueEntry(scheduled phaseTwoSchedul
 			cohort: scheduler.ShortPeriodCohortForInterval(scheduled.lifecycle.runner.DueBound().IntervalSeconds),
 		}
 	}
-	return phaseTwoQueuedRunner{
+	entry := phaseTwoQueuedRunner{
 		scheduled: scheduled, readyAt: readyAt,
 		deadline: deadline, sequence: scheduled.place.sequence, cohort: scheduled.place.cohort,
 	}
+	// An entry ready when queued could go from now; one ready later is
+	// stamped when its readiness comes (accountSlotsFull).
+	if now := dispatcher.bundle.schedulerNow(); !readyAt.After(now) {
+		entry.readyFull, entry.readyStamped = dispatcher.slotsFullFor.until(now), true
+	}
+	return entry
+}
+
+// accountSlotsFull brings F to now at the top of a pass. The recovery
+// entries whose readiness came since the last pass are stamped first, with F
+// at that moment, under the state the last pass left; then the state the
+// slots are in now is taken. The time from the last pass is the loop's
+// sleep or its work, and the state did not change in it.
+func (dispatcher *phaseTwoRunnerDispatcher) accountSlotsFull(now time.Time) {
+	for index := range dispatcher.delayed {
+		entry := &dispatcher.delayed[index]
+		if entry.readyStamped || entry.readyAt.After(now) {
+			continue
+		}
+		entry.readyFull, entry.readyStamped = dispatcher.slotsFullFor.until(entry.readyAt), true
+	}
+	dispatcher.slotsFullFor.advance(now, dispatcher.slotsFull())
+}
+
+// slotWaitOf is how long entry, dispatched at now, was ready to go while
+// every execution slot was in use: F since the moment it could first go.
+// Waits that are not for a slot - the walk held back by a full ready queue,
+// the Query Group busy with its previous round - come before that moment and
+// are not in it.
+func (dispatcher *phaseTwoRunnerDispatcher) slotWaitOf(entry phaseTwoQueuedRunner, now time.Time) time.Duration {
+	if !entry.readyStamped {
+		return 0
+	}
+	return max(dispatcher.slotsFullFor.until(now)-entry.readyFull, 0)
 }
 
 // recordDueBound rewrites the index entry from the round that has just
@@ -2807,7 +2915,7 @@ func (bundle *phaseTwoWorkerBundle) Shutdown(ctx context.Context) error {
 		runners := make([]*phaseTwoQueryGroupLifecycle, 0, len(bundle.runners))
 		queryGroups := make([]execution.QueryGroupIdentity, 0, len(bundle.runners))
 		for queryGroup, lifecycle := range bundle.runners {
-			bundle.removeRunnerLocked(queryGroup)
+			bundle.removeRunnerLocked(queryGroup, lookback.ForgottenShutdown)
 			lifecycle.cancel()
 			runners = append(runners, lifecycle)
 			queryGroups = append(queryGroups, queryGroup)
@@ -3415,7 +3523,7 @@ func (bundle *phaseTwoWorkerBundle) applyAssignment(
 		if _, keep := desired[queryGroup]; keep {
 			continue
 		}
-		bundle.removeRunnerLocked(queryGroup)
+		bundle.removeRunnerLocked(queryGroup, lookback.ForgottenMoved)
 		removed[queryGroup] = lifecycle
 		// The handover is counted here, under the lock that saw the bundle
 		// not draining, so Shutdown's wait on the group cannot begin before it.
@@ -3751,7 +3859,7 @@ func (bundle *phaseTwoWorkerBundle) stopLostQueryGroup(
 	err error,
 ) {
 	bundle.dropStateCache(queryGroup)
-	if !bundle.detachQueryGroup(queryGroup, lifecycle) {
+	if !bundle.detachQueryGroup(queryGroup, lifecycle, lostForgetReason(err)) {
 		return
 	}
 	lifecycle.cancel()
@@ -3773,7 +3881,7 @@ func (bundle *phaseTwoWorkerBundle) detachLostQueryGroup(
 	lifecycle *phaseTwoQueryGroupLifecycle,
 	err error,
 ) {
-	if !bundle.detachQueryGroup(queryGroup, lifecycle) {
+	if !bundle.detachQueryGroup(queryGroup, lifecycle, lostForgetReason(err)) {
 		return
 	}
 	releaseCtx, cancel := context.WithTimeout(context.Background(), bundle.dependencies.Config.ShutdownTimeout.Duration())
@@ -3798,16 +3906,28 @@ func lostResult(err error) observability.Result {
 	return observability.ResultFailed
 }
 
+// lostForgetReason is why the lookback forgets a Query Group let go of
+// outside a planned stop, told apart as lostResult tells it: content_switch
+// when its lease ran out at a content switch, lease_lost otherwise.
+func lostForgetReason(err error) string {
+	var switched *ownership.LeaseEndedAtContentSwitch
+	if errors.As(err, &switched) {
+		return lookback.ForgottenContentSwitch
+	}
+	return lookback.ForgottenLeaseLost
+}
+
 func (bundle *phaseTwoWorkerBundle) detachQueryGroup(
 	queryGroup execution.QueryGroupIdentity,
 	lifecycle *phaseTwoQueryGroupLifecycle,
+	reason string,
 ) bool {
 	bundle.mu.Lock()
 	defer bundle.mu.Unlock()
 	if bundle.runners[queryGroup] != lifecycle {
 		return false
 	}
-	bundle.removeRunnerLocked(queryGroup)
+	bundle.removeRunnerLocked(queryGroup, reason)
 	return true
 }
 
@@ -3871,14 +3991,16 @@ func (bundle *phaseTwoWorkerBundle) setRunnerLocked(
 	bundle.setOwnedQueryGroupsLocked()
 }
 
-func (bundle *phaseTwoWorkerBundle) removeRunnerLocked(queryGroup execution.QueryGroupIdentity) {
+// removeRunnerLocked takes a Query Group out of the Runner set, for why the
+// lookback is told (lookback.ForgottenReasons).
+func (bundle *phaseTwoWorkerBundle) removeRunnerLocked(queryGroup execution.QueryGroupIdentity, reason string) {
 	delete(bundle.runners, queryGroup)
 	// Not owned here any more: its timeline is its next owner's to report.
 	delete(bundle.unreadableTimelines, queryGroup)
 	bundle.setOwnedQueryGroupsLocked()
 	// A Query Group no longer owned is no longer rechecked. The lookback
 	// never takes the bundle's lock under its own, so this order is safe.
-	bundle.dependencies.Lookback.Forget(queryGroup)
+	bundle.dependencies.Lookback.Forget(queryGroup, reason)
 }
 
 // setOwnedQueryGroupsLocked follows every change to the owned Runner set, so
@@ -4105,7 +4227,7 @@ func (bundle *phaseTwoWorkerBundle) declineHungExecutions(now time.Time) {
 			continue
 		}
 		entry := &declinedQueryGroup{lifecycle: lifecycle, stage: stage, deadline: deadline, since: now}
-		bundle.removeRunnerLocked(queryGroup)
+		bundle.removeRunnerLocked(queryGroup, lookback.ForgottenDeclinedHung)
 		if bundle.declined == nil {
 			bundle.declined = make(map[execution.QueryGroupIdentity]*declinedQueryGroup)
 		}

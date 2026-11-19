@@ -14,8 +14,10 @@ import (
 // deployment has and a fresh fixture does not: a Segment open since before its
 // output context was revised, whose first contexts and first publication's
 // manifest are past their retention. After the owner restarts, four Slots in a
-// row run every stage -- started, queried, evaluated, state applied, progress
-// committed, completed -- and the cursor moves four steps. Every unit and
+// row run every stage -- started, queried, evaluated, State settled, progress
+// committed, completed -- and the cursor moves four steps. The State step is
+// settled as 014 B3 stage 3 has it, the segment skip on by default: written,
+// or every member it admitted left out as a stable segment member. Every unit and
 // runtime test passed on a build that stopped nearly every such group, because
 // each of them built its Segments fresh.
 func TestARevisedSegmentPastItsRetentionRunsEveryStageAfterARestart(t *testing.T) {
@@ -34,10 +36,10 @@ func TestARevisedSegmentPastItsRetentionRunsEveryStageAfterARestart(t *testing.T
 			before.LastFullSlot, after.LastFullSlot, before.NextSlot, after.NextSlot)
 	}
 	stages := []observability.Stage{observability.StageSlotStarted, observability.StageQueryCompleted, observability.StageEvaluationCompleted,
-		observability.StageStateApplied, observability.StageProgressCommitted, observability.StageSlotCompleted}
+		observability.StageProgressCommitted, observability.StageSlotCompleted}
 	counts := map[string]int{}
 	for _, observation := range f.observed()[mark:] {
-		for _, stage := range stages {
+		for _, stage := range append(stages, observability.StageStateApplied) {
 			if observation.Stage == stage {
 				counts[string(stage)+"/"+string(observation.ReasonCode)]++
 			}
@@ -48,8 +50,13 @@ func TestARevisedSegmentPastItsRetentionRunsEveryStageAfterARestart(t *testing.T
 			t.Fatalf("%s did not run once for each of the four Slots: %v", stage, counts)
 		}
 	}
-	if len(counts) != len(stages) {
-		t.Fatalf("a stage ended with a reason: %v", counts)
+	for key := range counts {
+		if !strings.HasSuffix(key, "/none") {
+			t.Fatalf("a stage ended with a reason: %v", counts)
+		}
+	}
+	if completed, settled := stateSettledSlots(f.observed()[mark:]); completed != 4 || settled != 4 {
+		t.Fatalf("%d of %d Slots settled their State, want all four written or left out under the skip", settled, completed)
 	}
 	if degraded := degradedCounts(f); len(degraded) != 0 {
 		t.Fatalf("the hold was degraded instead of prepared: %v", degraded)

@@ -419,7 +419,7 @@ func (engine *Engine) StepEarly(ctx context.Context) {
 			qg = work.trial.query.Contract.Slot.QueryGroup
 		}
 		if !engine.options.Owns(qg) {
-			engine.Forget(qg)
+			engine.Forget(qg, ForgottenNotOwned)
 			continue
 		}
 		release, yield, refused := engine.options.Permit()
@@ -523,7 +523,7 @@ func (engine *Engine) earlyRead(ctx context.Context, slot *directedSlot, release
 	readAt := engine.options.Now()
 	// Every slice the Slot read, each against its own first read, as the
 	// read at the rung does (rereadSlices).
-	queries, sinks, completion, err, refused := engine.rereadSlices(readCtx, slot)
+	queries, sinks, completion, err, refused := engine.rereadSlices(execution.WithLookbackRead(readCtx, execution.LookbackReadDirectedEarly), slot)
 	sink := mergeKeptSinks(sinks)
 	close(back)
 	release()

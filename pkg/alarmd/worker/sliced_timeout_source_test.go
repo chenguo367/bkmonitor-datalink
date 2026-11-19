@@ -12,6 +12,7 @@ package worker_test
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -53,15 +54,24 @@ func (provider *slicedProvider) clients(t *testing.T) (*uq.Client, *uq.Client) {
 		gateway := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 			writer.WriteHeader(http.StatusGatewayTimeout)
 		}))
+		// The server learns of a client gone only once it has read the
+		// request's body to its end, so the body is read first; the handler
+		// ends with the cases whatever the server learnt.
+		finished := make(chan struct{})
 		stalled := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			_, _ = io.Copy(io.Discard, request.Body)
 			writer.Header().Set("Content-Type", uq.SharedSchemaMediaType)
 			writer.WriteHeader(http.StatusOK)
 			_, _ = writer.Write([]byte(workerSharedHeader))
 			writer.(http.Flusher).Flush()
-			<-request.Context().Done()
+			select {
+			case <-request.Context().Done():
+			case <-finished:
+			}
 		}))
 		t.Cleanup(gateway.Close)
 		t.Cleanup(stalled.Close)
+		t.Cleanup(func() { close(finished) })
 		var err error
 		if provider.timeout, err = uq.NewClient(gateway.URL, "alarmd", gateway.Client()); err != nil {
 			t.Fatal(err)

@@ -491,16 +491,25 @@ func TestSharedSchemaCallerCancelStopsDeliveryAndReleasesHTTP(t *testing.T) {
 	body := sharedTestBody(t, []responseSeries{sharedTestSeries(), sharedTestSeries()}, map[string]any{"is_partial": false})
 	var posts atomic.Uint32
 	released := make(chan struct{})
+	// The server learns of a client gone only once it has read the request's
+	// body to its end, so the body is read first; a release it never learns
+	// of fails the case below, and the handler ends with the case.
+	finished := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
 		posts.Add(1)
 		w.Header().Set("Content-Type", SharedSchemaMediaType)
 		// Leave the body open after the data so cancellation also tests transport release.
 		_, _ = io.WriteString(w, body[:strings.LastIndex(body, `{"end"`)])
 		w.(http.Flusher).Flush()
-		<-r.Context().Done()
-		close(released)
+		select {
+		case <-r.Context().Done():
+			close(released)
+		case <-finished:
+		}
 	}))
 	defer server.Close()
+	defer close(finished)
 	client, _ := NewClientWithLimits(server.URL, "alarmd", server.Client(), DefaultLimits())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

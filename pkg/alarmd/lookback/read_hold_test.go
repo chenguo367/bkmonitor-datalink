@@ -79,6 +79,9 @@ func TestEarlierReadIsReservedOnceAndComparedOnlyWithTheFormalFirstRead(t *testi
 			if calls != 1 || f.group("qg").prepared != nil {
 				t.Fatalf("%d earlier reads, retained trial=%+v", calls, f.group("qg").prepared)
 			}
+			if kinds := f.readKinds(); len(kinds) != 1 || kinds[0] != execution.LookbackReadEarlier {
+				t.Fatalf("reads %v, want the one trial asked as an earlier read", kinds)
+			}
 		})
 	}
 }

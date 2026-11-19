@@ -42,6 +42,8 @@ type lookbackCollector struct {
 	faults     *prometheus.Desc
 	plans      *prometheus.Desc
 	planHeld   *prometheus.Desc
+	uncovered  *prometheus.Desc
+	forgotten  *prometheus.Desc
 	// The directed reads of series_late Query Groups and the supplements of
 	// their Slots.
 	supplementWindows    *prometheus.Desc
@@ -382,13 +384,30 @@ func newLookbackCollector() *lookbackCollector {
 		planHeld: desc("lookback_plan_entries",
 			"Entries of the control plane's lookback plan set this process holds now: the Query Groups it was "+
 				"told read late series. Zero where no Leader plans, or before the first set arrives."),
+		uncovered: desc("lookback_uncovered_groups",
+			"The Query Groups this process owns without a fresh measurement, by why. Each is counted under the "+
+				"first reason that holds for it, so the reasons add up to lookback_coverage owned less covered: "+
+				"not_seen (no first read of it has reached the lookback here), never_complete (no first read of it "+
+				"was whole), trial_blocking (an earlier-read trial of a Slot before its latest is still reserved "+
+				"where its next sample would be taken), unmeasured (samples of it were taken here, none completed as "+
+				"a measurement), first_sample_pending (its first sample is not due yet), resting (its rest after its "+
+				"latest sample is not over), awaiting_first_read (its rest is over; its next sample waits for its "+
+				"next formal first read). Which groups, on the replica's snapshot and on lookback.get.",
+			"reason"),
+		forgotten: desc("lookback_groups_forgotten_total",
+			"Query Groups whose lookback state this process dropped as no longer its own, by why. The reasons: moved (the "+
+				"Assignment gave it to another replica), lease_lost (its lease ended), content_switch (its lease "+
+				"ended at a content switch, as planned), declined_hung (its execution hung past its deadline and "+
+				"was let go), shutdown (the process stopping), not_owned (found no longer its own as the lookback "+
+				"went to read it). Counted only when there was state to drop.",
+			"reason"),
 	}
 }
 
 func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, desc := range []*prometheus.Desc{c.firstReads, c.checks, c.changed, c.changes, c.classes, c.readEarly, c.seriesLate, c.supplementWindows, c.supplementUnobserved, c.supplementSeries,
 		c.supplementPoints, c.partlyRefused, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.earlierBytes, c.earlierReads, c.earlierOvertaken, c.earlierPreparedLate, c.earlierAhead, c.earlierSkipped, c.probationRereads, c.probationCaught, c.probationGroups, c.floorProbeRounds, c.floorProbes, c.floorProbeGroups, c.floorProbeChanges, c.holdIgnored, c.readBytes, c.checkBytes, c.unknown, c.coverage,
-		c.pending, c.yields, c.refused, c.faults, c.plans, c.planHeld, c.readHoldTransition, c.readHoldOvertaken,
+		c.pending, c.yields, c.refused, c.faults, c.plans, c.planHeld, c.uncovered, c.forgotten, c.readHoldTransition, c.readHoldOvertaken,
 		c.readHoldPredecessor, c.readHoldSeed, c.readHoldDuration, c.readHoldEarlierSkip, c.readHoldFloorProbes, c.readHoldProbeProgress, c.readHoldFindings, c.roundsReadAtLimit, c.readHoldClamped, c.readHoldCorrupt, c.readHoldRetireClose, c.readHoldRetireClosed, c.readHoldWaits, c.readHoldWaiting, c.readHoldCloseSkip, c.readHoldDegraded,
 		c.readHoldGroups, c.readHoldMax} {
 		ch <- desc
@@ -578,6 +597,12 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 		counter(c.plans, n, outcome)
 	}
 	gauge(c.planHeld, float64(stats.PlanEntries))
+	for _, reason := range lookback.UncoveredReasons {
+		gauge(c.uncovered, float64(stats.Uncovered[reason]), reason)
+	}
+	for _, reason := range lookback.ForgottenReasons {
+		counter(c.forgotten, stats.GroupsForgotten[reason], reason)
+	}
 	gauge(c.coverage, float64(stats.Coverage.Owned), "owned")
 	gauge(c.coverage, float64(stats.Coverage.Covered), "covered")
 	gauge(c.coverage, float64(stats.Coverage.NeverCompleteFirstRead), "never_complete_first_read")
