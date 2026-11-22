@@ -9,7 +9,10 @@
 
 package observability
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 // The shadow of a Plan's stable segments (014 B3, first stage): every State
 // is written as before, and beside it the worker keeps, in process, the
@@ -260,6 +263,51 @@ type SegmentShadowMemberKey struct {
 	PeriodClass string
 }
 
+// Why a member the shadow compared as a match was written all the same, the
+// first that held, in the order the round checks them (014 B3 stage 3):
+// slot_skip_off, the Slot follows no segment skip word; write_failed, an
+// earlier attempt's segment write did not land; not_normal_operation, the
+// Slot is not a normal one; plan_stopped, the Plan degraded twice in its
+// owner's term; sampled, the Plan's sampled round of the day; ttl_zero, the
+// Plan's segments have no lifetime to be written with; fallback_page, the
+// member's page went unrenewed for half its lifetime and is written whole.
+// other is none of these, which by construction never happens: a member is
+// compared only when written for a reason above, so any count there is a
+// gate this list misses. A retried round compares no member, a member the
+// skip left is counted as skipped, and an exception is no match: none of
+// them is here.
+const (
+	SegmentNotSkippedSlotSkipOff  = "slot_skip_off"
+	SegmentNotSkippedWriteFailed  = "write_failed"
+	SegmentNotSkippedNotNormal    = "not_normal_operation"
+	SegmentNotSkippedPlanStopped  = "plan_stopped"
+	SegmentNotSkippedSampled      = "sampled"
+	SegmentNotSkippedTTLZero      = "ttl_zero"
+	SegmentNotSkippedFallbackPage = "fallback_page"
+	SegmentNotSkippedOther        = "other"
+)
+
+// AllSegmentNotSkippedGates is every gate, in the order checked.
+func AllSegmentNotSkippedGates() []string {
+	return []string{SegmentNotSkippedSlotSkipOff, SegmentNotSkippedWriteFailed, SegmentNotSkippedNotNormal,
+		SegmentNotSkippedPlanStopped, SegmentNotSkippedSampled, SegmentNotSkippedTTLZero,
+		SegmentNotSkippedFallbackPage, SegmentNotSkippedOther}
+}
+
+// SegmentNotSkippedKey is a cell of the matches not skipped: the gate and the
+// Plan's period class.
+type SegmentNotSkippedKey struct {
+	Gate        string
+	PeriodClass string
+}
+
+// SegmentRoundKey is a cell of the Plans' rounds: the skip mode the round ran
+// under (segment.SkipModes) and the Plan's period class.
+type SegmentRoundKey struct {
+	Mode        string
+	PeriodClass string
+}
+
 // SegmentShadowFacts is one Slot's shadow: how its open members compared,
 // what happened to its pages' membership, and the pages - and their bytes -
 // it would have rewritten, by period class.
@@ -285,6 +333,34 @@ type SegmentShadowFacts struct {
 	// Degraded is the Plans whose segments the Slot could not use as
 	// written, by why (AllSegmentDegradations).
 	Degraded map[string]int64 `json:"degraded,omitempty"`
+	// NotSkipped is the members compared a match and written all the same, by
+	// the first gate that kept them written (AllSegmentNotSkippedGates).
+	NotSkipped map[SegmentNotSkippedKey]int64 `json:"not_skipped,omitempty"`
+	// Rounds is the Plans' rounds, by the skip mode each ran under.
+	Rounds map[SegmentRoundKey]int64 `json:"rounds,omitempty"`
+}
+
+// NotSkip adds count to a gate's cell, a gate outside the closed list
+// counted as other.
+func (facts *SegmentShadowFacts) NotSkip(gate, class string, count int64) {
+	if count == 0 {
+		return
+	}
+	if !slices.Contains(AllSegmentNotSkippedGates(), gate) {
+		gate = SegmentNotSkippedOther
+	}
+	if facts.NotSkipped == nil {
+		facts.NotSkipped = map[SegmentNotSkippedKey]int64{}
+	}
+	facts.NotSkipped[SegmentNotSkippedKey{Gate: gate, PeriodClass: NormalizeSegmentPeriodClass(class)}] += count
+}
+
+// Round counts one Plan's round under the skip mode it ran under.
+func (facts *SegmentShadowFacts) Round(mode, class string) {
+	if facts.Rounds == nil {
+		facts.Rounds = map[SegmentRoundKey]int64{}
+	}
+	facts.Rounds[SegmentRoundKey{Mode: mode, PeriodClass: NormalizeSegmentPeriodClass(class)}]++
 }
 
 // Degrade counts a Plan degraded. A reason outside the closed list is not
@@ -404,7 +480,7 @@ func (facts *SegmentShadowFacts) Pages(class string, pages, bytes int64) {
 func (facts SegmentShadowFacts) Empty() bool {
 	return len(facts.Outcomes) == 0 && len(facts.Members) == 0 && len(facts.PageWrites) == 0 && len(facts.Skipped) == 0 &&
 		len(facts.Renewals) == 0 && len(facts.SkipFlagIgnored) == 0 && len(facts.Samples) == 0 && len(facts.Degraded) == 0 &&
-		len(facts.RenewScripts) == 0
+		len(facts.RenewScripts) == 0 && len(facts.NotSkipped) == 0 && len(facts.Rounds) == 0
 }
 
 func normalizeSegmentShadowOutcome(outcome SegmentShadowOutcome) SegmentShadowOutcome {

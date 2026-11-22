@@ -694,6 +694,9 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 		if !replayed {
 			sliceCompletion, err = coordinator.ports.Query.Execute(ctx, queryRequest, stream)
 		}
+		// The read's end, its footer checked or its read ahead replayed: a
+		// seam of the Slot's reads once the read is kept (sliceSeams).
+		ended := time.Now()
 		// The provider's own timeout comes back as a completion, UNAVAILABLE:
 		// put on the slice's size it is the read out of time below, by the
 		// time its query took, read ahead or here alike.
@@ -775,6 +778,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 			}
 			return execution.SlotExecutionResult{}, inSlotStep(execution.SlotNotCommittedQueryFailed, fmt.Errorf("alarmd worker: query: %w", err))
 		}
+		stream.seams.readEnded(ended)
 		if !read {
 			execution.MarkQueryReturned(ctx, time.Now())
 			completionCtx, cancelCompletion = shortPeriodCompletionContext(ctx, request.Operation, stream.header)
@@ -977,7 +981,10 @@ func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 		InputSlicesReadAheadContextEnded: stream.readAheadEnds[readAheadContextEnded],
 		ReadAheadYieldsNormalInput:       stream.readAheadYields[0], ReadAheadYieldsNormalOutput: stream.readAheadYields[1], ReadAheadYieldsNormalGap: stream.readAheadYields[2], ReadAheadYieldsNormalNoData: stream.readAheadYields[3], ReadAheadYieldsSlotOutput: stream.readAheadYields[4], ReadAheadYieldsFrames: stream.readAheadYields[5], ReadAheadYieldsWindowBound: stream.readAheadYields[6], ReadAheadYieldsQueryFree: stream.readAheadYields[7], ReadAheadYieldsOther: stream.readAheadYields[8],
 		ReadAheadYieldedBytes: stream.readAheadYieldedBytes, ReadAheadYieldDistanceMax: stream.readAheadYieldDistanceMax,
-		ReadAheadWaitMillisMax:              uint64(max(stream.readAheadWaitMax.Load(), 0)),
+		ReadAheadWaitMillisMax: uint64(max(stream.readAheadWaitMax.Load(), 0)),
+		InputSliceTailMillis:   uint64(stream.seams.tail.Milliseconds()), InputSliceTailMillisMax: uint64(stream.seams.tailMax.Milliseconds()),
+		InputSliceChangeMillis: uint64(stream.seams.change.Milliseconds()), InputSliceChangeMillisMax: uint64(stream.seams.changeMax.Milliseconds()),
+		SharedFrameWaitConsumerMillis: stream.queryPhases.frameConsumer / 1000, SharedFrameWaitReaderMillis: stream.queryPhases.frameReader / 1000,
 		InputSliceTimeouts:                  stream.sliceTimeoutsSplit(),
 		InputSliceShapeStarted:              shapes[0],
 		InputSliceShapeKept:                 shapes[1],

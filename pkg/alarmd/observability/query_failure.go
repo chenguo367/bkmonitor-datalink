@@ -377,6 +377,11 @@ type PhysicalQueryAnswer struct {
 	// and decoded.
 	Answered   bool
 	Wait, Body time.Duration
+	// FrameWaitConsumer and FrameWaitReader are what a shared-schema answer
+	// decoded to its end waited, each side of its frames for the other: its
+	// frame reader, a frame parsed, for the Slot to take it, and the Slot for
+	// the next frame. Zero for any other answer.
+	FrameWaitConsumer, FrameWaitReader time.Duration
 }
 
 // How a physical query ended, closed. A timeout is split by whose deadline

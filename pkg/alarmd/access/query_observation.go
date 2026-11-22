@@ -153,6 +153,8 @@ func queryAnswerOf(completion execution.ProviderCompletion, err error, elapsed t
 		answer.Wait = time.Duration(completion.Stats.WaitMillis) * time.Millisecond
 		answer.Body = time.Duration(completion.Stats.BodyMillis) * time.Millisecond
 	}
+	answer.FrameWaitConsumer = time.Duration(completion.Stats.SharedFrameWaitConsumerMicros) * time.Microsecond
+	answer.FrameWaitReader = time.Duration(completion.Stats.SharedFrameWaitReaderMicros) * time.Microsecond
 	switch failure {
 	case "":
 		answer.Outcome = observability.PhysicalQueryOK

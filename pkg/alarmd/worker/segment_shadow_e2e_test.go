@@ -89,6 +89,13 @@ type shadowObserved struct {
 	renewals map[string]int64
 	// notWritten is the admitted mutations not written, by reason.
 	notWritten map[observability.StateNotWrittenReason]int64
+	// notSkipped is the matches written all the same, by gate; rounds the
+	// Plans' rounds, by skip mode.
+	notSkipped map[string]int64
+	rounds     map[string]int64
+	// next, when set, is handed every observation after it is summed: the
+	// observer the replica's observations go on to (the fleet tracker).
+	next observability.Observer
 }
 
 // renewal is the page renewals counted under result.
@@ -98,7 +105,10 @@ func (observed *shadowObserved) renewal(result string) int64 {
 	return observed.renewals[result]
 }
 
-func (observed *shadowObserved) Observe(_ context.Context, observation observability.Observation) {
+func (observed *shadowObserved) Observe(ctx context.Context, observation observability.Observation) {
+	if observed.next != nil {
+		defer observed.next.Observe(ctx, observation)
+	}
 	if applied := observation.StateAlreadyApplied; applied != nil {
 		observed.mu.Lock()
 		for key, count := range applied.Counts {
@@ -145,6 +155,34 @@ func (observed *shadowObserved) Observe(_ context.Context, observation observabi
 		}
 		observed.renewals[result] += count
 	}
+	for key, count := range facts.NotSkipped {
+		if observed.notSkipped == nil {
+			observed.notSkipped = map[string]int64{}
+		}
+		observed.notSkipped[key.Gate] += count
+	}
+	for key, count := range facts.Rounds {
+		if observed.rounds == nil {
+			observed.rounds = map[string]int64{}
+		}
+		observed.rounds[key.Mode] += count
+	}
+}
+
+// matchLedger is the rig's matches so far, the members it left unwritten,
+// the matches it wrote by gate, and its Plans' rounds by skip mode.
+func (observed *shadowObserved) matchLedger() (matches, left int64, gates, rounds map[string]int64) {
+	observed.mu.Lock()
+	defer observed.mu.Unlock()
+	gates, rounds = map[string]int64{}, map[string]int64{}
+	for gate, count := range observed.notSkipped {
+		gates[gate] = count
+	}
+	for mode, count := range observed.rounds {
+		rounds[mode] = count
+	}
+	return observed.outcomes[observability.SegmentShadowMatch],
+		observed.notWritten[observability.StateNotWrittenSegmentMemberSkipped], gates, rounds
 }
 
 func (observed *shadowObserved) snapshot() (map[observability.SegmentShadowOutcome]int64, map[observability.SegmentShadowEvent]int64) {
@@ -1289,5 +1327,80 @@ func TestASlotWhoseSegmentsDidNotReadFailsByNameAndItsRetryCompletes(t *testing.
 			t.Errorf("%s last written %+v + %+v %+v\nwant %+v + %+v %+v", identity.SeriesIdentityDigest, got.BaseHistory, got.Points,
 				got.Levels, want.BaseHistory, want.Points, want.Levels)
 		}
+	}
+}
+
+// Every member the shadow compared a match is either left unwritten or
+// counted under the gate that kept it written - the gates and the members
+// left add up to the matches after every round - through Execute, in rounds
+// without the skip word, with it and without it again: without, every match
+// is the word's; with, the round leaves them and no gate is read; other,
+// which no round reaches, stays zero throughout. Every round is counted once
+// under the mode it ran in.
+func TestEveryMatchIsLeftOrCountedUnderTheGateThatKeptItWritten(t *testing.T) {
+	rig := newShadowRigWith(t, 6, 0, shadowRecoveryOff, 0, nil, 16<<20)
+	at := frozenContract().Slot.EvaluationTime
+	rounds := 0
+	step := func() {
+		t.Helper()
+		at += 60
+		if completed, err := rig.run(at, nil, nil, false); !completed {
+			t.Fatalf("Slot at %d: completed=%t err=%v", at, completed, err)
+		}
+		rounds++
+		matches, left, gates, modes := rig.observed.matchLedger()
+		sum := left
+		for _, count := range gates {
+			sum += count
+		}
+		if sum != matches {
+			t.Fatalf("at %d: %d matches, %d left and gates %v adding to %d", at, matches, left, gates, sum)
+		}
+		if gates[observability.SegmentNotSkippedOther] != 0 {
+			t.Fatalf("at %d: %d matches counted other", at, gates[observability.SegmentNotSkippedOther])
+		}
+		total := int64(0)
+		for _, count := range modes {
+			total += count
+		}
+		if total != int64(rounds) {
+			t.Fatalf("at %d: rounds by mode %v, want %d in all", at, modes, rounds)
+		}
+	}
+	// Without the word: every round's matches are written, as the word's.
+	for round := 0; round < 6; round++ {
+		step()
+	}
+	matches, left, gates, modes := rig.observed.matchLedger()
+	if matches == 0 || left != 0 || gates[observability.SegmentNotSkippedSlotSkipOff] != matches || len(gates) != 1 {
+		t.Fatalf("without the word: %d matches, %d left, gates %v; want every match under slot_skip_off", matches, left, gates)
+	}
+	if modes[segment.SkipModeOff] != 6 {
+		t.Fatalf("rounds %v, want six off", modes)
+	}
+	// With it: the rounds leave their matches; none is counted under a gate.
+	rig.skipWord.Store(7)
+	for round := 0; round < 8; round++ {
+		step()
+	}
+	matchesWith, leftWith, gatesWith, modesWith := rig.observed.matchLedger()
+	if leftWith == 0 || leftWith != matchesWith-matches {
+		t.Fatalf("with the word: %d more matches, %d left; want every new match left", matchesWith-matches, leftWith)
+	}
+	if !reflect.DeepEqual(gatesWith, gates) {
+		t.Fatalf("with the word the gates moved from %v to %v", gates, gatesWith)
+	}
+	if modesWith[segment.SkipModeOff] != 6 || modesWith[segment.SkipModeSkip]+modesWith[segment.SkipModeSampled] != 8 {
+		t.Fatalf("rounds %v, want six off and eight skipping", modesWith)
+	}
+	// Without it again: the word's matches again.
+	rig.skipWord.Store(0)
+	for round := 0; round < 2; round++ {
+		step()
+	}
+	matchesAfter, leftAfter, gatesAfter, _ := rig.observed.matchLedger()
+	if leftAfter != leftWith || gatesAfter[observability.SegmentNotSkippedSlotSkipOff]-gates[observability.SegmentNotSkippedSlotSkipOff] != matchesAfter-matchesWith {
+		t.Fatalf("without the word again: %d more matches, %d more left, slot_skip_off %d more", matchesAfter-matchesWith,
+			leftAfter-leftWith, gatesAfter[observability.SegmentNotSkippedSlotSkipOff]-gates[observability.SegmentNotSkippedSlotSkipOff])
 	}
 }

@@ -584,6 +584,11 @@ type segmentShadowPlanRound struct {
 type segmentShadowTally struct {
 	members  []execution.SeriesIdentityDigest
 	outcomes map[observability.SegmentShadowOutcome]int64
+	// notSkipped is the members compared a match and written all the same,
+	// by the first gate that kept them written (notSkippedGate); counted
+	// with the outcomes, so the gates and the members left add up to the
+	// matches.
+	notSkipped map[string]int64
 }
 
 func newSegmentShadowRound(request execution.SlotExecutionRequest, slot *segmentSlot) *segmentShadowRound {
@@ -633,6 +638,31 @@ func (round *segmentShadowRound) skipMode(planRound *segmentShadowPlanRound) str
 		return segment.SkipModeSampled
 	default:
 		return segment.SkipModeSkip
+	}
+}
+
+// notSkippedGate is why a member compared a match was written all the same:
+// the first of the reasons the round writes its members whole, in the order
+// skipMode and leaves check them (observability.AllSegmentNotSkippedGates).
+// A retried round compares none, so it has no gate here.
+func (round *segmentShadowRound) notSkippedGate(planRound *segmentShadowPlanRound, digest execution.SeriesIdentityDigest) string {
+	switch {
+	case !round.slot.skip:
+		return observability.SegmentNotSkippedSlotSkipOff
+	case round.slot.writeFailed:
+		return observability.SegmentNotSkippedWriteFailed
+	case !round.skip:
+		return observability.SegmentNotSkippedNotNormal
+	case planRound.state.stopped:
+		return observability.SegmentNotSkippedPlanStopped
+	case planRound.sample:
+		return observability.SegmentNotSkippedSampled
+	case planRound.state.ttl <= 0:
+		return observability.SegmentNotSkippedTTLZero
+	case planRound.state.onFallback(digest):
+		return observability.SegmentNotSkippedFallbackPage
+	default:
+		return observability.SegmentNotSkippedOther
 	}
 }
 
@@ -810,9 +840,16 @@ func (round *segmentShadowRound) observe(due execution.DuePlan, view execution.R
 			planRound.compared[last] = tally
 		}
 		tally.members = append(tally.members, digest)
-		for _, outcome := range compareMadeRead(view, mutation, segment.Coverage{Entry: entry, Position: last,
-			Interval: planRound.interval, Retention: planRound.retention}) {
+		outcomes := compareMadeRead(view, mutation, segment.Coverage{Entry: entry, Position: last,
+			Interval: planRound.interval, Retention: planRound.retention})
+		for _, outcome := range outcomes {
 			tally.outcomes[outcome]++
+		}
+		if len(outcomes) == 1 && outcomes[0] == observability.SegmentShadowMatch {
+			if tally.notSkipped == nil {
+				tally.notSkipped = map[string]int64{}
+			}
+			tally.notSkipped[round.notSkippedGate(planRound, digest)]++
 		}
 	case member:
 		// Back after it was closed: written whole, and off its page.
@@ -1096,6 +1133,13 @@ func foldSegmentShadowRound(round *segmentShadowRound, due []execution.DuePlan, 
 		facts.Member(observability.SegmentShadowReset, class, state.lost)
 		state.lost = 0
 		if planRound.retried {
+			// A round of its own, its output landed: counted under its mode -
+			// retried when the Slot follows the skip - though it starts its
+			// Plan over and folds no comparison. An earlier attempt of the
+			// Slot that folded before it failed was a round too, counted
+			// once under its own mode: rounds are counted by the attempts that
+			// fold, as the matches are.
+			facts.Round(round.skipMode(planRound), class)
 			facts.Member(observability.SegmentShadowReset, class, int64(state.book.Len()))
 			state.book, _ = segment.NewBook(nil)
 			state.position, state.fresh = 0, true
@@ -1110,6 +1154,10 @@ func foldSegmentShadowRound(round *segmentShadowRound, due []execution.DuePlan, 
 			// A round at or before the one folded last: a replay, not news.
 			continue
 		}
+		// Every round whose comparisons are folded, by the mode it ran
+		// under: what the matches and the members left are read against. A
+		// replay folds none and is no round.
+		facts.Round(round.skipMode(planRound), class)
 		if planRound.sample {
 			facts.Sample(class)
 		}
@@ -1124,6 +1172,9 @@ func foldSegmentShadowRound(round *segmentShadowRound, due []execution.DuePlan, 
 			}
 			for outcome, count := range tally.outcomes {
 				facts.Outcome(outcome, class, planRound.shadowRound(), count)
+			}
+			for gate, count := range tally.notSkipped {
+				facts.NotSkip(gate, class, count)
 			}
 		}
 		for exception, digests := range planRound.exceptions {

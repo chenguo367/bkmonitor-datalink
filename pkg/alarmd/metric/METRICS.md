@@ -99,6 +99,12 @@ Labels: `code`, `outcome`
 
 UQ responses carrying a top-level status code, by that code and what this deployment did with the response. An allowed outcome means the series travelled with the code and was kept, which happens when an expression computes an answer without reading any table; nothing else can report that a deployment is running on a fallback answer rather than on data. The code set is closed by UQ's own constants and an unrecognised code counts as OTHER.
 
+## alarmd_access_shared_frame_wait_seconds_total
+
+Labels: `side`
+
+Seconds the two sides of shared-schema answers' frames waited for each other, over the answers decoded to their end, by the side waited on: consumer, the frame reader with a frame read and parsed waiting for the Slot to take it - the Slot handing series on is the slower, and a faster decode leaves its time as it is; reader, the Slot waiting for the reader's next frame - the answer's reading and decoding is on the Slot's path. Read against access_query_answer_phase_seconds{phase="body"}. An answer that failed is in neither.
+
 ## alarmd_activation_blocked_query_groups
 
 Labels: `reason`
@@ -2315,6 +2321,12 @@ Labels: `outcome`
 
 Reads of a Plan's stable segment member's State (014 B3 3.2 rule 3), by what the read's extension did: extended, normal points made from its own last point to the segment's end (min of its close and the Plan's mark), the points a skipped write left out; within, its own points reach the end, as every read does while every State is written; refused_* (not_found, off_grid, fingerprint, record_id, record_clash, bad_coverage, no_levels), read as stored - so as a gap where points are missing, never as normal.
 
+## alarmd_state_segment_match_not_skipped_total
+
+Labels: `gate`, `period_class`
+
+Open members of a Plan's stable segments the shadow compared as a match and wrote all the same, by the first gate that kept them written and the Plan's period class. The gates, in the order the round checks them: slot_skip_off (the Slot follows no segment skip word), write_failed (an earlier attempt's segment write did not land), not_normal_operation (the Slot is not a normal one), plan_stopped (the Plan degraded twice in its owner's term), sampled (the Plan's sampled round of the day), ttl_zero (the Plan's segments have no lifetime to be written with), fallback_page (the member's page went unrenewed for half its lifetime). other is none of these and a defect: a match is written only for one of them. With state_series_not_written_total{reason="segment_member_skipped"} it adds up to state_segment_shadow_total{outcome="match"} summed over round, a replayed round aside.
+
 ## alarmd_state_segment_read_total
 
 Labels: `source`, `reason`
@@ -2330,6 +2342,12 @@ How long each state_segment_renew script that renewed its keys ran, by the serve
 Labels: `result`
 
 The renewals of a Plan's member pages due - a quarter of the shorter of the lifetime their last renewal gave and this round's since it (014 B3 3.5) - by result: renewed and failed, pages whose scripts all answered or not (a failed page's renewal time stays, and it is renewed whole next round); missing, member State keys a renewal found gone (not made again: they read MISSING_WARMING); over_budget, renewal scripts of at most 256 keys that ran past 2.5 ms by the server's clock; fallback_write, pages unrenewed for half their lifetime, whose members are written whole - in the second stage counted only, every State being written; fallback_unrenewable, the same of a page no earlier round could have renewed - unrenewed for less than its Plan's interval past the quarter lifetime it falls due by - by design: a lifetime of two intervals or less (a Plan keeping one point, or one its horizon cuts short), or a new page, made staggered, of a Plan whose keys live under four intervals; fallback_stalled, the same of a Plan whose rounds stopped - the Slot's evaluation time past its mark's round by more than its interval, or the round a replay or a retry - whatever its renewals did. missing and fallback_write zero, and over_budget at most 1e-4 of the state_segment_renew scripts that ran (redis_script_total{script="state_segment_renew",command=~"eval|evalsha",outcome="ok"}, one per script, pipeline members included, over the same window), over every lifetime tier is the third stage's bar: over_budget is the script's own clock and a lower bound, the server's slow log the reading of its tail; fallback_unrenewable and fallback_stalled are not read in it.
+
+## alarmd_state_segment_rounds_total
+
+Labels: `mode`, `period_class`
+
+Plans' rounds of Slots whose output landed, by the skip mode each ran under and the Plan's period class. The modes: off (the Slot follows no segment skip word), write_failed, operation (not a normal Slot), stopped, retried (an attempt that found the Plan's series applied in part and started its shadow over: it compares nothing), sampled - every member written whole - and skip, members compared a match left unwritten: the rounds state_segment_match_not_skipped_total and the members left are read against. Counted by the attempts that fold, as the matches are; a replay of a round already folded is none.
 
 ## alarmd_state_segment_sample_total
 

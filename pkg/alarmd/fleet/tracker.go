@@ -376,6 +376,10 @@ func failedExecution(outcome string) bool {
 }
 
 type queryGroupState struct {
+	// readiness is the object's normal Slots' timing over the last hour:
+	// their readiness slack, wall time and execution-slot waits
+	// (ReadinessSlack).
+	readiness *readinessWindow
 	// prunedSkip is the last span of Slots this object never had evaluated
 	// because its cursor was moved past a pruned part of the timeline. It
 	// outlives the rounds around it on purpose: the object recovers immediately
@@ -1060,6 +1064,12 @@ type Tracker struct {
 	// writes.
 	bookkeeping        BookkeepingFacts
 	bookkeepingObjects map[string]struct{}
+	// fallbackWrites is the latest fallback_write pages, the oldest first, at
+	// most MaxFallbackWritesKept, and fallbackWritesEvicted the ones pushed
+	// out (FallbackWrites). Not by object: they outlive the object's state,
+	// for a page found unrenewed to be read after the fact.
+	fallbackWrites        []FallbackWriteFacts
+	fallbackWritesEvicted uint64
 }
 
 // NewTracker wraps an observer. A nil next observer is allowed; the tracker is
@@ -1230,6 +1240,21 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	if observation.Stage == observability.StageQueryCompleted {
 		tracker.noteAnswerTruncation(queryGroup, observation, trace.EvaluationTime)
 		tracker.noteQueryRanges(queryGroup, observation, trace.EvaluationTime)
+	}
+	// The object's Slots' timing - its readiness slack, its Slots' wall time,
+	// its dispatches' waits for an execution slot and its period - kept for
+	// the slack it reads its data with to be read by object. Nothing else
+	// here reads them, and each goes on to whatever else it is.
+	switch observation.Stage {
+	case observability.StageSlotReadinessArrival, observability.StageSlotStarted, observability.StageSlotCompleted,
+		observability.StageQueryBudgetResolved:
+		tracker.noteReadiness(queryGroup, trace.EvaluationTime, observation)
+	}
+	// A page a round wrote whole because renewals did not keep it alive,
+	// kept for its line to be read after the fact; it goes on to whatever
+	// else it is.
+	if observation.Stage == observability.StageSegmentRenewalFallback {
+		tracker.noteFallbackWrite(queryGroup, trace.EvaluationTime, observation.SegmentFallback)
 	}
 	if observation.Stage == observability.StageSourceLiveness {
 		tracker.noteSourceHeld(queryGroup, trace, observation.SourceLivenessHeld)

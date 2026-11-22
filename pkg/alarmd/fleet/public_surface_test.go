@@ -48,7 +48,7 @@ var redactedHealthFields = map[string]bool{
 	"SourceReplica": true, "SourceStanding": true, "ControlFacts": true, "NoDataTracking": true, "Dependencies": true,
 	"DependenciesReplica": true, "LinkdConsole": true, "Coverage": true, "PerReplica": true, "Overdue": true,
 	"Dispatch": true, "Schedule": true, "Gaps": true, "Capacity": true, "AddressDiffers": true, "TrackerDropped": true, "EffectiveTimeUnread": true, "EffectiveTimeUnreadTotal": true,
-	"AwaitingFirstRound": true, "LookbackUncovered": true, "Undetermined": true, "UndeterminedTotal": true,
+	"AwaitingFirstRound": true, "LookbackUncovered": true, "ReadinessSlack": true, "FallbackWrites": true, "FallbackWritesEvicted": true, "Undetermined": true, "UndeterminedTotal": true,
 	"VerdictHistory": true, "VerdictHistorySince": true, "VerdictHistoryReplica": true,
 	"LeaderRound": true, "LeaderRoundReplica": true, "PlatformSettingFields": true,
 }

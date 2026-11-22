@@ -57,8 +57,11 @@ type flowMetrics struct {
 	answerBytes, answerSeries, answerRecords, answerSeconds *prometheus.HistogramVec
 	// answerPhaseSeconds splits an answered query's seconds by phase.
 	answerPhaseSeconds *prometheus.HistogramVec
-	queryFailures      *prometheus.CounterVec
-	failures           map[string]prometheus.Counter
+	// sharedFrameWait is what the two sides of shared-schema answers' frames
+	// waited for each other, by the side waited on.
+	sharedFrameWait *prometheus.CounterVec
+	queryFailures   *prometheus.CounterVec
+	failures        map[string]prometheus.Counter
 	// pointsDropped is the points the answers' normalization let go, by
 	// reason, each reason built at zero.
 	pointsDropped *prometheus.CounterVec
@@ -150,6 +153,16 @@ func newFlowMetrics(work *prometheus.CounterVec) flowMetrics {
 		for _, phase := range QueryAnswerPhases {
 			m.answerPhaseSeconds.WithLabelValues(outcome, phase)
 		}
+	}
+	m.sharedFrameWait = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem,
+		Name: "access_shared_frame_wait_seconds_total",
+		Help: "Seconds the two sides of shared-schema answers' frames waited for each other, over the answers decoded to " +
+			"their end, by the side waited on: consumer, the frame reader with a frame read and parsed waiting for the Slot " +
+			"to take it - the Slot handing series on is the slower, and a faster decode leaves its time as it is; reader, " +
+			"the Slot waiting for the reader's next frame - the answer's reading and decoding is on the Slot's path. Read " +
+			"against access_query_answer_phase_seconds{phase=\"body\"}. An answer that failed is in neither."}, []string{"side"})
+	for _, side := range SharedFrameWaitSides {
+		m.sharedFrameWait.WithLabelValues(side)
 	}
 	m.pointsDropped = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "access_query_points_dropped_total",
 		Help: "Points the normalization of a query's answer let go rather than evaluate, by reason: outside_range_before and " +
@@ -248,7 +261,23 @@ func (r *Recorder) RecordPhysicalQueryAnswer(answer observability.PhysicalQueryA
 		flow.answerPhaseSeconds.WithLabelValues(outcome, QueryAnswerPhaseWait).Observe(answer.Wait.Seconds())
 		flow.answerPhaseSeconds.WithLabelValues(outcome, QueryAnswerPhaseBody).Observe(answer.Body.Seconds())
 	}
+	if answer.FrameWaitConsumer > 0 {
+		flow.sharedFrameWait.WithLabelValues(SharedFrameWaitConsumer).Add(answer.FrameWaitConsumer.Seconds())
+	}
+	if answer.FrameWaitReader > 0 {
+		flow.sharedFrameWait.WithLabelValues(SharedFrameWaitReader).Add(answer.FrameWaitReader.Seconds())
+	}
 }
+
+// The sides of a shared-schema answer's frames, by the one waited on:
+// consumer, the Slot taking a parsed frame; reader, the frame reader's next.
+const (
+	SharedFrameWaitConsumer = "consumer"
+	SharedFrameWaitReader   = "reader"
+)
+
+// SharedFrameWaitSides lists them.
+var SharedFrameWaitSides = []string{SharedFrameWaitConsumer, SharedFrameWaitReader}
 
 // The phases of an answered query's seconds, closed: wait, before the
 // answer's first byte; body, after it.

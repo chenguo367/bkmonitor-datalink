@@ -10,16 +10,19 @@
 package metric
 
 import (
+	"slices"
+
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/segment"
 )
 
 // The shadow of the Plans' stable segments (014 B3, first stage): every cell
 // of every family exists from the start, so a zero is a reading.
 type segmentShadowMetrics struct {
-	outcomes, members, pageWrites, pageBytes, skipped, renewals, skipFlagIgnored, samples, degraded *prometheus.CounterVec
-	renewScript                                                                                     prometheus.Histogram
+	outcomes, members, pageWrites, pageBytes, skipped, renewals, skipFlagIgnored, samples, degraded, notSkipped, rounds *prometheus.CounterVec
+	renewScript                                                                                                         prometheus.Histogram
 }
 
 // segmentRenewScriptBuckets are dense about the renewal script's 2.5 ms
@@ -123,6 +126,27 @@ func newSegmentShadowMetrics() segmentShadowMetrics {
 				"no longer left unwritten on this replica until the owner changes - plan_segments.last skip_mode " +
 				"\"stopped\" names it. Zero is the reading; undecodable or stopped growing is segments being lost.",
 		}, []string{"reason"}),
+		notSkipped: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Subsystem: metricSubsystem, Name: "state_segment_match_not_skipped_total",
+			Help: "Open members of a Plan's stable segments the shadow compared as a match and wrote all the same, by " +
+				"the first gate that kept them written and the Plan's period class. The gates, in the order the round " +
+				"checks them: slot_skip_off (the Slot follows no segment skip word), write_failed (an earlier attempt's " +
+				"segment write did not land), not_normal_operation (the Slot is not a normal one), plan_stopped (the " +
+				"Plan degraded twice in its owner's term), sampled (the Plan's sampled round of the day), ttl_zero (the " +
+				"Plan's segments have no lifetime to be written with), fallback_page (the member's page went unrenewed " +
+				"for half its lifetime). other is none of these and a defect: a match is written only for one of them. " +
+				"With state_series_not_written_total{reason=\"segment_member_skipped\"} it adds up to " +
+				"state_segment_shadow_total{outcome=\"match\"} summed over round, a replayed round aside.",
+		}, []string{"gate", "period_class"}),
+		rounds: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Subsystem: metricSubsystem, Name: "state_segment_rounds_total",
+			Help: "Plans' rounds of Slots whose output landed, by the skip mode each ran under and the Plan's period " +
+				"class. The modes: off (the Slot follows no segment skip word), write_failed, operation (not a normal " +
+				"Slot), stopped, retried (an attempt that found the Plan's series applied in part and started its shadow " +
+				"over: it compares nothing), sampled - every member written whole - and skip, members compared a match " +
+				"left unwritten: the rounds state_segment_match_not_skipped_total and the members left are read against. " +
+				"Counted by the attempts that fold, as the matches are; a replay of a round already folded is none.",
+		}, []string{"mode", "period_class"}),
 	}
 	metrics.renewScript = prometheus.NewHistogram(prometheus.HistogramOpts{
 		Subsystem: metricSubsystem, Name: "state_segment_renew_script_seconds",
@@ -165,13 +189,19 @@ func newSegmentShadowMetrics() segmentShadowMetrics {
 		}
 		metrics.pageWrites.WithLabelValues(class)
 		metrics.pageBytes.WithLabelValues(class)
+		for _, gate := range observability.AllSegmentNotSkippedGates() {
+			metrics.notSkipped.WithLabelValues(gate, class)
+		}
+		for _, mode := range segment.SkipModes() {
+			metrics.rounds.WithLabelValues(mode, class)
+		}
 	}
 	return metrics
 }
 
 func (m segmentShadowMetrics) collectors() []prometheus.Collector {
 	return []prometheus.Collector{m.outcomes, m.members, m.pageWrites, m.pageBytes, m.skipped, m.renewals, m.skipFlagIgnored, m.samples,
-		m.degraded, m.renewScript}
+		m.degraded, m.notSkipped, m.rounds, m.renewScript}
 }
 
 func (m segmentShadowMetrics) observe(facts *observability.SegmentShadowFacts) {
@@ -205,5 +235,17 @@ func (m segmentShadowMetrics) observe(facts *observability.SegmentShadowFacts) {
 	}
 	for reason, count := range facts.Degraded {
 		m.degraded.WithLabelValues(reason).Add(float64(count))
+	}
+	for key, count := range facts.NotSkipped {
+		m.notSkipped.WithLabelValues(key.Gate, key.PeriodClass).Add(float64(count))
+	}
+	modes := segment.SkipModes()
+	for key, count := range facts.Rounds {
+		// The round's mode is one of segment.SkipModes by construction
+		// (segmentShadowRound.skipMode); a word outside them is not given a
+		// cell no reader expects.
+		if slices.Contains(modes, key.Mode) {
+			m.rounds.WithLabelValues(key.Mode, key.PeriodClass).Add(float64(count))
+		}
 	}
 }

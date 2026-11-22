@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/segment"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/state"
 )
 
@@ -150,5 +151,56 @@ func TestTheStateCacheServesStateValuesAndSegmentsApart(t *testing.T) {
 				t.Fatalf("departures %s of %s: %v, want %v", reason, kind, samples, value)
 			}
 		}
+	}
+}
+
+// A match written all the same is counted by its gate and every Plan's round
+// by its skip mode, each by period class, every cell present at zero from the
+// start; a gate outside the list is counted other, and a mode outside
+// segment.SkipModes makes no cell.
+func TestTheMatchesNotSkippedAndTheRoundsAreCountedEveryCellFromTheStart(t *testing.T) {
+	recorder := NewRecorder(BuildInfo{Version: "0.7.9999", Commit: "0123456789abcdef", SchemaVersion: "v3"})
+	cell := func(name string, labels map[string]string) float64 {
+		t.Helper()
+		samples := redisSamples(t, recorder, name, labels)
+		if len(samples) != 1 {
+			t.Fatalf("%s %v: %d cells, want one", name, labels, len(samples))
+		}
+		return samples[0].GetCounter().GetValue()
+	}
+	for _, class := range observability.AllSegmentPeriodClasses() {
+		for _, gate := range observability.AllSegmentNotSkippedGates() {
+			if got := cell("alarmd_state_segment_match_not_skipped_total", map[string]string{"gate": gate, "period_class": class}); got != 0 {
+				t.Fatalf("gate %s %s starts at %v", gate, class, got)
+			}
+		}
+		for _, mode := range segment.SkipModes() {
+			if got := cell("alarmd_state_segment_rounds_total", map[string]string{"mode": mode, "period_class": class}); got != 0 {
+				t.Fatalf("mode %s %s starts at %v", mode, class, got)
+			}
+		}
+	}
+	var facts observability.SegmentShadowFacts
+	facts.NotSkip(observability.SegmentNotSkippedSampled, observability.SegmentPeriodClass(60), 3)
+	facts.NotSkip("not_a_gate", observability.SegmentPeriodClass(60), 2)
+	facts.Round(segment.SkipModeSkip, observability.SegmentPeriodClass(60))
+	facts.Round(segment.SkipModeSkip, observability.SegmentPeriodClass(60))
+	facts.Round("not_a_mode", observability.SegmentPeriodClass(60))
+	recorder.Observe(context.Background(), observability.NormalizeObservation(observability.Observation{
+		Component: observability.ComponentState, Stage: observability.StageMutationCompared,
+		Result: observability.ResultSuccess, Operation: observability.OperationNormal, SegmentShadow: &facts,
+	}))
+	minute := observability.SegmentPeriodClass(60)
+	for gate, want := range map[string]float64{observability.SegmentNotSkippedSampled: 3, observability.SegmentNotSkippedOther: 2,
+		observability.SegmentNotSkippedSlotSkipOff: 0} {
+		if got := cell("alarmd_state_segment_match_not_skipped_total", map[string]string{"gate": gate, "period_class": minute}); got != want {
+			t.Fatalf("gate %s: %v, want %v", gate, got, want)
+		}
+	}
+	if got := cell("alarmd_state_segment_rounds_total", map[string]string{"mode": segment.SkipModeSkip, "period_class": minute}); got != 2 {
+		t.Fatalf("rounds skip: %v, want 2", got)
+	}
+	if samples := redisSamples(t, recorder, "alarmd_state_segment_rounds_total", map[string]string{"mode": "not_a_mode"}); len(samples) != 0 {
+		t.Fatalf("a mode outside the list made a cell: %v", samples)
 	}
 }

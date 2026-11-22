@@ -33,3 +33,17 @@ func TestAnAnsweredQuerysPhasesReachItsHistograms(t *testing.T) {
 		t.Fatalf("an unanswered query's answer %+v, want no phases", failed)
 	}
 }
+
+// A shared-schema answer's frame waits reach the counter as its completion
+// says them, each side its own; an answer that failed has none to carry.
+func TestASharedAnswersFrameWaitsReachTheCounter(t *testing.T) {
+	completion := execution.ProviderCompletion{Stats: execution.ProviderStats{Answered: true,
+		SharedFrameWaitConsumerMicros: 1_500_000, SharedFrameWaitReaderMicros: 250}}
+	answer := queryAnswerOf(completion, nil, 4500*time.Millisecond, "")
+	if answer.FrameWaitConsumer != 1500*time.Millisecond || answer.FrameWaitReader != 250*time.Microsecond {
+		t.Fatalf("frame waits %v on the consumer and %v on the reader, want 1.5 s and 250 µs", answer.FrameWaitConsumer, answer.FrameWaitReader)
+	}
+	if failed := queryAnswerOf(execution.ProviderCompletion{}, errors.New("reset"), time.Second, QueryFailureTransport); failed.FrameWaitConsumer != 0 || failed.FrameWaitReader != 0 {
+		t.Fatalf("a failed answer carried frame waits %+v", failed)
+	}
+}

@@ -898,6 +898,17 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	if publisher.lookbackLate != nil {
 		snapshot.LookbackLate = publisher.lookbackLate()
 	}
+	// And the held objects whose normal Slots read their data with the most
+	// slack past 2 s over the last hour: which of them the slack comes from.
+	held := make([]string, 0, len(owned))
+	for _, queryGroup := range owned {
+		held = append(held, string(queryGroup))
+	}
+	snapshot.ReadinessSlack = publisher.tracker.ReadinessSlack(held, publisher.startedAt, phaseTwoMaxSupportedEvaluationInterval)
+	// And the latest pages this replica's rounds wrote whole because
+	// renewals did not keep them alive: which Plans, after their lines are
+	// gone from the log.
+	snapshot.FallbackWrites, snapshot.FallbackWritesEvicted = publisher.tracker.FallbackWrites()
 	// And the owned objects the lookback has no fresh measurement of, the
 	// largest first, with why: one read of the replica names them.
 	if publisher.lookbackUncovered != nil {

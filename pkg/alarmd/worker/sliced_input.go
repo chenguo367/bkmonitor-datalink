@@ -466,6 +466,7 @@ func (stream *streamedExecution) beginSlice(leaf inputslice.Leaf, last bool) {
 // children to read again, and returns the sample it kept.
 func (stream *streamedExecution) abandonSlice() inputslice.Sample {
 	reading := stream.slices
+	stream.seams.readLetGo()
 	if reading.leaveInput != nil {
 		reading.leaveInput()
 		reading.leaveInput = nil

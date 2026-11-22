@@ -1412,6 +1412,25 @@ func windowMeasureFirstSliceAlone(requests []windowMeasureRequest, span time.Dur
 	return other.Sub(first.sent)
 }
 
+// windowMeasureSegmentSkip is whether the Slots may leave their Plans'
+// unchanged series unwritten (phase_two.control.segment_skip): on or off as
+// ALARMD_MEASURE_SEGMENT_SKIP says, the configuration's default without it -
+// off measures every round writing all its series, as the measurements
+// before the skip did. The line says which.
+func windowMeasureSegmentSkip(t *testing.T, configured bool) bool {
+	switch raw := strings.TrimSpace(os.Getenv("ALARMD_MEASURE_SEGMENT_SKIP")); raw {
+	case "":
+		return configured
+	case "on":
+		return true
+	case "off":
+		return false
+	default:
+		t.Fatalf("ALARMD_MEASURE_SEGMENT_SKIP=%q is neither on nor off", raw)
+		return configured
+	}
+}
+
 // windowMeasureProcs is the cores the measurement runs on: GOMAXPROCS, from
 // ALARMD_MEASURE_PROCS, 4 (a 4c replica) without it. The host pins the
 // process to as many CPUs (taskset); the line says both.
@@ -1652,6 +1671,9 @@ func windowMeasureCapacity(t *testing.T, cfg config.Config) config.Config {
 
 // windowMeasureResult is what one shape's measured Slot came to.
 type windowMeasureResult struct {
+	// segmentSkip is whether the Slots measured could leave unchanged series
+	// unwritten (windowMeasureSegmentSkip).
+	segmentSkip                     bool
 	completed                       bool
 	result, reason, cause           string
 	usage                           observability.SlotBudgetUsageFacts
@@ -1893,7 +1915,14 @@ func (measured windowMeasureResult) line(shape windowMeasureShape) string {
 		measured.redisSent, measured.redisReceived, measured.redisUsedBefore, measured.redisUsedAfter,
 		measured.redisKeysBefore, measured.redisKeysAfter, measured.fakeUQCPU, usage.InputSlicesReadAhead,
 		usage.InputSlicesReadAheadOtherLeaf, usage.InputSlicesReadAheadYielded, usage.InputSlicesReadAheadFailed,
-		usage.InputSliceTimeouts, windowMeasureShapesLine(usage), windowMeasureRequestsLine(measured.requests, measured.started, measured.took)) + fmt.Sprintf(" rss_idle=%d %s ", measured.idleRSS, measured.neighbors) + measured.host
+		usage.InputSliceTimeouts, windowMeasureShapesLine(usage), windowMeasureRequestsLine(measured.requests, measured.started, measured.took)) +
+		// The seams of the measured Slot's reads - each read's tail and the
+		// change into the next - and its shared-schema answers' frame waits.
+		fmt.Sprintf(" segment_skip=%t slice_tail_ms=%d slice_tail_ms_max=%d slice_change_ms=%d slice_change_ms_max=%d "+
+			"shared_frame_wait_consumer_ms=%d shared_frame_wait_reader_ms=%d",
+			measured.segmentSkip, usage.InputSliceTailMillis, usage.InputSliceTailMillisMax, usage.InputSliceChangeMillis, usage.InputSliceChangeMillisMax,
+			usage.SharedFrameWaitConsumerMillis, usage.SharedFrameWaitReaderMillis) +
+		fmt.Sprintf(" rss_idle=%d %s ", measured.idleRSS, measured.neighbors) + measured.host
 }
 
 // measureWindowedShape runs one shape: its own Redis, bundle and answers.
@@ -1931,6 +1960,7 @@ func measureWindowedShape(t *testing.T, shape windowMeasureShape) windowMeasureR
 	cfg.PhaseTwo.Ownership.ControlLeaderTTL = config.Duration(2 * time.Hour)
 	cfg.PhaseTwo.Ownership.LeaseTTL = config.Duration(2 * time.Hour)
 	cfg = windowMeasureCapacity(t, cfg)
+	cfg.PhaseTwo.Control.SegmentSkip = windowMeasureSegmentSkip(t, cfg.PhaseTwo.Control.SegmentSkip)
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("configuration rejected: %v", err)
 	}
@@ -1939,7 +1969,7 @@ func measureWindowedShape(t *testing.T, shape windowMeasureShape) windowMeasureR
 	answers := &countingWindowTransport{next: http.DefaultTransport}
 	var measuring atomic.Bool
 	var mu sync.Mutex
-	measured := windowMeasureResult{refusals: map[string]int{}}
+	measured := windowMeasureResult{refusals: map[string]int{}, segmentSkip: cfg.PhaseTwo.Control.SegmentSkip}
 	observer := observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
 		if observation.Stage == observability.StageNoDataMemoryRefused {
 			mu.Lock()

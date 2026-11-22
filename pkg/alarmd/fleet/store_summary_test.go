@@ -388,7 +388,7 @@ func TestEveryListOfASnapshotIsEitherRowsOrKeptInItsHead(t *testing.T) {
 		"PrunedSkips": true, "GapSkips": true, "NoData": true, "NoDataMemory": true, "RetainedShare": true, "ReadEarly": true,
 		"LateSeries": true, "ReadHolds": true, "ReadHeld": true, "OverdueEpisodes": true, "EvaluatingStrategies": true,
 		"LookbackLate": true}
-	kept := map[string]bool{"AwaitingFirstRound": true, "Recovered": true, "Dependencies": true, "AddressDiffers": true, "Undetermined": true, "EffectiveTimeUnread": true, "LookbackUncovered": true}
+	kept := map[string]bool{"AwaitingFirstRound": true, "Recovered": true, "Dependencies": true, "AddressDiffers": true, "Undetermined": true, "EffectiveTimeUnread": true, "LookbackUncovered": true, "ReadinessSlack": true, "FallbackWrites": true}
 	var full Snapshot
 	fill(reflect.ValueOf(&full).Elem(), 0)
 	head := reflect.ValueOf(headOf(full))

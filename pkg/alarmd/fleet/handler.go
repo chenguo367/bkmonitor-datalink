@@ -386,6 +386,19 @@ type HealthResponse struct {
 	// series their Plans bound, at most MaxLookbackUncovered, each with its
 	// replica and why (alarmd_lookback_uncovered_groups counts them all).
 	LookbackUncovered []LookbackUncoveredFacts `json:"lookback_uncovered,omitempty"`
+	// ReadinessSlack names the objects, across the replicas, whose normal
+	// Slots read their data with the most slack past 2 s over the last hour,
+	// each with its replica, period, series, slack, wall time and waits for an
+	// execution slot: where the slack slot_readiness_slack_seconds counts
+	// comes from, at most MaxReadinessSlack.
+	ReadinessSlack []ReadinessSlackFacts `json:"readiness_slack,omitempty"`
+	// FallbackWrites names the pages, across the replicas, that a round
+	// wrote whole because renewals did not keep them alive, the latest first,
+	// each with its replica and its fallback line's facts, at most
+	// MaxFallbackWrites (state_segment_renewal_total{fallback_write} counts
+	// them all); FallbackWritesEvicted the older ones not named.
+	FallbackWrites        []FallbackWriteFacts `json:"fallback_writes,omitempty"`
+	FallbackWritesEvicted uint64               `json:"fallback_writes_evicted,omitempty"`
 	// TrackerDropped is what the replicas' object tables lost because they
 	// were full: rounds, truncations and ranges never recorded, with the
 	// latest objects named. Absent while nothing was lost.
@@ -1115,7 +1128,8 @@ func healthOf(view *View, part ReplicaPart, at time.Time) HealthResponse {
 		Dependencies:   dependencyList(view.Dependencies), DependenciesReplica: view.DependenciesReplica,
 		DependenciesReplicas: view.DependenciesReplicas, ReplicasNotReady: view.ReplicasNotReady,
 		Overdue: view.Overdue, Dispatch: view.Dispatch, Schedule: view.Schedule, AddressDiffers: view.AddressDiffers, TrackerDropped: view.TrackerDropped,
-		LookbackUncovered:   view.LookbackUncovered,
+		LookbackUncovered: view.LookbackUncovered, ReadinessSlack: view.ReadinessSlack,
+		FallbackWrites: view.FallbackWrites, FallbackWritesEvicted: view.FallbackWritesEvicted,
 		EffectiveTimeUnread: view.EffectiveTimeUnread, EffectiveTimeUnreadTotal: view.EffectiveTimeUnreadTotal,
 		AwaitingFirstRound: view.AwaitingFirstRound, Undetermined: view.Undetermined, UndeterminedTotal: view.UndeterminedTotal,
 		Gaps: view.Gaps, Capacity: view.Capacity,

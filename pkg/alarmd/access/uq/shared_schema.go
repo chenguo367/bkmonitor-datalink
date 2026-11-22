@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -149,6 +150,11 @@ func (client *Client) decodeShared(
 	// still here, in the order the frames came.
 	frames := make(chan sharedFrame, 1)
 	stop, finished := make(chan struct{}), make(chan struct{})
+	// What each side waited for the other: the reader, a frame parsed, for
+	// this side to take it (onConsumer, the reader's own until finished), and
+	// this side for the reader's next frame (onReader). Kept on the
+	// completion of an answer decoded to its end.
+	var onConsumer, onReader time.Duration
 	// readerEnded is set when the reader ended the answer itself - the end
 	// of the body, or a frame that failed - and returns on its own.
 	readerEnded := false
@@ -167,13 +173,28 @@ func (client *Client) decodeShared(
 			}
 		}
 		<-finished
+		completion.Stats.SharedFrameWaitConsumerMicros = uint64(onConsumer.Microseconds())
+		completion.Stats.SharedFrameWaitReaderMicros = uint64(onReader.Microseconds())
 	}()
 	go func() {
 		defer close(finished)
-		client.readSharedFrames(ctx, reader, frames, stop)
+		client.readSharedFrames(ctx, reader, frames, stop, &onConsumer)
 	}()
+	// next takes the reader's next frame, the time it was not there yet
+	// waited on the reader.
+	next := func() (sharedFrame, bool) {
+		select {
+		case frame, open := <-frames:
+			return frame, open
+		default:
+		}
+		from := client.now()
+		frame, open := <-frames
+		onReader += client.now().Sub(from)
+		return frame, open
+	}
 	var footer map[string]json.RawMessage
-	for frame := range frames {
+	for frame, open := next(); open; frame, open = next() {
 		readerEnded = frame.err != nil
 		switch {
 		case frame.version:
@@ -399,12 +420,24 @@ type sharedSeries struct {
 // line of sharedFrameBytes at most - beside the one being handed on: bounded
 // by the frame's own limits, and not charged to the share, as the frame being
 // read was not.
-func (client *Client) readSharedFrames(ctx context.Context, reader io.Reader, frames chan<- sharedFrame, stop <-chan struct{}) {
+func (client *Client) readSharedFrames(ctx context.Context, reader io.Reader, frames chan<- sharedFrame, stop <-chan struct{},
+	onConsumer *time.Duration) {
 	defer close(frames)
 	lines := sharedFrameReaders.Get().(*bufio.Reader)
 	lines.Reset(reader)
 	defer sharedFrameReaders.Put(lines)
+	// send hands a frame on, the time the frame before still held the
+	// channel waited on the consumer (onConsumer).
 	send := func(frame sharedFrame) bool {
+		select {
+		case frames <- frame:
+			return frame.err == nil
+		case <-stop:
+			return false
+		default:
+		}
+		from := client.now()
+		defer func() { *onConsumer += client.now().Sub(from) }()
 		select {
 		case frames <- frame:
 			return frame.err == nil

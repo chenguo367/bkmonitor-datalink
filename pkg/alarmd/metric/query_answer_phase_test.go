@@ -54,3 +54,33 @@ func TestAnAnsweredQuerysSecondsAreSplitByPhaseUnderItsOutcome(t *testing.T) {
 		}
 	}
 }
+
+// The seconds shared-schema answers' two sides waited for each other are
+// counted by the side waited on, both sides there before any answer; an
+// answer with no frame waits adds nothing.
+func TestASharedAnswersFrameWaitsAreCountedByTheSideWaitedOn(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	read := func() map[string]float64 {
+		cells := map[string]float64{}
+		for _, m := range gatherFamily(t, r, "alarmd_access_shared_frame_wait_seconds_total") {
+			for _, label := range m.GetLabel() {
+				if label.GetName() == "side" {
+					cells[label.GetValue()] = m.GetCounter().GetValue()
+				}
+			}
+		}
+		return cells
+	}
+	if cells := read(); len(cells) != 2 || cells[SharedFrameWaitConsumer] != 0 || cells[SharedFrameWaitReader] != 0 {
+		t.Fatalf("before any answer: %v, want consumer and reader at 0", cells)
+	}
+	r.RecordPhysicalQueryAnswer(observability.PhysicalQueryAnswer{Outcome: observability.PhysicalQueryOK, Answered: true,
+		FrameWaitConsumer: 1500 * time.Millisecond, FrameWaitReader: 250 * time.Millisecond})
+	r.RecordPhysicalQueryAnswer(observability.PhysicalQueryAnswer{Outcome: observability.PhysicalQueryOK, Answered: true,
+		FrameWaitReader: 500 * time.Millisecond})
+	r.RecordPhysicalQueryAnswer(observability.PhysicalQueryAnswer{Outcome: observability.PhysicalQueryOK, Answered: true})
+	cells := read()
+	if math.Abs(cells[SharedFrameWaitConsumer]-1.5) > 1e-9 || math.Abs(cells[SharedFrameWaitReader]-0.75) > 1e-9 || len(cells) != 2 {
+		t.Fatalf("frame waits %v, want consumer 1.5 and reader 0.75", cells)
+	}
+}

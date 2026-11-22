@@ -112,7 +112,12 @@ type slicedCall struct {
 // complete delivered.
 type slicedSource struct {
 	// beforeRead, when set, runs as each read is asked, before anything of it.
-	beforeRead  func()
+	beforeRead func()
+	// afterLast is how long each read takes after its last series, before it
+	// completes; frameWait is the shared-schema frame waits each read's
+	// answer says, on the consumer side, the reader side twice it.
+	afterLast   time.Duration
+	frameWait   uint64
 	t           *testing.T
 	ports       *recordingPorts
 	series      []slicedSeries
@@ -309,6 +314,9 @@ func (source *slicedSource) answer(ctx context.Context, request execution.QueryE
 			return execution.QueryExecutionCompletion{}, err
 		}
 	}
+	if source.afterLast > 0 {
+		time.Sleep(source.afterLast) // fixed-wait: the read's own time after its last series, the seam the case times
+	}
 	completeness := execution.CompletenessFull
 	if unavailable {
 		completeness = execution.CompletenessUnavailable
@@ -321,7 +329,8 @@ func (source *slicedSource) answer(ctx context.Context, request execution.QueryE
 	}
 	physical := execution.PhysicalQueryCompletion{Ref: "provider-result-1", PhysicalQuery: "physical-query-1",
 		QueryRevision: queryRevision, Completeness: completeness, DataState: execution.DataStateData, Delivery: delivery,
-		Stats: execution.ProviderStats{QueryMillis: source.queryMillis}}
+		Stats: execution.ProviderStats{QueryMillis: source.queryMillis,
+			SharedFrameWaitConsumerMicros: source.frameWait, SharedFrameWaitReaderMicros: 2 * source.frameWait}}
 	if len(call.delivered) == 0 {
 		physical.DataState = execution.DataStateEmpty
 	}
@@ -2009,5 +2018,68 @@ func TestTheSlicesAQueryGroupIsReadInDoNotGrowRoundByRound(t *testing.T) {
 		if !reflect.DeepEqual(slices, first) {
 			t.Fatalf("round %d landed %d slices %v, round 3 %d %v: want the same slices every round", round, len(slices), slices, len(first), first)
 		}
+	}
+}
+
+// slowEvents writes each batch of events pause after it is handed it.
+type slowEvents struct {
+	*recordingPorts
+	pause time.Duration
+}
+
+func (events *slowEvents) WriteBatch(ctx context.Context, batch []contract.TriggerEventV1) error {
+	time.Sleep(events.pause) // fixed-wait: the slice's completion writing its events, the seam the case times
+	return events.recordingPorts.WriteBatch(ctx, batch)
+}
+
+// The seams of a Slot's reads are timed on its usage: a read's tail, from
+// its last series reaching the Slot to the read ending - the source taking
+// 30 ms after its last series - and the change into the next read, from that
+// end to the next read's first series - each slice's events taking 40 ms to
+// write as it completes, while the next is read ahead. Its answers' frame
+// waits are summed beside them. A Slot read whole has a tail and no change.
+func TestTheSeamsOfASlotsReadsAreTimedOnItsUsage(t *testing.T) {
+	const tail, write = 30 * time.Millisecond, 40 * time.Millisecond
+	fixture := newSlicedFixture(t, slicedHosts(24, 40<<10), sliceableFacts(), 200)
+	fixture.source.afterLast, fixture.source.frameWait = tail, 2_500_000
+	fixture.coordinator = fixture.build(t, worker.Ports{Activation: fixture.ports, State: fixture.state,
+		GapGuard: fixture.ports, Events: &slowEvents{recordingPorts: fixture.ports, pause: write}}, 200)
+	result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
+	if err != nil || !result.Completed {
+		t.Fatalf("Execute() result=%+v err=%v", result, err)
+	}
+	landed := uint64(len(fixture.source.landed()))
+	usage := result.Usage
+	if landed < 2 || usage.InputSlices != landed {
+		t.Fatalf("landed %d reads, usage %d slices: want the Slot read in slices", landed, usage.InputSlices)
+	}
+	// The first slice is read on the Slot's goroutine, its tail the source's;
+	// every change holds the slice before writing its events.
+	if usage.InputSliceTailMillisMax < 30 || usage.InputSliceTailMillis < usage.InputSliceTailMillisMax {
+		t.Errorf("tails %d ms, the longest %d: want one of 30 ms or more", usage.InputSliceTailMillis, usage.InputSliceTailMillisMax)
+	}
+	if usage.InputSliceChangeMillisMax < 40 || usage.InputSliceChangeMillis < (landed-1)*40 {
+		t.Errorf("changes %d ms over %d slices, the longest %d: want each 40 ms or more", usage.InputSliceChangeMillis, landed,
+			usage.InputSliceChangeMillisMax)
+	}
+	fixture.source.mu.Lock()
+	reads := uint64(len(fixture.source.calls))
+	fixture.source.mu.Unlock()
+	if usage.SharedFrameWaitConsumerMillis < landed*2500 ||
+		usage.SharedFrameWaitConsumerMillis > reads*2500 || usage.SharedFrameWaitReaderMillis != 2*usage.SharedFrameWaitConsumerMillis {
+		t.Errorf("frame waits %d and %d ms over %d reads landed, want 2500 and 5000 a read", usage.SharedFrameWaitConsumerMillis,
+			usage.SharedFrameWaitReaderMillis, landed)
+	}
+
+	whole := newSlicedFixture(t, slicedHosts(2, 1<<10), sliceableFacts(), 200)
+	whole.source.afterLast = tail
+	result, err = whole.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
+	if err != nil || !result.Completed {
+		t.Fatalf("Execute() result=%+v err=%v", result, err)
+	}
+	if usage := result.Usage; usage.InputSliceTailMillisMax < 30 || usage.InputSliceTailMillis != usage.InputSliceTailMillisMax ||
+		usage.InputSliceChangeMillis != 0 || usage.InputSliceChangeMillisMax != 0 {
+		t.Errorf("a Slot read whole: tail %d (longest %d), change %d (longest %d): want one tail of 30 ms or more and no change",
+			usage.InputSliceTailMillis, usage.InputSliceTailMillisMax, usage.InputSliceChangeMillis, usage.InputSliceChangeMillisMax)
 	}
 }

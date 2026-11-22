@@ -828,9 +828,11 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("access_query_failure_total"):        7,
 		// one series a reason, observability.PointDropReasons
 		fqName("access_query_points_dropped_total"): len(observability.PointDropReasons),
-		fqName("access_query_request_end_total"):    len(observability.QueryRequestEndOutcomes),
-		fqName("output_events_rejected_all_total"):  1,
-		fqName("access_response_codec_total"):       3 * 3 * 4,
+		// one series a side, SharedFrameWaitSides
+		fqName("access_shared_frame_wait_seconds_total"): len(SharedFrameWaitSides),
+		fqName("access_query_request_end_total"):         len(observability.QueryRequestEndOutcomes),
+		fqName("output_events_rejected_all_total"):       1,
+		fqName("access_response_codec_total"):            3 * 3 * 4,
 		// One per source answered through Elasticsearch terms.
 		fqName("uq_answer_truncated_total"): 4,
 		// attempt, no_attempt_reason, no_attempts, other.
@@ -1060,6 +1062,10 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("state_segment_shadow_members_total")] = len(observability.AllSegmentShadowEvents()) * len(observability.AllSegmentPeriodClasses())
 	bounds[fqName("state_segment_shadow_page_writes_total")] = len(observability.AllSegmentPeriodClasses())
 	bounds[fqName("state_segment_shadow_page_bytes_total")] = len(observability.AllSegmentPeriodClasses())
+	// A match written all the same by every gate, and the Plans' rounds by
+	// every skip mode, each by every period class.
+	bounds[fqName("state_segment_match_not_skipped_total")] = len(observability.AllSegmentNotSkippedGates()) * len(observability.AllSegmentPeriodClasses())
+	bounds[fqName("state_segment_rounds_total")] = len(segment.SkipModes()) * len(observability.AllSegmentPeriodClasses())
 	// The page cache's plans, pages and bytes.
 	bounds[fqName("worker_segment_shadow_memory")] = 3
 	bounds[fqName("state_segment_shadow_skipped_total")] = len(observability.AllSegmentShadowSkips())

@@ -1961,7 +1961,19 @@ type Snapshot struct {
 	// each with why: what the coverage gauge counts, named. Bounded, it rides
 	// in the summary's head, for the deployment's health to read.
 	LookbackUncovered []LookbackUncoveredFacts `json:"lookback_uncovered,omitempty"`
-	ReadHolds         map[string]ReadHoldFacts `json:"read_holds,omitempty"`
+	// ReadinessSlack is the held objects whose normal Slots read their data
+	// with the most slack past 2 s over the last hour, at most
+	// MaxReadinessSlack (Tracker.ReadinessSlack). Bounded, it rides in the
+	// summary's head, for the deployment's health to read.
+	ReadinessSlack []ReadinessSlackFacts `json:"readiness_slack,omitempty"`
+	// FallbackWrites is the latest pages this replica's rounds wrote whole
+	// because renewals did not keep them alive, at most
+	// MaxFallbackWritesKept, and FallbackWritesEvicted the older ones pushed
+	// out (Tracker.FallbackWrites). Bounded, they ride in the summary's head,
+	// for the deployment's health to read.
+	FallbackWrites        []FallbackWriteFacts     `json:"fallback_writes,omitempty"`
+	FallbackWritesEvicted uint64                   `json:"fallback_writes_evicted,omitempty"`
+	ReadHolds             map[string]ReadHoldFacts `json:"read_holds,omitempty"`
 	// ReadHoldsCut says ReadHolds was cut to its budget, so a group it does
 	// not list may hold one (ReadHoldFacts).
 	ReadHoldsCut bool `json:"read_holds_cut,omitempty"`
@@ -3205,7 +3217,15 @@ type View struct {
 	// fresh measurement of, the largest first and bounded
 	// (aggregateLookbackUncovered).
 	LookbackUncovered []LookbackUncoveredFacts `json:"lookback_uncovered,omitempty"`
-	Anomalies         []Anomaly                `json:"anomalies"`
+	// ReadinessSlack is every replica's objects with the most slack past 2 s,
+	// ordered and bounded alike (aggregateReadinessSlack).
+	ReadinessSlack []ReadinessSlackFacts `json:"readiness_slack,omitempty"`
+	// FallbackWrites is every replica's latest fallback_write pages, the
+	// latest first and bounded, and FallbackWritesEvicted what the replicas
+	// pushed out and the bound left out (aggregateFallbackWrites).
+	FallbackWrites        []FallbackWriteFacts `json:"fallback_writes,omitempty"`
+	FallbackWritesEvicted uint64               `json:"fallback_writes_evicted,omitempty"`
+	Anomalies             []Anomaly            `json:"anomalies"`
 	// Healthy is Determined minus the listed columns. It is computed here
 	// rather than left to the page because it is the column a reader trusts
 	// most, and a page that derives it by subtraction can be made to show a
@@ -3776,6 +3796,8 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	aggregateDispatchSuppression(&view, counted)
 	aggregateAddressDiffers(&view, counted)
 	aggregateLookbackUncovered(&view, counted)
+	aggregateReadinessSlack(&view, counted)
+	aggregateFallbackWrites(&view, counted)
 	aggregateTrackerDropped(&view, counted)
 	aggregateEffectiveTimeUnread(&view, counted)
 	aggregateUndetermined(&view, counted)

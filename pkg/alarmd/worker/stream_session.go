@@ -47,8 +47,12 @@ type streamedExecution struct {
 	// the Query Group's own.
 	pointsDropped observability.PointDrops
 	// queryPhases is the Slot's physical queries' time before their answers'
-	// first byte and after it, summed and the longest of each.
+	// first byte and after it, summed and the longest of each, and their
+	// shared-schema answers' frame waits.
 	queryPhases queryPhaseTotals
+	// seams times the seams of the Slot's reads: each read's tail and the
+	// change into the next (sliceSeams).
+	seams sliceSeams
 	// inputHolds is, by series, what the batches of that series were charged
 	// to the input phase and how many streamed bindings still point at them,
 	// so a window that lets its series' bindings go gives their bytes back
@@ -746,6 +750,7 @@ func (stream *streamedExecution) ConsumeSeries(ctx context.Context, batch execut
 	stream.series += batch.Delivery.Series
 	stream.retainBytes(retainPhaseInput, retained)
 	stream.noteSliceInput(batch, retained)
+	stream.seams.seriesCame(time.Now())
 	hold := stream.holdInput(series, retained)
 	folded := make(map[*execution.Dataset]foldedDataset)
 	for _, binding := range batch.Inputs {
@@ -3565,6 +3570,9 @@ func (oneTimeClose) OneTimeClose() bool { return true }
 // summed over the queries and the longest one's.
 type queryPhaseTotals struct {
 	wait, body, waitMax, bodyMax uint64
+	// frameConsumer and frameReader are the shared-schema answers' frame
+	// waits, in microseconds.
+	frameConsumer, frameReader uint64
 }
 
 func (totals *queryPhaseTotals) add(stats execution.ProviderStats) {
@@ -3572,4 +3580,6 @@ func (totals *queryPhaseTotals) add(stats execution.ProviderStats) {
 	totals.body += stats.BodyMillis
 	totals.waitMax = max(totals.waitMax, stats.WaitMillis)
 	totals.bodyMax = max(totals.bodyMax, stats.BodyMillis)
+	totals.frameConsumer += stats.SharedFrameWaitConsumerMicros
+	totals.frameReader += stats.SharedFrameWaitReaderMicros
 }

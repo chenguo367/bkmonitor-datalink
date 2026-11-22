@@ -533,8 +533,17 @@ func TestARetryStartsOverAndAWithheldOrReplayedRoundChangesNothing(t *testing.T)
 	round.retried(shadowDue)
 	written := steady(t, shadowSeries(1), 1260)
 	round.observe(shadowDue, written.view, written.write, written.class, false)
-	if facts := foldShadow(t, shadow, round, request, shadowDue, nil); member(facts, observability.SegmentShadowReset) != 2 {
+	facts := foldShadow(t, shadow, round, request, shadowDue, nil)
+	if member(facts, observability.SegmentShadowReset) != 2 {
 		t.Fatalf("a retry: %+v, want the Plan reset with its two members", facts)
+	}
+	// It is a round, under the mode it ran: one, comparing nothing, no gate.
+	planRound := round.plans[shadowKey(shadowDue, shadowDue.StateGeneration)]
+	mode := round.skipMode(planRound)
+	if len(facts.Rounds) != 1 || facts.Rounds[observability.SegmentRoundKey{Mode: mode, PeriodClass: planRound.class}] != 1 ||
+		len(facts.NotSkipped) != 0 || outcome(facts, observability.SegmentShadowMatch) != 0 {
+		t.Fatalf("a retry counted rounds %v, gates %v and %d matches, want one %s round and nothing compared", facts.Rounds,
+			facts.NotSkipped, outcome(facts, observability.SegmentShadowMatch), mode)
 	}
 	if _, open, closed := shadow.reading(t); open != 0 || closed != 0 {
 		t.Fatalf("the reset stored %d open and %d closed, want an empty book", open, closed)

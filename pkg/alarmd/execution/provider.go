@@ -602,6 +602,13 @@ type ProviderStats struct {
 	Answered   bool
 	WaitMillis uint64
 	BodyMillis uint64
+	// SharedFrameWaitConsumerMicros and SharedFrameWaitReaderMicros are what
+	// the two sides of a shared-schema answer's frames waited for each other,
+	// over an answer decoded to its end: its frame reader, a frame read and
+	// parsed, for the Slot to take it (consumer), and the Slot for the next
+	// frame (reader).
+	SharedFrameWaitConsumerMicros uint64 `json:",omitempty"`
+	SharedFrameWaitReaderMicros   uint64 `json:",omitempty"`
 	// NullIdentityFields counts (series, identity field) pairs whose declared
 	// identity dimension was absent from the provider series and was bound to
 	// JSON null, as Python binds an absent dimension to None. It is a bounded

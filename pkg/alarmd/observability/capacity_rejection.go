@@ -154,6 +154,15 @@ type SlotBudgetUsageFacts struct {
 	ReadAheadYieldedBytes       uint64 `json:"read_ahead_yielded_bytes,omitempty"`
 	ReadAheadYieldDistanceMax   uint64 `json:"read_ahead_yield_distance_max,omitempty"`
 	ReadAheadWaitMillisMax      uint64 `json:"read_ahead_wait_millis_max,omitempty"`
+	// InputSliceTail* and InputSliceChange* time the seams of the Slot's
+	// reads, summed and the longest; SharedFrameWait* are its shared-schema
+	// answers' frame waits, summed (execution.SlotBudgetUsage).
+	InputSliceTailMillis          uint64 `json:"input_slice_tail_millis,omitempty"`
+	InputSliceTailMillisMax       uint64 `json:"input_slice_tail_millis_max,omitempty"`
+	InputSliceChangeMillis        uint64 `json:"input_slice_change_millis,omitempty"`
+	InputSliceChangeMillisMax     uint64 `json:"input_slice_change_millis_max,omitempty"`
+	SharedFrameWaitConsumerMillis uint64 `json:"shared_frame_wait_consumer_millis,omitempty"`
+	SharedFrameWaitReaderMillis   uint64 `json:"shared_frame_wait_reader_millis,omitempty"`
 	// InputSliceTimeouts is the slices that ran out of time and were split
 	// and read again, the Slot completing: at most one a Slot.
 	InputSliceTimeouts uint64 `json:"input_slice_timeouts,omitempty"`

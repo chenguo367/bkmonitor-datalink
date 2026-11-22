@@ -4900,6 +4900,22 @@ type SlotBudgetUsage struct {
 	ReadAheadYieldedBytes       uint64
 	ReadAheadYieldDistanceMax   uint64
 	ReadAheadWaitMillisMax      uint64
+	// InputSliceTailMillis and InputSliceChangeMillis time the seams of the
+	// Slot's reads, summed, and the longest of each (Max): a read's tail,
+	// from its last series reaching the Slot to the read ending - its
+	// answer's footer checked and its read finished, or its read ahead
+	// replayed - and a change, from a read ending to the next read's first
+	// series reaching the Slot: the read before completing, the next one
+	// asked or waited for. A read let go and split did not end, and the
+	// change runs on to the first series of the read that did; a read of no
+	// series has no tail, nor the change into it.
+	InputSliceTailMillis, InputSliceTailMillisMax     uint64
+	InputSliceChangeMillis, InputSliceChangeMillisMax uint64
+	// SharedFrameWaitConsumerMillis and SharedFrameWaitReaderMillis are the
+	// Slot's shared-schema answers' frame waits, summed: their frame readers
+	// waiting for the Slot to take a parsed frame, and the Slot waiting for
+	// the next (ProviderStats).
+	SharedFrameWaitConsumerMillis, SharedFrameWaitReaderMillis uint64
 	// InputSliceTimeouts is the slices of a completed Slot that ran out of
 	// time and were split and read again (split_succeeded): at most one.
 	InputSliceTimeouts uint64
