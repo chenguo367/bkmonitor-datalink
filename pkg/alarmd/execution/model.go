@@ -326,6 +326,12 @@ type QueryExecutionRequest struct {
 	// Slice is the slice of the Query Group's series this read is of; the
 	// zero slice is all of them (InputSlice).
 	Slice InputSlice
+	// FollowingRead is a read of the Slot after its first: a slice past the
+	// first, read in turn or ahead, or the children of one let go. The Slot
+	// arrived at its first read; what this one arrives with is the reads
+	// before it, not the schedule (the readiness of a Slot is its first
+	// read's).
+	FollowingRead bool
 }
 
 type followingSlotKey struct{}
@@ -713,6 +719,11 @@ type StatePreflightItem struct {
 	// Sharded says the Plan is a piece of a split strategy. The State key
 	// carries no shard, so the store reads such a series back every round.
 	Sharded bool
+	// VerifyCached is the Plan's piece in its sampled round of the day: a
+	// value the State cache would serve is read from the store all the same,
+	// compared with what the cache holds and let go of where they differ, and
+	// the round goes on with what was read (014 next7 3.6).
+	VerifyCached bool
 }
 
 type PlanGapLoadItem struct {
@@ -966,6 +977,26 @@ type StatePreflightResult struct {
 	// them. Found is handed to the Worker on the view (Carried); the other
 	// two start from nothing, as a series with no history does.
 	CarryFound, CarryMissing, CarryUnreadable int
+	// CacheVerify is what the sampled round's check of the State cache found
+	// (StatePreflightItem.VerifyCached).
+	CacheVerify StateCacheVerifyFacts
+}
+
+// StateCacheVerifyFacts is what a preflight's check of the State cache
+// against the store found: the values that matched and that did not, and the
+// first that did not - its Plan, the kind of value the cache held
+// (written, readback or compact) and the first field the two differ in.
+type StateCacheVerifyFacts struct {
+	Matched, Mismatched int
+	First               *StateCacheMismatch
+}
+
+// StateCacheMismatch is one value the State cache held that the store did
+// not: no value of either is carried, only where they part.
+type StateCacheMismatch struct {
+	Plan  PlanIdentity
+	Kind  string
+	Field string
 }
 
 func (result StatePreflightResult) Find(identity StateKeyIdentity) (RuntimeStateView, bool) {
@@ -1045,7 +1076,8 @@ func ClassifyStatePreflight(request StatePreflightRequest, result StatePreflight
 		// The carry pass's split travels too: dropped here, the round's
 		// reading of how much history crossed a moved generation would be
 		// zero on every round that carried any.
-		CarryFound: result.CarryFound, CarryMissing: result.CarryMissing, CarryUnreadable: result.CarryUnreadable}
+		CarryFound: result.CarryFound, CarryMissing: result.CarryMissing, CarryUnreadable: result.CarryUnreadable,
+		CacheVerify: result.CacheVerify}
 	seen := make(map[StateKeyIdentity]struct{}, len(result.Items))
 	for index, view := range result.Items {
 		candidate, ok := wanted[view.Identity]

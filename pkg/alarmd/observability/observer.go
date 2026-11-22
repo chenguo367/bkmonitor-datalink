@@ -85,8 +85,12 @@ const (
 	// StageStateCarryDecided is the Control Leader deciding what an
 	// activation whose state generation moved may carry; StageStateCarried
 	// is a Worker carrying it for each series. See StateCarryFacts.
-	StageStateCarryDecided      = "state_carry_decided"
-	StageStateCarried           = "state_carried"
+	StageStateCarryDecided = "state_carry_decided"
+	StageStateCarried      = "state_carried"
+	// StageStateCacheVerified is a Slot's sampled round finding values the
+	// State cache held that the store did not (014 next7 3.6). See
+	// StateCacheMismatchFacts.
+	StageStateCacheVerified     = "state_cache_verified"
 	StageScheduleCutover        = "schedule_cutover"
 	StageDrainingQGReconciled   = "draining_query_groups"
 	StageAssignmentAcquired     = "assignment_acquired"
@@ -1536,6 +1540,19 @@ type StateCarryFacts struct {
 	Scope  string
 	Result string
 	Count  int
+}
+
+// StateCacheMismatchFacts is a preflight's values the State cache held that
+// the store did not, found by its Plan's sampled round: how many, and of the
+// first, its strategy, the kind the cache held it as (written, readback,
+// compact) and the first field of its view the two differ in ("absent" for a
+// key gone, "bytes" for bytes that differ in no field). No value of either
+// is carried.
+type StateCacheMismatchFacts struct {
+	Count      int
+	StrategyID string
+	Kind       string
+	Field      string
 }
 
 // StateCarryScopes and StateCarryResults are the closed vocabularies of
@@ -3062,6 +3079,7 @@ type Observation struct {
 	ObjectRead          *ObjectReadFacts
 	StateGenerationSkew *StateGenerationSkewFacts
 	StateCarry          *StateCarryFacts
+	StateCacheMismatch  *StateCacheMismatchFacts
 	ActivationHold      *ActivationHoldFacts
 	DrainingQG          *DrainingQGFacts
 	Rebalance           *RebalanceFacts
@@ -4149,7 +4167,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentControlPlane, StageActiveQGSet},
 	{ComponentControlPlane, StageDrainingQGReconciled},
 	{ComponentControlPlane, StageFrozenPlanGeneration}, {ComponentControlPlane, StageActivationHold},
-	{ComponentControlPlane, StageStateCarryDecided}, {ComponentState, StageStateCarried},
+	{ComponentControlPlane, StageStateCarryDecided}, {ComponentState, StageStateCarried}, {ComponentState, StageStateCacheVerified},
 	{ComponentOwnership, StageAssignmentAcquired}, {ComponentOwnership, StageAssignmentLost},
 	{ComponentOwnership, StageRebalancePlanned},
 	{ComponentOwnership, StageControlReadsSpent},

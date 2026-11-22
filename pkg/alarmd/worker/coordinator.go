@@ -161,6 +161,9 @@ type SlotExecutionCoordinator struct {
 	// permanent class in its owner's term, and the ones stopped by it
 	// (segment_shadow.go).
 	segmentDegradations segmentDegradations
+	// generations is the State generation each Plan's last normal Slot here
+	// ran under (014 B4 H7).
+	generations planGenerations
 	// segmentFallbackLines is when each Query Group's Plans last wrote their
 	// fallback line (segment_fallback_lines.go).
 	segmentFallbackLines segmentFallbackLines
@@ -585,6 +588,12 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	if err := request.Validate(); err != nil {
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: invalid execution request: %w", err)
 	}
+	// Last on the way out, every apply of the attempt done: the witnesses
+	// its preflights left, those of the members its round left unwritten
+	// among them, are let go. Nothing of the attempt takes one after - a
+	// retry, an output retry and a supplement are attempts of their own,
+	// each preflighting again.
+	defer coordinator.ports.State.ReleaseSlotWitnesses(request.Contract.Slot)
 	if request.Supplement != nil {
 		// Before the evidence mark is armed: a supplement neither begins nor
 		// completes its Slot, so it has nothing of either to leave behind.
@@ -694,6 +703,8 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 		if !replayed {
 			sliceCompletion, err = coordinator.ports.Query.Execute(ctx, queryRequest, stream)
 		}
+		// Every read after this one follows it: the Slot arrived here.
+		queryRequest.FollowingRead = true
 		// The read's end, its footer checked or its read ahead replayed: a
 		// seam of the Slot's reads once the read is kept (sliceSeams).
 		ended := time.Now()

@@ -1285,6 +1285,11 @@ type productionPhaseTwoOwnershipDependencies struct {
 	// alone, which is what every runtime did before.
 	QueryCooldowns scheduler.QueryCooldownStore
 	ReadHolds      *productionReadHolds
+	// HandoverLedger is bound to each Query Group's session as it is opened
+	// and released, and reads the ledgers of those opened (LoadOpened); nil
+	// where the recovery gate answers from the link's copy, which keeps
+	// nothing a process would hand over.
+	HandoverLedger *productionHandoverLedger
 	// DropRuntimeWitnesses lets go of the preflight witnesses a released
 	// Query Group left in the execution store, up to the last Slot the
 	// releasing session ran. Nil drops none: they leave by the cache's bounds.
@@ -2708,11 +2713,16 @@ func (runtime *productionPhaseTwoOwnership) clearControlAuthority(authority owne
 	}
 }
 
+func (runtime *productionPhaseTwoOwnership) ForgetTakeover(queryGroup execution.QueryGroupIdentity) {
+	runtime.takeovers.Forget(queryGroup)
+}
+
 func (runtime *productionPhaseTwoOwnership) LoadOpened(ctx context.Context, queryGroups []execution.QueryGroupIdentity) {
-	if runtime.dependencies.ReadHolds == nil {
-		return
+	if runtime.dependencies.ReadHolds != nil {
+		runtime.dependencies.ReadHolds.load(ctx, queryGroups)
 	}
-	runtime.dependencies.ReadHolds.load(ctx, queryGroups)
+	// After the read holds, as the handover design reads them.
+	runtime.dependencies.HandoverLedger.load(ctx, queryGroups)
 }
 
 func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
@@ -2755,6 +2765,11 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 	if holds := runtime.dependencies.ReadHolds; holds != nil {
 		holds.bind(queryGroup, session)
 		release = func() { holds.forget(queryGroup, session) }
+	}
+	if ledger := runtime.dependencies.HandoverLedger; ledger != nil {
+		ledger.bind(queryGroup, session)
+		previousRelease := release
+		release = func() { previousRelease(); ledger.unbind(queryGroup, session) }
 	}
 	if runtime.viewGate != nil {
 		// The early renewal the gate makes when the view is ahead of the
@@ -2967,6 +2982,11 @@ func (source observedProductionSlotSource) FreezeSupplement(ctx context.Context,
 
 // Supplement runs a supplement of one of this Query Group's completed Slots
 // on its Runner; see scheduler.Runner.Supplement.
+func (runtime *productionPhaseTwoQueryGroup) SupplementContract(ctx context.Context, at execution.EvaluationTime,
+	readHoldMillis int64) (execution.FrozenExecutionContractRef, execution.OwnerFence, error) {
+	return runtime.runner.SupplementContract(ctx, at, readHoldMillis)
+}
+
 func (runtime *productionPhaseTwoQueryGroup) Supplement(
 	ctx context.Context,
 	at execution.EvaluationTime,

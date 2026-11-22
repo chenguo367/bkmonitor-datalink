@@ -17,6 +17,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/segment"
 )
 
 // Batch bounds for Runtime State storage round trips. They are constants on
@@ -215,6 +216,23 @@ func (cache *runtimeWitnessCache) forget(queryGroup execution.QueryGroupIdentity
 	}
 	cache.dropLocked(group)
 	delete(cache.groups, queryGroup)
+}
+
+// release drops the witnesses slot's preflights left once its attempt is
+// done applying: a member its round left unwritten took none of its own, and
+// would keep it until the Query Group's next Slot - the group being filled is
+// never evicted, so a large Query Group kept a round's worth. A group of any
+// other Slot is left alone: a later one's, or the earlier Slot a supplement
+// read under.
+func (cache *runtimeWitnessCache) release(slot execution.SlotIdentity) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	group := cache.groups[slot.QueryGroup]
+	if group == nil || group.slot != slot {
+		return
+	}
+	cache.dropLocked(group)
+	delete(cache.groups, slot.QueryGroup)
 }
 
 func (cache *runtimeWitnessCache) stats() RuntimeWitnessStats {
@@ -573,8 +591,8 @@ func (store *ExecutionStore) applyRuntime(
 	unknown := func() {
 		// A request any part of which ended in doubt: a write of it may have
 		// landed, so none of its keys is served from the cache (rule 2).
-		for _, key := range keys {
-			store.cache.drop(key, StateCacheDepartUnknown)
+		for index, key := range keys {
+			store.cache.dropState(key, request.Contract.Slot.QueryGroup, request.Items[index].Identity, StateCacheDepartUnknown)
 		}
 	}
 	for index, mutation := range request.Items {
@@ -657,7 +675,7 @@ func (store *ExecutionStore) applyRuntime(
 		write := FencedWrite{Key: keys[index], ExpectedMissing: witness.framedMissing, ExpectedDigest: witness.framedDigest,
 			Value: encoded, TTL: ttl}
 		if guard != nil {
-			staged[index] = stateCacheEntry{key: keys[index], group: request.Contract.Slot.QueryGroup, raw: encoded,
+			staged[index] = stateCacheEntry{key: keys[index], group: request.Contract.Slot.QueryGroup, identity: mutation.Identity, raw: encoded,
 				digest: ExpectedValueDigest(encoded), applyVersion: mutation.ApplyVersion,
 				fence: execution.OwnerFence{QueryGroup: request.Contract.Slot.QueryGroup, OwnerID: guard.OwnerID,
 					OwnerEpoch: guard.OwnerEpoch, LeaseToken: guard.LeaseToken},
@@ -673,7 +691,7 @@ func (store *ExecutionStore) applyRuntime(
 		unknown()
 		return execution.StateApplyResult{}, err
 	}
-	store.keepWritten(keys, result, staged)
+	store.keepWritten(request.Contract.Slot.QueryGroup, keys, result, staged)
 	return result, result.Validate()
 }
 
@@ -941,6 +959,30 @@ type runtimeLoadPass struct {
 	// series that has no record of its own and whose Plan carries.
 	carry                                     bool
 	carryFound, carryMissing, carryUnreadable int
+	// members is, by item, each series' coverage when it is an open member
+	// of its Plan's stable segment: what the cache keeps a value read back
+	// by (keepReadback). Nil when the load keeps none: a read no write
+	// follows from (Unwitnessed), one under no fence, or no cache.
+	members []readbackMember
+	// verify is, by item, what the cache held of a series its Plan's sampled
+	// round reads back all the same (014 next7 3.6); verified what the
+	// checks found.
+	verify   map[int]cachedValue
+	verified execution.StateCacheVerifyFacts
+}
+
+// cachedValue is what the State cache held of a series: its bytes' entry,
+// or its compact member.
+type cachedValue struct {
+	entry  *stateCacheEntry
+	member *compactMember
+}
+
+// readbackMember is a series' coverage by its Plan's stable segment, when it
+// is an open member of it; member is false otherwise.
+type readbackMember struct {
+	member   bool
+	coverage segment.Coverage
 }
 
 func (batch *runtimeLoadBatch) reset() {
@@ -1081,8 +1123,50 @@ func (store *ExecutionStore) loadRuntimeBatch(
 			largest = len(raw)
 		}
 		views[index] = store.readFramedRecord(ctx, request, item, raw)
+		if cached, checked := pass.verify[index]; checked {
+			store.verifyCached(request, item, batch.keys[position], raw, cached, pass)
+		}
+		if pass.members != nil {
+			store.keepReadback(request, item, batch.keys[position], raw, views[index], pass.members[index])
+		}
 	}
 	return loaded, largest, err == nil
+}
+
+// keepReadback offers the State cache a value the Slot's own preflight read
+// back (014 next7 3.1). A member its round leaves unwritten reads the same
+// bytes back round after round, Redis only renewing its key: it is kept,
+// stamped as a write's entry is, until its page's last renewal's life less
+// the replay age - which its key outlives - and its page's next renewal
+// moves that on (memberRenewed). A record that was not found, or did not
+// read, is no candidate; every other is counted by what became of it.
+func (store *ExecutionStore) keepReadback(request execution.StatePreflightRequest, item execution.StatePreflightItem, key string,
+	raw []byte, view execution.RuntimeStateView, member readbackMember) {
+	switch view.Status {
+	case execution.StateFoundReady, execution.StateFoundWarming, execution.StateFoundGapped:
+	default:
+		return
+	}
+	switch {
+	case !member.member:
+		store.cache.countReadback(StateCacheReadbackDeclinedNotMember)
+		return
+	case !member.coverage.Leaves:
+		store.cache.countReadback(StateCacheReadbackDeclinedOperation)
+		return
+	}
+	renewal := member.coverage.Renewal
+	usableUntil := time.UnixMilli(renewal.At + renewal.TTL).Add(-store.options.StateCacheReplayAge)
+	if !store.options.Now().Before(usableUntil) {
+		store.cache.countReadback(StateCacheReadbackDeclinedNoRenewal)
+		return
+	}
+	store.cache.keepReadback(stateCacheEntry{key: key, group: request.Contract.Slot.QueryGroup, identity: item.Identity, raw: raw,
+		digest: ExpectedValueDigest(raw), applyVersion: view.PersistedApplyVersion, fence: request.OwnerFence,
+		epoch: item.ApplyVersion.StateApplyEpoch, segmentStart: request.Contract.ScheduleSegmentStart,
+		slot: request.Contract.Slot.EvaluationTime, usableUntil: usableUntil,
+		interval: time.Duration(member.coverage.Interval) * time.Second})
+	store.cache.countReadback(StateCacheReadbackKept)
 }
 
 // readCarriedRecord decodes a series' frame under the generation its Plan
@@ -1157,21 +1241,36 @@ func (store *ExecutionStore) readStoredRecord(
 		remember()
 		return execution.RuntimeStateView{Identity: item.Identity, Status: execution.StateMissingWarming}
 	}
-	witness.framedDigest = ExpectedValueDigest(framedRaw)
 	var decoded execution.RuntimeStateView
 	if framedDecoded != nil {
 		decoded = *framedDecoded
 	} else {
 		decoded = store.decodeRuntime(ctx, framedRaw, item.Identity, request.Contract, item.ApplyVersion)
 	}
+	return store.witnessFound(request, item, ExpectedValueDigest(framedRaw), decoded)
+}
+
+// readKeptRecord is readStoredRecord for a value the State cache keeps
+// compact (014 next7 3.3): decoded already from bytes whose digest is
+// digest, finished and witnessed as those bytes would be.
+func (store *ExecutionStore) readKeptRecord(ctx context.Context, request execution.StatePreflightRequest, item execution.StatePreflightItem,
+	digest string, decoded execution.RuntimeStateView) execution.RuntimeStateView {
+	return store.witnessFound(request, item, digest, store.finishRuntime(ctx, decoded, item.Identity, request.Contract, item.ApplyVersion))
+}
+
+// witnessFound remembers a found record's view for the apply path, its
+// framed bytes' digest digest, unless the request is Unwitnessed; a record
+// that does not read is refused by name and not witnessed.
+func (store *ExecutionStore) witnessFound(request execution.StatePreflightRequest, item execution.StatePreflightItem, digest string,
+	decoded execution.RuntimeStateView) execution.RuntimeStateView {
 	if decoded.Status == execution.StateDeterministicInvalid {
 		return decoded
 	}
-	witness.framedRevision = decoded.BlobRevision
-	witness.missing = false
-	witness.blobRevision, witness.applyVersion, witness.mutationDigest = decoded.BlobRevision, decoded.PersistedApplyVersion, decoded.PersistedMutationDigest
-	witness.digest = witness.framedDigest
-	remember()
+	witness := runtimeWitness{framedDigest: digest, framedRevision: decoded.BlobRevision, blobRevision: decoded.BlobRevision,
+		applyVersion: decoded.PersistedApplyVersion, mutationDigest: decoded.PersistedMutationDigest, digest: digest}
+	if !request.Unwitnessed {
+		store.witnesses.remember(request.Contract.Slot, item.Identity, witness)
+	}
 	return decoded
 }
 
@@ -1196,7 +1295,7 @@ func (store *ExecutionStore) restorable(
 	default:
 		return false
 	}
-	last, found := store.cache.lastWritten(write.Key)
+	last, found := store.cache.lastWritten(write.Key, request.Contract.Slot.QueryGroup, identity)
 	if !found || ExpectedValueDigest(outcome.Current) == last.digest {
 		// This process wrote those bytes: its own concurrent write came first.
 		return false
@@ -1252,14 +1351,15 @@ func (pipeline *runtimeApplyPipeline) restore(ctx context.Context, batch runtime
 // takes the key out - a conflict, an already-applied or stale refusal, a
 // sequential write, whose bytes were not staged. A write in doubt takes out
 // every key of the request.
-func (store *ExecutionStore) keepWritten(keys []string, result execution.StateApplyResult, staged map[int]stateCacheEntry) {
+func (store *ExecutionStore) keepWritten(group execution.QueryGroupIdentity, keys []string, result execution.StateApplyResult,
+	staged map[int]stateCacheEntry) {
 	if store.cache == nil {
 		return
 	}
 	for _, item := range result.Items {
 		if item.Status == execution.StateApplyRetryable {
-			for _, key := range keys {
-				store.cache.drop(key, StateCacheDepartUnknown)
+			for index, key := range keys {
+				store.cache.dropState(key, group, result.Items[index].Identity, StateCacheDepartUnknown)
 			}
 			return
 		}
@@ -1272,6 +1372,6 @@ func (store *ExecutionStore) keepWritten(keys []string, result execution.StateAp
 			store.cache.applied(entry)
 			continue
 		}
-		store.cache.drop(keys[index], StateCacheDepartConflict)
+		store.cache.dropState(keys[index], group, item.Identity, StateCacheDepartConflict)
 	}
 }

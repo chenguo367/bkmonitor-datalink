@@ -128,11 +128,70 @@ func TestASupplementOfASlotBeforeAnEditIsWritten(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Supplement() error = %v", err)
 	}
-	if facts.Admitted != 1 || facts.CrossedT != 1 || facts.ConfigDrift != 0 {
-		t.Fatalf("supplement facts %+v, want host B admitted, host A crossed and nothing taken for drift", facts)
+	if facts.Admitted != 1 || facts.CrossedT != 1 || facts.ConfigDrift != 0 || facts.GenerationMoved != 0 {
+		t.Fatalf("supplement facts %+v, want host B admitted, host A crossed and nothing taken for drift; no Slot of the "+
+			"new generation ran here, so none moved", facts)
 	}
 	if written := seriesDigests(fixture, held); written[supplementHostB] != digests[supplementHostB] {
 		t.Fatalf("the supplement wrote events for %v, want host B's", written)
+	}
+}
+
+// A supplement of a Slot before an edit that changed the Plan's State
+// generation, once the new generation has run a Slot here (014 B4 H7): it
+// writes the late series at its Slot under the old generation, a key the
+// Plan reads no more for a series the new generation has a record of, and
+// says so - the admitted pair counted generation_moved.
+func TestASupplementWrittenUnderAGenerationTheNewOneHasRunPastIsCounted(t *testing.T) {
+	probe := firingFixture(t)
+	probe.uqHosts = func(int64) []string { return []string{supplementHostA, supplementHostB} }
+	probeSlot := execution.EvaluationTime(probe.base + 60)
+	if ended := runSlot(t, probe, probe.queryGroup, probe.runner, probeSlot); ended != fullEnding {
+		t.Fatalf("the probe Slot ended %q", ended)
+	}
+	digests := seriesDigests(probe, probeSlot)
+	if len(digests) != 2 {
+		t.Fatalf("probe digests %v, want one per host", digests)
+	}
+
+	fixture := firingFixture(t)
+	ctx := context.Background()
+	held := execution.EvaluationTime(fixture.base + 60)
+	late := true
+	fixture.uqHosts = func(int64) []string {
+		if late {
+			return []string{supplementHostA}
+		}
+		return []string{supplementHostA, supplementHostB}
+	}
+	if ended := runSlot(t, fixture, fixture.queryGroup, fixture.runner, held); ended != fullEnding {
+		t.Fatalf("the Slot before the edit ended %q", ended)
+	}
+	hold := fixture.progress(ctx).LastCompletion.Contract.ReadHoldMillis
+
+	installEditedStrategies(t, ctx, fixture.redisClient, 1725000600, thresholdTo(2))
+	first := held + 60
+	fixture.clock.Store((int64(first) - 1) * 1000)
+	for round := 0; round < 2; round++ {
+		if err := fixture.bundle.refreshAndReconcile(ctx, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	late = false
+	runSlot(t, fixture, fixture.queryGroup, fixture.runner, first)
+
+	client, err := accessuq.NewClient(fixture.cfg.PhaseTwo.Access.UQEndpoint, fixture.cfg.PhaseTwo.Access.QuerySource, http.DefaultClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := fixture.runner.(*settlingRuntime).phaseTwoQueryGroupRuntime.(*productionPhaseTwoQueryGroup)
+	facts, err := runtime.Supplement(access.WithKeptRead(testwait.Context(t), recheckedRead{client: client}), held, hold,
+		execution.SupplementScope{Series: []execution.SeriesIdentityDigest{digests[supplementHostB]}})
+	if err != nil {
+		t.Fatalf("Supplement() error = %v", err)
+	}
+	if facts.Admitted != 1 || facts.GenerationMoved != 1 {
+		t.Fatalf("supplement facts %+v, want host B admitted under the old generation and counted generation_moved", facts)
 	}
 }
 

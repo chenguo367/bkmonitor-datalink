@@ -25,6 +25,8 @@ type stateCacheCollector struct {
 	mu                                                             sync.Mutex
 	source                                                         func() state.StateCacheStats
 	lookups, departures, restored, declined, bytes, budget, groups *prometheus.Desc
+	entries, readback, memberRenewals, fallbacks, compactDeclined  *prometheus.Desc
+	verified                                                       *prometheus.Desc
 }
 
 func newStateCacheCollector() *stateCacheCollector {
@@ -34,7 +36,9 @@ func newStateCacheCollector() *stateCacheCollector {
 	return &stateCacheCollector{
 		lookups: descriptor("state_cache_lookups_total",
 			"Runtime State keys a load asked the write-through State cache for, by result: hit (served from "+
-				"what this process last wrote), or why it was read back - miss_absent (nothing kept), "+
+				"what the cache holds: what this process last wrote, a stable member's value read back, or its "+
+				"compact entry - on a Plan's sampled round a hit is read back from the store all the same and "+
+				"checked against it), or why it was read back - miss_absent (nothing kept), "+
 				"miss_fence (another owner fence), miss_unknown (the last write's outcome unknown), "+
 				"miss_expired (past its key's life less the replay age), miss_replay (a replay, retry or "+
 				"older Slot), miss_activation (the Plan's activation changed: moved, put back, reactivated, "+
@@ -45,11 +49,13 @@ func newStateCacheCollector() *stateCacheCollector {
 		departures: descriptor("state_cache_departures_total",
 			"Entries that left the State cache, by reason and kind - state, a Runtime State value; segment, a Plan's "+
 				"stable segment mark or member page (014 B3); the two share the budget - : released (the Query Group stopped, was lost, "+
-				"declined or handed over), unknown (a write of its request ended in doubt), conflict (its "+
+				"declined or handed over, or a Plan's compact table let go whole when its owner fence or activation "+
+				"changed), unknown (a write of its request ended in doubt), conflict (its "+
 				"write did not apply), expired, renewal_missing, untouched (neither read nor written for two "+
 				"of its own intervals), over_budget (its Query Group did not fit the budget: it left whole, or a write "+
 				"of it was not taken in), yielded (the same for what the Slots leave of the retained pool, or its "+
-				"Query Group given back whole for a Slot that needed the room). A group kept out is judged again "+
+				"Query Group given back whole for a Slot that needed the room), mismatch (a value a Plan's sampled "+
+				"round found the store no longer held as the cache did). A group kept out is judged again "+
 				"once a round, by a whole round of it, so one that never fits leaves once rather than every round. "+
 				"Every cell exists from the start.", "reason", "kind"),
 		restored: descriptor("state_cache_restored_total",
@@ -65,13 +71,55 @@ func newStateCacheCollector() *stateCacheCollector {
 		bytes: descriptor("state_cache_bytes",
 			"The State cache's charge: each entry's value and key rounded to their size classes plus a fixed "+
 				"overhead, summed, by kind - state, the Runtime State values; segment, the Plans' stable segment marks "+
-				"and member pages (014 B3). The two share one budget, the container's thirty-second "+
-				"(state_cache_budget_bytes): read their sum against it, and each kind for what it takes of it.", "kind"),
+				"and member pages (014 B3). The two share one budget (state_cache_budget_bytes): read their sum "+
+				"against it, and each kind for what it takes of it.", "kind"),
 		budget: descriptor("state_cache_budget_bytes",
-			"The most the State cache may hold: the container's thirty-second, borrowed from the retained-bytes "+
-				"pool while no Slot has reserved it and given back when one needs it. A Query Group that would go "+
-				"past it or past the pool's room is kept out and read back; the resident ones stay."),
+			"The most the State cache may hold, set once a minute: the series this replica holds "+
+				"(state_series_held) times a State entry's charge as the cache measures it, a quarter more, beside what "+
+				"the segments hold; never less than the container's thirty-second. Borrowed from the retained-bytes pool "+
+				"while no Slot has reserved it and given back when one needs it, or when the soft memory limit is passed. "+
+				"A Query Group that would go past it or past the pool's room is kept out and read back; the resident "+
+				"ones stay."),
 		groups: descriptor("state_cache_query_groups", "Query Groups holding entries in the State cache."),
+		entries: descriptor("state_cache_entries",
+			"Runtime State entries the State cache holds, by kind: written (what this process wrote), readback (what a "+
+				"preflight read back of a stable member its round leaves unwritten, kept as stored), compact (the same "+
+				"kept in its compact form). Every cell exists from the start.", "kind"),
+		readback: descriptor("state_cache_readback_inserted_total",
+			"Records a Slot's own preflight found under its fence, by what the State cache did with them: kept (taken "+
+				"in, or judged against the budget as a write is), declined_not_member (not an open member of its Plan's "+
+				"stable segment, or a Plan of a split strategy), declined_operation (a member its round writes whole: "+
+				"not a normal round, the segment skip not followed, the Plan's sampled round, a stopped Plan, a page "+
+				"past half its life unrenewed), declined_no_renewal (a member left out whose page's last renewal leaves "+
+				"its key less than the replay age). Read kept against state_cache_lookups_total{result=\"hit\"}: a "+
+				"member kept is served on the rounds after. Every cell exists from the start.", "result"),
+		memberRenewals: descriptor("state_cache_member_renewed_total",
+			"State entries of stable members at their page's renewal, by result: renewed (the renewal found every key "+
+				"of its chunk, and the entries live as long as the keys now do) and dropped_missing (it found some "+
+				"gone, and the chunk's entries were let go: which ones is not known). Every cell exists from the start.",
+			"result"),
+		compactDeclined: descriptor("state_cache_compact_declined_total",
+			"Values a preflight read back of a stable member that the State cache kept as their bytes rather than "+
+				"compact, by why: legacy_frame (a record carrying stored record ids), series_guard (a record carrying a "+
+				"series guard), digest_shape (a digest not 64 lowercase hexadecimal characters), rebuilt_bytes (the member "+
+				"rebuilt to other bytes than were read back: a header written another way, by another build), "+
+				"rebuilt_view (it decoded to another view than the bytes did), unreadable (the bytes did not parse). Each "+
+				"kept as its bytes costs some four times a compact one in state_cache_bytes. Every cell exists from the "+
+				"start.", "reason"),
+		verified: descriptor("state_cache_readback_verify_total",
+			"Values the State cache held that a Plan's sampled round of the day read from the store all the same and "+
+				"compared, by result: match, or mismatch (the store held another value, or none: the cache's value was "+
+				"let go and the round went on with the store's). Every kind of value is checked - written, read back, "+
+				"compact. mismatch is to be zero, every one: a state_cache_verified line names the strategy, the kind and "+
+				"the first field of the first; match above zero says the check ran. Both cells exist from the start.",
+			"result"),
+		fallbacks: descriptor("state_cache_fallback_mget_total",
+			"Stable members their round leaves unwritten that a preflight read back from Redis rather than serving "+
+				"from the State cache, by why: absent (nothing kept: the first round after a start or a takeover, or "+
+				"one it left), yielded and over_budget (its Query Group kept out of the cache), expired, activation "+
+				"(its Plan's activation changed). The members' reads the cache exists to spare; hit low against "+
+				"expectation reads here first, then state_cache_readback_inserted_total's declined cells. Every cell "+
+				"exists from the start.", "reason"),
 	}
 }
 
@@ -86,7 +134,8 @@ func (r *Recorder) SetStateCacheSource(source func() state.StateCacheStats) {
 }
 
 func (c *stateCacheCollector) Describe(ch chan<- *prometheus.Desc) {
-	for _, desc := range []*prometheus.Desc{c.lookups, c.departures, c.restored, c.declined, c.bytes, c.budget, c.groups} {
+	for _, desc := range []*prometheus.Desc{c.lookups, c.departures, c.restored, c.declined, c.bytes, c.budget, c.groups,
+		c.entries, c.readback, c.memberRenewals, c.fallbacks, c.compactDeclined, c.verified} {
 		ch <- desc
 	}
 }
@@ -107,6 +156,11 @@ func (c *stateCacheCollector) Collect(ch chan<- prometheus.Metric) {
 		{c.lookups, state.StateCacheLookupResults, stats.Lookups},
 		{c.restored, state.StateCacheRestoreCauses, stats.Restored},
 		{c.declined, state.StateCacheDeclineReasons, stats.Declined},
+		{c.readback, state.StateCacheReadbackResults, stats.Readback},
+		{c.memberRenewals, state.StateCacheMemberRenewalResults, stats.MemberRenewals},
+		{c.fallbacks, state.StateCacheFallbackReasons, stats.Fallbacks},
+		{c.compactDeclined, state.StateCacheCompactDeclineReasons, stats.CompactDeclined},
+		{c.verified, state.StateCacheVerifyResults, stats.Verified},
 	} {
 		for _, word := range family.words {
 			ch <- prometheus.MustNewConstMetric(family.desc, prometheus.CounterValue, float64(family.counts[word]), word)
@@ -124,4 +178,7 @@ func (c *stateCacheCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.bytes, prometheus.GaugeValue, float64(stats.SegmentBytes), state.StateCacheKindSegment)
 	ch <- prometheus.MustNewConstMetric(c.budget, prometheus.GaugeValue, float64(stats.BudgetBytes))
 	ch <- prometheus.MustNewConstMetric(c.groups, prometheus.GaugeValue, float64(stats.QueryGroups))
+	for _, kind := range state.StateCacheEntryKinds {
+		ch <- prometheus.MustNewConstMetric(c.entries, prometheus.GaugeValue, float64(stats.Entries[kind]), kind)
+	}
 }

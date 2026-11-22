@@ -482,6 +482,9 @@ func TestApplyStateCountsVersionConflictsByKindAndNamesTheFirst(t *testing.T) {
 	}
 }
 
+// ReleaseSlotWitnesses keeps no witnesses to let go of.
+func (*chunkStore) ReleaseSlotWitnesses(execution.SlotIdentity) {}
+
 func (store *chunkStore) RenewFrozenRuntime(
 	_ context.Context, request execution.FrozenStateRenewalRequest,
 ) (execution.FrozenStateRenewalResult, error) {

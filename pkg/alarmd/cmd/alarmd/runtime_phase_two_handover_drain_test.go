@@ -23,7 +23,9 @@ import (
 // creating Slots, finishes the commit boundary it is in, and only then
 // releases its lease. The Query Group is moved away while its Slot runs:
 // the reconcile that learns of the move returns without waiting for the
-// Slot, no release happens while it runs, and exactly one follows it.
+// Slot, no release happens while it runs, and exactly one follows it. Once
+// released it is forgotten by the takeover clock, and not before: given
+// back to this process it is taken over again.
 func TestAReassignedQueryGroupIsReleasedOnlyAfterItsRunningSlotReturns(t *testing.T) {
 	cfg := validGoAccessRuntimeConfig()
 	control := &fakePhaseTwoControl{queryGroups: []execution.QueryGroupIdentity{"query-group-1"}}
@@ -46,6 +48,13 @@ func TestAReassignedQueryGroupIsReleasedOnlyAfterItsRunningSlotReturns(t *testin
 	letSlotFinish := func() { finishSlot.Do(func() { close(first.runRelease) }) }
 	defer letSlotFinish()
 	waitSignal(t, first.leaseStarted, "lease maintenance")
+	var missesMu sync.Mutex
+	var misses []execution.QueryGroupIdentity
+	bundle.dependencies.ForgetOpenAlertMisses = func(queryGroup execution.QueryGroupIdentity) {
+		missesMu.Lock()
+		misses = append(misses, queryGroup)
+		missesMu.Unlock()
+	}
 
 	done := make(chan error, 1)
 	go func() { done <- runScheduledOnceSettled(context.Background(), bundle) }()
@@ -72,6 +81,9 @@ func TestAReassignedQueryGroupIsReleasedOnlyAfterItsRunningSlotReturns(t *testin
 		t.Fatalf("lease released %d time(s) while the Slot was still running; want the release after "+
 			"the Slot's commit boundary (02 §6.2 steps 2-3)", released)
 	}
+	if forgotten := forgottenTakeovers(owner); len(forgotten) != 0 {
+		t.Fatalf("takeovers forgotten while the Slot still ran: %v", forgotten)
+	}
 	letSlotFinish()
 	<-done
 	deadline := testwait.Deadline(t)
@@ -80,6 +92,16 @@ func TestAReassignedQueryGroupIsReleasedOnlyAfterItsRunningSlotReturns(t *testin
 	}
 	if released := first.releaseCount(); released != 1 {
 		t.Fatalf("release calls after the Slot returned = %d, want exactly 1", released)
+	}
+	testwait.Until(t, "the moved Query Group's takeover forgotten", func() bool { return len(forgottenTakeovers(owner)) > 0 })
+	missesMu.Lock()
+	letGo := append([]execution.QueryGroupIdentity(nil), misses...)
+	missesMu.Unlock()
+	if len(letGo) != 1 || letGo[0] != "query-group-1" {
+		t.Fatalf("open-alert misses let go of for %v, want query-group-1's once", letGo)
+	}
+	if forgotten := forgottenTakeovers(owner); len(forgotten) != 1 || forgotten[0] != "query-group-1" || first.releaseCount() != 1 {
+		t.Fatalf("takeovers forgotten %v with %d releases, want query-group-1's once, after its release", forgotten, first.releaseCount())
 	}
 }
 

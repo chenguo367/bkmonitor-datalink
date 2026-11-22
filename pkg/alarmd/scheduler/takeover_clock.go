@@ -34,7 +34,11 @@ import (
 //
 // Entries are kept for every Query Group this process has held, one epoch
 // and one instant each; a Query Group that leaves and comes back after
-// another owner is told apart by its epoch, so nothing needs to forget them.
+// another owner is told apart by its epoch. One this process let go of -
+// moved to another owner, or declined - and was given back before anyone
+// else acquired it comes back one epoch later, as a rebuild does, though
+// nothing here ran its Slots in between: it is forgotten when it is let go
+// (Forget), so its return is a takeover.
 type TakeoverClock struct {
 	mu    sync.Mutex
 	owned map[execution.QueryGroupIdentity]takeover
@@ -77,6 +81,19 @@ func (clock *TakeoverClock) Anchor(queryGroup execution.QueryGroupIdentity, fenc
 		clock.owned[queryGroup] = takeover{epoch: fence.OwnerEpoch, at: now}
 		return now
 	}
+}
+
+// Forget lets go of what the clock holds of a Query Group this process let
+// go of: the next epoch it holds here, whatever its number, is a takeover.
+// Called once its Runner has stopped and its lease was given back, so no
+// round of the epoch it let go of notes the Query Group again.
+func (clock *TakeoverClock) Forget(queryGroup execution.QueryGroupIdentity) {
+	if clock == nil {
+		return
+	}
+	clock.mu.Lock()
+	delete(clock.owned, queryGroup)
+	clock.mu.Unlock()
 }
 
 // FirstClassification reports whether this is the first time the Slot at

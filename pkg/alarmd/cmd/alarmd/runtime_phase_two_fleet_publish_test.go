@@ -48,6 +48,7 @@ func TestEverySnapshotFieldIsAssignedWhereTheSnapshotIsBuilt(t *testing.T) {
 		"Replica":      "the publisher keys the snapshot by it rather than storing it in the body",
 		"ObservedAt":   "stamped by the store on write, so a replica cannot backdate itself",
 		"ReadHoldsCut": "set by the store on write, where the read hold list is cut to its budget",
+		"OwnedInKey":   "set by the store on a summarized write, the owned list put in its own key, and cleared on load",
 	}
 	snapshot := reflect.TypeOf(fleet.Snapshot{})
 	for index := 0; index < snapshot.NumField(); index++ {

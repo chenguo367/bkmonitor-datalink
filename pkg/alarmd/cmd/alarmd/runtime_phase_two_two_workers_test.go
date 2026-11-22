@@ -125,6 +125,14 @@ func valuedUQ(t *testing.T, value *atomic.Int64) *httptest.Server {
 // worker-b, and opens worker-b.
 func startTwoWorkerFixture(t *testing.T, before func(ctx context.Context, client *redis.Client, cfg config.Config), plans int) *twoWorkerFixture {
 	t.Helper()
+	return startTwoWorkerFixtureWith(t, nil, before, plans)
+}
+
+// startTwoWorkerFixtureWith is startTwoWorkerFixture with both workers'
+// configuration changed as configure says, after the fixture's own.
+func startTwoWorkerFixtureWith(t *testing.T, configure func(*config.Config), before func(ctx context.Context, client *redis.Client,
+	cfg config.Config), plans int) *twoWorkerFixture {
+	t.Helper()
 	placement := &pinnedWorkers{pins: map[execution.QueryGroupIdentity]string{}}
 	value := &atomic.Int64{}
 	value.Store(aboveThreshold)
@@ -132,6 +140,9 @@ func startTwoWorkerFixture(t *testing.T, before func(ctx context.Context, client
 	f := openCutoverFixtureSharing(t, func(cfg *config.Config) {
 		cfg.PhaseTwo.Worker.ID = "worker-a"
 		cfg.PhaseTwo.Access.UQEndpoint = uq.URL
+		if configure != nil {
+			configure(cfg)
+		}
 	},
 		observability.Discard(observability.ComponentRuntime), before, nil,
 		func(external *phaseTwoProductionExternalDependencies) { external.Placement = placement }, plans)

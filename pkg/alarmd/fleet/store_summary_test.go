@@ -38,6 +38,21 @@ func realRedis(t *testing.T) (string, *redis.Client) {
 	return server.Addr, client
 }
 
+// storedSnapshotJSON is the JSON of a replica's snapshot as the store wrote
+// it, its compressed value inflated.
+func storedSnapshotJSON(t *testing.T, client *redis.Client, store *RedisStore, replica string) string {
+	t.Helper()
+	stored, err := client.Get(context.Background(), store.compressedSnapshotKey(replica)).Bytes()
+	if err != nil {
+		t.Fatalf("the compressed snapshot of %s: %v", replica, err)
+	}
+	raw, err := decodeSnapshotPayload(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
 // summarizedSnapshot is a replica's snapshot with rows, and more owned
 // objects than a small budget lets its list carry.
 func summarizedSnapshot(replica string, owned int) Snapshot {
@@ -57,7 +72,8 @@ func summarizedSnapshot(replica string, owned int) Snapshot {
 // A summarized publish writes the snapshot, its summary and its whole owned
 // list, each readable for the store's TTL: the summary is the one the reader
 // would make from the snapshot as written, and the owned list is the whole
-// set though the snapshot's own list was cut to its budget.
+// set, kept once beside a snapshot written without one, which a load reads
+// back with the whole list where the budget would have cut it.
 func TestASummarizedPublishWritesTheSnapshotItsSummaryAndItsWholeOwnedList(t *testing.T) {
 	_, client := realRedis(t)
 	store := mustStore(t, client, time.Minute, 256)
@@ -68,8 +84,11 @@ func TestASummarizedPublishWritesTheSnapshotItsSummaryAndItsWholeOwnedList(t *te
 		t.Fatal(err)
 	}
 	written, err := store.Load(context.Background(), []string{"pod-a"})
-	if err != nil || len(written) != 1 || len(written[0].OwnedObjects) >= len(snapshot.OwnedObjects) {
-		t.Fatalf("snapshot %+v error %v, want it written with its owned list cut to the budget", written, err)
+	if err != nil || len(written) != 1 || !reflect.DeepEqual(written[0].OwnedObjects, snapshot.OwnedObjects) {
+		t.Fatalf("snapshot %+v error %v, want it read back with its whole owned list", written, err)
+	}
+	if raw := storedSnapshotJSON(t, client, store, "pod-a"); strings.Contains(raw, "owned_objects") {
+		t.Fatalf("snapshot written with an owned list: %s", raw)
 	}
 	summaries, err := store.LoadSummaries(context.Background(), []string{"pod-a", "pod-gone"})
 	if err != nil || len(summaries) != 1 {
@@ -83,15 +102,16 @@ func TestASummarizedPublishWritesTheSnapshotItsSummaryAndItsWholeOwnedList(t *te
 	if err != nil || len(owned) != 1 || len(owned["pod-a"]) != len(snapshot.OwnedObjects) {
 		t.Fatalf("owned %v error %v, want pod-a's whole list alone", owned, err)
 	}
-	for _, key := range []string{store.snapshotKey("pod-a"), store.summaryKey("pod-a"), store.ownedKey("pod-a")} {
+	for _, key := range []string{store.compressedSnapshotKey("pod-a"), store.summaryKey("pod-a"), store.ownedKey("pod-a")} {
 		if ttl := client.TTL(context.Background(), key).Val(); ttl <= 0 || ttl > time.Minute {
 			t.Errorf("%s ttl %v, want the store's", key, ttl)
 		}
 	}
 	summary := client.Get(context.Background(), store.summaryKey("pod-a")).Val()
 	if len(meter.summaries) != 1 || meter.summaries[0] != len(summary) || len(meter.summaryLoads) != 1 ||
-		meter.summaryLoads[0] != [2]int{1, len(summary)} || len(meter.ownedLoads) != 1 || meter.ownedLoads[0][0] != 1 {
-		t.Fatalf("meter %+v, want the summary's bytes written and each read counted", meter)
+		meter.summaryLoads[0] != [2]int{1, len(summary)} || len(meter.ownedLoads) != 2 || meter.ownedLoads[0][0] != 1 ||
+		meter.ownedLoads[1][0] != 1 {
+		t.Fatalf("meter %+v, want the summary's bytes written and each read counted, the load's of the owned list as well", meter)
 	}
 }
 
@@ -109,7 +129,7 @@ func TestASummarizedPublishCountsTheEvaluatingStrategiesWithoutWritingThem(t *te
 	if err != nil || summary.Part.RunningStrategies == nil {
 		t.Fatalf("summary %+v error %v, want the running strategies counted", summary.Part, err)
 	}
-	raw := client.Get(context.Background(), store.snapshotKey("pod-a")).Val()
+	raw := storedSnapshotJSON(t, client, store, "pod-a")
 	if raw == "" || strings.Contains(raw, "evaluating_strategies") {
 		t.Fatalf("snapshot written as %s, want it without the strategies list", raw)
 	}
@@ -138,7 +158,7 @@ func TestThePublishSummarizedScriptRunsAsTheStoreCallsIt(t *testing.T) {
 		Written: func(t *testing.T, client *redis.Client) {
 			ctx := context.Background()
 			store := mustStore(t, client, time.Minute, 0)
-			keys := []string{store.snapshotKey("pod-a"), store.summaryKey("pod-a"), store.ownedKey("pod-a")}
+			keys := []string{store.compressedSnapshotKey("pod-a"), store.summaryKey("pod-a"), store.ownedKey("pod-a")}
 			values := client.MGet(ctx, keys...).Val()
 			if want, err := json.Marshal(written); err != nil || values[1] != string(want) {
 				t.Fatalf("stored summary %v, want the one returned %s", values[1], want)
@@ -279,7 +299,7 @@ func TestASummarizedPublishCutInsideItsScriptCallLeavesAllThreeAsTheyWere(t *tes
 	if _, err := before.PublishSummarized(context.Background(), summarizedSnapshot("pod-a", 3), 10*time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	keys := []string{before.snapshotKey("pod-a"), before.summaryKey("pod-a"), before.ownedKey("pod-a")}
+	keys := []string{before.compressedSnapshotKey("pod-a"), before.summaryKey("pod-a"), before.ownedKey("pod-a")}
 	old := client.MGet(context.Background(), keys...).Val()
 
 	proxy, cutScript := scriptCutter(t, address)
@@ -337,6 +357,9 @@ func TestTheServiceSummarizesAReplicaThatPublishedNoSummaryFromItsSnapshot(t *te
 		expectation := Expectation{QueryGroups: len(ids), Known: true, IDs: ids}
 		service := mustService(t, stubExpectations{expectation: expectation}, stubRegistry{replicas: replicas()}, store)
 		view, part := service.Summarized(context.Background(), 10*time.Minute)
+		// The service's reads, before the case's own load of the snapshots,
+		// which reads pod-a's list from its key as every load does.
+		ownedReads, summaryReads := append([][2]int(nil), meter.ownedLoads...), len(meter.summaryLoads)
 		snapshots, err := store.Load(context.Background(), replicas())
 		if err != nil {
 			t.Fatal(err)
@@ -345,8 +368,8 @@ func TestTheServiceSummarizesAReplicaThatPublishedNoSummaryFromItsSnapshot(t *te
 		sameJSON(t, name, healthOf(&view, part, now), want)
 		// pod-b's list came from its snapshot; only pod-a's is read, and only
 		// when the digests disagree.
-		if read := len(meter.ownedLoads) == 1; read != (name == "disagreeing") || len(meter.summaryLoads) != 1 {
-			t.Errorf("%s: owned reads %v, summary reads %v", name, meter.ownedLoads, meter.summaryLoads)
+		if read := len(ownedReads) == 1; read != (name == "disagreeing") || summaryReads != 1 {
+			t.Errorf("%s: owned reads %v, %d summary reads", name, ownedReads, summaryReads)
 		}
 	}
 }
@@ -461,7 +484,7 @@ func TestASummarizedPublishWritesTheLookbackLateListBesideTheSnapshot(t *testing
 	if ttl := client.TTL(context.Background(), store.lookbackKey("pod-a")).Val(); ttl <= 0 || ttl > time.Minute {
 		t.Fatalf("lookback late list ttl %v, want the store's", ttl)
 	}
-	if raw := client.Get(context.Background(), store.snapshotKey("pod-a")).Val(); strings.Contains(raw, "qg-later") {
+	if raw := storedSnapshotJSON(t, client, store, "pod-a"); strings.Contains(raw, "qg-later") {
 		t.Fatalf("the snapshot carries the lookback late list: %s", raw)
 	}
 	for publish := 0; publish < 20; publish++ {
@@ -512,7 +535,8 @@ func TestADepartedReplicasLookbackLateListGoesWithItsSnapshot(t *testing.T) {
 		t.Fatalf("lists just after the publish = %v error %v, want pod-gone's", lists, err)
 	}
 	time.Sleep(400 * time.Millisecond) // fixed-wait: past the store's 300 ms life on the Redis server's clock, which the fixture cannot move; waiting until the keys go would pass a longer life too
-	if exists := client.Exists(context.Background(), store.lookbackKey("pod-gone"), store.snapshotKey("pod-gone")).Val(); exists != 0 {
-		t.Fatalf("%d of the departed replica's list and snapshot remain past the store's life, want none", exists)
+	if exists := client.Exists(context.Background(), store.lookbackKey("pod-gone"), store.compressedSnapshotKey("pod-gone"),
+		store.ownedKey("pod-gone"), store.summaryKey("pod-gone")).Val(); exists != 0 {
+		t.Fatalf("%d of the departed replica's lists, snapshot and summary remain past the store's life, want none", exists)
 	}
 }

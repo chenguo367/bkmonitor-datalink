@@ -27,6 +27,9 @@ import (
 // the series it may evaluate, what became of each, and the points of every
 // series that reached its evaluation, by Plan, for finalization to settle.
 type supplementRun struct {
+	// all is a scope of every series the read returned (SupplementScope
+	// All), series empty.
+	all       bool
 	series    map[execution.SeriesIdentityDigest]struct{}
 	facts     execution.SupplementFacts
 	evaluated map[execution.PlanIdentity]map[execution.SeriesIdentityDigest]uint64
@@ -37,7 +40,7 @@ func newSupplementRun(scope execution.SupplementScope) *supplementRun {
 	for _, identity := range scope.Series {
 		series[identity] = struct{}{}
 	}
-	return &supplementRun{series: series,
+	return &supplementRun{all: scope.All, series: series,
 		evaluated: make(map[execution.PlanIdentity]map[execution.SeriesIdentityDigest]uint64)}
 }
 
@@ -98,12 +101,18 @@ func (coordinator *SlotExecutionCoordinator) executeSupplement(
 // and, when it is not taken, by why.
 func (stream *streamedExecution) supplementTakes(prepared preparedSeries) bool {
 	run := stream.supplement
-	if _, named := run.series[prepared.identity]; !named {
+	if _, named := run.series[prepared.identity]; !named && !run.all {
 		return false
 	}
 	run.facts.Candidates++
-	if len(primaryIncompleteIn(stream.preparedBindings(prepared))) != 0 {
+	bindings := stream.preparedBindings(prepared)
+	if len(primaryIncompleteIn(bindings)) != 0 {
 		run.facts.InputIncomplete++
+		return false
+	}
+	if stream.supplementCovered(prepared, bindings) {
+		run.facts.CrossedT++
+		run.facts.CoveredT++
 		return false
 	}
 	switch stream.noDataStandingAt(prepared) {
@@ -123,10 +132,50 @@ func (stream *streamedExecution) supplementTakes(prepared preparedSeries) bool {
 // way the Slot is not decided for it a second time.
 func (stream *streamedExecution) supplementReached(view execution.RuntimeStateView) bool {
 	if view.VersionComparison != execution.ApplyVersionEqual && view.VersionComparison != execution.ApplyVersionPersistedNewer {
+		stream.supplement.facts.Unreached++
 		return false
 	}
 	stream.supplement.facts.CrossedT++
 	return true
+}
+
+// supplementCovered is whether the series' Plan's stable segment covers its
+// read here (014 B4 H1): an open member whose mark is at or past the
+// series' last point in the read, or one closed there or after. Such a
+// series was in the first read of every round up to there, judged and
+// compared, its write left out (014 B3): its State's own version stays at
+// its last write, and the Slot was decided for it all the same - as a
+// series whose State reached the Slot is. A series late for the Slot was
+// not in its first read, and the round closed it before: never covered.
+// Told from the segments the supplement read, before any State is.
+func (stream *streamedExecution) supplementCovered(prepared preparedSeries, bindings []execution.NamedInputBinding) bool {
+	if stream.segments == nil || prepared.due == nil {
+		return false
+	}
+	coverage, member := stream.segments.Coverage(execution.StateKeyIdentity{Plan: prepared.due.Identity,
+		StateGeneration: prepared.due.StateGeneration, SeriesIdentityDigest: prepared.identity})
+	if !member {
+		return false
+	}
+	last, found := lastPrimaryPoint(bindings)
+	return found && coveredAt(coverage, last)
+}
+
+// lastPrimaryPoint is the latest source time of the series' primary
+// inputs' records, false for none.
+func lastPrimaryPoint(bindings []execution.NamedInputBinding) (int64, bool) {
+	last, found := int64(0), false
+	for _, binding := range bindings {
+		if binding.Role != execution.InputRolePrimary || binding.Dataset == nil {
+			continue
+		}
+		for index := 0; index < binding.Dataset.Len(); index++ {
+			if record, ok := binding.Dataset.Record(index); ok && (!found || record.SourceTime() > last) {
+				last, found = record.SourceTime(), true
+			}
+		}
+	}
+	return last, found
 }
 
 // noteSupplementEvaluated keeps a series that reached its evaluation for
@@ -403,8 +452,12 @@ func (coordinator *SlotExecutionCoordinator) finalizeSupplement(
 			run.facts.ConfigDrift += len(evaluated)
 			continue
 		}
+		before := run.facts.Admitted
 		if err := coordinator.writeSupplementedPlan(ctx, request, stream, due, planResult, stateIndex, evaluated); err != nil {
 			return err
+		}
+		if coordinator.generations.moved(request.Contract.Slot.QueryGroup, due) {
+			run.facts.GenerationMoved += run.facts.Admitted - before
 		}
 	}
 	return nil

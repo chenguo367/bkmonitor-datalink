@@ -61,11 +61,25 @@ const (
 	// what the Slots left of the retained pool: given back for a Slot that
 	// needed the room, or not taken in past it.
 	StateCacheDepartYielded = "yielded"
+	// StateCacheDepartMismatch is a value the sampled round's check found
+	// the store no longer held (014 next7 3.6).
+	StateCacheDepartMismatch = "mismatch"
 )
 
 // StateCacheDepartureReasons lists them.
 var StateCacheDepartureReasons = []string{StateCacheDepartReleased, StateCacheDepartUnknown, StateCacheDepartConflict,
-	StateCacheDepartExpired, StateCacheDepartRenewalMissing, StateCacheDepartUntouched, StateCacheDepartOverBudget, StateCacheDepartYielded}
+	StateCacheDepartExpired, StateCacheDepartRenewalMissing, StateCacheDepartUntouched, StateCacheDepartOverBudget, StateCacheDepartYielded,
+	StateCacheDepartMismatch}
+
+// What the sampled round's check of a value the cache held found (014
+// next7 3.6), closed: state_cache_readback_verify_total.
+const (
+	StateCacheVerifyMatch    = "match"
+	StateCacheVerifyMismatch = "mismatch"
+)
+
+// StateCacheVerifyResults lists them.
+var StateCacheVerifyResults = []string{StateCacheVerifyMatch, StateCacheVerifyMismatch}
 
 // Entry kinds, closed: a Runtime State value, or a Plan's stable segment - a
 // mark or a member page (014 B3). The two share the cache's budget.
@@ -76,6 +90,69 @@ const (
 
 // StateCacheKinds lists them.
 var StateCacheKinds = []string{StateCacheKindState, StateCacheKindSegment}
+
+// What became of a value a preflight read back, as a candidate entry of the
+// cache (014 next7 3.1), closed: kept, taken in (or judged against the budget
+// as a write is); declined_not_member, not an open member of its Plan's
+// stable segment as the Slot read it, or a Plan of a split strategy;
+// declined_operation, a member its round writes whole - not a normal round,
+// the segment skip not followed, the Plan's sampled round, a stopped Plan, a
+// page past half its life unrenewed; declined_no_renewal, a member left out
+// whose page's last renewal leaves its key less than the replay age. Counted
+// for every record a Slot's own preflight found, under its fence.
+const (
+	StateCacheReadbackKept              = "kept"
+	StateCacheReadbackDeclinedNotMember = "declined_not_member"
+	StateCacheReadbackDeclinedOperation = "declined_operation"
+	StateCacheReadbackDeclinedNoRenewal = "declined_no_renewal"
+)
+
+// StateCacheReadbackResults lists them.
+var StateCacheReadbackResults = []string{StateCacheReadbackKept, StateCacheReadbackDeclinedNotMember,
+	StateCacheReadbackDeclinedOperation, StateCacheReadbackDeclinedNoRenewal}
+
+// What a page renewal did to the State entries of its members (014 next7
+// 3.2), closed: renewed, their life moved to the renewal's; dropped_missing,
+// let go because the renewal found keys of the chunk gone.
+const (
+	StateCacheMemberRenewed        = "renewed"
+	StateCacheMemberDroppedMissing = "dropped_missing"
+)
+
+// StateCacheMemberRenewalResults lists them.
+var StateCacheMemberRenewalResults = []string{StateCacheMemberRenewed, StateCacheMemberDroppedMissing}
+
+// Why a member its round leaves unwritten was read back rather than served
+// (014 next7 3.4), closed: absent, nothing kept; yielded and over_budget, its
+// Query Group kept out; expired; activation, its Plan's activation changed.
+const (
+	StateCacheFallbackAbsent     = "absent"
+	StateCacheFallbackYielded    = "yielded"
+	StateCacheFallbackOverBudget = "over_budget"
+	StateCacheFallbackExpired    = "expired"
+	StateCacheFallbackActivation = "activation"
+)
+
+// StateCacheFallbackReasons lists them.
+var StateCacheFallbackReasons = []string{StateCacheFallbackAbsent, StateCacheFallbackYielded, StateCacheFallbackOverBudget,
+	StateCacheFallbackExpired, StateCacheFallbackActivation}
+
+// stateCacheFallbacks is the fallback reason of each lookup word that has one.
+var stateCacheFallbacks = map[string]string{StateCacheMissAbsent: StateCacheFallbackAbsent,
+	StateCacheMissYielded: StateCacheFallbackYielded, StateCacheMissOverBudget: StateCacheFallbackOverBudget,
+	StateCacheMissExpired: StateCacheFallbackExpired, StateCacheMissActivation: StateCacheFallbackActivation}
+
+// The State entries by where their bytes came from, closed: written, what
+// this process wrote; readback, what a preflight read back (014 next7 3.1);
+// compact, a read-back value kept in its compact form (3.3).
+const (
+	StateCacheEntryWritten  = "written"
+	StateCacheEntryReadback = "readback"
+	StateCacheEntryCompact  = "compact"
+)
+
+// StateCacheEntryKinds lists them.
+var StateCacheEntryKinds = []string{StateCacheEntryWritten, StateCacheEntryReadback, StateCacheEntryCompact}
 
 // Restore causes and refusals (§4.4).
 const (
@@ -99,7 +176,10 @@ const stateCacheEntryOverhead = 400
 type stateCacheEntry struct {
 	key   string
 	group execution.QueryGroupIdentity
-	raw   []byte
+	// identity is a State entry's series, which its compact form is kept by
+	// (014 next7 3.3): a write or a drop of the key takes either out.
+	identity execution.StateKeyIdentity
+	raw      []byte
 	// digest is the stored bytes' SHA-1 as the write's witness names it:
 	// what this process last wrote under the key.
 	digest       string
@@ -125,11 +205,23 @@ type stateCacheEntry struct {
 	// untouched past two of those, as the Plan's round reads it every one.
 	segment         bool
 	segmentInterval time.Duration
+	// readback is a State value a preflight read back rather than one this
+	// process wrote (014 next7 3.1): its digest is the stored bytes', its
+	// applyVersion the stored record's, and its interval its Plan's.
+	readback bool
 }
 
 type stateCacheGroup struct {
 	entries map[string]*stateCacheEntry
+	// compact is the group's Plans' compact members (014 next7 3.3), charged
+	// to bytes with the entries.
+	compact map[compactPlanKey]*compactPlan
 	bytes   int64
+}
+
+// empty is a group that holds nothing.
+func (group *stateCacheGroup) empty() bool {
+	return len(group.entries) == 0 && len(group.compact) == 0
 }
 
 // stateCacheRefusal is a Query Group kept out of the cache. bound is the
@@ -167,6 +259,15 @@ type StateCacheStats struct {
 	// entries leave never makes one kind's count of the other's.
 	SegmentBytes                       int64
 	StateDepartures, SegmentDepartures map[string]uint64
+	// Entries is the State entries by kind (StateCacheEntryKinds);
+	// Readback, MemberRenewals and Fallbacks the counts of
+	// StateCacheReadbackResults, StateCacheMemberRenewalResults and
+	// StateCacheFallbackReasons.
+	Entries                             map[string]int64
+	Readback, MemberRenewals, Fallbacks map[string]uint64
+	// CompactDeclined is the counts of StateCacheCompactDeclineReasons,
+	// Verified those of StateCacheVerifyResults.
+	CompactDeclined, Verified map[string]uint64
 }
 
 // stateCache is per ExecutionStore. Nil is a disabled cache: every method is
@@ -209,6 +310,17 @@ type stateCache struct {
 	// bytes.
 	segmentBytes                       int64
 	stateDepartures, segmentDepartures map[string]*atomic.Uint64
+	// entries is the State entries held by kind, under mu; readback,
+	// memberRenewals and fallbacks count what became of read-back values,
+	// of members' entries at a page renewal, and of members read back.
+	entries                             map[string]int64
+	readback, memberRenewals, fallbacks map[string]*atomic.Uint64
+	// compactPlans is every Plan generation's compact members, by Query
+	// Group; compactDeclined counts the values kept as their bytes instead.
+	compactPlans    map[compactPlanKey]*compactPlan
+	compactDeclined map[string]*atomic.Uint64
+	// verified counts the sampled round's checks by result.
+	verified map[string]*atomic.Uint64
 }
 
 func newStateCache(budget int64, replayAge time.Duration, now func() time.Time) *stateCache {
@@ -227,7 +339,22 @@ func newStateCache(budget int64, replayAge time.Duration, now func() time.Time) 
 		refused: map[execution.QueryGroupIdentity]*stateCacheRefusal{}, lookups: counters(StateCacheLookupResults),
 		segmentNotes:    map[execution.QueryGroupIdentity]*segmentNotes{},
 		stateDepartures: counters(StateCacheDepartureReasons), segmentDepartures: counters(StateCacheDepartureReasons),
-		restored: counters(StateCacheRestoreCauses), declined: counters(StateCacheDeclineReasons)}
+		restored: counters(StateCacheRestoreCauses), declined: counters(StateCacheDeclineReasons),
+		entries: map[string]int64{}, readback: counters(StateCacheReadbackResults),
+		memberRenewals: counters(StateCacheMemberRenewalResults), fallbacks: counters(StateCacheFallbackReasons),
+		compactPlans: map[compactPlanKey]*compactPlan{}, compactDeclined: counters(StateCacheCompactDeclineReasons),
+		verified: counters(StateCacheVerifyResults)}
+}
+
+// entryKind is a State entry's kind; "" for a segment's.
+func entryKind(entry *stateCacheEntry) string {
+	switch {
+	case entry.segment:
+		return ""
+	case entry.readback:
+		return StateCacheEntryReadback
+	}
+	return StateCacheEntryWritten
 }
 
 // sizeClass rounds a length up to the allocator's size class, close enough:
@@ -252,134 +379,145 @@ func entryCost(key string, raw []byte) int64 {
 	return sizeClass(len(raw)) + sizeClass(len(key)) + stateCacheEntryOverhead
 }
 
-// lookup is the cached record for key, when every rule holds for this read,
-// and the result word either way.
-func (cache *stateCache) lookup(key string, request execution.StatePreflightRequest, item execution.StatePreflightItem) (*stateCacheEntry, string) {
+// lookup is the cached record for key, when every rule holds for this read
+// - its bytes' entry, or its compact member - and the result word either
+// way. A compact member is never changed once taken in, but for its life
+// and its touch: the caller builds its view outside the lock.
+func (cache *stateCache) lookup(key string, request execution.StatePreflightRequest, item execution.StatePreflightItem) (*stateCacheEntry, *compactMember, string) {
 	if cache == nil {
-		return nil, ""
+		return nil, nil, ""
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	group := request.Contract.Slot.QueryGroup
-	result := cache.judgeLocked(key, request, item, group)
+	result, member := cache.judgeLocked(key, request, item, group)
 	cache.lookups[result].Add(1)
 	if result != StateCacheHit {
-		return nil, result
+		return nil, nil, result
+	}
+	if member != nil {
+		member.touched = cache.now()
+		return nil, member, result
 	}
 	entry := cache.byKey[key]
 	entry.touched = cache.now()
-	return entry, result
+	return entry, nil, result
 }
 
-func (cache *stateCache) judgeLocked(key string, request execution.StatePreflightRequest, item execution.StatePreflightItem, group execution.QueryGroupIdentity) string {
+func (cache *stateCache) judgeLocked(key string, request execution.StatePreflightRequest, item execution.StatePreflightItem,
+	group execution.QueryGroupIdentity) (string, *compactMember) {
 	if item.Sharded {
 		// The key carries no shard: two pieces of a split strategy whose
 		// selections met would write it under one epoch (§4.3, rule 6).
-		return StateCacheMissSharded
+		return StateCacheMissSharded, nil
 	}
 	if refusal := cache.refused[group]; refusal != nil {
-		return refusal.missOf()
+		return refusal.missOf(), nil
 	}
 	entry := cache.byKey[key]
 	if entry == nil {
-		return StateCacheMissAbsent
+		return cache.judgeCompactLocked(request, item, group)
 	}
 	now := cache.now()
 	switch {
 	case !now.Before(entry.usableUntil):
 		cache.departLocked(entry, StateCacheDepartExpired)
-		return StateCacheMissExpired
+		return StateCacheMissExpired, nil
 	case request.OwnerFence.IsZero() || entry.fence != request.OwnerFence:
-		return StateCacheMissFence
+		return StateCacheMissFence, nil
 	case request.Contract.Slot.EvaluationTime <= entry.slot:
 		// A replay, retry or older Slot reads the store, as the replay
 		// judgement always has (rule 5).
-		return StateCacheMissReplay
+		return StateCacheMissReplay, nil
 	case entry.epoch != item.ApplyVersion.StateApplyEpoch || entry.segmentStart != request.Contract.ScheduleSegmentStart:
-		return StateCacheMissActivation
+		return StateCacheMissActivation, nil
 	}
-	return StateCacheHit
+	return StateCacheHit, nil
 }
 
-// lastWritten is the digest and version this process last wrote under key,
-// whatever Query Group wrote it.
-func (cache *stateCache) lastWritten(key string) (*stateCacheEntry, bool) {
+// lastWritten is the digest and version the cache holds under key - what
+// this process last wrote there, whatever Query Group wrote it, or read back
+// of a member under group, compact or not (014 next7 4: the restore judges a
+// read-back value as a written one).
+func (cache *stateCache) lastWritten(key string, group execution.QueryGroupIdentity, identity execution.StateKeyIdentity) (*stateCacheEntry, bool) {
 	if cache == nil {
 		return nil, false
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	entry, found := cache.byKey[key]
-	if !found {
-		return nil, false
+	if entry, found := cache.byKey[key]; found {
+		copied := *entry
+		return &copied, true
 	}
-	copied := *entry
-	return &copied, true
+	if plan, member := cache.compactOfLocked(group, identity); member != nil {
+		return &stateCacheEntry{key: key, group: group, identity: identity, digest: member.digest(), applyVersion: member.applyVersion,
+			fence: plan.fence}, true
+	}
+	return nil, false
 }
 
 // applied records a write that came back APPLIED.
 func (cache *stateCache) applied(entry stateCacheEntry) {
+	cache.insert(entry, true)
+}
+
+// keepReadback takes in a value a preflight read back (014 next7 3.1),
+// within the budget and the pool's room as a write's: the caller judged it
+// one the store holds until entry.usableUntil, and gave it its Plan's
+// interval and the series' identity. Kept compact when it rebuilds to its
+// bytes (3.3), as its bytes otherwise, the reason counted.
+func (cache *stateCache) keepReadback(entry stateCacheEntry) {
+	if cache == nil {
+		return
+	}
+	member, declined := compactOf(entry.identity, entry.raw)
+	room := cache.roomNow()
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if member == nil {
+		cache.compactDeclined[declined].Add(1)
+		entry.readback = true
+		cache.insertLocked(entry, false, room)
+		return
+	}
+	cache.keepCompactLocked(entry, member, room)
+}
+
+// insert takes in an entry; measured has the interval read from the write
+// before it under the same key, for an entry that leaves untouched past two.
+func (cache *stateCache) insert(entry stateCacheEntry, measured bool) {
 	if cache == nil {
 		return
 	}
 	room := cache.roomNow()
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	capacity := min(cache.budget, room)
+	cache.insertLocked(entry, measured, room)
+}
+
+// insertLocked is insert under the lock, room read before it was taken.
+func (cache *stateCache) insertLocked(entry stateCacheEntry, measured bool, room int64) {
 	now := cache.now()
 	entry.cost = entryCost(entry.key, entry.raw)
 	entry.touched, entry.written = now, now
 	if previous := cache.byKey[entry.key]; previous != nil {
-		if previous.group == entry.group && previous.written.Before(now) {
+		if measured && previous.group == entry.group && previous.written.Before(now) {
 			entry.interval = now.Sub(previous.written)
 		}
 		cache.removeLocked(previous)
 	}
-	if refusal := cache.refused[entry.group]; refusal != nil {
-		// Kept out while a round of it is measured: a write for its latest
-		// Slot adds to the round, and the first write for a later Slot
-		// closes it, taking the group back only when the whole round fits.
-		switch {
-		case entry.slot == refusal.slot:
-			refusal.size += entry.cost
-			return
-		case entry.slot < refusal.slot:
-			return
+	if !entry.segment {
+		// Its compact form, kept while its round left it unwritten.
+		if plan, member := cache.compactOfLocked(entry.group, entry.identity); member != nil {
+			cache.removeCompactLocked(plan, member)
 		}
-		round := refusal.size
-		refusal.slot, refusal.size = entry.slot, entry.cost
-		if cache.bytes+round > capacity {
-			refusal.bound = cache.boundOf(cache.bytes + round)
-			return
-		}
-		delete(cache.refused, entry.group)
 	}
-	if cache.bytes+entry.cost > capacity {
-		// A resident Query Group that grew past the room leaves whole; one
-		// not resident does not come in. Either way it is read back, and
-		// what it wrote for this Slot starts the round it is measured by.
-		bound := cache.boundOf(cache.bytes + entry.cost)
-		size := entry.cost
-		if group := cache.groups[entry.group]; group != nil {
-			for _, resident := range group.entries {
-				if resident.slot == entry.slot {
-					size += resident.cost
-				}
-				cache.departLocked(resident, bound)
-			}
-		} else {
-			cache.departuresOf(entry.segment)[bound].Add(1)
-		}
-		cache.refused[entry.group] = &stateCacheRefusal{bound: bound, slot: entry.slot, size: size}
+	if !cache.admitLocked(entry.group, entry.slot, entry.cost, entry.segment, min(cache.budget, room)) {
 		return
 	}
 	stored := entry
 	stored.raw = append([]byte(nil), entry.raw...)
-	group := cache.groups[entry.group]
-	if group == nil {
-		group = &stateCacheGroup{entries: map[string]*stateCacheEntry{}}
-		cache.groups[entry.group] = group
-	}
+	group := cache.groupLocked(entry.group)
 	group.entries[entry.key] = &stored
 	group.bytes += stored.cost
 	cache.byKey[entry.key] = &stored
@@ -387,7 +525,111 @@ func (cache *stateCache) applied(entry stateCacheEntry) {
 	if stored.segment {
 		cache.segmentBytes += stored.cost
 	}
+	if kind := entryKind(&stored); kind != "" {
+		cache.entries[kind]++
+	}
 	cache.held.Store(cache.bytes)
+}
+
+// groupLocked is the group's record, made when it holds nothing yet.
+func (cache *stateCache) groupLocked(group execution.QueryGroupIdentity) *stateCacheGroup {
+	held := cache.groups[group]
+	if held == nil {
+		held = &stateCacheGroup{entries: map[string]*stateCacheEntry{}, compact: map[compactPlanKey]*compactPlan{}}
+		cache.groups[group] = held
+	}
+	return held
+}
+
+// admitLocked is whether the group may take in cost more for slot within
+// capacity. A group kept out is measured a round at a time: what it would
+// hold for its latest Slot adds to the round, and the first of a later Slot
+// closes it, taking the group back only when the whole round fits. A
+// resident group that would grow past capacity leaves whole; one not
+// resident does not come in. Either way it is read back, and what it would
+// hold for this Slot starts the round it is measured by.
+func (cache *stateCache) admitLocked(group execution.QueryGroupIdentity, slot execution.EvaluationTime, cost int64, segment bool,
+	capacity int64) bool {
+	if refusal := cache.refused[group]; refusal != nil {
+		switch {
+		case slot == refusal.slot:
+			refusal.size += cost
+			return false
+		case slot < refusal.slot:
+			return false
+		}
+		round := refusal.size
+		refusal.slot, refusal.size = slot, cost
+		if cache.bytes+round > capacity {
+			refusal.bound = cache.boundOf(cache.bytes + round)
+			return false
+		}
+		delete(cache.refused, group)
+	}
+	if cache.bytes+cost <= capacity {
+		return true
+	}
+	bound := cache.boundOf(cache.bytes + cost)
+	refusal := &stateCacheRefusal{bound: bound, slot: slot, size: cost}
+	if held := cache.groups[group]; held != nil {
+		cache.departGroupLocked(held, bound, func(residentSlot execution.EvaluationTime, residentCost int64) {
+			if residentSlot == slot {
+				refusal.size += residentCost
+			}
+		})
+	} else {
+		cache.departuresOf(segment)[bound].Add(1)
+	}
+	cache.refused[group] = refusal
+	return false
+}
+
+// departGroupLocked lets every entry and compact member of the group go for
+// reason, telling each's Slot and charge to seen first.
+func (cache *stateCache) departGroupLocked(held *stateCacheGroup, reason string, seen func(execution.EvaluationTime, int64)) {
+	for _, entry := range held.entries {
+		if seen != nil {
+			seen(entry.slot, entry.cost)
+		}
+		cache.departLocked(entry, reason)
+	}
+	for _, plan := range held.compact {
+		for _, member := range plan.members {
+			if seen != nil {
+				seen(member.slot, member.cost)
+			}
+			cache.departCompactLocked(plan, member, reason)
+		}
+	}
+}
+
+// stateCacheBudgetMargin is the room the budget leaves above what the held
+// series were measured to take, in quarters: a quarter more (014 next7 3.4).
+const stateCacheBudgetMargin = 5
+
+// resize sets the budget to what the series this process holds take in the
+// cache (014 next7 3.4): heldSeries times the charge of a State entry as the
+// cache measures it now, a quarter more, beside what the segments hold;
+// never less than floor, and floor while nothing is held or measured. The
+// budget moves with what is held, as the series do; the pool's room and the
+// soft limit (yield) bound it from above as before.
+func (cache *stateCache) resize(heldSeries uint64, floor int64) {
+	if cache == nil {
+		return
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	budget := floor
+	entries := int64(0)
+	for _, kind := range StateCacheEntryKinds {
+		entries += cache.entries[kind]
+	}
+	if heldSeries > 0 && entries > 0 {
+		perEntry := (cache.bytes - cache.segmentBytes) / entries
+		series := int64(min(heldSeries, uint64(math.MaxInt64/max(perEntry*stateCacheBudgetMargin, 1))))
+		budget = max(floor, series*perEntry*stateCacheBudgetMargin/4+cache.segmentBytes)
+	}
+	cache.budget = budget
 }
 
 // boundOf is the departure word for what bytes did not fit: past the budget
@@ -454,15 +696,14 @@ func (cache *stateCache) YieldRetainedBytes(need uint64) {
 		held := cache.groups[group]
 		freed += uint64(held.bytes)
 		refusal := &stateCacheRefusal{bound: StateCacheDepartYielded}
-		for _, entry := range held.entries {
+		cache.departGroupLocked(held, StateCacheDepartYielded, func(slot execution.EvaluationTime, cost int64) {
 			switch {
-			case entry.slot > refusal.slot:
-				refusal.slot, refusal.size = entry.slot, entry.cost
-			case entry.slot == refusal.slot:
-				refusal.size += entry.cost
+			case slot > refusal.slot:
+				refusal.slot, refusal.size = slot, cost
+			case slot == refusal.slot:
+				refusal.size += cost
 			}
-			cache.departLocked(entry, StateCacheDepartYielded)
-		}
+		})
 		cache.refused[group] = refusal
 	}
 }
@@ -479,6 +720,22 @@ func (cache *stateCache) drop(key, reason string) {
 	}
 }
 
+// dropState removes a State key's entry, or its member's compact form under
+// group, for reason, if either is held.
+func (cache *stateCache) dropState(key string, group execution.QueryGroupIdentity, identity execution.StateKeyIdentity, reason string) {
+	if cache == nil {
+		return
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if entry := cache.byKey[key]; entry != nil {
+		cache.departLocked(entry, reason)
+	}
+	if plan, member := cache.compactOfLocked(group, identity); member != nil {
+		cache.departCompactLocked(plan, member, reason)
+	}
+}
+
 // DropQueryGroup removes every entry of a Query Group this process stops,
 // loses, declines or hands over (rule 1: the fence would refuse them anyway).
 func (cache *stateCache) dropQueryGroup(group execution.QueryGroupIdentity) {
@@ -488,9 +745,7 @@ func (cache *stateCache) dropQueryGroup(group execution.QueryGroupIdentity) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	if held := cache.groups[group]; held != nil {
-		for _, entry := range held.entries {
-			cache.departLocked(entry, StateCacheDepartReleased)
-		}
+		cache.departGroupLocked(held, StateCacheDepartReleased, nil)
 	}
 	delete(cache.refused, group)
 	delete(cache.segmentNotes, group)
@@ -521,6 +776,16 @@ func (cache *stateCache) sweep(group execution.QueryGroupIdentity) {
 			cache.departLocked(entry, StateCacheDepartExpired)
 		case interval > 0 && now.Sub(entry.touched) > 2*interval:
 			cache.departLocked(entry, StateCacheDepartUntouched)
+		}
+	}
+	for _, plan := range held.compact {
+		for _, member := range plan.members {
+			switch {
+			case !now.Before(member.usableUntil):
+				cache.departCompactLocked(plan, member, StateCacheDepartExpired)
+			case plan.interval > 0 && now.Sub(member.touched) > 2*plan.interval:
+				cache.departCompactLocked(plan, member, StateCacheDepartUntouched)
+			}
 		}
 	}
 	if notes := cache.segmentNotes[group]; notes != nil {
@@ -569,13 +834,84 @@ func (cache *stateCache) removeLocked(entry *stateCacheEntry) {
 	if entry.segment {
 		cache.segmentBytes -= entry.cost
 	}
+	if kind := entryKind(entry); kind != "" {
+		cache.entries[kind]--
+	}
 	cache.held.Store(cache.bytes)
 	if group := cache.groups[entry.group]; group != nil {
 		delete(group.entries, entry.key)
 		group.bytes -= entry.cost
-		if len(group.entries) == 0 {
+		if group.empty() {
 			delete(cache.groups, entry.group)
 		}
+	}
+}
+
+// memberRenewed moves the State entries of the keys a page renewal renewed
+// under fence, every one found, to usableUntil (014 next7 3.2): the renewal
+// gave each key its life from before it was sent. Set, not raised: the
+// renewal's life replaces a longer one a write gave.
+func (cache *stateCache) memberRenewed(keys []string, identities []execution.StateKeyIdentity, fence execution.OwnerFence, usableUntil time.Time) {
+	if cache == nil || len(keys) == 0 {
+		return
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	renewed := uint64(0)
+	for index, key := range keys {
+		if entry := cache.byKey[key]; entry != nil && !entry.segment && entry.fence == fence {
+			entry.usableUntil = usableUntil
+			renewed++
+		}
+		if index < len(identities) {
+			if plan, member := cache.compactOfLocked(fence.QueryGroup, identities[index]); member != nil && plan.fence == fence {
+				member.usableUntil = usableUntil
+				renewed++
+			}
+		}
+	}
+	cache.memberRenewals[StateCacheMemberRenewed].Add(renewed)
+}
+
+// memberMissing lets go of the State entries of the keys a page renewal
+// found some gone of, under fence: which ones is not known (rule 4).
+func (cache *stateCache) memberMissing(keys []string, identities []execution.StateKeyIdentity, fence execution.OwnerFence) {
+	if cache == nil || len(keys) == 0 {
+		return
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	dropped := uint64(0)
+	for index, key := range keys {
+		if entry := cache.byKey[key]; entry != nil && !entry.segment && entry.fence == fence {
+			cache.departLocked(entry, StateCacheDepartRenewalMissing)
+			dropped++
+		}
+		if index < len(identities) {
+			if plan, member := cache.compactOfLocked(fence.QueryGroup, identities[index]); member != nil && plan.fence == fence {
+				cache.departCompactLocked(plan, member, StateCacheDepartRenewalMissing)
+				dropped++
+			}
+		}
+	}
+	cache.memberRenewals[StateCacheMemberDroppedMissing].Add(dropped)
+}
+
+// countReadback counts what became of a value read back.
+func (cache *stateCache) countReadback(result string) {
+	if cache != nil {
+		cache.readback[result].Add(1)
+	}
+}
+
+// countFallback counts a member its round leaves unwritten read back for
+// the lookup word, when the word is one of StateCacheFallbackReasons'.
+func (cache *stateCache) countFallback(lookup string) {
+	if cache == nil {
+		return
+	}
+	if reason, ok := stateCacheFallbacks[lookup]; ok {
+		cache.fallbacks[reason].Add(1)
 	}
 }
 
@@ -603,10 +939,16 @@ func (cache *stateCache) stats() StateCacheStats {
 		return out
 	}
 	cache.mu.Lock()
-	bytes, segmentBytes, groups := cache.bytes, cache.segmentBytes, len(cache.groups)
+	bytes, segmentBytes, groups, budget := cache.bytes, cache.segmentBytes, len(cache.groups), cache.budget
+	entries := make(map[string]int64, len(StateCacheEntryKinds))
+	for _, kind := range StateCacheEntryKinds {
+		entries[kind] = cache.entries[kind]
+	}
 	cache.mu.Unlock()
-	stats := StateCacheStats{Bytes: bytes, BudgetBytes: cache.budget, QueryGroups: groups,
-		Lookups: read(cache.lookups), Restored: read(cache.restored), Declined: read(cache.declined), SegmentBytes: segmentBytes}
+	stats := StateCacheStats{Bytes: bytes, BudgetBytes: budget, QueryGroups: groups,
+		Lookups: read(cache.lookups), Restored: read(cache.restored), Declined: read(cache.declined), SegmentBytes: segmentBytes,
+		Entries: entries, Readback: read(cache.readback), MemberRenewals: read(cache.memberRenewals), Fallbacks: read(cache.fallbacks),
+		CompactDeclined: read(cache.compactDeclined), Verified: read(cache.verified)}
 	stats.StateDepartures, stats.SegmentDepartures = read(cache.stateDepartures), read(cache.segmentDepartures)
 	stats.Departures = make(map[string]uint64, len(stats.StateDepartures))
 	for reason, count := range stats.StateDepartures {
@@ -618,6 +960,22 @@ func (cache *stateCache) stats() StateCacheStats {
 // StateCacheStats reports the cache's sizes and counts; the zero value when
 // the cache is off.
 func (store *ExecutionStore) StateCacheStats() StateCacheStats { return store.cache.stats() }
+
+// SizeStateCache sets the State cache's budget to what heldSeries take in it
+// (014 next7 3.4), never below the budget the store was opened with, and
+// gives back what the soft limit is passed by (yield, past the line: the
+// live heap after the last collection and what the detection budgets may
+// still take over the limit), the largest Query Groups first. Called once a
+// minute; a no-op without the cache.
+func (store *ExecutionStore) SizeStateCache(heldSeries uint64, pastLimit uint64) {
+	if store == nil || store.cache == nil {
+		return
+	}
+	store.cache.resize(heldSeries, store.options.StateCacheBudgetBytes)
+	if pastLimit > 0 {
+		store.cache.YieldRetainedBytes(pastLimit)
+	}
+}
 
 // StateCacheBorrower is the cache as the retained pool's borrower; nil when
 // the cache is off.

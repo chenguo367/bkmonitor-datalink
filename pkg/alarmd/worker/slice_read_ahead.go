@@ -170,6 +170,8 @@ func (stream *streamedExecution) startSliceReadAhead(ctx context.Context, reques
 		cancel: cancel, done: make(chan struct{}), targets: stream.ResolvedTargets(), groups: stream.ResolvedScopeGroups()}
 	ahead.changed = sync.NewCond(&ahead.mu)
 	request.Slice = leaf.Slice
+	// Read while the slice before completed: never the Slot's first read.
+	request.FollowingRead = true
 	ahead.contract = request.Contract
 	stream.aheads = append(stream.aheads, ahead)
 	query := stream.coordinator.ports.Query

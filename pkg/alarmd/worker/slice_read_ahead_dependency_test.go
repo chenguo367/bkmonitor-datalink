@@ -128,6 +128,13 @@ type ringRatioRig struct {
 
 func newRingRatioRig(t *testing.T, hosts, padding int) *ringRatioRig {
 	t.Helper()
+	return newRingRatioRigObserved(t, hosts, padding, nil)
+}
+
+// newRingRatioRigObserved is newRingRatioRig with the access source telling
+// observer what it sees.
+func newRingRatioRigObserved(t *testing.T, hosts, padding int, observer observability.Observer) *ringRatioRig {
+	t.Helper()
 	facts := ringRatioQueryFacts(t)
 	ref := execution.LogicalQueryRef(facts.QueryRevision)
 	compiled, requirements := ringRatioCompiledPlan(t, string(ref))
@@ -154,7 +161,7 @@ func newRingRatioRig(t *testing.T, hosts, padding int) *ringRatioRig {
 	provider := newRingRatioProvider(t, hosts, padding, int64(evaluationTime))
 	readAt := time.Unix(int64(evaluationTime)+120, 0)
 	source, err := access.NewSource(ringRatioFrozen{plan: frozen}, provider, ringRatioPermits{},
-		access.Config{MinReadyDelay: time.Second, Now: func() time.Time { return readAt }})
+		access.Config{MinReadyDelay: time.Second, Now: func() time.Time { return readAt }, Observer: observer})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,6 +341,71 @@ func ringRatioCompiledPlanWith(t *testing.T, ref, recovery string, snapshotRevis
 		requirements = append(requirements, template.Bind(execution.DataRequirementConsumer{}))
 	}
 	return compiled, requirements
+}
+
+// thresholdCompiledPlan is a threshold Plan of one Level, 5, raised at 100
+// and up in any of its last three positions, its primary requirement on ref:
+// one logical query, one physical query a Slot. Three positions, so it keeps
+// a history its stable segments cover - a window of one keeps none - and no
+// recovery: a quiet series decided RECOVERY round after round sends its
+// event each time, and a series with events is no member.
+func thresholdCompiledPlan(t *testing.T, ref string) (*strategy.CompiledPlan, []execution.DataRequirement) {
+	t.Helper()
+	compiler, err := strategy.NewCompiler(strategy.NewDefaultAlgorithmCompilerRegistry(), strategy.Limits{
+		MaxPlanBytes: 64 << 10, MaxLevelsPerPlan: 16, MaxAlgorithmsPerLevel: 8, MaxGroupsPerAlgorithm: 16,
+		MaxConditionsPerAlgorithm: 64, MaxASTNodesPerLevel: 256, MaxTriggerWindowSize: 4096,
+		MaxRecoveryConsecutiveWindows: 4096, MaxRequiredHistoryPoints: 4096, MaxTriggerComputeCost: 1 << 20,
+		MaxCompiledPlanBytes: 64 << 10, MaxCacheEntries: 64, MaxCacheBytes: 4 << 20,
+		NegativeCacheTTL: time.Minute, BudgetRevision: "worker-threshold-shadow-test-v1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	strategyRef := contract.StrategyRefV2{TenantID: "tenant", StrategyID: "7", Revision: "strategy-v1"}
+	inputProjection := contract.InputProjectionV2{ValueFields: []string{"value"}, DimensionFields: []string{"host"},
+		BusinessIdentityField: "bk_biz_id", MultiValueAlignment: "SINGLE_VALUE", DataUnit: "percent",
+		MissingValuePolicy: contract.MissingValuePolicyRequired}
+	threshold := json.RawMessage(`{"value_field":"value","data_unit":"percent","threshold_unit_prefix":"","precision":{"decimal_places":6,"rounding":"HALF_EVEN"},"groups":[{"conditions":[{"operator":"GTE","threshold_decimal":"100"}]}]}`)
+	plan := contract.EvaluationPlanV2{PlanID: "7", StrategyRef: strategyRef, InputProjection: inputProjection,
+		StrategyIR: contract.StrategyIRV2{Schema: contract.Schema{Name: contract.StrategyIRSchemaV2, Major: 2},
+			StrategyRef: strategyRef, InputProjection: inputProjection,
+			ExecutionSemantics: contract.ExecutionSemanticsV2{EvaluationScope: contract.EvaluationScopeSeries,
+				QueryWindow: 300, AggregationInterval: 60, EvaluationInterval: 60, LatenessTolerance: 120},
+			Levels: []contract.LevelIRV2{{Definition: contract.LevelDefinitionV2{LevelID: 5, Priority: 1},
+				Connector:  contract.LevelConnectorAND,
+				DetectPlan: contract.DetectPlanV2{Algorithms: []contract.AlgorithmIRV2{{Type: strategy.DetectorKindThreshold, Version: 1, Config: threshold}}},
+				TriggerPlan: contract.TypedPlanV1{Type: "N_OF_M", Version: 1,
+					Config: json.RawMessage(`{"window_size":3,"required_anomalies":1,"step_seconds":60}`)},
+				RecoveryPlan: contract.TypedPlanV1{Type: "CONTINUOUS_TRIGGER_MISS", Version: 1,
+					Config: json.RawMessage(shadowRecoveryOff)},
+			}}}}
+	result, err := compiler.Compile(context.Background(), strategy.CompileRequest{Plan: plan,
+		DatasetContract: contract.DatasetContractV2{SchemaDigest: strings.Repeat("1", 64),
+			NormalizationDigest: strings.Repeat("2", 64), IdentityFields: []string{"host"},
+			SourceTimeField: "time", ReceivedTimeField: "received_time"},
+		StateSemantics: strategy.StateSemantics{StateSchemaVersion: "window-state-v1", CodecSemanticsVersion: "window-codec-v1",
+			IdentitySchemaDigest: strings.Repeat("3", 64), SourceTimeSemanticsVersion: "source-time-v1",
+			HistoryCellSemanticsVersion: "history-cell-v1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, ok := result.Plan()
+	if !ok || compiled.Levels().Len() == 0 {
+		t.Fatalf("compile threshold: terminal=%+v levels=%+v", result.PlanTerminal(), result.LevelTerminals())
+	}
+	template, err := execution.BuildDataRequirementTemplate(execution.DataRequirementTemplate{
+		DatasetName: "primary", Role: execution.InputRole(strategy.AlgorithmInputPrimary), ConsumerLevelID: 5,
+		LogicalQueryRef: execution.LogicalQueryRef(ref),
+		RelativeWindow:  execution.RelativeQueryWindow{StartOffsetSeconds: -60, EndOffsetSeconds: 0, HalfOpen: true},
+		StepMillis:      60_000, AlignmentMillis: 60_000, ResultWindowPolicy: execution.ResultWindowExactHalfOpen,
+		ReadinessClass: execution.ReadinessClass(strategy.AlgorithmReadinessEager),
+		InputProjection: execution.InputProjection{ValueFields: []string{"value"}, DimensionFields: []string{"host"},
+			IdentityFields: []string{"host"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return compiled, []execution.DataRequirement{template.Bind(execution.DataRequirementConsumer{})}
 }
 
 type ringRatioFrozen struct{ plan access.FrozenPlan }

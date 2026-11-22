@@ -33,6 +33,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/filterclose"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/newopens"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
@@ -1038,6 +1039,13 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("active_copy_pass_total")] = len(activecopy.Outcomes)
 	bounds[fqName("active_copy_entries")] = 2
 	bounds[fqName("active_copy_link_unsupported")] = 1
+	bounds[fqName("recovery_gate_source")] = len(activecopy.Gates)
+	bounds[fqName("active_copy_misses_forgotten_total")] = 1
+	bounds[fqName("handover_ledger_total")] = len(observability.HandoverLedgerResults)
+	bounds[fqName("lookback_handover_slots_total")] = len(lookback.HandoverSlotResults)
+	bounds[fqName("lookback_handover_series_late_total")] = len(lookback.HandoverLateResults)
+	bounds[fqName("lookback_restored_dedup_series_total")] = len(lookback.RestoredDedupSources)
+	bounds[fqName("handover_ledger_open_alerts_total")] = len(handoverLedgerOwnDirections)
 	// Every stage of the closed list, _other among them, written and limited.
 	bounds[fqName("log_lines_total")] = 2 * len(observability.AllStages())
 	bounds[fqName("observer_panics_total")] = len(observability.ObserverNames)
@@ -1059,6 +1067,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		len(observability.AllSegmentShadowRounds())
 	bounds[fqName("state_segment_sample_total")] = len(observability.AllSegmentPeriodClasses())
 	bounds[fqName("state_segment_degraded_total")] = len(observability.AllSegmentDegradations())
+	bounds[fqName("state_segment_carry_total")] = len(observability.AllSegmentCarries())
 	bounds[fqName("state_segment_shadow_members_total")] = len(observability.AllSegmentShadowEvents()) * len(observability.AllSegmentPeriodClasses())
 	bounds[fqName("state_segment_shadow_page_writes_total")] = len(observability.AllSegmentPeriodClasses())
 	bounds[fqName("state_segment_shadow_page_bytes_total")] = len(observability.AllSegmentPeriodClasses())
@@ -1085,6 +1094,12 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("state_cache_bytes")] = len(state.StateCacheKinds)
 	bounds[fqName("state_cache_budget_bytes")] = 1
 	bounds[fqName("state_cache_query_groups")] = 1
+	bounds[fqName("state_cache_entries")] = len(state.StateCacheEntryKinds)
+	bounds[fqName("state_cache_readback_inserted_total")] = len(state.StateCacheReadbackResults)
+	bounds[fqName("state_cache_member_renewed_total")] = len(state.StateCacheMemberRenewalResults)
+	bounds[fqName("state_cache_fallback_mget_total")] = len(state.StateCacheFallbackReasons)
+	bounds[fqName("state_cache_compact_declined_total")] = len(state.StateCacheCompactDeclineReasons)
+	bounds[fqName("state_cache_readback_verify_total")] = len(state.StateCacheVerifyResults)
 	bounds[fqName("state_witness_items")] = 1
 	bounds[fqName("state_witness_bytes")] = 1
 	bounds[fqName("container_memory_cgroup_info")] = 1

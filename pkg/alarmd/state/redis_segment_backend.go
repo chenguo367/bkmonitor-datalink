@@ -18,6 +18,7 @@ import (
 
 	"github.com/go-redis/redis/v8"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/segment"
 )
@@ -318,6 +319,9 @@ var segmentRenewSHA = func() string {
 type segmentRenewChunk struct {
 	ttl  time.Duration
 	keys []string
+	// identities is each key's series, for the State cache's compact
+	// members (014 next7 3.3); the script reads only the keys.
+	identities []execution.StateKeyIdentity
 }
 
 // segmentRenewOutcome is how one renewal script came back: its result, the

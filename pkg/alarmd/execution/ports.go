@@ -155,6 +155,12 @@ type StateStore interface {
 	// production would not, and the only symptom would be the state loss this
 	// exists to stop, arriving months later and looking like a warming series.
 	RenewFrozenRuntime(context.Context, FrozenStateRenewalRequest) (FrozenStateRenewalResult, error)
+	// ReleaseSlotWitnesses lets go of what the Slot's preflights kept for its
+	// writes once its attempt is done applying: the witnesses of the series it
+	// left unwritten are taken by no write. Required for the same reason
+	// RenewFrozenRuntime is: a store that lacked it would hold a round's worth
+	// between rounds, and nothing would say so.
+	ReleaseSlotWitnesses(SlotIdentity)
 }
 
 type ProgressStore interface {

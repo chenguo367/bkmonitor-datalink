@@ -702,8 +702,8 @@ func (store *ExecutionStore) RenewSegments(ctx context.Context, request segment.
 		}
 		for page, renewal := range plan.Pages {
 			for _, digest := range renewal.Members {
-				key, err := RuntimeStateKeyV3(store.options.Prefix, execution.StateKeyIdentity{Plan: plan.Key.Plan,
-					StateGeneration: plan.Key.Generation, SeriesIdentityDigest: digest})
+				identity := execution.StateKeyIdentity{Plan: plan.Key.Plan, StateGeneration: plan.Key.Generation, SeriesIdentityDigest: digest}
+				key, err := RuntimeStateKeyV3(store.options.Prefix, identity)
 				if err != nil {
 					failed[index][page] = true
 					continue
@@ -714,21 +714,33 @@ func (store *ExecutionStore) RenewSegments(ctx context.Context, request segment.
 				if len(owner.pages) == 0 || owner.pages[len(owner.pages)-1] != page {
 					owner.pages = append(owner.pages, page)
 				}
-				chunk.keys = append(chunk.keys, key)
+				chunk.keys, chunk.identities = append(chunk.keys, key), append(chunk.identities, identity)
 			}
 		}
 		flush()
 	}
+	// Read before any script is sent: every key a script renews lives at
+	// least this plus its ttl, what the State entries of its members are
+	// moved to (014 next7 3.2).
+	renewedAt := store.options.Now()
 	for _, name := range order {
 		outcomes := backends[name].RenewSegments(ctx, guard, chunks[name])
 		for position, outcome := range outcomes {
 			owner := owners[name][position]
 			plan := &result.Plans[owner.plan]
 			if outcome.result != segment.WriteApplied {
+				// Refused by the fence, or not answered: the entries are left
+				// as they are, the fence's rules let go of them.
 				for _, page := range owner.pages {
 					failed[owner.plan][page] = true
 				}
 				continue
+			}
+			if chunk := chunks[name][position]; outcome.missing > 0 {
+				store.cache.memberMissing(chunk.keys, chunk.identities, request.Fence.Fence)
+			} else {
+				store.cache.memberRenewed(chunk.keys, chunk.identities, request.Fence.Fence,
+					renewedAt.Add(chunk.ttl-store.options.StateCacheReplayAge))
 			}
 			plan.Missing += outcome.missing
 			plan.Elapsed = append(plan.Elapsed, outcome.elapsed)

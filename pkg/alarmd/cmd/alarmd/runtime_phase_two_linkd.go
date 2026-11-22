@@ -122,6 +122,9 @@ type openAlertCopyPort struct {
 	// opens counts each strategy's opens in the hour, as the copy judges
 	// them (newopens); nil in tests that need only the copy.
 	opens *newopens.Counter
+	// handover hears which strategies each Query Group's Slots evaluate, to
+	// hand own's alerts of them over with the Query Group; nil beside a copy.
+	handover *productionHandoverLedger
 }
 
 // Linked says whether a link stands behind the copy (execution.OpenAlertLink).
@@ -149,6 +152,7 @@ func (port openAlertCopyPort) TrackPlans(qg execution.QueryGroupIdentity, plans 
 	}
 	port.copy.Track(keys...)
 	port.own.Track(keys...)
+	port.handover.notePlans(qg, keys)
 	if port.registerOwned != nil {
 		port.registerOwned(qg, plans)
 	}

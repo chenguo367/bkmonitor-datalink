@@ -27,6 +27,11 @@ type activeCopyCollector struct {
 	passes      *prometheus.Desc
 	entries     *prometheus.Desc
 	unsupported *prometheus.Desc
+	forgotten   *prometheus.Desc
+	// gate is what the recovery gate answers from (SetRecoveryGate), and
+	// gateDesc its gauge: read whether or not there is a copy.
+	gate     string
+	gateDesc *prometheus.Desc
 }
 
 func newActiveCopyCollector() *activeCopyCollector {
@@ -54,7 +59,29 @@ func newActiveCopyCollector() *activeCopyCollector {
 			"What the copy holds: known (fingerprints with a word) and queued (waiting for a pass).", "kind"),
 		unsupported: descriptor("active_copy_link_unsupported",
 			"1 while the link answers that it cannot search (501, 404 or 405), until a search is answered again."),
+		forgotten: descriptor("active_copy_misses_forgotten_total",
+			"Misses the copy let go of, judged or young, for the strategies of a Query Group this process let go of "+
+				"(moved away or declined): given back after another owner held it, an alert that owner opened is asked "+
+				"of the link again rather than read as missed for up to an hour."),
+		gateDesc: descriptor("recovery_gate_source",
+			"1 for what this process's recovery gate and no-data end answer from, 0 for the other, from startup: own (the "+
+				"alerts this process opened and the broker took, where phase_two.linkd is not configured: an alert another "+
+				"process opened is not seen, and its RECOVERY is held) or copy (alarmd's copy of the link's active alerts). "+
+				"The gate acts on the Plans that publish the standard protocol only: a Plan on the compatibility protocol "+
+				"builds no RECOVERY envelope and never asks it, counted as trigger_open_alert_gate_total{outcome=\"protocol_not_gated\"}.",
+			"source"),
 	}
+}
+
+// SetRecoveryGate says what the recovery gate answers from (activecopy.Gates).
+// A nil recorder is a no-op.
+func (r *Recorder) SetRecoveryGate(gate string) {
+	if r == nil || r.phaseTwo.activeCopy == nil {
+		return
+	}
+	r.phaseTwo.activeCopy.mu.Lock()
+	r.phaseTwo.activeCopy.gate = gate
+	r.phaseTwo.activeCopy.mu.Unlock()
 }
 
 // SetActiveCopySource binds the collector to the copy. Safe before or
@@ -73,12 +100,23 @@ func (c *activeCopyCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.passes
 	ch <- c.entries
 	ch <- c.unsupported
+	ch <- c.forgotten
+	ch <- c.gateDesc
 }
 
 func (c *activeCopyCollector) Collect(ch chan<- prometheus.Metric) {
 	c.mu.Lock()
-	source := c.source
+	source, gate := c.source, c.gate
 	c.mu.Unlock()
+	if gate != "" {
+		for _, each := range activecopy.Gates {
+			value := 0.0
+			if each == gate {
+				value = 1
+			}
+			ch <- prometheus.MustNewConstMetric(c.gateDesc, prometheus.GaugeValue, value, each)
+		}
+	}
 	if source == nil {
 		return
 	}
@@ -96,4 +134,5 @@ func (c *activeCopyCollector) Collect(ch chan<- prometheus.Metric) {
 		unsupported = 1
 	}
 	ch <- prometheus.MustNewConstMetric(c.unsupported, prometheus.GaugeValue, unsupported)
+	ch <- prometheus.MustNewConstMetric(c.forgotten, prometheus.CounterValue, float64(stats.MissesForgotten))
 }

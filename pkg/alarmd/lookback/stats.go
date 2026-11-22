@@ -40,6 +40,9 @@ type counters struct {
 	directedUnobserved map[string]uint64
 	supplementSeries   map[string]uint64
 	supplementPoints   map[string]uint64
+	// supplementGenerationMoved is the admitted pairs written under a State
+	// generation the Plan had moved off here (014 B4 H7).
+	supplementGenerationMoved map[string]uint64
 	// directedPartlyRefused is the directed Slots some of whose slices' rereads
 	// the share refused while the others' were read, by source.
 	directedPartlyRefused map[string]uint64
@@ -92,6 +95,11 @@ type counters struct {
 	faults          map[string]uint64 // reason
 	plans           map[string]uint64 // outcome (PlanOutcomes)
 	forgotten       map[string]uint64 // reason (ForgottenReasons): groups forgotten
+	// What became of the Slots and the series_late states handed over
+	// (HandoverSlotResults, HandoverLateResults), and how the restored
+	// Slots' supplements told the series decided already
+	// (RestoredDedupSources).
+	handoverSlots, handoverLate, restoredDedup map[string]uint64
 	// Per source: the latest completion seen, the bytes rechecks read back,
 	// and samples whose query's lookback could not be read.
 	maxCompletion   map[string]time.Duration
@@ -109,14 +117,16 @@ func newCounters(sources, refusals []string) counters {
 		changed: map[string]uint64{}, changes: map[string]uint64{}, preempted: map[string]uint64{},
 		completion: map[string]uint64{}, probes: map[string]uint64{}, classes: map[string]uint64{}, unclassified: map[string]uint64{}, emptyFirstReads: map[string]uint64{},
 		directedWindows: map[string]uint64{}, directedUnobserved: map[string]uint64{}, supplementSeries: map[string]uint64{},
-		supplementPoints: map[string]uint64{}, directedBytes: map[string]uint64{}, directedPartlyRefused: map[string]uint64{},
-		supplementHold: map[string]uint64{}, supplementHoldMax: map[string]time.Duration{},
+		supplementPoints: map[string]uint64{}, supplementGenerationMoved: map[string]uint64{}, directedBytes: map[string]uint64{},
+		directedPartlyRefused: map[string]uint64{},
+		supplementHold:        map[string]uint64{}, supplementHoldMax: map[string]time.Duration{},
 		early: map[string]uint64{}, earlyUndecided: map[string]uint64{}, earlyBytes: map[string]uint64{},
 		earlierReads: map[string]uint64{}, earlierBytes: map[string]uint64{}, holdIgnored: map[string]uint64{},
 		earlierOvertaken: map[string]uint64{}, earlierPreparedLateMax: map[string]time.Duration{}, earlierAhead: map[string]uint64{},
 		earlierSkipped: map[string]uint64{}, probations: map[string]uint64{}, probationCaught: map[string]uint64{},
 		floorProbeRounds: map[string]uint64{}, floorProbes: map[string]uint64{}, floorProbeChanges: map[string]uint64{},
 		emptyCompletion: map[string]uint64{}, refusals: map[string]uint64{RefusedOther: 0}, faults: map[string]uint64{}, plans: map[string]uint64{},
+		handoverSlots: map[string]uint64{}, handoverLate: map[string]uint64{}, restoredDedup: map[string]uint64{},
 		maxCompletion: map[string]time.Duration{}, recheckBytes: map[string]uint64{}, unknownLookback: map[string]uint64{},
 		yieldReleases: map[string]uint64{}, yieldReleaseSeconds: map[string]float64{}, yieldReleaseMax: map[string]time.Duration{}}
 	for _, reason := range refusals {
@@ -162,6 +172,7 @@ func newCounters(sources, refusals []string) counters {
 			c.supplementSeries[key2(source, outcome)] = 0
 		}
 		c.supplementPoints[source], c.directedBytes[source], c.directedPartlyRefused[source] = 0, 0, 0
+		c.supplementGenerationMoved[source] = 0
 		for _, bucket := range SupplementHoldBuckets {
 			c.supplementHold[key2(source, bucket)] = 0
 		}
@@ -298,6 +309,13 @@ type Stats struct {
 	// GroupsForgotten: reason -> Query Groups whose state was dropped as no
 	// longer this process's, by why (ForgottenReasons).
 	GroupsForgotten map[string]uint64 `json:"groups_forgotten"`
+	// HandoverSlots and HandoverLate: what became of the Slots and the
+	// series_late states previous owners handed over (HandoverSlotResults,
+	// HandoverLateResults); RestoredDedup: how the restored Slots'
+	// supplements told the series decided already (RestoredDedupSources).
+	HandoverSlots map[string]uint64 `json:"handover_slots,omitempty"`
+	HandoverLate  map[string]uint64 `json:"handover_late,omitempty"`
+	RestoredDedup map[string]uint64 `json:"restored_dedup,omitempty"`
 	// Uncovered: reason -> the owned Query Groups without a fresh measurement,
 	// by why (UncoveredReasons), every reason present. They add up to
 	// Coverage.Owned less Coverage.Covered, the groups a moving Runner set
@@ -411,6 +429,11 @@ type SourceStats struct {
 	SupplementUnobserved map[string]uint64 `json:"supplement_unobserved"`
 	SupplementSeries     map[string]uint64 `json:"supplement_series"`
 	SupplementPoints     uint64            `json:"supplement_points"`
+	// SupplementGenerationMoved is the admitted pairs of the supplements
+	// written under a State generation their Plan's last normal Slot here
+	// had moved off (014 B4 H7): late points an edit between the Slot and
+	// its supplement left where the Plan reads them no more.
+	SupplementGenerationMoved uint64 `json:"supplement_generation_moved,omitempty"`
 	// SupplementPartlyRefused is the directed Slots read in slices some of
 	// whose rereads the share refused: each came to the outcome of the slices
 	// read (SupplementWindows), none of them is in SupplementUnobserved.
@@ -791,8 +814,9 @@ func (engine *Engine) Stats() Stats {
 			Classes: map[string]uint64{}, Unclassified: map[string]uint64{},
 			SupplementWindows: map[string]uint64{}, SupplementUnobserved: map[string]uint64{}, SupplementSeries: map[string]uint64{},
 			SupplementPoints: engine.counts.supplementPoints[source], DirectedReadBytes: engine.counts.directedBytes[source],
-			SupplementPartlyRefused: engine.counts.directedPartlyRefused[source],
-			SupplementHold:          map[string]uint64{}, SupplementHoldMaxSeconds: engine.counts.supplementHoldMax[source].Seconds(),
+			SupplementGenerationMoved: engine.counts.supplementGenerationMoved[source],
+			SupplementPartlyRefused:   engine.counts.directedPartlyRefused[source],
+			SupplementHold:            map[string]uint64{}, SupplementHoldMaxSeconds: engine.counts.supplementHoldMax[source].Seconds(),
 			EarlyReads: map[string]uint64{}, EarlyUndecided: engine.counts.earlyUndecided[source],
 			EarlyReadBytes: engine.counts.earlyBytes[source], EarlierReads: map[string]uint64{}, EarlierReadBytes: engine.counts.earlierBytes[source], ReadHoldIgnored: map[string]uint64{}}
 		for _, reason := range ReadHoldIgnoredReasons {
@@ -904,6 +928,16 @@ func (engine *Engine) Stats() Stats {
 	}
 	for reason, n := range engine.counts.refusals {
 		stats.PermitRefusals[reason] = n
+	}
+	stats.HandoverSlots, stats.HandoverLate, stats.RestoredDedup = map[string]uint64{}, map[string]uint64{}, map[string]uint64{}
+	for _, result := range HandoverSlotResults {
+		stats.HandoverSlots[result] = engine.counts.handoverSlots[result]
+	}
+	for _, result := range HandoverLateResults {
+		stats.HandoverLate[result] = engine.counts.handoverLate[result]
+	}
+	for _, source := range RestoredDedupSources {
+		stats.RestoredDedup[source] = engine.counts.restoredDedup[source]
 	}
 	for outcome, n := range engine.counts.plans {
 		stats.Plans[outcome] = n

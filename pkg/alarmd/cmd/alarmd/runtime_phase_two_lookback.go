@@ -27,6 +27,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/worker"
 )
 
 // lookbackTick is how often due rechecks are looked for: inside the window
@@ -75,6 +76,69 @@ type supplementRunner interface {
 
 var _ supplementRunner = (*productionPhaseTwoQueryGroup)(nil)
 
+// supplementPlanner freezes a supplement's contract outside its flight
+// (scheduler.Runner.SupplementContract).
+type supplementPlanner interface {
+	SupplementContract(context.Context, execution.EvaluationTime, int64) (execution.FrozenExecutionContractRef, execution.OwnerFence, error)
+}
+
+var _ supplementPlanner = (*productionPhaseTwoQueryGroup)(nil)
+
+// lookbackShapeKnown is whether this process has read the Query Group, so
+// knows the slices a Slot handed over is read again in
+// (worker.RestoredShapeKnown): no store read, and no bundle lock - asked under
+// the lookback's.
+func lookbackShapeKnown(ownership *lookbackOwnership) func(execution.QueryGroupIdentity) bool {
+	return func(queryGroup execution.QueryGroupIdentity) bool {
+		bundle := ownership.bundle.Load()
+		return bundle != nil && worker.RestoredShapeKnown(bundle.coordinator, queryGroup)
+	}
+}
+
+// lookbackRespec plans a Slot a Query Group's previous owner handed over
+// again (014 B4 H1): its contract frozen as its supplement will freeze it,
+// on the Query Group's Runner here; its queries planned by the query source
+// - read when called, as the source is built after the lookback; read in
+// the slices this process reads the Query Group in now; and keeping only
+// the series its supplement would not tell decided by their segments.
+func lookbackRespec(ownership *lookbackOwnership, planned func() func(context.Context, execution.FrozenExecutionContractRef) (
+	execution.InternalExecutionHeader, []execution.PhysicalQuerySpec, error)) lookback.Respec {
+	return func(ctx context.Context, queryGroup execution.QueryGroupIdentity, evaluation execution.EvaluationTime,
+		readHoldMillis int64) (lookback.RestoredPlan, error) {
+		bundle := ownership.bundle.Load()
+		if bundle == nil {
+			return lookback.RestoredPlan{}, errors.New("lookback respec: no bundle")
+		}
+		lifecycle, owned := bundle.enterOwnedWork(queryGroup)
+		if !owned {
+			return lookback.RestoredPlan{}, errors.New("lookback respec: Query Group not owned")
+		}
+		defer bundle.exitOwnedWork(lifecycle)
+		planner, supported := lifecycle.runner.(supplementPlanner)
+		plan := planned()
+		if !supported || plan == nil {
+			return lookback.RestoredPlan{}, errors.New("lookback respec: no planner")
+		}
+		contract, fence, err := planner.SupplementContract(ctx, evaluation, readHoldMillis)
+		if err != nil {
+			return lookback.RestoredPlan{}, err
+		}
+		header, specs, err := plan(ctx, contract)
+		if err != nil {
+			return lookback.RestoredPlan{}, err
+		}
+		request := execution.SlotExecutionRequest{Contract: contract, OwnerFence: fence, Operation: execution.OperationSupplement}
+		restored := lookback.RestoredPlan{Specs: specs}
+		// The slices first: a Slot with none to be read in waits, and its
+		// segments are not read for it.
+		if restored.Slices, restored.Shaped = worker.RestoredSlices(bundle.coordinator, request); !restored.Shaped {
+			return restored, nil
+		}
+		restored.Covered = worker.RestoredCoverage(ctx, bundle.coordinator, request, header)
+		return restored, nil
+	}
+}
+
 // supplementRunner is the owned Query Group's, when this replica holds its
 // Runner and the Runner runs supplements, with the supplement counted in
 // flight on the Query Group's lifecycle until done is called: a handover
@@ -114,7 +178,7 @@ func lookbackSupplement(
 ) func(context.Context, lookback.SupplementJob) lookback.SupplementOutcome {
 	return func(ctx context.Context, job lookback.SupplementJob) lookback.SupplementOutcome {
 		ctx = scheduler.WithSupplementGuard(access.WithKeptRead(ctx, job.Read), job.Guard)
-		scope := execution.SupplementScope{Series: job.Series}
+		scope := execution.SupplementScope{Series: job.Series, All: job.All}
 		for retried := false; ; retried = true {
 			// Counted per attempt, not across the wait between them: a
 			// handover waits for a supplement writing, not for one waiting

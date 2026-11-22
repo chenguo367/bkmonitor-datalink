@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"net"
 	"net/http"
@@ -33,6 +34,7 @@ import (
 	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/legacyoutput"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdoutput"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/memoryline"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/newopens"
@@ -622,8 +624,22 @@ func openProductionPhaseTwoBundleAssembly(
 	if err != nil {
 		return nil, err
 	}
+	// A Slot a previous owner handed over is planned again by the query
+	// source, built after the lookback and read when a reread is due.
+	var plannedQueries *access.Source
+	respec := lookbackRespec(lookbackOwner, func() func(context.Context, execution.FrozenExecutionContractRef) (
+		execution.InternalExecutionHeader, []execution.PhysicalQuerySpec, error) {
+		if plannedQueries == nil {
+			return nil
+		}
+		return plannedQueries.PlannedExecution
+	})
 	lookbackEngine, lookbackState, err := buildLookback(queryClient.Recheck, flights, lookbackOwner, logger,
-		external.Now, observationAdmit(observationMemory, memoryline.ConsumerLookback), external.lookbackRounds, readHolds)
+		external.Now, observationAdmit(observationMemory, memoryline.ConsumerLookback), func(options *lookback.Options) {
+			external.lookbackRounds(options)
+			options.Respec = respec
+			options.ShapeKnown = lookbackShapeKnown(lookbackOwner)
+		}, readHolds)
 	if err != nil {
 		return nil, err
 	}
@@ -652,6 +668,7 @@ func openProductionPhaseTwoBundleAssembly(
 	if err != nil {
 		return nil, err
 	}
+	plannedQueries = querySource
 	detector, err := detect.NewEvaluator(detect.NewDefaultRegistry())
 	if err != nil {
 		return nil, err
@@ -788,8 +805,23 @@ func openProductionPhaseTwoBundleAssembly(
 	// Without the link the gate answers from the alerts this process opened,
 	// as before the link copy existed (activecopy.Own).
 	var ownOpens *activecopy.Own
+	gate := activecopy.GateCopy
 	if openAlertCopy == nil {
-		ownOpens = activecopy.NewOwn(external.Now)
+		ownOpens, gate = activecopy.NewOwn(external.Now), activecopy.GateOwn
+	}
+	// Said at startup, by name: on Own an alert another process opened is not
+	// seen here, and its RECOVERY is held - what a handover leaves, which
+	// a deployment reading this knows to look for.
+	recorder.SetRecoveryGate(gate)
+	logger.InfoEvent(observability.StageStartup, observability.ResultSuccess, 0, slog.String("recovery_gate", gate))
+	// What own holds and what the lookback had go with each Query Group this
+	// process lets go of, to its next owner (014 B4 H5, H1); the link's copy
+	// is the link's.
+	handoverLedger := newProductionHandoverLedger(ownershipStore, ownOpens, lookbackEngine, external.Now, recorder.RecordHandoverLedger)
+	var writeHandoverLedger func(context.Context, execution.QueryGroupIdentity)
+	var holdLookbackHandover func(execution.QueryGroupIdentity, *lookback.Handover)
+	if handoverLedger != nil {
+		writeHandoverLedger, holdLookbackHandover = handoverLedger.handOver, handoverLedger.holdLookback
 	}
 	episodeWriter, err := newEpisodeWriter(cfg, linkdManage, redisForCaller(runtimeClient, redisfailure.CallerLinkd), external.Now, recorder)
 	if err != nil {
@@ -844,7 +876,7 @@ func openProductionPhaseTwoBundleAssembly(
 		// Linked only with the link's control plane: without it the copy is
 		// never refreshed and can never judge, and the worker keeps no
 		// no-data end index.
-		OpenAlerts: &openAlertCopyPort{copy: openAlertCopy, own: ownOpens, record: episodeWriter, opens: newOpens},
+		OpenAlerts: &openAlertCopyPort{copy: openAlertCopy, own: ownOpens, record: episodeWriter, opens: newOpens, handover: handoverLedger},
 		// The horizon the platform settings copy resolves now, read per Slot:
 		// runtime state lives at most this long past a series' last write.
 		StateHorizon:          func() int64 { return platformSettings.Current().NoDataTrackingHorizonSeconds },
@@ -955,6 +987,7 @@ func openProductionPhaseTwoBundleAssembly(
 		SteppedDownAsLeader:  controlLeaderSteppedDown(reconciler, recorder),
 		QueryCooldowns:       newProductionQueryCooldownStore(cfg, redisForCaller(runtimeClient, redisfailure.CallerQueryCooldown), recorder, observer),
 		ReadHolds:            readHolds,
+		HandoverLedger:       handoverLedger,
 		DropRuntimeWitnesses: dropWitnesses,
 		ForgetQueryGroup:     func(queryGroup execution.QueryGroupIdentity) { worker.ForgetQueryGroup(coordinator, queryGroup) },
 		Traces:               traces,
@@ -1270,6 +1303,17 @@ func openProductionPhaseTwoBundleAssembly(
 	}()
 	surface := publicSurfaceStandingOf(cfg, publicRestricted)
 	surface.warn(logger)
+	// The series this replica's Query Groups bind: the tracker's per-Plan
+	// counts over the Query Groups this replica runs now, read for the State
+	// cache's budget and its metric.
+	heldSeries := func() uint64 {
+		owned := bundle.ownedQueryGroups()
+		held := make(map[string]struct{}, len(owned))
+		for _, queryGroup := range owned {
+			held[string(queryGroup)] = struct{}{}
+		}
+		return fleetTracker.SeriesMatchedIn(held, phaseTwoMaxSupportedEvaluationInterval)
+	}
 	bundle, err = newPhaseTwoWorkerBundle(phaseTwoWorkerBundleDependencies{
 		Flights:           flights,
 		LiveReserve:       liveReserve,
@@ -1281,9 +1325,22 @@ func openProductionPhaseTwoBundleAssembly(
 		Config:            cfg, Health: health, Control: control, Ownership: productionOwnership,
 		Recorder: recorder, Observer: observer, TargetFlow: targetFlow, Now: external.Now,
 		FleetAPI: fleetAPI, PublicSurfaceRestricted: publicRestricted,
-		NoDataCloseAPI: noDataCloseAPIOf(core.NoDataCloses, external.Now),
-		DropStateCache: executionStore.DropStateCacheQueryGroup,
-		ControlStream:  controlStream, StreamIdentity: streamIdentity, ViewStreamStats: viewServer.Stats, ViewClient: viewClient,
+		NoDataCloseAPI:        noDataCloseAPIOf(core.NoDataCloses, external.Now),
+		DropStateCache:        executionStore.DropStateCacheQueryGroup,
+		ForgetOpenAlertMisses: forgetOpenAlertMissesOf(openAlertCopy, fleetTracker.StrategiesFor),
+		// The State cache's budget follows the series held, and the cache
+		// gives back what the soft limit is passed by (014 next7 3.4).
+		SizeStateCache: func() {
+			reading := observationMemory.Read()
+			past := uint64(0)
+			if !reading.LimitUnlimited && reading.HeadroomBytes < 0 {
+				past = uint64(-reading.HeadroomBytes)
+			}
+			executionStore.SizeStateCache(heldSeries(), past)
+		},
+		WriteHandoverLedger:  writeHandoverLedger,
+		HoldLookbackHandover: holdLookbackHandover,
+		ControlStream:        controlStream, StreamIdentity: streamIdentity, ViewStreamStats: viewServer.Stats, ViewClient: viewClient,
 		PublishFleet: func(ctx context.Context) {
 			publishRoleControlFacts(ctx, bundle, fleetStore, external.RoleRuntime)
 			observationRefresh.publish(ctx)
@@ -1350,14 +1407,7 @@ func openProductionPhaseTwoBundleAssembly(
 	// The series this replica's Query Groups bind, for the State cache's
 	// budget to be read against: the tracker's per-Plan counts over the Query
 	// Groups this replica runs now, at scrape time.
-	recorder.SetStateSeriesHeldSource(func() uint64 {
-		owned := bundle.ownedQueryGroups()
-		held := make(map[string]struct{}, len(owned))
-		for _, queryGroup := range owned {
-			held[string(queryGroup)] = struct{}{}
-		}
-		return fleetTracker.SeriesMatchedIn(held, phaseTwoMaxSupportedEvaluationInterval)
-	})
+	recorder.SetStateSeriesHeldSource(heldSeries)
 	lookbackOwner.bind(bundle)
 	// A Slot a supplement or maintenance turned away from its flight runs as
 	// soon as the hold ends, not at its next turn.
@@ -1810,6 +1860,23 @@ func maxDuration(values ...time.Duration) time.Duration {
 }
 
 // activeCopyFactsSource is what this replica publishes about its copy.
+// forgetOpenAlertMissesOf lets go of copy's misses for the strategies a
+// Query Group's rounds named here (strategiesFor), when this process lets
+// it go; nil without a copy.
+func forgetOpenAlertMissesOf(copy *activecopy.Copy, strategiesFor func(string) []fleet.StrategyRef) func(execution.QueryGroupIdentity) {
+	if copy == nil || strategiesFor == nil {
+		return nil
+	}
+	return func(queryGroup execution.QueryGroupIdentity) {
+		strategies := strategiesFor(string(queryGroup))
+		ids := make([]string, 0, len(strategies))
+		for _, strategy := range strategies {
+			ids = append(ids, strategy.StrategyID)
+		}
+		copy.ForgetMisses(ids)
+	}
+}
+
 func activeCopyFactsSource(copy *activecopy.Copy) func() *fleet.ActiveCopyFacts {
 	return func() *fleet.ActiveCopyFacts {
 		stats := copy.Stats()

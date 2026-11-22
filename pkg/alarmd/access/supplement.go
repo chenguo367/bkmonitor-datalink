@@ -61,6 +61,33 @@ func KeptReadOf(ctx context.Context) (KeptRead, bool) {
 // series admission of every Plan's target. The admission and series-pulled
 // counters are not fed: they count what the Slots of this process read, and
 // a replay reads nothing.
+// PlannedExecution is the header a Slot frozen as contract is executed
+// under and the physical queries it plans, each with requirements: what the
+// lookback reads a Slot its previous owner handed over again by (014 B4
+// H1) - the queries that Slot's supplement then plans and finds kept, and
+// the Plans whose stable segments say which series it keeps.
+func (source *Source) PlannedExecution(ctx context.Context, contract execution.FrozenExecutionContractRef) (
+	execution.InternalExecutionHeader, []execution.PhysicalQuerySpec, error) {
+	if source == nil {
+		return execution.InternalExecutionHeader{}, nil, errors.New("alarmd access: initialized source is required")
+	}
+	frozen, err := source.plans.ResolveFrozenPlan(ctx, contract)
+	if err != nil {
+		return execution.InternalExecutionHeader{}, nil, fmt.Errorf("alarmd access: resolve frozen plan: %w", err)
+	}
+	prepared, err := prepare(contract, frozen, source.config.MinReadyDelay, false, source.config.LiveReserve)
+	if err != nil {
+		return execution.InternalExecutionHeader{}, nil, err
+	}
+	var specs []execution.PhysicalQuerySpec
+	for _, query := range prepared.Queries {
+		if len(query.Requirements) != 0 {
+			specs = append(specs, query.Spec)
+		}
+	}
+	return prepared.Header, specs, nil
+}
+
 func (source *Source) executeSupplement(
 	ctx context.Context,
 	request execution.QueryExecutionRequest,

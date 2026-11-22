@@ -702,13 +702,18 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"survived compilation into the due set; due is what the no-data round found there. " +
 				"Read them in that order against the leader's sum(catalog_no_data_plans): the first hop " +
 				"that reads zero while the one before it does not is where the section is being lost. " +
-				"published is reported by the leader once per publication and the rest by every worker " +
-				"once per Slot, so compare rates rather than raw sums across hops on different sides. " +
+				"published is reported by the leader once per publication. assembled_bytes, assembled and " +
+				"frozen are reported by a worker once per freeze of a Slot's contract on its catalog, not " +
+				"once per Slot: the scheduler's taking of the Slot or of an expired range, its finalization, " +
+				"each query execution - each slice it reads and each arrival it waits for again, and each " +
+				"re-resolve of a recovery - and a supplement's reread each freeze it, so a Slot executed " +
+				"counts three at the least; a diagnostic read of a Slot (the CLI's) counts none, its catalog " +
+				"heard by no observer. " +
 				"published only advances when a publication is actually written, so a flat zero there " +
 				"means either that every publication carried none or that there was no publication at " +
 				"all -- read it against object_catalog_objects_total{operation=\"write\"}, which is how " +
-				"you tell those apart. assembled and frozen are per Slot and directly comparable with " +
-				"each other and with worker_no_data_plans_seen_total over the same window. " +
+				"you tell those apart. Across hops read only whether one reads zero; as a ratio, read only " +
+				"due against worker_no_data_plans_seen_total over the same window. " +
 				"Every label is created at startup, because a hop reporting nothing and a hop reporting " +
 				"zero are the whole difference this family exists to show. It exists because three " +
 				"releases were spent proving from the call graph that every hop carries the section " +
@@ -2116,8 +2121,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	// multiple of.
 	metrics.fleetSnapshotBytes = prometheus.NewGauge(prometheus.GaugeOpts{
 		Subsystem: metricSubsystem, Name: "fleet_snapshot_bytes",
-		Help: "Bytes of the fleet snapshot this replica last published to the snapshot store. A fleet view on any replica " +
-			"reads every replica's snapshot, so one view costs about the sum of this across the fleet.",
+		Help: "Bytes of the fleet snapshot this replica last published to the snapshot store, as stored: compressed " +
+			"(gzip, about a sixth of its JSON on a replica of a cooldown pool). A fleet view on any replica reads every " +
+			"replica's snapshot, so one view costs about the sum of this across the fleet.",
 	})
 	metrics.fleetViewSnapshotLoads = prometheus.NewCounter(prometheus.CounterOpts{
 		Subsystem: metricSubsystem, Name: "fleet_view_snapshot_loads_total",
@@ -2126,7 +2132,8 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	})
 	metrics.fleetViewSnapshotBytes = prometheus.NewCounter(prometheus.CounterOpts{
 		Subsystem: metricSubsystem, Name: "fleet_view_snapshot_bytes_total",
-		Help: "Bytes of fleet snapshots this replica read from the snapshot store to build fleet views. Divided by " +
+		Help: "Bytes of fleet snapshots this replica read from the snapshot store to build fleet views, as stored: " +
+			"compressed, or the JSON of a replica on a build before the snapshots were compressed. Divided by " +
 			"fleet_view_snapshot_loads_total it is the true per-view read size.",
 	})
 	// The summaries beside the snapshots, which the health route and the

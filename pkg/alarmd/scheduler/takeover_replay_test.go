@@ -51,6 +51,29 @@ func TestTheTakeoverClockTellsATakeoverFromARebuild(t *testing.T) {
 	}
 }
 
+// A Query Group this process let go of - moved away or declined - and was
+// given back before anyone else acquired it comes back one epoch later, as a
+// rebuild does; forgotten when it was let go, its return is a takeover at the
+// moment it is held again. Forgetting one the clock never held, or on no
+// clock, changes nothing.
+func TestAQueryGroupLetGoAndGivenBackIsTakenOverAgain(t *testing.T) {
+	clock := NewTakeoverClock()
+	start := time.Unix(1_700_000_000, 0)
+	at := func(minutes int) time.Time { return start.Add(time.Duration(minutes) * time.Minute) }
+	clock.Anchor("query-group-1", testFence(7), at(0))
+	clock.Anchor("query-group-2", testFence(7), at(0))
+	clock.Forget("query-group-1")
+	clock.Forget("query-group-never-held")
+	if got := clock.Anchor("query-group-1", testFence(8), at(2)); !got.Equal(at(2)) {
+		t.Fatalf("given back one epoch later after it was let go: taken over at %v, want %v", got, at(2))
+	}
+	if got := clock.Anchor("query-group-2", testFence(8), at(2)); !got.Equal(at(0)) {
+		t.Fatalf("rebuilt here, not let go: taken over at %v, want %v", got, at(0))
+	}
+	var none *TakeoverClock
+	none.Forget("query-group-1")
+}
+
 type takeoverObserver struct {
 	facts      []observability.ReplayTakeoverFacts
 	diversions []observability.SlotDiversionFacts
@@ -70,7 +93,8 @@ func (observer *takeoverObserver) Observe(_ context.Context, observation observa
 // rule gives it up to keep the Query Group current. Due before this process
 // took the Query Group over -- a restart, a rebalance that moved it here --
 // nobody here could have run it, and it is replayed; the rebuild of a Runner
-// in this process is not a takeover and does not buy it that.
+// in this process is not a takeover and does not buy it that, and a Query
+// Group let go of and given back one epoch later is one.
 func TestASlotDueBeforeATakeoverIsReplayedPastTheDistanceRule(t *testing.T) {
 	const slot = execution.EvaluationTime(1_700_124_000)
 	deadline := int64(slot)*1000 + 25_000
@@ -87,6 +111,7 @@ func TestASlotDueBeforeATakeoverIsReplayedPastTheDistanceRule(t *testing.T) {
 		"taken over before the Slot was due":         {true, fenceOf(7), testFence(7), false},
 		"a Runner rebuilt here since":                {true, fenceOf(7), testFence(8), false},
 		"back here after another owner held it":      {true, fenceOf(7), testFence(9), true},
+		"given back one epoch after it was let go":   {true, fenceOf(7), testFence(8), true},
 		"taken over by a new process, same epoch +1": {true, nil, testFence(8), true},
 	} {
 		source, _ := replayClassificationSource(t, 10, slot, 30*time.Second, testRecoveryLimits())
@@ -97,6 +122,9 @@ func TestASlotDueBeforeATakeoverIsReplayedPastTheDistanceRule(t *testing.T) {
 		}
 		if tc.earlier != nil {
 			source.takeovers.Anchor(source.queryGroup, *tc.earlier, before)
+		}
+		if name == "given back one epoch after it was let go" {
+			source.takeovers.Forget(source.queryGroup)
 		}
 		operation, facts, err := source.classifyRecovery(context.Background(), slot, deadline, 0, reached, tc.now)
 		if err != nil {

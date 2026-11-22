@@ -31,7 +31,9 @@ func newSlotReadinessMetrics() slotReadinessMetrics {
 			Subsystem: metricSubsystem,
 			Name:      "slot_readiness_slack_seconds",
 			Help: "How long a Slot's data had already been readable when an execution arrived to read " +
-				"it, for normal operations whose queries share one readiness moment. Arriving early is " +
+				"it, for normal operations whose queries share one readiness moment: once an attempt, at its first read, " +
+				"however many slices it is read in - a later slice arrives late by the reads before it, not by the " +
+				"schedule; a Slot attempted again arrives again. Arriving early is " +
 				"turned away before this point and counted as a deferral, so this measures the other " +
 				"direction only, and the two have to be read together: a scheduler that stops arriving " +
 				"early by arriving late shows no deferrals at all and looks like a success. It does not " +
@@ -43,7 +45,7 @@ func newSlotReadinessMetrics() slotReadinessMetrics {
 		boundary: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: metricSubsystem,
 			Name:      "slot_readiness_boundary_total",
-			Help: "Normal executions by whether their queries agree on one moment the data becomes " +
+			Help: "Normal Slots' attempts, once each at its first read - a Slot attempted again counted again - by whether their queries agree on one moment the data becomes " +
 				"readable. Only a unified boundary contributes to slot_readiness_slack_seconds, so this " +
 				"is what says how much of the population that histogram covers: a mixed Slot has no one " +
 				"readiness moment and therefore no single answer for how late anything was. Reading the " +

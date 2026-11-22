@@ -646,6 +646,7 @@ func addFacts(sum, facts execution.SupplementFacts) execution.SupplementFacts {
 	sum.CrossedT += facts.CrossedT
 	sum.NoDataFact += facts.NoDataFact
 	sum.ConfigDrift += facts.ConfigDrift
+	sum.GenerationMoved += facts.GenerationMoved
 	sum.InputIncomplete += facts.InputIncomplete
 	sum.Withheld += facts.Withheld
 	return sum

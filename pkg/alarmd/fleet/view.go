@@ -1950,6 +1950,11 @@ type Snapshot struct {
 	// holding more than the budget publishes a short list beside a full count
 	// rather than a smaller count.
 	OwnedObjects []string `json:"owned_objects,omitempty"`
+	// OwnedInKey says a summarized publish wrote the snapshot without its
+	// owned list, which is in the replica's owned key whole: the store's
+	// load reads it from there, and hands on the snapshot with the list and
+	// without this.
+	OwnedInKey bool `json:"owned_in_key,omitempty"`
 	// LookbackLate is the Query Groups this replica's lookback reads directed
 	// on its own evidence, by the rung their late series were last seen at.
 	// It is not part of the snapshot's body: the store writes it to a key of

@@ -10,6 +10,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
 )
@@ -40,28 +42,34 @@ func withoutTheLink(protocol string) func(*config.Config, string) {
 // opened is held and counted (held_no_open_alert), and a Plan on the
 // Python-compatible format is not gated at all (protocol_not_gated).
 //
+// The process says which at startup, on recovery_gate_source: copy with the
+// link, own without it.
+//
 // Host B is absent in round 1 and its no-data alert is raised; in round 2
 // its data is back and the round decides the closing RECOVERY - in the
 // process that raised it ("own"), or in another that took the Plan over
-// from the same store ("foreign").
+// from the same store: after the first stopped and handed over what its
+// gate held of the Query Group in its ledger ("handed", 014 B4 H5), or
+// after the first left nothing - a crash, a ledger not written ("foreign").
 func TestTheRecoveryGateAnswersByTheDestination(t *testing.T) {
 	for name, test := range map[string]struct {
 		configure    func(*config.Config, string)
 		unrevisioned bool
-		// own and foreign are the gate's outcome for the RECOVERY;
-		// written is whether the own RECOVERY reaches the sink.
-		own, foreign string
-		written      bool
+		// own, handed and foreign are the gate's outcome for the RECOVERY;
+		// written is whether the own RECOVERY reaches the sink, and the
+		// handed one with it where it passes.
+		own, handed, foreign string
+		written              bool
 	}{
-		"the link, native": {own: "passed", foreign: "held_no_open_alert", written: true},
+		"the link, native": {own: "passed", handed: "held_no_open_alert", foreign: "held_no_open_alert", written: true},
 		"no link, native": {configure: withoutTheLink(config.OutputProtocolNative),
-			own: "passed", foreign: "held_no_open_alert", written: true},
+			own: "passed", handed: "passed", foreign: "held_no_open_alert", written: true},
 		"no link, auto, revisioned": {configure: withoutTheLink(config.OutputProtocolAuto),
-			own: "passed", foreign: "held_no_open_alert", written: true},
+			own: "passed", handed: "passed", foreign: "held_no_open_alert", written: true},
 		"no link, auto, unrevisioned": {configure: withoutTheLink(config.OutputProtocolAuto), unrevisioned: true,
-			own: "protocol_not_gated", foreign: "protocol_not_gated"},
+			own: "protocol_not_gated", handed: "protocol_not_gated", foreign: "protocol_not_gated"},
 		"no link, legacy": {configure: withoutTheLink(config.OutputProtocolLegacy),
-			own: "protocol_not_gated", foreign: "protocol_not_gated"},
+			own: "protocol_not_gated", handed: "protocol_not_gated", foreign: "protocol_not_gated"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			options := roundsOptions{hosts: true, configure: test.configure, unrevisioned: test.unrevisioned}
@@ -76,6 +84,13 @@ func TestTheRecoveryGateAnswersByTheDestination(t *testing.T) {
 			}
 
 			fixture := startRoundsFixture(t, options)
+			gate, other := "copy", "own"
+			if test.configure != nil {
+				gate, other = "own", "copy"
+			}
+			if got := recoveryGateSources(t, fixture.recorder); !reflect.DeepEqual(got, map[string]float64{gate: 1, other: 0}) {
+				t.Fatalf("recovery_gate_source %v, want %s alone", got, gate)
+			}
 			series := open(fixture)
 			fixture.report(ipSeries(followsHostA), ipSeries(followsHostB))
 			mark, sent := fixture.mark(), len(fixture.written())
@@ -88,22 +103,63 @@ func TestTheRecoveryGateAnswersByTheDestination(t *testing.T) {
 				t.Fatalf("own: the gate answered %+v, want %+v", got, want)
 			}
 
-			first := startRoundsFixture(t, options)
-			series = open(first)
-			first.stopBundle()
-			options.address, options.client, options.base = first.address, first.redis, first.base
-			taken := startRoundsFixture(t, options)
-			taken.report(ipSeries(followsHostA), ipSeries(followsHostB))
-			mark = taken.mark()
-			taken.run(2)
-			if held, _ := eventsAbout(taken.written(), "bk_target_ip", followsHostB); test.foreign == "held_no_open_alert" && len(held) != 0 {
-				t.Fatalf("foreign: round 2 wrote host B's no-data events %+v; this process opened no alert for it", held)
-			}
-			if got, want := taken.openAlertGatesFor(mark, series), []observability.OpenAlertGateFact{{Outcome: observability.OpenAlertGateOutcome(test.foreign), Records: 1}}; !reflect.DeepEqual(got, want) {
-				t.Fatalf("foreign: the gate answered %+v, want %+v", got, want)
+			for _, takeover := range []struct {
+				name, outcome string
+				// leftNothing deletes the first process's handover ledger
+				// before the next takes the Query Group over.
+				leftNothing bool
+			}{{"handed", test.handed, false}, {"foreign", test.foreign, true}} {
+				first := startRoundsFixture(t, options)
+				series = open(first)
+				first.stopBundle()
+				if takeover.leftNothing {
+					ctx := context.Background()
+					for _, key := range first.redis.Keys(ctx, "*handover*").Val() {
+						first.redis.Del(ctx, key)
+					}
+				}
+				next := options
+				next.address, next.client, next.base = first.address, first.redis, first.base
+				taken := startRoundsFixture(t, next)
+				taken.report(ipSeries(followsHostA), ipSeries(followsHostB))
+				mark = taken.mark()
+				taken.run(2)
+				closing, _ := eventsAbout(taken.written(), "bk_target_ip", followsHostB)
+				switch {
+				case takeover.outcome == "held_no_open_alert" && len(closing) != 0:
+					t.Fatalf("%s: round 2 wrote host B's no-data events %+v; this process knows of no alert of it", takeover.name, closing)
+				case takeover.outcome == "passed" && (len(closing) != 1 || closing[0].EventKind != contract.TriggerEventRecovery):
+					t.Fatalf("%s: round 2 wrote host B's no-data events %+v, want the RECOVERY of the alert handed over", takeover.name, closing)
+				}
+				if got, want := taken.openAlertGatesFor(mark, series), []observability.OpenAlertGateFact{{Outcome: observability.OpenAlertGateOutcome(takeover.outcome), Records: 1}}; !reflect.DeepEqual(got, want) {
+					t.Fatalf("%s: the gate answered %+v, want %+v", takeover.name, got, want)
+				}
 			}
 		})
 	}
+}
+
+// recoveryGateSources is recorder's recovery_gate_source, by source.
+func recoveryGateSources(t *testing.T, recorder *metric.Recorder) map[string]float64 {
+	t.Helper()
+	families, err := recorder.Gatherer().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources := map[string]float64{}
+	for _, family := range families {
+		if family.GetName() != "alarmd_recovery_gate_source" {
+			continue
+		}
+		for _, sample := range family.GetMetric() {
+			for _, label := range sample.GetLabel() {
+				if label.GetName() == "source" {
+					sources[label.GetValue()] = sample.GetGauge().GetValue()
+				}
+			}
+		}
+	}
+	return sources
 }
 
 // The existing bk-monitor deployment's shape, end to end: a Control and

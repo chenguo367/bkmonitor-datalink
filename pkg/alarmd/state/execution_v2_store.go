@@ -195,6 +195,13 @@ func (store *ExecutionStore) DropRuntimeWitnesses(queryGroup execution.QueryGrou
 	store.witnesses.forget(queryGroup, upTo)
 }
 
+// ReleaseSlotWitnesses lets go of the preflight witnesses slot's attempt left
+// once it is done applying (runtimeWitnessCache.release); the witnesses of any
+// other Slot of the Query Group stay.
+func (store *ExecutionStore) ReleaseSlotWitnesses(slot execution.SlotIdentity) {
+	store.witnesses.release(slot)
+}
+
 // RuntimeWitnessStats reports the witness cache's items and estimated bytes.
 func (store *ExecutionStore) RuntimeWitnessStats() RuntimeWitnessStats {
 	return store.witnesses.stats()
@@ -304,6 +311,13 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 	result := execution.StatePreflightResult{Items: make([]execution.RuntimeStateView, len(request.Items))}
 	store.cache.sweep(request.Contract.Slot.QueryGroup)
 	pass := &runtimeLoadPass{}
+	// The Slot's own read under its fence offers the cache what it reads
+	// back of the members their round leaves unwritten (014 next7 3.1).
+	var source segment.Source
+	if store.cache != nil && !request.Unwitnessed && !request.OwnerFence.IsZero() {
+		source = segment.SourceFrom(ctx)
+		pass.members = make([]readbackMember, len(request.Items))
+	}
 	batch := &runtimeLoadBatch{}
 	roundLargest, anyRead := 0, false
 	flush := func() {
@@ -333,15 +347,46 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 			result.Items[index] = runtimeLoadFailure(view, err)
 			continue
 		}
-		if entry, _ := store.cache.lookup(framedKey, request, item); entry != nil {
-			// Served from what this process last wrote: the same bytes the
-			// store holds while every rule of §4.3 holds, decoded and
-			// witnessed exactly as bytes read back are.
-			result.Items[index] = store.readFramedRecord(ctx, request, item, entry.raw)
+		if source != nil && !item.Sharded {
+			if coverage, member := source.Coverage(item.Identity); member && coverage.Entry.Open() {
+				pass.members[index] = readbackMember{member: true, coverage: coverage}
+			}
+		}
+		entry, member, word := store.cache.lookup(framedKey, request, item)
+		// Served from what this process last wrote, or read back while its
+		// round left it unwritten: the same bytes the store holds while every
+		// rule of §4.3 holds, decoded and witnessed exactly as bytes read
+		// back are - a compact one decoded without its bytes, to the view
+		// they decode to (014 next7 3.3).
+		served := false
+		switch {
+		case item.VerifyCached && (entry != nil || member != nil):
+			// The Plan's sampled round: read back all the same, and checked
+			// against what the cache held (014 next7 3.6).
+			if pass.verify == nil {
+				pass.verify = map[int]cachedValue{}
+			}
+			pass.verify[index] = cachedValue{entry: entry, member: member}
+		case member != nil:
+			if decoded, err := member.view(item.Identity); err == nil {
+				result.Items[index], served = store.readKeptRecord(ctx, request, item, member.digest(), decoded), true
+			} else {
+				// Unreachable: checked as it was taken in. Read back.
+				store.cache.dropState(framedKey, request.Contract.Slot.QueryGroup, item.Identity, StateCacheDepartConflict)
+			}
+		case entry != nil:
+			result.Items[index], served = store.readFramedRecord(ctx, request, item, entry.raw), true
+		}
+		if served {
 			if !request.Unwitnessed {
 				store.witnesses.markCached(request.Contract.Slot, item.Identity)
 			}
 			continue
+		}
+		if pass.members != nil && pass.members[index].coverage.Leaves {
+			// A member its round leaves unwritten, read back all the same:
+			// why (014 next7 3.4).
+			store.cache.countFallback(word)
 		}
 		if len(batch.indexes) > 0 && (batch.target.Name != target.Name || len(batch.indexes) >= store.runtimeLoadBatchLimit(request.Contract.Slot.QueryGroup, roundLargest, anyRead)) {
 			flush()
@@ -383,6 +428,7 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 	}
 	flush()
 	result.CarryFound, result.CarryMissing, result.CarryUnreadable = pass.carryFound, pass.carryMissing, pass.carryUnreadable
+	result.CacheVerify = pass.verified
 	// One commit for the whole preflight: the round read every key of the
 	// Query Group, so this is a complete measurement of the population rather
 	// than whatever the last batch happened to hold.
@@ -485,6 +531,21 @@ func (store *ExecutionStore) decodeRuntime(ctx context.Context, raw []byte, iden
 	return view
 }
 
+// finishRuntime is decodeRuntime for a view already decoded from the record's
+// bytes: what the State cache keeps compact (finishRuntimeCovered).
+func (store *ExecutionStore) finishRuntime(ctx context.Context, decoded execution.RuntimeStateView, identity execution.StateKeyIdentity,
+	contractRef execution.FrozenExecutionContractRef, candidate execution.ApplyVersion) execution.RuntimeStateView {
+	segments := segment.SourceFrom(ctx)
+	if segments == nil {
+		segments = store.options.Segments
+	}
+	view, extension := finishRuntimeCovered(decoded, identity, contractRef, candidate, segments)
+	if extension != "" {
+		store.segments.extended(extension)
+	}
+	return view
+}
+
 // decodeRuntimeCovered reads a stored framed record, extends a member's read
 // by its segment (segment.Extend: the State's own points, then normal ones
 // where the segment covers, up to the mark and never further), and
@@ -510,6 +571,19 @@ func decodeRuntimeCovered(raw []byte, identity execution.StateKeyIdentity, contr
 		return invalid(contract.ReasonStateSchemaUnsupported), ""
 	case err != nil:
 		return invalid(contract.ReasonStateCorrupt), ""
+	}
+	return finishRuntimeCovered(view, identity, contractRef, candidate, segments)
+}
+
+// finishRuntimeCovered is a framed record's view, decoded, as every reader
+// reads it: its load status, extended by its segment, classified against the
+// candidate. A value the State cache keeps compact is decoded to the same
+// view without its bytes (014 next7 3.3) and finished here as bytes are.
+func finishRuntimeCovered(view execution.RuntimeStateView, identity execution.StateKeyIdentity, contractRef execution.FrozenExecutionContractRef,
+	candidate execution.ApplyVersion, segments SegmentCoverage) (execution.RuntimeStateView, segment.Extension) {
+	invalid := func(reason string) execution.RuntimeStateView {
+		return execution.RuntimeStateView{Identity: identity, BlobRevision: 1, Status: execution.StateDeterministicInvalid,
+			ReasonCode: execution.ReasonCode(reason)}
 	}
 	view.Representation = execution.StateRepresentationFramed
 	view.Status = storedLoadStatus(view.Levels, view.SeriesGuard)

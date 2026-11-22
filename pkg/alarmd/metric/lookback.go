@@ -44,12 +44,16 @@ type lookbackCollector struct {
 	planHeld   *prometheus.Desc
 	uncovered  *prometheus.Desc
 	forgotten  *prometheus.Desc
+	// What of a Query Group's lookback its previous owner handed over came
+	// to (014 B4 H1, H2).
+	handoverSlots, handoverLate, restoredDedup *prometheus.Desc
 	// The directed reads of series_late Query Groups and the supplements of
 	// their Slots.
 	supplementWindows    *prometheus.Desc
 	supplementUnobserved *prometheus.Desc
 	supplementSeries     *prometheus.Desc
 	supplementPoints     *prometheus.Desc
+	generationMoved      *prometheus.Desc
 	partlyRefused        *prometheus.Desc
 	directedBytes        *prometheus.Desc
 	supplementHold       *prometheus.Desc
@@ -246,13 +250,22 @@ func newLookbackCollector() *lookbackCollector {
 				"unobserved.", "source", "outcome"),
 		supplementUnobserved: desc("lookback_supplement_unobserved_total",
 			"Slots of series_late Query Groups not read again, by source and why: yielded, read_failed, "+
-				"first_read_incomplete, multi_query, memory_refused, named_outputs.", "source", "reason"),
+				"first_read_incomplete, multi_query, memory_refused, named_outputs, restored_unplanned (a Slot handed "+
+				"over whose queries could not be planned again), no_slice_shape (a Slot handed over let go with no "+
+				"slices known to read it in).", "source", "reason"),
 		supplementSeries: desc("lookback_supplement_series_total",
 			"(Plan, series) pairs the supplements that ran were given, by source and what each came to: candidates "+
 				"in all, and admitted, crossed_t, no_data_fact, config_drift, input_incomplete, withheld.",
 			"source", "outcome"),
 		supplementPoints: desc("lookback_supplement_points_total",
 			"Points the admitted series of the supplements were evaluated on, by source.", "source"),
+		generationMoved: desc("lookback_supplement_generation_moved_series_total",
+			"Of lookback_supplement_series_total{outcome=\"admitted\"}, the pairs whose Plan's last normal Slot on this "+
+				"process ran under another State generation than the supplemented Slot's (014 B4 H7), by source: an edit "+
+				"came between the Slot and its supplement, which writes the Slot's generation's key, one the Plan no "+
+				"longer reads for a series its new generation has a record of - that late point is lost. An upper bound: "+
+				"a series the new generation has no record of yet still reads the old key (its carry), and its point is "+
+				"not lost. Zero without edits; growing bounds how often an edit drops a late point.", "source"),
 		partlyRefused: desc("lookback_supplement_partly_refused_total",
 			"Directed Slots read in slices some of whose rereads the memory share refused, by source: each came to "+
 				"the outcome of the slices read in lookback_supplement_windows_total and is in no reason of "+
@@ -401,13 +414,37 @@ func newLookbackCollector() *lookbackCollector {
 				"was let go), shutdown (the process stopping), not_owned (found no longer its own as the lookback "+
 				"went to read it). Counted only when there was state to drop.",
 			"reason"),
+		handoverSlots: desc("lookback_handover_slots_total",
+			"Slots a Query Group's previous owner handed over still on their reread ladder, by what became of them here: "+
+				"restored (back on the ladder, read again at their rung's delay in the slices this process reads the Query "+
+				"Group in, keeping the series their stable segments do not cover, and every series supplemented that "+
+				"nothing has decided at the Slot or after), expired (past their rung's window when they came), "+
+				"not_series_late (the Query Group read directed neither by the previous owner's word nor by its own "+
+				"samples here), present (a Slot this process already held), no_slice_shape (a restored Slot let go with "+
+				"no slices known to read it in, its deepest rung's window over - it waited for them, the later Slots of "+
+				"its Query Group with it). no_slice_shape counts Slots counted restored already, so the cells do not sum "+
+				"to the Slots handed over. Every cell exists from the start.",
+			"result"),
+		handoverLate: desc("lookback_handover_series_late_total",
+			"series_late states a Query Group's previous owner handed over, by what became of them: restored (its rung, "+
+				"its start and whether a plan started it taken as they were), kept_local (a sample of it here already "+
+				"decides it). Every cell exists from the start.",
+			"result"),
+		restoredDedup: desc("lookback_restored_dedup_series_total",
+			"Series the supplements of restored Slots read, by how each told whether the Slot was decided for it "+
+				"already: segment (a member its stable segment covered at the Slot, its State not read), "+
+				"persisted_version (its State read and at the Slot or after), read (its State read and short of the "+
+				"Slot: decided by the supplement). read against segment and persisted_version is what a handover's "+
+				"rereads cost in State reads. Every cell exists from the start.",
+			"source"),
 	}
 }
 
 func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, desc := range []*prometheus.Desc{c.firstReads, c.checks, c.changed, c.changes, c.classes, c.readEarly, c.seriesLate, c.supplementWindows, c.supplementUnobserved, c.supplementSeries,
-		c.supplementPoints, c.partlyRefused, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.earlierBytes, c.earlierReads, c.earlierOvertaken, c.earlierPreparedLate, c.earlierAhead, c.earlierSkipped, c.probationRereads, c.probationCaught, c.probationGroups, c.floorProbeRounds, c.floorProbes, c.floorProbeGroups, c.floorProbeChanges, c.holdIgnored, c.readBytes, c.checkBytes, c.unknown, c.coverage,
-		c.pending, c.yields, c.refused, c.faults, c.plans, c.planHeld, c.uncovered, c.forgotten, c.readHoldTransition, c.readHoldOvertaken,
+		c.supplementPoints, c.generationMoved, c.partlyRefused, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.earlierBytes, c.earlierReads, c.earlierOvertaken, c.earlierPreparedLate, c.earlierAhead, c.earlierSkipped, c.probationRereads, c.probationCaught, c.probationGroups, c.floorProbeRounds, c.floorProbes, c.floorProbeGroups, c.floorProbeChanges, c.holdIgnored, c.readBytes, c.checkBytes, c.unknown, c.coverage,
+		c.pending, c.yields, c.refused, c.faults, c.plans, c.planHeld, c.uncovered, c.forgotten, c.handoverSlots, c.handoverLate, c.restoredDedup,
+		c.readHoldTransition, c.readHoldOvertaken,
 		c.readHoldPredecessor, c.readHoldSeed, c.readHoldDuration, c.readHoldEarlierSkip, c.readHoldFloorProbes, c.readHoldProbeProgress, c.readHoldFindings, c.roundsReadAtLimit, c.readHoldClamped, c.readHoldCorrupt, c.readHoldRetireClose, c.readHoldRetireClosed, c.readHoldWaits, c.readHoldWaiting, c.readHoldCloseSkip, c.readHoldDegraded,
 		c.readHoldGroups, c.readHoldMax} {
 		ch <- desc
@@ -505,6 +542,7 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 			counter(c.supplementSeries, source.SupplementSeries[outcome], name, outcome)
 		}
 		counter(c.supplementPoints, source.SupplementPoints, name)
+		counter(c.generationMoved, source.SupplementGenerationMoved, name)
 		counter(c.partlyRefused, source.SupplementPartlyRefused, name)
 		counter(c.directedBytes, source.DirectedReadBytes, name)
 		for _, bucket := range lookback.SupplementHoldBuckets {
@@ -602,6 +640,15 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	for _, reason := range lookback.ForgottenReasons {
 		counter(c.forgotten, stats.GroupsForgotten[reason], reason)
+	}
+	for _, result := range lookback.HandoverSlotResults {
+		counter(c.handoverSlots, stats.HandoverSlots[result], result)
+	}
+	for _, result := range lookback.HandoverLateResults {
+		counter(c.handoverLate, stats.HandoverLate[result], result)
+	}
+	for _, source := range lookback.RestoredDedupSources {
+		counter(c.restoredDedup, stats.RestoredDedup[source], source)
 	}
 	gauge(c.coverage, float64(stats.Coverage.Owned), "owned")
 	gauge(c.coverage, float64(stats.Coverage.Covered), "covered")

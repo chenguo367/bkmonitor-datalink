@@ -102,7 +102,7 @@ func heldOf(cache *stateCache, group execution.QueryGroupIdentity) int {
 
 // missOf is the word a lookup of group's first key gets.
 func missOf(cache *stateCache, group execution.QueryGroupIdentity) string {
-	_, word := cache.lookup(cacheKey(group, 0), execution.StatePreflightRequest{
+	_, _, word := cache.lookup(cacheKey(group, 0), execution.StatePreflightRequest{
 		Contract: execution.FrozenExecutionContractRef{Slot: execution.SlotIdentity{QueryGroup: group}}}, execution.StatePreflightItem{})
 	return word
 }

@@ -17,11 +17,12 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/go-redis/redis/v8"
 
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisatomic"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisscript"
 )
 
 // Publishing a snapshot per replica keeps the read side free of fan-out: any
@@ -71,6 +72,11 @@ type RedisStore struct {
 	// is written (HoldLoads).
 	admitLoad func(bytes uint64) bool
 	holdLoad  func(bytes uint64) (release func(), held bool)
+	// ownedWritten is, by replica, the digest of the owned list this store
+	// last wrote: a publish whose set is the same only extends the list's
+	// life, and writes it whole again when it is gone.
+	ownedMu      sync.Mutex
+	ownedWritten map[string]SetDigest
 }
 
 // ErrSnapshotsDeferred is a load of snapshots the observation memory line
@@ -167,8 +173,21 @@ func NewRedisStore(client redis.Cmdable, prefix string, ttl time.Duration, maxAn
 // seen as stale before it is seen as absent.
 func (store *RedisStore) TTL() time.Duration { return store.ttl }
 
+// snapshotKey is where a replica on an earlier build wrote its snapshot as
+// JSON, compressedSnapshotKey where this build writes it compressed
+// (snapshot_codec.go). A key of its own rather than the earlier one in a new
+// form: through a rolling update a reader on the earlier build reads only
+// snapshotKey, and finds a replica on this build without a snapshot, as it
+// finds one that has not published - the replica's rows missing from its
+// page until it is updated too - where a compressed value under the key it
+// reads would fail its whole read of the deployment. Its health is read from
+// the summaries, which keep their form. A reader on this build reads either.
 func (store *RedisStore) snapshotKey(replica string) string {
 	return store.replicaKey("fleet-snapshot", replica)
+}
+
+func (store *RedisStore) compressedSnapshotKey(replica string) string {
+	return store.replicaKey("fleet-snapshot-z", replica)
 }
 
 // summaryKey and ownedKey are the keys a replica's summary and its owned
@@ -316,17 +335,26 @@ func (store *RedisStore) Publish(ctx context.Context, snapshot Snapshot) error {
 	if err != nil {
 		return err
 	}
-	payload, err := json.Marshal(snapshot)
+	payload, err := encodedSnapshot(snapshot)
 	if err != nil {
-		return fmt.Errorf("alarmd fleet: encode snapshot: %w", err)
+		return err
 	}
-	if err := store.client.Set(ctx, store.snapshotKey(snapshot.Replica), payload, store.ttl).Err(); err != nil {
+	if err := store.client.Set(ctx, store.compressedSnapshotKey(snapshot.Replica), payload, store.ttl).Err(); err != nil {
 		return fmt.Errorf("alarmd fleet: publish snapshot: %w", err)
 	}
 	if store.meter != nil {
 		store.meter.SnapshotPublished(len(payload))
 	}
 	return nil
+}
+
+// encodedSnapshot is a snapshot as it is stored: its JSON compressed.
+func encodedSnapshot(snapshot Snapshot) ([]byte, error) {
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		return nil, fmt.Errorf("alarmd fleet: encode snapshot: %w", err)
+	}
+	return encodeSnapshotPayload(raw)
 }
 
 // PublishSummarized writes this replica's snapshot as Publish does, and
@@ -336,6 +364,12 @@ func (store *RedisStore) Publish(ctx context.Context, snapshot Snapshot) error {
 // until they expire -- never a summary of one snapshot beside another. The
 // summary is of the snapshot as written, its rows decided at stallAfter; its
 // owned digest and list are the whole set, before the snapshot's list is cut.
+//
+// The owned list is kept once, in its own key: the snapshot is written
+// without one, and a reader takes the list from the key (loadEach). The key
+// is written whole when the set differs from the one this store wrote last,
+// and otherwise only has its life extended; found gone, it is written whole
+// in a second run of the script.
 func (store *RedisStore) PublishSummarized(ctx context.Context, snapshot Snapshot, stallAfter time.Duration) (ReplicaSummary, error) {
 	owned := snapshot.OwnedObjects
 	snapshot, err := store.written(snapshot)
@@ -343,9 +377,10 @@ func (store *RedisStore) PublishSummarized(ctx context.Context, snapshot Snapsho
 		return ReplicaSummary{}, err
 	}
 	summary := SummaryOf(snapshot, owned, stallAfter)
-	payload, err := json.Marshal(snapshot)
+	snapshot.OwnedObjects, snapshot.OwnedInKey = nil, true
+	payload, err := encodedSnapshot(snapshot)
 	if err != nil {
-		return ReplicaSummary{}, fmt.Errorf("alarmd fleet: encode snapshot: %w", err)
+		return ReplicaSummary{}, err
 	}
 	summaryPayload, err := json.Marshal(summary)
 	if err != nil {
@@ -363,16 +398,34 @@ func (store *RedisStore) PublishSummarized(ctx context.Context, snapshot Snapsho
 	if err != nil {
 		return ReplicaSummary{}, fmt.Errorf("alarmd fleet: encode lookback late list: %w", err)
 	}
-	ttl := store.ttl.Milliseconds()
-	if ttl < 1 {
-		ttl = 1
+	ttl := max(store.ttl.Milliseconds(), 1)
+	keys := []string{store.compressedSnapshotKey(snapshot.Replica), store.summaryKey(snapshot.Replica), store.ownedKey(snapshot.Replica),
+		store.lookbackKey(snapshot.Replica), store.snapshotKey(snapshot.Replica)}
+	store.ownedMu.Lock()
+	same := store.ownedWritten[snapshot.Replica] == summary.Owned
+	store.ownedMu.Unlock()
+	for _, whole := range []bool{!same, true} {
+		ownedArg := []byte(nil)
+		if whole {
+			ownedArg = ownedPayload
+		}
+		result, err := publishSummarizedWrite.Run(ctx, store.client, keys, payload, summaryPayload, ownedArg, ttl, latePayload,
+			boolArg(whole)).Int()
+		if err != nil {
+			return ReplicaSummary{}, fmt.Errorf("alarmd fleet: publish snapshot and summary: %w", err)
+		}
+		if result == 1 {
+			break
+		}
+		// The list was gone (it outlived no publish of the same set, or the
+		// server lost it): written whole now.
 	}
-	if err := publishSummarizedWrite.Run(ctx, store.client,
-		[]string{store.snapshotKey(snapshot.Replica), store.summaryKey(snapshot.Replica), store.ownedKey(snapshot.Replica),
-			store.lookbackKey(snapshot.Replica)},
-		payload, summaryPayload, ownedPayload, ttl, latePayload); err != nil {
-		return ReplicaSummary{}, fmt.Errorf("alarmd fleet: publish snapshot and summary: %w", err)
+	store.ownedMu.Lock()
+	if store.ownedWritten == nil {
+		store.ownedWritten = map[string]SetDigest{}
 	}
+	store.ownedWritten[snapshot.Replica] = summary.Owned
+	store.ownedMu.Unlock()
 	if store.meter != nil {
 		store.meter.SnapshotPublished(len(payload))
 		store.meter.SummaryPublished(len(summaryPayload))
@@ -380,18 +433,35 @@ func (store *RedisStore) PublishSummarized(ctx context.Context, snapshot Snapsho
 	return summary, nil
 }
 
-// publishSummarizedWrite sets a replica's snapshot, summary, owned list and
-// lookback late list, each with the store's life, as one script rather than a MULTI/EXEC (see
-// redisatomic for why). The three keys share no hash tag: like the
-// activation scripts (controlplane/activation_rebuild.go) this runs on a
-// standalone or Sentinel server, and the configuration refuses Cluster
-// (config/redis.go).
-var publishSummarizedWrite = redisatomic.New("fleet_publish_summarized", `
+func boolArg(value bool) string {
+	if value {
+		return "1"
+	}
+	return "0"
+}
+
+// publishSummarizedWrite sets a replica's compressed snapshot, summary and
+// lookback late list, each with the store's life, and its owned list whole
+// when ARGV[6] says so, else only the list's life, as one script rather than
+// a MULTI/EXEC (see redisatomic for why); and lets go of the JSON snapshot an
+// earlier build left, which a reader on this build would never read again
+// and one on the earlier build would read stale. It answers 0 for a list
+// that was to have its life extended and was gone, having written the rest:
+// the caller runs it again with the list whole. A script of its own rather
+// than a redisatomic write, which answers nothing, for that answer is read.
+// The keys share no hash tag: like the activation scripts
+// (controlplane/activation_rebuild.go) this runs on a standalone or Sentinel
+// server, and the configuration refuses Cluster (config/redis.go).
+var publishSummarizedWrite = redisscript.New("fleet_publish_summarized", `
 redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[4])
 redis.call('SET', KEYS[2], ARGV[2], 'PX', ARGV[4])
-redis.call('SET', KEYS[3], ARGV[3], 'PX', ARGV[4])
 redis.call('SET', KEYS[4], ARGV[5], 'PX', ARGV[4])
-return 1
+redis.call('DEL', KEYS[5])
+if ARGV[6] == '1' then
+  redis.call('SET', KEYS[3], ARGV[3], 'PX', ARGV[4])
+  return 1
+end
+return redis.call('PEXPIRE', KEYS[3], ARGV[4])
 `)
 
 // written is the snapshot as it is written: checked, its totals at least
@@ -512,15 +582,31 @@ func (store *RedisStore) loadEach(ctx context.Context, replicas []string, admitt
 		// admitted until the next collection, rather than read unasked.
 		admit = func(total uint64) bool { return store.admitLoad(total * snapshotDecodedCharge) }
 	}
-	bytes, err := store.read(ctx, replicas, store.snapshotKey, admit, func(index int, text string) error {
+	bytes, err := store.readSnapshots(ctx, replicas, admit, func(index int, stored string) error {
+		raw, err := decodeSnapshotPayload([]byte(stored))
+		if err != nil {
+			decodeErr = fmt.Errorf("alarmd fleet: decode snapshot for %s: %w", replicas[index], err)
+			return decodeErr
+		}
 		var snapshot Snapshot
-		if err := json.Unmarshal([]byte(text), &snapshot); err != nil {
+		if err := json.Unmarshal(raw, &snapshot); err != nil {
 			decodeErr = fmt.Errorf("alarmd fleet: decode snapshot for %s: %w", replicas[index], err)
 			return decodeErr
 		}
 		if snapshot.Replica != replicas[index] {
 			decodeErr = fmt.Errorf("alarmd fleet: snapshot for %s reports replica %q", replicas[index], snapshot.Replica)
 			return decodeErr
+		}
+		// A summarized publish keeps the owned list in its own key, not in
+		// the snapshot: the reader takes it from there, whole, where an
+		// earlier build's snapshot carried it cut to its budget.
+		if snapshot.OwnedInKey {
+			owned, err := store.ownedOf(ctx, replicas[index])
+			if err != nil {
+				decodeErr = err
+				return decodeErr
+			}
+			snapshot.OwnedObjects, snapshot.OwnedInKey = owned, false
 		}
 		// A replica on a build before cause_origin publishes reasons without
 		// one: unknown, not physical.
@@ -717,6 +803,114 @@ func (store *RedisStore) read(ctx context.Context, replicas []string, key func(s
 			}
 			bytes += len(text)
 			if err := visit(start+offset, text); err != nil {
+				return bytes, err
+			}
+		}
+		start = end
+	}
+	return bytes, nil
+}
+
+// ownedOf is a replica's whole owned list from its key, nil when it is gone
+// (the snapshot is then read as one whose list was cut: Owned more than it
+// names).
+func (store *RedisStore) ownedOf(ctx context.Context, replica string) ([]string, error) {
+	text, err := store.client.Get(ctx, store.ownedKey(replica)).Result()
+	if errors.Is(err, redis.Nil) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("alarmd fleet: read owned objects of %s: %w", replica, err)
+	}
+	if store.meter != nil {
+		store.meter.OwnedLoaded(1, len(text))
+	}
+	var owned []string
+	if err := json.Unmarshal([]byte(text), &owned); err != nil {
+		return nil, fmt.Errorf("alarmd fleet: decode owned objects for %s: %w", replica, err)
+	}
+	return owned, nil
+}
+
+// readSnapshots is read for the named replicas' snapshots, each from the key
+// it was last written to: the compressed key a replica on this build writes,
+// else the JSON key one on an earlier build wrote (snapshotKey). In one
+// pipeline it reads each replica's two lengths and the compressed value's
+// header; admit is asked for what the snapshots hold decoded - a compressed
+// one's JSON length from its header, an earlier one's stored length - and
+// the values are read in order, in MGETs bounded as read's, and handed visit.
+func (store *RedisStore) readSnapshots(ctx context.Context, replicas []string, admit func(total uint64) bool,
+	visit func(index int, stored string) error) (int, error) {
+	if len(replicas) == 0 {
+		return 0, nil
+	}
+	type found struct {
+		zLength, length *redis.IntCmd
+		head            *redis.StringCmd
+	}
+	looks := make([]found, len(replicas))
+	if _, err := store.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		for index, replica := range replicas {
+			looks[index] = found{zLength: pipe.StrLen(ctx, store.compressedSnapshotKey(replica)),
+				length: pipe.StrLen(ctx, store.snapshotKey(replica)),
+				head:   pipe.GetRange(ctx, store.compressedSnapshotKey(replica), 0, int64(snapshotCodecHeader-1))}
+		}
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+	type pick struct {
+		index  int
+		key    string
+		stored int64
+	}
+	picks := make([]pick, 0, len(replicas))
+	total := uint64(0)
+	for index, look := range looks {
+		switch {
+		case look.zLength.Val() > 0:
+			raw, ok := snapshotRawLength([]byte(look.head.Val()))
+			if !ok {
+				raw = uint64(look.zLength.Val())
+			}
+			picks = append(picks, pick{index: index, key: store.compressedSnapshotKey(replicas[index]), stored: look.zLength.Val()})
+			total += raw
+		case look.length.Val() > 0:
+			picks = append(picks, pick{index: index, key: store.snapshotKey(replicas[index]), stored: look.length.Val()})
+			total += uint64(look.length.Val())
+		}
+	}
+	if admit != nil && !admit(total) {
+		return 0, ErrSnapshotsDeferred
+	}
+	bytes, bound := 0, store.readChunkBytes()
+	for start := 0; start < len(picks); {
+		end, spent := start, int64(0)
+		for end < len(picks) && (end == start || spent+picks[end].stored <= bound) {
+			spent += picks[end].stored
+			end++
+		}
+		keys := make([]string, 0, end-start)
+		for _, chosen := range picks[start:end] {
+			keys = append(keys, chosen.key)
+		}
+		values, err := store.client.MGet(ctx, keys...).Result()
+		if err != nil {
+			return bytes, err
+		}
+		for offset, value := range values {
+			if value == nil {
+				// Expired between the lengths and the read: absent, as a
+				// replica that has not published.
+				continue
+			}
+			chosen := picks[start+offset]
+			text, ok := value.(string)
+			if !ok {
+				return bytes, fmt.Errorf("value for %s has an unexpected type", replicas[chosen.index])
+			}
+			bytes += len(text)
+			if err := visit(chosen.index, text); err != nil {
 				return bytes, err
 			}
 		}

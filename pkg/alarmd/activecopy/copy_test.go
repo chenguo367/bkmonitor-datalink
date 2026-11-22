@@ -693,3 +693,56 @@ func TestOpenLevelsAreKnownOnlyFromOwnSends(t *testing.T) {
 		t.Fatal("a series learned of by a search has known open Levels")
 	}
 }
+
+// Let go of for a Query Group's strategies, the copy's misses of them -
+// judged and young - are asked of the link again, so an alert another owner
+// opened meanwhile is found rather than read as missed for MissLife: its
+// RECOVERY passes once the search finds it. Their hits stay, and another
+// strategy's misses stay judged. The count says how many were let go of.
+func TestTheMissesOfAStrategyLetGoOfAreAskedAgain(t *testing.T) {
+	link := newFakeSearch(t)
+	link.open("t", "1", fp(3))
+	clk := &clock{at: time.Unix(1_800_000_000, 0)}
+	c := newCopy(t, link, clk)
+	judge := func(strategy string, n int) {
+		c.Holds("t", strategy, fp(n))
+		c.Pass(context.Background())
+	}
+	// Judged misses of strategies 1 and 2, a young miss and a hit of 1.
+	judge("1", 1)
+	judge("2", 2)
+	clk.at = clk.at.Add(MissMinAge)
+	judge("1", 1)
+	judge("2", 2)
+	judge("1", 4)
+	judge("1", 3)
+	if held, judged := c.Holds("t", "1", fp(1)); held || !judged {
+		t.Fatal("strategy 1's miss is not judged before it is let go of")
+	}
+	// Another owner opens strategy 1's alert of fp(1) while the Query Group
+	// is away.
+	link.open("t", "1", fp(1))
+	if forgotten := c.ForgetMisses([]string{"1", "absent"}); forgotten != 2 || c.Stats().MissesForgotten != 2 {
+		t.Fatalf("let go of %d misses (counted %d), want strategy 1's judged and young ones", forgotten, c.Stats().MissesForgotten)
+	}
+	if held, judged := c.Holds("t", "1", fp(3)); !held || !judged {
+		t.Fatal("strategy 1's hit was let go of")
+	}
+	if held, judged := c.Holds("t", "2", fp(2)); held || !judged {
+		t.Fatal("strategy 2's judged miss was let go of")
+	}
+	if c.Contains("t", "1", fp(1)) {
+		t.Fatal("the alert opened meanwhile passed its RECOVERY before the link was asked")
+	}
+	c.Pass(context.Background())
+	if !c.Contains("t", "1", fp(1)) {
+		t.Fatal("the alert opened meanwhile is still read as missed")
+	}
+	if forgotten := c.ForgetMisses(nil); forgotten != 0 {
+		t.Fatalf("no strategies let go of %d misses", forgotten)
+	}
+	var none *Copy
+	if none.ForgetMisses([]string{"1"}) != 0 {
+		t.Fatal("no copy let go of misses")
+	}
+}

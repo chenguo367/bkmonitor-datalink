@@ -33,6 +33,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/segment"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/state"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/trigger"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/worker"
 )
@@ -58,6 +59,7 @@ type shadowRig struct {
 	provider    *shadowProvider
 	frozen      *shadowFrozen
 	coordinator *worker.SlotExecutionCoordinator
+	source      *access.Source
 	base        execution.SlotExecutionRequest
 	readAt      time.Time
 	readMu      sync.Mutex
@@ -318,6 +320,27 @@ func newShadowRigWith(t *testing.T, hosts, padding int, recovery string, snapsho
 	facts := ringRatioQueryFacts(t)
 	ref := execution.LogicalQueryRef(facts.QueryRevision)
 	compiled, requirements := ringRatioCompiledPlanWith(t, string(ref), recovery, snapshotRevision, noData)
+	return newShadowRigPlanned(t, hosts, padding, cacheBudget, facts, compiled, requirements)
+}
+
+// newThresholdShadowRig is the rig over a threshold Plan, the Level read on
+// the primary query alone: one physical query a Slot, as a lookback reads a
+// Slot again directed only of such Plans. Every host reads 60, under its
+// threshold of 100: normal, its members stable.
+func newThresholdShadowRig(t *testing.T, hosts int, cacheBudget int64) *shadowRig {
+	t.Helper()
+	facts := ringRatioQueryFacts(t)
+	ref := execution.LogicalQueryRef(facts.QueryRevision)
+	compiled, requirements := thresholdCompiledPlan(t, string(ref))
+	return newShadowRigPlanned(t, hosts, 0, cacheBudget, facts, compiled, requirements)
+}
+
+// newShadowRigPlanned is the rig over the compiled Plan and its requirements
+// given, on the query facts given.
+func newShadowRigPlanned(t *testing.T, hosts, padding int, cacheBudget int64, facts execution.QueryPlanFacts,
+	compiled *strategy.CompiledPlan, requirements []execution.DataRequirement) *shadowRig {
+	t.Helper()
+	ref := execution.LogicalQueryRef(facts.QueryRevision)
 	provider := &shadowProvider{padding: strings.Repeat("p", padding)}
 	for index := 0; index < hosts; index++ {
 		provider.hosts = append(provider.hosts, fmt.Sprintf("host-%02d", index))
@@ -339,6 +362,7 @@ func newShadowRigWith(t *testing.T, hosts, padding int, recovery string, snapsho
 	if err != nil {
 		t.Fatal(err)
 	}
+	rig.source = source
 	detector, err := detect.NewEvaluator(detect.NewDefaultRegistry())
 	if err != nil {
 		t.Fatal(err)
@@ -363,7 +387,7 @@ func newShadowRigWith(t *testing.T, hosts, padding int, recovery string, snapsho
 		// The lifetimes in production's relation: the replay age, the
 		// restart margin and the shortest lifetime all ten minutes.
 		real, err = state.NewExecutionStore(state.ExecutionStoreOptions{Prefix: "alarmd-shadow", Router: router,
-			MaxValueBytes: 1 << 20, MaxItemsPerCall: 16, MinTTL: 10 * time.Minute, MaxTTL: time.Hour,
+			MaxValueBytes: 1 << 20, MaxItemsPerCall: max(16, hosts), MinTTL: 10 * time.Minute, MaxTTL: time.Hour,
 			RestartMargin: 10 * time.Minute, StateCacheBudgetBytes: cacheBudget, StateCacheReplayAge: 10 * time.Minute,
 			Now: time.Now})
 		if err != nil {
@@ -377,7 +401,7 @@ func newShadowRigWith(t *testing.T, hosts, padding int, recovery string, snapsho
 		t.Fatal(err)
 	}
 	rig.redis, err = state.NewExecutionStore(state.ExecutionStoreOptions{Prefix: "alarmd-shadow", Router: direct,
-		MaxValueBytes: 1 << 20, MaxItemsPerCall: 16, MinTTL: time.Minute, MaxTTL: time.Hour, RestartMargin: time.Minute})
+		MaxValueBytes: 1 << 20, MaxItemsPerCall: max(16, hosts), MinTTL: time.Minute, MaxTTL: time.Hour, RestartMargin: time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -458,9 +482,11 @@ func (rig *shadowRig) execute(evaluation execution.EvaluationTime, absent []stri
 	rig.readMu.Lock()
 	rig.readAt = time.Unix(int64(evaluation)+120, 0)
 	rig.readMu.Unlock()
+	rig.frozen.mu.Lock()
 	due := rig.frozen.plan.DuePlans[0]
-	due.CompletionDeadlineUnixMilli = int64(evaluation)*1000 + 600_000
 	requirements := append([]execution.DataRequirement(nil), rig.frozen.plan.Requirements...)
+	rig.frozen.mu.Unlock()
+	due.CompletionDeadlineUnixMilli = int64(evaluation)*1000 + 600_000
 	consumer := execution.ConsumerRef{Plan: due.Identity, LevelID: 5, HasLevel: true}
 	for index := range requirements {
 		requirements[index].Consumers = []execution.DataRequirementConsumer{{Consumer: consumer,
@@ -1143,6 +1169,28 @@ func (rig *shadowRig) commits() int {
 		}
 	}
 	return commits
+}
+
+// A round that leaves members unwritten leaves no witness behind: the
+// witnesses its preflight kept for them, never taken by a write, are let go
+// with the rest as the Slot's attempt ends, and the next Slot starts with
+// none of the last one's.
+func TestARoundThatLeavesMembersUnwrittenLeavesNoWitnessBehind(t *testing.T) {
+	rig := newShadowRigWith(t, 5, 0, shadowRecoveryOff, 0, nil, 16<<20)
+	rig.skipWord.Store(7)
+	at := frozenContract().Slot.EvaluationTime
+	for round := 0; round < 8 && rig.skippedSoFar() == 0; round++ {
+		at += 60
+		if completed, err := rig.run(at, nil, nil, false); !completed {
+			t.Fatalf("Slot at %d: completed=%t err=%v", at, completed, err)
+		}
+	}
+	if rig.skippedSoFar() == 0 {
+		t.Fatal("no round left a member unwritten")
+	}
+	if stats := rig.store.RuntimeWitnessStats(); stats.Items != 0 || stats.Bytes != 0 {
+		t.Fatalf("after a round that left members unwritten the store holds %+v witnesses, want none", stats)
+	}
 }
 
 // skippedSoFar is the members the rig's rounds left unwritten so far.

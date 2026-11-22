@@ -802,6 +802,11 @@ func freshFrozenRenewals(request execution.FrozenStateRenewalRequest) execution.
 	return result
 }
 
+// ReleaseSlotWitnesses is the wrapped store's.
+func (store *g3aCrashStateStore) ReleaseSlotWitnesses(slot execution.SlotIdentity) {
+	store.delegate.ReleaseSlotWitnesses(slot)
+}
+
 func (store *g3aCrashStateStore) RenewFrozenRuntime(
 	_ context.Context, request execution.FrozenStateRenewalRequest,
 ) (execution.FrozenStateRenewalResult, error) {

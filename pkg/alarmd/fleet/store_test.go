@@ -30,7 +30,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
-// Only Set and MGet are exercised; any other call would panic and thereby prove
+// Only Set, MGet and the reads' lengths and headers are exercised; any other call would panic and thereby prove
 // the store reached a command it should not use.
 type fakeRedis struct {
 	redis.Cmdable
@@ -67,6 +67,16 @@ type fakePipe struct {
 
 func (pipe *fakePipe) StrLen(_ context.Context, key string) *redis.IntCmd {
 	return redis.NewIntResult(int64(len(pipe.client.values[key])), nil)
+}
+
+// GetRange answers as Redis does: the bytes from start to end inclusive,
+// none past the value's end.
+func (pipe *fakePipe) GetRange(_ context.Context, key string, start, end int64) *redis.StringCmd {
+	value := pipe.client.values[key]
+	if start >= int64(len(value)) {
+		return redis.NewStringResult("", nil)
+	}
+	return redis.NewStringResult(value[start:min(end+1, int64(len(value)))], nil)
 }
 
 func (client *fakeRedis) MGet(_ context.Context, keys ...string) *redis.SliceCmd {
@@ -332,7 +342,7 @@ func TestTheStoreReportsWhatItPublishedAndWhatEachViewRead(t *testing.T) {
 	if err := store.Publish(context.Background(), snapshotWith(0)); err != nil {
 		t.Fatal(err)
 	}
-	if len(meter.published) != 1 || meter.published[0] != len(client.values[store.snapshotKey("pod-a")]) {
+	if len(meter.published) != 1 || meter.published[0] != len(client.values[store.compressedSnapshotKey("pod-a")]) {
 		t.Fatalf("published = %v, want the bytes actually written", meter.published)
 	}
 	if _, err := store.Load(context.Background(), []string{"pod-a", "pod-gone"}); err != nil {

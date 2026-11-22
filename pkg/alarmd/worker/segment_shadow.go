@@ -87,10 +87,21 @@ type segmentSlot struct {
 	// unwritten and its segments' write not landed: none is left now.
 	skip        bool
 	writeFailed bool
+	// leaves is whether the Slot's round leaves its stable members' State
+	// writes out - its skip word followed, no earlier attempt's segments
+	// write failed, a normal operation - as the round itself is told
+	// (newSegmentShadowRound); at is its evaluation time, the place of the
+	// Plans' sampled rounds (sampleRound). What a member's Coverage says of
+	// its write.
+	leaves bool
+	at     int64
 	// unread and undecodable are the Plans - by their own generation's key,
 	// for a carried one too - whose segments did not answer, and whose
 	// stored segments did not decode (014 B3 §9.7).
 	unread, undecodable []segment.PlanKey
+	// carries is what each read of a generation a Plan carries from read as
+	// (observability.AllSegmentCarries).
+	carries []string
 }
 
 // segmentShadowPlan is one Plan's book as the Slot read it: its members, the
@@ -161,6 +172,9 @@ func (coordinator *SlotExecutionCoordinator) segmentDues(header execution.Intern
 // its owner's term is stopped: none of its members is left.
 func (coordinator *SlotExecutionCoordinator) loadSegments(ctx context.Context, request execution.SlotExecutionRequest,
 	header execution.InternalExecutionHeader) (*segmentSlot, string, error) {
+	if request.Operation == execution.OperationNormal {
+		coordinator.generations.note(request.Contract.Slot.QueryGroup, header.DuePlans, coordinator.now())
+	}
 	store, ok := coordinator.ports.State.(segment.Store)
 	if !ok {
 		return nil, "", nil
@@ -192,8 +206,13 @@ func (coordinator *SlotExecutionCoordinator) loadSegments(ctx context.Context, r
 		}
 	}
 	coordinator.degradeSegments(request, slot.undecodable, observability.SegmentDegradedUndecodable, &facts)
+	for _, result := range slot.carries {
+		facts.Carry(result)
+	}
 	slot.skip = skip
 	slot.writeFailed = coordinator.segmentWriteFailures.failed(request.Contract.Slot.QueryGroup)
+	slot.leaves = slot.skip && !slot.writeFailed && request.Operation == execution.OperationNormal
+	slot.at = int64(request.Contract.Slot.EvaluationTime)
 	now := coordinator.now().UnixMilli()
 	for key, state := range slot.plans {
 		state.markFallback(now)
@@ -439,10 +458,43 @@ func (slot *segmentSlot) Coverage(identity execution.StateKeyIdentity) (segment.
 			continue
 		}
 		if entry, member := state.book.Entry(identity.SeriesIdentityDigest); member {
-			return segment.Coverage{Entry: entry, Position: state.position, Interval: state.interval, Retention: state.retention}, true
+			coverage := segment.Coverage{Entry: entry, Position: state.position, Interval: state.interval, Retention: state.retention}
+			coverage.Renewal, coverage.Leaves = slot.leavesWritten(state, entry)
+			return coverage, true
 		}
 	}
 	return segment.Coverage{}, false
+}
+
+// sampled is whether the Plan's piece the due Plan is, under generation, is
+// in its sampled round in this Slot (sampleRound): its series' values the
+// State cache holds are checked against the store (014 next7 3.6).
+func (slot *segmentSlot) sampled(due execution.DuePlan, generation execution.StateGeneration) bool {
+	if slot == nil {
+		return false
+	}
+	key := shadowKey(due, generation)
+	state := slot.plans[key]
+	return state != nil && state.interval > 0 && sampleRound(key, slot.at, state.interval)
+}
+
+// leavesWritten is whether the round leaves the member's State write out,
+// as far as the Slot can tell before evaluating it, and its page's last
+// renewal then (segment.Coverage.Leaves): its own generation's book, not a
+// carried one's; the Slot's round leaving members; an open member; its Plan
+// not stopped, renewing its keys, not in its sampled round; its page not
+// written whole for want of renewal. A series the evaluation then finds
+// changed is written all the same, and what was kept of it is replaced.
+func (slot *segmentSlot) leavesWritten(state *segmentShadowPlan, entry segment.Entry) (segment.Renewal, bool) {
+	if !slot.leaves || slot.plans[state.key] != state || !entry.Open() || state.stopped || state.ttl <= 0 ||
+		state.onFallback(entry.Digest) || sampleRound(state.key, slot.at, state.interval) {
+		return segment.Renewal{}, false
+	}
+	page, err := segment.BucketOf(entry.Digest, state.mark.Pages)
+	if err != nil || page >= len(state.mark.Renewed) {
+		return segment.Renewal{}, false
+	}
+	return state.mark.Renewed[page], true
 }
 
 func loadSegmentSlot(ctx context.Context, store segment.Store, request execution.SlotExecutionRequest, dues []segmentDue) *segmentSlot {
@@ -473,11 +525,18 @@ func loadSegmentSlot(ctx context.Context, store segment.Store, request execution
 		own := shadowKey(carries[index].due, carries[index].due.StateGeneration)
 		if stored.Reason == segment.ReadFailed {
 			slot.unread = append(slot.unread, own)
+			slot.carries = append(slot.carries, observability.SegmentCarryReadFailed)
 			continue
 		}
 		state, err := storedSegmentPlan(read.Plans[len(dues)+index].Key, carries[index], stored)
-		if err != nil {
+		switch {
+		case err != nil:
 			slot.undecodable = append(slot.undecodable, own)
+			slot.carries = append(slot.carries, observability.SegmentCarryUndecodable)
+		case state == nil:
+			slot.carries = append(slot.carries, observability.SegmentCarryAbsent)
+		default:
+			slot.carries = append(slot.carries, observability.SegmentCarryCarried)
 		}
 		if state != nil {
 			slot.carried = append(slot.carried, state)

@@ -333,8 +333,13 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 	// Past the turn-away, so this arrival is one that goes on to do the work.
 	// Deferred arrivals are already counted as deferrals; recording them here
 	// too would count one round of work twice and put the early arrivals and
-	// the late ones in the same distribution, where they cancel.
-	source.observeSlotReadiness(ctx, request, prepared, arrivedAt)
+	// the late ones in the same distribution, where they cancel. Only the
+	// Slot's first read arrives: a later slice's arrival is the reads before
+	// it, and counted, a Slot read in five slices was five arrivals, the last
+	// four late by what the first four took.
+	if !request.FollowingRead {
+		source.observeSlotReadiness(ctx, request, prepared, arrivedAt)
+	}
 	var permits PhysicalQueryPermitAcquirer = source.permits
 	if request.Operation != execution.OperationNormal {
 		maximum := len(prepared.Queries)

@@ -86,13 +86,23 @@ func Answered(err error) bool {
 
 // Values reads keys in pipelined batches of Batch, one round trip each.
 func Values(ctx context.Context, client Client, keys []string) ([]Value, error) {
+	return read(ctx, client, keys, func(pipe redis.Pipeliner, key string) *redis.StringCmd { return pipe.Get(ctx, key) })
+}
+
+// HashFields reads one field of each hash key the way Values reads string
+// values: Missing for a key without the field, or without the hash.
+func HashFields(ctx context.Context, client Client, keys []string, field string) ([]Value, error) {
+	return read(ctx, client, keys, func(pipe redis.Pipeliner, key string) *redis.StringCmd { return pipe.HGet(ctx, key, field) })
+}
+
+func read(ctx context.Context, client Client, keys []string, get func(redis.Pipeliner, string) *redis.StringCmd) ([]Value, error) {
 	values := make([]Value, len(keys))
 	for start := 0; start < len(keys); start += Batch {
 		end := min(start+Batch, len(keys))
 		replies := make([]*redis.StringCmd, end-start)
 		if _, err := client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 			for offset, key := range keys[start:end] {
-				replies[offset] = pipe.Get(ctx, key)
+				replies[offset] = get(pipe, key)
 			}
 			return nil
 		}); err != nil && !Answered(err) {

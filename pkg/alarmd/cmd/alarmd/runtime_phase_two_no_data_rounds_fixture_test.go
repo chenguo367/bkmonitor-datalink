@@ -107,6 +107,8 @@ type roundsFixture struct {
 	// stopBundle shuts the bundle down before the case ends, for a case that
 	// opens another on the same store.
 	stopBundle func()
+	// recorder is the bundle's metrics recorder.
+	recorder *metric.Recorder
 }
 
 // startRoundsFixture opens the production bundle over the strategy the options
@@ -214,8 +216,9 @@ func startRoundsFixture(t *testing.T, options roundsOptions) *roundsFixture {
 	fixture.retry = cfg.PhaseTwo.Scheduler.RetryMinDelay.Duration()
 
 	fixture.sink = &followsSink{mode: followsOK}
+	fixture.recorder = metric.NewRecorder(metric.BuildInfo{})
 	bundle, err := openProductionPhaseTwoBundleWithDependencies(
-		ctx, cfg, metric.NewRecorder(metric.BuildInfo{}), observability.Discard(observability.ComponentRuntime),
+		ctx, cfg, fixture.recorder, observability.Discard(observability.ComponentRuntime),
 		newPhaseTwoApplicationHealth(),
 		func(client redis.Cmdable, prefix string) (controlplane.StrategySource, error) {
 			return controlplane.NewLegacyRedisStrategySource(client, prefix)

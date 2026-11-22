@@ -345,7 +345,7 @@ func TestTheSameBucketIsEvaluatedOnceAcrossTheSlotAndItsSupplements(t *testing.T
 	// A later read of the Slot has both.
 	late := map[execution.SeriesIdentityDigest]string{hotSeries: "80", calmSeries: "90"}
 	for round, want := range []execution.SupplementFacts{
-		{Candidates: 2, Admitted: 1, Points: 1, CrossedT: 1},
+		{Candidates: 2, Admitted: 1, Points: 1, CrossedT: 1, Unreached: 1},
 		{Candidates: 2, CrossedT: 2},
 	} {
 		batches, completion = supplementRead(t, header, late)
@@ -539,7 +539,7 @@ func TestASupplementWhoseEvaluationDecidesNothingWithholdsTheSeries(t *testing.T
 	header := supplementHeader(t)
 	ports, evaluator, facts := runSupplement(t, header, map[execution.SeriesIdentityDigest]string{hotSeries: "80"},
 		func(ports *recordingPorts) { ports.gapLoadStatus = execution.GapUnavailable }, hotSeries)
-	if len(evaluator.requests) != 1 || facts != (execution.SupplementFacts{Candidates: 1, Withheld: 1}) ||
+	if len(evaluator.requests) != 1 || facts != (execution.SupplementFacts{Candidates: 1, Withheld: 1, Unreached: 1}) ||
 		ports.eventCount != 0 || ports.stateApplyCalls != 0 {
 		t.Fatalf("evaluations %d facts %+v events %d state %d", len(evaluator.requests), facts, ports.eventCount, ports.stateApplyCalls)
 	}
@@ -554,7 +554,7 @@ func TestASupplementOfAPlanDetectingNoDataReadsItsMemory(t *testing.T) {
 	}
 	ports, _, facts := runSupplement(t, header, map[execution.SeriesIdentityDigest]string{hotSeries: "80"},
 		func(ports *recordingPorts) { ports.gapMissing = true }, hotSeries)
-	if facts != (execution.SupplementFacts{Candidates: 1, Admitted: 1, Points: 1}) || ports.eventCount != 1 {
+	if facts != (execution.SupplementFacts{Candidates: 1, Admitted: 1, Points: 1, Unreached: 1}) || ports.eventCount != 1 {
 		t.Fatalf("facts %+v events %d, want the series supplemented", facts, ports.eventCount)
 	}
 }

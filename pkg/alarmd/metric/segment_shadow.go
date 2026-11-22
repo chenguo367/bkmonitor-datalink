@@ -21,8 +21,8 @@ import (
 // The shadow of the Plans' stable segments (014 B3, first stage): every cell
 // of every family exists from the start, so a zero is a reading.
 type segmentShadowMetrics struct {
-	outcomes, members, pageWrites, pageBytes, skipped, renewals, skipFlagIgnored, samples, degraded, notSkipped, rounds *prometheus.CounterVec
-	renewScript                                                                                                         prometheus.Histogram
+	outcomes, members, pageWrites, pageBytes, skipped, renewals, skipFlagIgnored, samples, degraded, notSkipped, rounds, carries *prometheus.CounterVec
+	renewScript                                                                                                                  prometheus.Histogram
 }
 
 // segmentRenewScriptBuckets are dense about the renewal script's 2.5 ms
@@ -126,6 +126,17 @@ func newSegmentShadowMetrics() segmentShadowMetrics {
 				"no longer left unwritten on this replica until the owner changes - plan_segments.last skip_mode " +
 				"\"stopped\" names it. Zero is the reading; undecodable or stopped growing is segments being lost.",
 		}, []string{"reason"}),
+		carries: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Subsystem: metricSubsystem, Name: "state_segment_carry_total",
+			Help: "Reads of the stable segments of the State generation a Plan carries from - a Plan edited to a new " +
+				"generation reads a series with no record of its own under the old one, and extends it by the old " +
+				"book - a Plan once each load of a Slot's segments, a retry's and a supplement's too, by what they " +
+				"read as: carried (the book read), absent (no book under the " +
+				"old generation), undecodable (it did not decode: a page of it gone, the old generation's pages no " +
+				"longer renewed since the edit, 014 B4 H8 - its Plan is degraded undecodable, its members read as " +
+				"stored, GAPPED or WARMING, never normal), read_failed (the read did not answer). Zero without edits; " +
+				"undecodable after one is how often H8 happens.",
+		}, []string{"result"}),
 		notSkipped: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: metricSubsystem, Name: "state_segment_match_not_skipped_total",
 			Help: "Open members of a Plan's stable segments the shadow compared as a match and wrote all the same, by " +
@@ -168,6 +179,9 @@ func newSegmentShadowMetrics() segmentShadowMetrics {
 	for _, reason := range observability.AllSegmentDegradations() {
 		metrics.degraded.WithLabelValues(reason)
 	}
+	for _, result := range observability.AllSegmentCarries() {
+		metrics.carries.WithLabelValues(result)
+	}
 	for _, reason := range observability.AllSegmentSkipIgnoredReasons() {
 		metrics.skipFlagIgnored.WithLabelValues(reason)
 	}
@@ -201,7 +215,7 @@ func newSegmentShadowMetrics() segmentShadowMetrics {
 
 func (m segmentShadowMetrics) collectors() []prometheus.Collector {
 	return []prometheus.Collector{m.outcomes, m.members, m.pageWrites, m.pageBytes, m.skipped, m.renewals, m.skipFlagIgnored, m.samples,
-		m.degraded, m.notSkipped, m.rounds, m.renewScript}
+		m.degraded, m.notSkipped, m.rounds, m.renewScript, m.carries}
 }
 
 func (m segmentShadowMetrics) observe(facts *observability.SegmentShadowFacts) {
@@ -235,6 +249,9 @@ func (m segmentShadowMetrics) observe(facts *observability.SegmentShadowFacts) {
 	}
 	for reason, count := range facts.Degraded {
 		m.degraded.WithLabelValues(reason).Add(float64(count))
+	}
+	for result, count := range facts.Carries {
+		m.carries.WithLabelValues(result).Add(float64(count))
 	}
 	for key, count := range facts.NotSkipped {
 		m.notSkipped.WithLabelValues(key.Gate, key.PeriodClass).Add(float64(count))

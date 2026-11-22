@@ -1755,7 +1755,8 @@ func (stream *streamedExecution) evaluateSeries(
 			position: position,
 			item: execution.StatePreflightItem{Identity: execution.StateKeyIdentity{
 				Plan: due.Identity, StateGeneration: due.StateGeneration, SeriesIdentityDigest: prepared.identity,
-			}, ApplyVersion: version, CarryFrom: carryFrom(due), Sharded: !due.Shard.IsZero()}})
+			}, ApplyVersion: version, CarryFrom: carryFrom(due), Sharded: !due.Shard.IsZero(),
+				VerifyCached: stream.segments.sampled(due, due.StateGeneration)}})
 		if len(pending) >= batchLimit {
 			if err := next(); err != nil {
 				return err
@@ -2533,6 +2534,17 @@ func (stream *streamedExecution) evaluateReadBatch(ctx context.Context, batch []
 		stream.request.Operation, started, stateResult, stateReason,
 		observability.Counts{Keys: int64(len(loaded.Items)), StateBytes: loaded.LoadedBytes,
 			StateFetchMillis: timing.Fetch.Milliseconds(), StateDecodeMillis: timing.Decode.Milliseconds()}, nil)
+	if verify := loaded.CacheVerify; verify.Mismatched > 0 && verify.First != nil {
+		// The State cache held what the store did not: let go, and the
+		// round went on with what was read (014 next7 3.6).
+		stream.coordinator.emitObservation(ctx, observability.Observation{
+			Component: observability.ComponentState, Stage: observability.StageStateCacheVerified,
+			Operation: observability.Operation(stream.request.Operation), Result: observability.ResultFailed,
+			ReasonCode: observability.ReasonCode(contract.ReasonStateStaleVersion),
+			StateCacheMismatch: &observability.StateCacheMismatchFacts{Count: verify.Mismatched,
+				StrategyID: verify.First.Plan.StrategyID, Kind: verify.First.Kind, Field: verify.First.Field},
+		})
+	}
 	outcomes := make(map[string]int)
 	defer stream.observeCarries(ctx, outcomes)
 	// The series are evaluated side by side and merged one after another in

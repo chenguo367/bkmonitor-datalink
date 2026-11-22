@@ -158,6 +158,27 @@ func supplementFreezeError(err error) error {
 	return err
 }
 
+// SupplementContract is the contract a supplement of the completed Slot at
+// at is frozen with, its read hold readHoldMillis (FreezeSupplement),
+// outside the flight: what a Slot its previous owner handed over is read
+// again by (014 B4 H1), and what its supplement then freezes and finds the
+// read kept.
+func (runner *Runner) SupplementContract(ctx context.Context, at execution.EvaluationTime,
+	readHoldMillis int64) (execution.FrozenExecutionContractRef, execution.OwnerFence, error) {
+	if runner == nil {
+		return execution.FrozenExecutionContractRef{}, execution.OwnerFence{}, errors.New("alarmd scheduler: initialized Runner is required")
+	}
+	source, supported := runner.source.(SupplementSlotSource)
+	if !supported {
+		return execution.FrozenExecutionContractRef{}, execution.OwnerFence{}, ErrSupplementUnsupported
+	}
+	slot, err := source.FreezeSupplement(ctx, at, readHoldMillis)
+	if err != nil {
+		return execution.FrozenExecutionContractRef{}, execution.OwnerFence{}, err
+	}
+	return slot.Contract, slot.Dispatch.OwnerFence, nil
+}
+
 // Supplement runs a supplement of the completed Slot at at over the series
 // of scope, under the Query Group's flight and its current fence.
 //

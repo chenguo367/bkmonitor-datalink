@@ -185,6 +185,10 @@ Labels: `answer`
 
 The recovery gate's and the no-data end's lookups by how the copy answered: own_sent (this process's acknowledged ABNORMAL), search_hit (an active alert the link's search found within 5 minutes), search_miss (two misses at least 2 minutes apart, within an hour), young_miss (one run of misses shorter than that: held, not judged), unknown (no current word: queued for the next pass, held meanwhile), full (unknown and not queued, the copy at its bound), link_unsupported (unknown while the link answers it cannot search: queued for the retry, held meanwhile).
 
+## alarmd_active_copy_misses_forgotten_total
+
+Misses the copy let go of, judged or young, for the strategies of a Query Group this process let go of (moved away or declined): given back after another owner held it, an alert that owner opened is asked of the link again rather than read as missed for up to an hour.
+
 ## alarmd_active_copy_pass_total
 
 Labels: `outcome`
@@ -909,7 +913,7 @@ Strategies running on the replicas' objects, by state: each replica folds its ow
 
 ## alarmd_fleet_snapshot_bytes
 
-Bytes of the fleet snapshot this replica last published to the snapshot store. A fleet view on any replica reads every replica's snapshot, so one view costs about the sum of this across the fleet.
+Bytes of the fleet snapshot this replica last published to the snapshot store, as stored: compressed (gzip, about a sixth of its JSON on a replica of a cooldown pool). A fleet view on any replica reads every replica's snapshot, so one view costs about the sum of this across the fleet.
 
 ## alarmd_fleet_stalled_objects
 
@@ -935,7 +939,7 @@ Owned-list reads a summarized fleet view made because the replicas' owned digest
 
 ## alarmd_fleet_view_snapshot_bytes_total
 
-Bytes of fleet snapshots this replica read from the snapshot store to build fleet views. Divided by fleet_view_snapshot_loads_total it is the true per-view read size.
+Bytes of fleet snapshots this replica read from the snapshot store to build fleet views, as stored: compressed, or the JSON of a replica on a build before the snapshots were compressed. Divided by fleet_view_snapshot_loads_total it is the true per-view read size.
 
 ## alarmd_fleet_view_snapshot_loads_total
 
@@ -978,6 +982,18 @@ How long a planned handover waited for the moved Query Group's running Slot befo
 Labels: `outcome`
 
 Planned handovers - a Query Group this Worker is no longer desired for - by how the wait for its running Slot ended before the lease was released. idle: nothing was running, the release did not wait. finished: the Slot returned and the lease was released after its commit boundary. lease_ended: the lease stopped renewing first (the grace the move gave it ran out, or the store refused it), so the Slot's later writes are refused and the next owner may send its events again. stopped: the process began stopping while it waited, and the Slot was waited for within the shutdown timeout. Every outcome has a series at startup. Read finished against lease_ended for whether handovers complete inside the grace; output_unapplied_total says whether a duplicate followed. Reader: the release acceptance, from /metrics after each deploy.
+
+## alarmd_handover_ledger_open_alerts_total
+
+Labels: `direction`
+
+Open alerts the handover ledgers carried, by direction: exported (written for the next owner) and imported (taken from the previous one into the recovery gate's record; one the record already held from a later ABNORMAL is not counted). Both series exist from startup. Reader: the release acceptance, from /metrics after each deploy.
+
+## alarmd_handover_ledger_total
+
+Labels: `result`
+
+Query Groups' handover ledgers, by result: what a process that lets a Query Group go (moved away, declined, stopping, or opened and never started) writes under the Query Group's fence before it releases the lease, and its next owner reads once it holds it. It carries what the lookback had of the Query Group - its Slots on the reread ladder and its series_late state - written wherever the process runs a lookback, and the recovery gate's record of the open alerts where that gate answers from its own record (recovery_gate_source{source="own"}: without it the next owner holds every RECOVERY of an alert the previous one opened); where the gate answers from the link's copy, that part is empty. On the writer: written; empty (nothing to hand over, nothing written); write_failed (refused by the fence - the handover's grace ran out first - or Redis failed: the next owner does as before the ledger). On the reader, for each Query Group taken over - not one this process rebuilt, which it held the epoch before: loaded; absent; stale (left by an owner before the previous one, which left none: not read); unreadable; read_failed. Every result has a series at startup; loaded is read against the previous owners' written. Reader: the release acceptance, from /metrics after each deploy.
 
 ## alarmd_heap_inuse_live_bytes
 
@@ -1237,6 +1253,18 @@ Labels: `reason`
 
 Query Groups whose lookback state this process dropped as no longer its own, by why. The reasons: moved (the Assignment gave it to another replica), lease_lost (its lease ended), content_switch (its lease ended at a content switch, as planned), declined_hung (its execution hung past its deadline and was let go), shutdown (the process stopping), not_owned (found no longer its own as the lookback went to read it). Counted only when there was state to drop.
 
+## alarmd_lookback_handover_series_late_total
+
+Labels: `result`
+
+series_late states a Query Group's previous owner handed over, by what became of them: restored (its rung, its start and whether a plan started it taken as they were), kept_local (a sample of it here already decides it). Every cell exists from the start.
+
+## alarmd_lookback_handover_slots_total
+
+Labels: `result`
+
+Slots a Query Group's previous owner handed over still on their reread ladder, by what became of them here: restored (back on the ladder, read again at their rung's delay in the slices this process reads the Query Group in, keeping the series their stable segments do not cover, and every series supplemented that nothing has decided at the Slot or after), expired (past their rung's window when they came), not_series_late (the Query Group read directed neither by the previous owner's word nor by its own samples here), present (a Slot this process already held), no_slice_shape (a restored Slot let go with no slices known to read it in, its deepest rung's window over - it waited for them, the later Slots of its Query Group with it). no_slice_shape counts Slots counted restored already, so the cells do not sum to the Slots handed over. Every cell exists from the start.
+
 ## alarmd_lookback_pending
 
 Labels: `what`
@@ -1307,6 +1335,12 @@ Labels: `source`, `outcome`
 
 Rechecks by source and outcome, over every rung; each rung's are in /api/lookback. Only compared is a window observed; yielded, recheck_failed, partial and owner_lost are windows not observed.
 
+## alarmd_lookback_restored_dedup_series_total
+
+Labels: `source`
+
+Series the supplements of restored Slots read, by how each told whether the Slot was decided for it already: segment (a member its stable segment covered at the Slot, its State not read), persisted_version (its State read and at the Slot or after), read (its State read and short of the Slot: decided by the supplement). read against segment and persisted_version is what a handover's rereads cost in State reads. Every cell exists from the start.
+
 ## alarmd_lookback_sample_classes_total
 
 Labels: `source`, `class`
@@ -1318,6 +1352,12 @@ Completed samples by what their rungs found against the first read, by source: w
 Labels: `source`
 
 The source's Query Groups some of whose series were seen coming later than the first read.
+
+## alarmd_lookback_supplement_generation_moved_series_total
+
+Labels: `source`
+
+Of lookback_supplement_series_total{outcome="admitted"}, the pairs whose Plan's last normal Slot on this process ran under another State generation than the supplemented Slot's (014 B4 H7), by source: an edit came between the Slot and its supplement, which writes the Slot's generation's key, one the Plan no longer reads for a series its new generation has a record of - that late point is lost. An upper bound: a series the new generation has no record of yet still reads the old key (its carry), and its point is not lost. Zero without edits; growing bounds how often an edit drops a late point.
 
 ## alarmd_lookback_supplement_hold_max_seconds
 
@@ -1353,7 +1393,7 @@ Labels: `source`, `outcome`
 
 Labels: `source`, `reason`
 
-Slots of series_late Query Groups not read again, by source and why: yielded, read_failed, first_read_incomplete, multi_query, memory_refused, named_outputs.
+Slots of series_late Query Groups not read again, by source and why: yielded, read_failed, first_read_incomplete, multi_query, memory_refused, named_outputs, restored_unplanned (a Slot handed over whose queries could not be planned again), no_slice_shape (a Slot handed over let go with no slices known to read it in).
 
 ## alarmd_lookback_supplement_windows_total
 
@@ -1407,7 +1447,7 @@ What the no-data end index did, by outcome: sent (series whose end event the sin
 
 Labels: `hop`
 
-Plans that detect no-data, counted at each hop between the leader's Catalog and the Slot that judges them, so the hop where they stop existing is a number rather than an argument. published is what decodes back out of the bytes the leader wrote; assembled is what a worker got back from the object store for its Segment; frozen is what survived compilation into the due set; due is what the no-data round found there. Read them in that order against the leader's sum(catalog_no_data_plans): the first hop that reads zero while the one before it does not is where the section is being lost. published is reported by the leader once per publication and the rest by every worker once per Slot, so compare rates rather than raw sums across hops on different sides. published only advances when a publication is actually written, so a flat zero there means either that every publication carried none or that there was no publication at all -- read it against object_catalog_objects_total{operation="write"}, which is how you tell those apart. assembled and frozen are per Slot and directly comparable with each other and with worker_no_data_plans_seen_total over the same window. Every label is created at startup, because a hop reporting nothing and a hop reporting zero are the whole difference this family exists to show. It exists because three releases were spent proving from the call graph that every hop carries the section while production read zero at the end of it.
+Plans that detect no-data, counted at each hop between the leader's Catalog and the Slot that judges them, so the hop where they stop existing is a number rather than an argument. published is what decodes back out of the bytes the leader wrote; assembled is what a worker got back from the object store for its Segment; frozen is what survived compilation into the due set; due is what the no-data round found there. Read them in that order against the leader's sum(catalog_no_data_plans): the first hop that reads zero while the one before it does not is where the section is being lost. published is reported by the leader once per publication. assembled_bytes, assembled and frozen are reported by a worker once per freeze of a Slot's contract on its catalog, not once per Slot: the scheduler's taking of the Slot or of an expired range, its finalization, each query execution - each slice it reads and each arrival it waits for again, and each re-resolve of a recovery - and a supplement's reread each freeze it, so a Slot executed counts three at the least; a diagnostic read of a Slot (the CLI's) counts none, its catalog heard by no observer. published only advances when a publication is actually written, so a flat zero there means either that every publication carried none or that there was no publication at all -- read it against object_catalog_objects_total{operation="write"}, which is how you tell those apart. Across hops read only whether one reads zero; as a ratio, read only due against worker_no_data_plans_seen_total over the same window. Every label is created at startup, because a hop reporting nothing and a hop reporting zero are the whole difference this family exists to show. It exists because three releases were spent proving from the call graph that every hop carries the section while production read zero at the end of it.
 
 ## alarmd_object_cache_decoded_ratio
 
@@ -1817,6 +1857,12 @@ Rebalance rounds that planned moves and published none, by reason. reason=set_un
 
 Assignments the latest rebalance round on this Control Leader planned to move from the most to the least loaded ready worker. Read beside assignment_moves_total: planned and not published for more than one stabilisation window is a ready set that keeps changing. Meaningful on the Control Leader only; aggregate replicas with max, not sum.
 
+## alarmd_recovery_gate_source
+
+Labels: `source`
+
+1 for what this process's recovery gate and no-data end answer from, 0 for the other, from startup: own (the alerts this process opened and the broker took, where phase_two.linkd is not configured: an alert another process opened is not seen, and its RECOVERY is held) or copy (alarmd's copy of the link's active alerts). The gate acts on the Plans that publish the standard protocol only: a Plan on the compatibility protocol builds no RECOVERY envelope and never asks it, counted as trigger_open_alert_gate_total{outcome="protocol_not_gated"}.
+
 ## alarmd_redis_bytes_total
 
 Labels: `client`, `caller`, `command`, `direction`
@@ -2127,11 +2173,11 @@ Nested wall durations of RunOne, SlotSource.Next and Executor.Execute; not addit
 
 Labels: `boundary`
 
-Normal executions by whether their queries agree on one moment the data becomes readable. Only a unified boundary contributes to slot_readiness_slack_seconds, so this is what says how much of the population that histogram covers: a mixed Slot has no one readiness moment and therefore no single answer for how late anything was. Reading the histogram without this reads a sample as the whole.
+Normal Slots' attempts, once each at its first read - a Slot attempted again counted again - by whether their queries agree on one moment the data becomes readable. Only a unified boundary contributes to slot_readiness_slack_seconds, so this is what says how much of the population that histogram covers: a mixed Slot has no one readiness moment and therefore no single answer for how late anything was. Reading the histogram without this reads a sample as the whole.
 
 ## alarmd_slot_readiness_slack_seconds
 
-How long a Slot's data had already been readable when an execution arrived to read it, for normal operations whose queries share one readiness moment. Arriving early is turned away before this point and counted as a deferral, so this measures the other direction only, and the two have to be read together: a scheduler that stops arriving early by arriving late shows no deferrals at all and looks like a success. It does not say why the time was lost -- sleeping too long and waiting for dispatch capacity produce the same figure; the operation="normal" cells of scheduler_execution_slot_wait_seconds_total are the part of it spent waiting for an execution slot while every one was in use.
+How long a Slot's data had already been readable when an execution arrived to read it, for normal operations whose queries share one readiness moment: once an attempt, at its first read, however many slices it is read in - a later slice arrives late by the reads before it, not by the schedule; a Slot attempted again arrives again. Arriving early is turned away before this point and counted as a deferral, so this measures the other direction only, and the two have to be read together: a scheduler that stops arriving early by arriving late shows no deferrals at all and looks like a success. It does not say why the time was lost -- sleeping too long and waiting for dispatch capacity produce the same figure; the operation="normal" cells of scheduler_execution_slot_wait_seconds_total are the part of it spent waiting for an execution slot while every one was in use.
 
 ## alarmd_slot_wait_duration_seconds
 
@@ -2243,29 +2289,65 @@ Runtime State mutations found already on disk, by where that was decided and how
 
 ## alarmd_state_cache_budget_bytes
 
-The most the State cache may hold: the container's thirty-second, borrowed from the retained-bytes pool while no Slot has reserved it and given back when one needs it. A Query Group that would go past it or past the pool's room is kept out and read back; the resident ones stay.
+The most the State cache may hold, set once a minute: the series this replica holds (state_series_held) times a State entry's charge as the cache measures it, a quarter more, beside what the segments hold; never less than the container's thirty-second. Borrowed from the retained-bytes pool while no Slot has reserved it and given back when one needs it, or when the soft memory limit is passed. A Query Group that would go past it or past the pool's room is kept out and read back; the resident ones stay.
 
 ## alarmd_state_cache_bytes
 
 Labels: `kind`
 
-The State cache's charge: each entry's value and key rounded to their size classes plus a fixed overhead, summed, by kind - state, the Runtime State values; segment, the Plans' stable segment marks and member pages (014 B3). The two share one budget, the container's thirty-second (state_cache_budget_bytes): read their sum against it, and each kind for what it takes of it.
+The State cache's charge: each entry's value and key rounded to their size classes plus a fixed overhead, summed, by kind - state, the Runtime State values; segment, the Plans' stable segment marks and member pages (014 B3). The two share one budget (state_cache_budget_bytes): read their sum against it, and each kind for what it takes of it.
+
+## alarmd_state_cache_compact_declined_total
+
+Labels: `reason`
+
+Values a preflight read back of a stable member that the State cache kept as their bytes rather than compact, by why: legacy_frame (a record carrying stored record ids), series_guard (a record carrying a series guard), digest_shape (a digest not 64 lowercase hexadecimal characters), rebuilt_bytes (the member rebuilt to other bytes than were read back: a header written another way, by another build), rebuilt_view (it decoded to another view than the bytes did), unreadable (the bytes did not parse). Each kept as its bytes costs some four times a compact one in state_cache_bytes. Every cell exists from the start.
 
 ## alarmd_state_cache_departures_total
 
 Labels: `reason`, `kind`
 
-Entries that left the State cache, by reason and kind - state, a Runtime State value; segment, a Plan's stable segment mark or member page (014 B3); the two share the budget - : released (the Query Group stopped, was lost, declined or handed over), unknown (a write of its request ended in doubt), conflict (its write did not apply), expired, renewal_missing, untouched (neither read nor written for two of its own intervals), over_budget (its Query Group did not fit the budget: it left whole, or a write of it was not taken in), yielded (the same for what the Slots leave of the retained pool, or its Query Group given back whole for a Slot that needed the room). A group kept out is judged again once a round, by a whole round of it, so one that never fits leaves once rather than every round. Every cell exists from the start.
+Entries that left the State cache, by reason and kind - state, a Runtime State value; segment, a Plan's stable segment mark or member page (014 B3); the two share the budget - : released (the Query Group stopped, was lost, declined or handed over, or a Plan's compact table let go whole when its owner fence or activation changed), unknown (a write of its request ended in doubt), conflict (its write did not apply), expired, renewal_missing, untouched (neither read nor written for two of its own intervals), over_budget (its Query Group did not fit the budget: it left whole, or a write of it was not taken in), yielded (the same for what the Slots leave of the retained pool, or its Query Group given back whole for a Slot that needed the room), mismatch (a value a Plan's sampled round found the store no longer held as the cache did). A group kept out is judged again once a round, by a whole round of it, so one that never fits leaves once rather than every round. Every cell exists from the start.
+
+## alarmd_state_cache_entries
+
+Labels: `kind`
+
+Runtime State entries the State cache holds, by kind: written (what this process wrote), readback (what a preflight read back of a stable member its round leaves unwritten, kept as stored), compact (the same kept in its compact form). Every cell exists from the start.
+
+## alarmd_state_cache_fallback_mget_total
+
+Labels: `reason`
+
+Stable members their round leaves unwritten that a preflight read back from Redis rather than serving from the State cache, by why: absent (nothing kept: the first round after a start or a takeover, or one it left), yielded and over_budget (its Query Group kept out of the cache), expired, activation (its Plan's activation changed). The members' reads the cache exists to spare; hit low against expectation reads here first, then state_cache_readback_inserted_total's declined cells. Every cell exists from the start.
 
 ## alarmd_state_cache_lookups_total
 
 Labels: `result`
 
-Runtime State keys a load asked the write-through State cache for, by result: hit (served from what this process last wrote), or why it was read back - miss_absent (nothing kept), miss_fence (another owner fence), miss_unknown (the last write's outcome unknown), miss_expired (past its key's life less the replay age), miss_replay (a replay, retry or older Slot), miss_activation (the Plan's activation changed: moved, put back, reactivated, edited), miss_sharded (a split strategy's Plan, never served), miss_over_budget (its Query Group kept out: a round of it does not fit the budget), miss_yielded (its Query Group kept out: a round of it fits the budget but not what the Slots leave of the retained pool, or it was given back for a Slot). Every cell exists from the start, so a zero is a reading.
+Runtime State keys a load asked the write-through State cache for, by result: hit (served from what the cache holds: what this process last wrote, a stable member's value read back, or its compact entry - on a Plan's sampled round a hit is read back from the store all the same and checked against it), or why it was read back - miss_absent (nothing kept), miss_fence (another owner fence), miss_unknown (the last write's outcome unknown), miss_expired (past its key's life less the replay age), miss_replay (a replay, retry or older Slot), miss_activation (the Plan's activation changed: moved, put back, reactivated, edited), miss_sharded (a split strategy's Plan, never served), miss_over_budget (its Query Group kept out: a round of it does not fit the budget), miss_yielded (its Query Group kept out: a round of it fits the budget but not what the Slots leave of the retained pool, or it was given back for a Slot). Every cell exists from the start, so a zero is a reading.
+
+## alarmd_state_cache_member_renewed_total
+
+Labels: `result`
+
+State entries of stable members at their page's renewal, by result: renewed (the renewal found every key of its chunk, and the entries live as long as the keys now do) and dropped_missing (it found some gone, and the chunk's entries were let go: which ones is not known). Every cell exists from the start.
 
 ## alarmd_state_cache_query_groups
 
 Query Groups holding entries in the State cache.
+
+## alarmd_state_cache_readback_inserted_total
+
+Labels: `result`
+
+Records a Slot's own preflight found under its fence, by what the State cache did with them: kept (taken in, or judged against the budget as a write is), declined_not_member (not an open member of its Plan's stable segment, or a Plan of a split strategy), declined_operation (a member its round writes whole: not a normal round, the segment skip not followed, the Plan's sampled round, a stopped Plan, a page past half its life unrenewed), declined_no_renewal (a member left out whose page's last renewal leaves its key less than the replay age). Read kept against state_cache_lookups_total{result="hit"}: a member kept is served on the rounds after. Every cell exists from the start.
+
+## alarmd_state_cache_readback_verify_total
+
+Labels: `result`
+
+Values the State cache held that a Plan's sampled round of the day read from the store all the same and compared, by result: match, or mismatch (the store held another value, or none: the cache's value was let go and the round went on with the store's). Every kind of value is checked - written, read back, compact. mismatch is to be zero, every one: a state_cache_verified line names the strategy, the kind and the first field of the first; match above zero says the check ran. Both cells exist from the start.
 
 ## alarmd_state_cache_restore_declined_total
 
@@ -2308,6 +2390,12 @@ Slots whose retained bytes reached at least 95 percent of the one-object share o
 ## alarmd_state_segment_cache_drift_total
 
 Segment keys a read from Redis under the fence the State cache kept them under found other than kept - other bytes, or gone with no write or renewal saying so - beyond what a write in doubt tried to leave. The cache's claim that its owner is the keys' only writer, read against the store: zero is the second stage's bar.
+
+## alarmd_state_segment_carry_total
+
+Labels: `result`
+
+Reads of the stable segments of the State generation a Plan carries from - a Plan edited to a new generation reads a series with no record of its own under the old one, and extends it by the old book - a Plan once each load of a Slot's segments, a retry's and a supplement's too, by what they read as: carried (the book read), absent (no book under the old generation), undecodable (it did not decode: a page of it gone, the old generation's pages no longer renewed since the edit, 014 B4 H8 - its Plan is degraded undecodable, its members read as stored, GAPPED or WARMING, never normal), read_failed (the read did not answer). Zero without edits; undecodable after one is how often H8 happens.
 
 ## alarmd_state_segment_degraded_total
 
@@ -2427,11 +2515,11 @@ Runtime State mutations refused STATE_VERSION_CONFLICT, by where that was decide
 
 ## alarmd_state_witness_bytes
 
-The runtime witness cache's estimated heap, a fixed 320 B per witness for its map entry plus the digests it alone keeps alive, each rounded to its allocation. No budget charges the cache. It is bounded at 2^18 witnesses, and a Query Group's witnesses leave when this worker releases its lease. Read it against the resident heap term in the sizing table. It is an estimate from the layout, not a measurement, and leaves out the Plan identity every series of a Plan shares.
+The runtime witness cache's estimated heap, a fixed 320 B per witness for its map entry plus the digests it alone keeps alive, each rounded to its allocation. No budget charges the cache. It is bounded at 2^18 witnesses; a Slot's witnesses leave as each of its attempts ends, and a Query Group's when this worker releases its lease, so between rounds it reads zero. Read it against the resident heap term in the sizing table. It is an estimate from the layout, not a measurement, and leaves out the Plan identity every series of a Plan shares.
 
 ## alarmd_state_witness_items
 
-Preflight witnesses held in the runtime witness cache, kept from a Slot's load of Runtime State to its apply so the write compares without reading the value again. No budget charges the cache. It is bounded at 2^18 witnesses and 4096 Query Groups, the least recently filled Query Group evicted first, and a Query Group's witnesses leave when this worker releases its lease. Read with state_witness_bytes against the resident heap term in the sizing table.
+Preflight witnesses held in the runtime witness cache, kept from a Slot's load of Runtime State to its apply so the write compares without reading the value again. No budget charges the cache. It is bounded at 2^18 witnesses and 4096 Query Groups, the least recently filled Query Group evicted first; a Slot's witnesses leave as each of its attempts ends, those its writes did not take with them, and a Query Group's when this worker releases its lease - so between rounds it reads zero, and above zero only while an attempt runs. Read with state_witness_bytes against the resident heap term in the sizing table.
 
 ## alarmd_state_write_reuse_total
 

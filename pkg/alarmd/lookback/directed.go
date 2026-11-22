@@ -80,7 +80,7 @@ const (
 
 // DirectedUnobservedReasons is every reason.
 var DirectedUnobservedReasons = []string{UnobservedYielded, UnobservedReadFailed, UnobservedFirstReadIncomplete,
-	UnobservedMultiQuery, UnobservedMemoryRefused, UnobservedNamedOutputs}
+	UnobservedMultiQuery, UnobservedMemoryRefused, UnobservedNamedOutputs, UnobservedRestoredUnplanned, UnobservedNoSliceShape}
 
 // Series outcomes of the supplements that ran, closed: the names
 // execution.SupplementFacts counts, and the points the admitted ones were
@@ -109,8 +109,11 @@ type SupplementJob struct {
 	QueryGroup     execution.QueryGroupIdentity
 	EvaluationTime execution.EvaluationTime
 	Series         []execution.SeriesIdentityDigest
-	Read           *KeptRead
-	Deadline       time.Time
+	// All is a supplement of every series of Read, Series empty: a Slot
+	// handed over, read again without its first read's series (handover.go).
+	All      bool
+	Read     *KeptRead
+	Deadline time.Time
 	// ReadHoldMillis is the read hold the Slot was frozen with (its first
 	// read's contract): the supplement freezes it again with the same one,
 	// so it is the contract the Slot ran under, with the same deadlines.
@@ -240,6 +243,9 @@ type directedQuery struct {
 	first    *seriesSet
 	complete bool
 	finished bool
+	// covered, on a restored Slot's query, says a series of its reread was
+	// decided at the Slot already (RestoredPlan.Covered).
+	covered func(execution.SeriesIdentityDigest, int64) bool
 	// slot is the Slot it is a read of, begunAt when it began.
 	slot    *directedSlot
 	begunAt time.Time
@@ -258,6 +264,9 @@ type directedSlot struct {
 	queries    []*directedQuery
 	running    bool
 	dropped    bool
+	// awaitingShape is a restored Slot waiting for the slices its Query
+	// Group is read in here (respec).
+	awaitingShape bool
 	// period is the directed reads the Slot was opened in: a window that
 	// ends after they did still supplements its late series, and is not
 	// counted into the reports of the reads that came after.
@@ -285,6 +294,10 @@ type directedSlot struct {
 	// whether that reading was counted among its Query Group's.
 	sliceTook   time.Duration
 	tookCounted bool
+	// restored is a Slot its previous owner handed over (handover.go): its
+	// first read was not here, and its queries are planned again when its
+	// reread is due.
+	restored bool
 }
 
 // supplementTally is what a directed Query Group's Slots came to since it
@@ -390,9 +403,35 @@ func (engine *Engine) completeDirectedLocked(captured *directedQuery, completion
 func (engine *Engine) dueDirectedLocked(state *group, now time.Time) []*directedSlot {
 	var oldest *directedSlot
 	running := false
+	// A restored Slot waiting for its Query Group's slices holds every later
+	// Slot of the group back: one supplemented first would move a series
+	// late in both past it, and its own supplement would find it decided.
+	// It is read the Step the slices are known, its rung's delay long past,
+	// and let go once its ladder's deepest rung's window is over.
+	var waiting *directedSlot
+	for _, slot := range state.directed {
+		if slot.awaitingShape && (waiting == nil || slot.evaluation < waiting.evaluation) {
+			waiting = slot
+		}
+	}
 	for evaluation, slot := range state.directed {
 		if slot.running {
 			running = true
+			continue
+		}
+		if slot.awaitingShape {
+			last := len(RungSteps) - 1
+			if now.After(slot.readAt.Add(rungDelay(last, slot.step) + rungWindow(last, slot.step))) {
+				engine.counts.handoverSlots[HandoverSlotNoSliceShape]++
+				engine.fileWindowLocked(state, slot, DirectedUnobserved, UnobservedNoSliceShape, rungRead{})
+				delete(state.directed, evaluation)
+				continue
+			}
+			if known := engine.options.ShapeKnown; known == nil || known(slot.queryGroup) {
+				if oldest == nil || slot.evaluation < oldest.evaluation {
+					oldest = slot
+				}
+			}
 			continue
 		}
 		if slot.early != nil && !slot.early.done {
@@ -407,6 +446,8 @@ func (engine *Engine) dueDirectedLocked(state *group, now time.Time) []*directed
 		switch {
 		case now.After(at.Add(rungWindow(slot.rung, slot.step))):
 			reason = UnobservedYielded
+		case slot.restored && len(slot.queries) == 0:
+			// Planned again as its reread runs (respec).
 		case len(slot.queries) == 0:
 			reason = UnobservedFirstReadIncomplete
 		case slot.physicalQueries() != 1:
@@ -429,6 +470,9 @@ func (engine *Engine) dueDirectedLocked(state *group, now time.Time) []*directed
 		if reason != "" {
 			engine.fileWindowLocked(state, slot, DirectedUnobserved, reason, rungRead{})
 			delete(state.directed, evaluation)
+			continue
+		}
+		if waiting != nil && slot.evaluation > waiting.evaluation {
 			continue
 		}
 		if oldest == nil || slot.evaluation < oldest.evaluation {
@@ -458,6 +502,7 @@ func (engine *Engine) noteDirectedLocked(state *group, slot *directedSlot, outco
 		return
 	}
 	engine.counts.supplementPoints[slot.source] += facts.Points
+	engine.counts.supplementGenerationMoved[slot.source] += uint64(facts.GenerationMoved)
 	for outcome, n := range seriesOutcomes(*facts) {
 		engine.counts.supplementSeries[key2(slot.source, outcome)] += uint64(n)
 	}
@@ -468,6 +513,7 @@ func (engine *Engine) noteDirectedLocked(state *group, slot *directedSlot, outco
 	sum.CrossedT += facts.CrossedT
 	sum.NoDataFact += facts.NoDataFact
 	sum.ConfigDrift += facts.ConfigDrift
+	sum.GenerationMoved += facts.GenerationMoved
 	sum.InputIncomplete += facts.InputIncomplete
 	sum.Withheld += facts.Withheld
 }
@@ -481,7 +527,11 @@ func seriesOutcomes(facts execution.SupplementFacts) map[string]int {
 // keptSink keeps, of a directed read, the series its first read did not
 // have, and counts the bytes the read delivered.
 type keptSink struct {
-	first      map[uint64]struct{}
+	first map[uint64]struct{}
+	// covered drops a series decided at the Slot already (a restored Slot's,
+	// directedQuery.covered), counted in dropped.
+	covered    func(execution.SeriesIdentityDigest, int64) bool
+	dropped    uint64
 	admit      func(bytes uint64) bool
 	bytes      uint64
 	batches    []execution.ProviderSeriesBatch
@@ -503,6 +553,18 @@ func (sink *keptSink) ConsumeProviderSeries(_ context.Context, batch execution.P
 	identity := record.DimensionIdentityDigest()
 	if _, had := sink.first[hashString(identity)]; had {
 		return nil
+	}
+	if sink.covered != nil {
+		last := int64(0)
+		for index := 0; index < batch.Dataset.Len(); index++ {
+			if point, ok := batch.Dataset.Record(index); ok && point.SourceTime() > last {
+				last = point.SourceTime()
+			}
+		}
+		if sink.covered(execution.SeriesIdentityDigest(identity), last) {
+			sink.dropped++
+			return nil
+		}
 	}
 	// What a kept series holds is its Dataset's RetainedBytes; the line is
 	// asked for room as it doubles, as a series table's is.
@@ -586,7 +648,7 @@ func (engine *Engine) rereadSlices(readCtx context.Context, slot *directedSlot) 
 	}
 	engine.mu.Unlock()
 	for index, query := range queries {
-		sink := &keptSink{first: firsts[index], admit: engine.options.Memory}
+		sink := &keptSink{first: firsts[index], admit: engine.options.Memory, covered: query.covered}
 		var read execution.ProviderCompletion
 		read, err = engine.options.Recheck(execution.WithInputSlice(readCtx, query.slice), query.spec, sink)
 		if index == 0 || err == nil && read.Completeness != execution.CompletenessFull {
@@ -614,6 +676,7 @@ func mergeKeptSinks(sinks []*keptSink) *keptSink {
 	merged := &keptSink{}
 	for _, sink := range sinks {
 		merged.bytes += sink.bytes
+		merged.dropped += sink.dropped
 		if merged.invalid == nil && sink.invalid != nil {
 			merged.invalid = sink.invalid
 		}
@@ -646,6 +709,27 @@ func mergeKeptSinks(sinks []*keptSink) *keptSink {
 // runs: a supplement reads nothing, and it waits for nothing but its own
 // Query Group's flight.
 func (engine *Engine) directedRead(ctx context.Context, slot *directedSlot, release func(), yield <-chan struct{}) {
+	if slot.restored && len(slot.queries) == 0 {
+		reason, deferred := engine.respec(ctx, slot)
+		if deferred {
+			// Waiting for the Query Group's slices (respec), where it is.
+			release()
+			engine.mu.Lock()
+			slot.running = false
+			engine.mu.Unlock()
+			return
+		}
+		if reason != "" {
+			release()
+			engine.mu.Lock()
+			defer engine.mu.Unlock()
+			if state := engine.groups[slot.queryGroup]; state != nil && !slot.dropped {
+				engine.fileWindowLocked(state, slot, DirectedUnobserved, reason, rungRead{})
+				delete(state.directed, slot.evaluation)
+			}
+			return
+		}
+	}
 	readCtx, cancel := context.WithTimeout(ctx, engine.slotRereadTimeout(slot))
 	back := make(chan struct{})
 	if yield != nil {
@@ -664,6 +748,10 @@ func (engine *Engine) directedRead(ctx context.Context, slot *directedSlot, rele
 	merged := mergeKeptSinks(sinks)
 	engine.mu.Lock()
 	engine.counts.directedBytes[slot.source] += merged.bytes
+	if slot.restored {
+		// Decided at the Slot by their segments, dropped as they streamed.
+		engine.counts.restoredDedup[RestoredDedupSegment] += merged.dropped
+	}
 	state := engine.groups[slot.queryGroup]
 	if slot.dropped || state == nil {
 		engine.mu.Unlock()
@@ -704,9 +792,14 @@ func (engine *Engine) directedRead(ctx context.Context, slot *directedSlot, rele
 	deadline := slot.readAt.Add(rungDelay(slot.rung, slot.step) + rungWindow(slot.rung, slot.step))
 	engine.mu.Unlock()
 
-	outcome := engine.options.Supplement(ctx, SupplementJob{QueryGroup: slot.queryGroup, EvaluationTime: slot.evaluation,
-		ReadHoldMillis: slot.readHold,
-		Series:         series, Read: read, Deadline: deadline})
+	job := SupplementJob{QueryGroup: slot.queryGroup, EvaluationTime: slot.evaluation, ReadHoldMillis: slot.readHold,
+		Series: series, Read: read, Deadline: deadline}
+	if slot.restored {
+		// Every series read: its first read's are not known here, and the
+		// supplement tells those decided already (handover.go).
+		job.Series, job.All = nil, true
+	}
+	outcome := engine.options.Supplement(ctx, job)
 
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
@@ -720,6 +813,9 @@ func (engine *Engine) directedRead(ctx context.Context, slot *directedSlot, rele
 	switch {
 	case outcome.Ran:
 		rung.facts = &outcome.Facts
+		if slot.restored {
+			engine.noteRestoredLocked(outcome.Facts)
+		}
 		engine.fileWindowLocked(state, slot, DirectedSupplemented, "", rung)
 	case outcome.Refused == DirectedFlightBusy || outcome.Refused == DirectedContractExpired ||
 		outcome.Refused == DirectedKeptReadAbsent:

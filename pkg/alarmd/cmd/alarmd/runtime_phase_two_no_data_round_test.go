@@ -23,6 +23,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/legacyoutput"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
@@ -275,6 +276,13 @@ type noDataFixture struct {
 	// or not their protocol had a message for it.
 	ackedMu sync.Mutex
 	acked   []observability.Observation
+	// recorder is the process's metrics; cfg, client, now and queryGroup what
+	// a diagnostic read of one of its Slots is made with.
+	recorder   *metric.Recorder
+	cfg        config.Config
+	client     redis.Cmdable
+	now        func() time.Time
+	queryGroup execution.QueryGroupIdentity
 }
 
 // decided is the kinds the rounds decided, as the output lines count them.
@@ -425,8 +433,9 @@ func startNoDataFixtureWith(t *testing.T, protocol string, continuous int) *noDa
 	cfg.PhaseTwo.Ownership.LeaseRenewInterval = config.Duration(time.Minute)
 
 	events := &recordingPhaseTwoEventSink{}
+	fixture.recorder, fixture.cfg, fixture.client, fixture.now = metric.NewRecorder(metric.BuildInfo{}), cfg, redisClient, now
 	bundle, err := openProductionPhaseTwoBundleWithDependencies(
-		ctx, cfg, metric.NewRecorder(metric.BuildInfo{}), observability.Discard(observability.ComponentRuntime),
+		ctx, cfg, fixture.recorder, observability.Discard(observability.ComponentRuntime),
 		newPhaseTwoApplicationHealth(),
 		func(client redis.Cmdable, prefix string) (controlplane.StrategySource, error) {
 			return controlplane.NewLegacyRedisStrategySource(client, prefix)
@@ -459,6 +468,7 @@ func startNoDataFixtureWith(t *testing.T, protocol string, continuous int) *noDa
 		t.Fatalf("Query Groups = %v, want one", bundle.queryGroups)
 	}
 	queryGroup := bundle.queryGroups[0]
+	fixture.queryGroup = queryGroup
 	fixture.runner = settledRunner(bundle, queryGroup)
 	fixture.events = events
 	fixture.readAt = func(evaluationAt int64) int64 {

@@ -35,20 +35,35 @@ const (
 )
 
 // readinessBucket is one five-minute bucket of an object's normal Slots:
-// how many arrived, how many with slack over 0.5 s and 2 s, the largest
-// slack and its histogram (ReadinessSlackBounds, the last cell past them),
-// how many arrived under no unified readiness moment and how many under
-// none at all, the longest Slot's wall time, and the time and times its
-// dispatches waited for an execution slot.
+// how many arrived - a Slot once, at its first read, however many slices it
+// was read in - how many with slack over 0.5 s and 2 s, the largest slack
+// and its histogram (ReadinessSlackBounds, the last cell past them), how
+// many arrived under no unified readiness moment and how many under none at
+// all, the slices the completed ones were read in, the longest Slot's wall
+// time and what it spent where, and the time and times its dispatches
+// waited for an execution slot.
 type readinessBucket struct {
-	start                int64
-	slots, over05, over2 uint32
-	notUnified, none     uint32
-	slackMax             float64
-	histogram            [12]uint32
-	wallMax              time.Duration
-	waitSeconds          float64
-	waits                uint32
+	start                 int64
+	rounds, over05, over2 uint32
+	notUnified, none      uint32
+	slices                uint64
+	slackMax              float64
+	histogram             [12]uint32
+	wallMax               time.Duration
+	slowest               readinessRound
+	waitSeconds           float64
+	waits                 uint32
+}
+
+// readinessRound is what a Slot's wall time went to, as its completion
+// reports it (observability.SlotBudgetUsageFacts): its queries' waits for
+// their answers' first byte and their answers' bodies, summed; the seams
+// between its reads, their tails and the changes into the next, summed; and
+// the slices it was read in.
+type readinessRound struct {
+	wall                                   time.Duration
+	waitMillis, bodyMillis                 uint64
+	tailMillis, changeMillis, slicesInRead uint64
 }
 
 // readinessWindow is an object's buckets, a ring indexed by the bucket's
@@ -107,7 +122,7 @@ func (tracker *Tracker) noteReadiness(queryGroup string, slot int64, observation
 			window.lastSlot = slot
 		}
 		b := window.bucket(now)
-		b.slots++
+		b.rounds++
 		if facts.Boundary != observability.ReadinessBoundaryUnified {
 			b.notUnified++
 		}
@@ -134,37 +149,66 @@ func (tracker *Tracker) noteReadiness(queryGroup string, slot int64, observation
 			b.waitSeconds += wait.WaitMillis / 1000
 		}
 	case observability.StageSlotCompleted:
-		if observation.Operation == observability.OperationNormal && observation.Duration > 0 {
-			b := window.bucket(now)
-			b.wallMax = max(b.wallMax, observation.Duration)
+		if observation.Operation != observability.OperationNormal || observation.Duration <= 0 {
+			return
+		}
+		b := window.bucket(now)
+		var round readinessRound
+		if usage := observation.SlotBudgetUsage; usage != nil {
+			round = readinessRound{waitMillis: usage.QueryWaitMillis, bodyMillis: usage.QueryBodyMillis,
+				tailMillis: usage.InputSliceTailMillis, changeMillis: usage.InputSliceChangeMillis, slicesInRead: usage.InputSlices}
+			b.slices += usage.InputSlices
+		}
+		if observation.Duration > b.wallMax {
+			round.wall = observation.Duration
+			b.wallMax, b.slowest = observation.Duration, round
 		}
 	}
 }
 
 // ReadinessSlackFacts is one object's normal Slots over the last hour, or
-// since WindowStart when this process has run less: how many read their
-// data, how many with slack past 0.5 s and 2 s, the largest slack and its
-// p99 (the bound of the histogram bucket it falls in, an approximation,
-// never past the largest), the readiness boundary they read under (unified
-// when every one had one moment, none when none waited on data, mixed
-// otherwise), its period and the series its Plans bound, the longest
-// Slot's wall time, and what its dispatches waited for an execution slot.
-// Replica is the replica that holds it, set on the deployment's list.
+// since WindowStart when this process has run less: how many rounds read
+// their data - a Slot once, at its first read - and the slices the
+// completed ones were read in, how many with slack past 0.5 s and 2 s, the
+// largest slack and its p99 (the bound of the histogram bucket it falls in,
+// an approximation, never past the largest), the readiness boundary they
+// read under (unified when every one had one moment, none when none waited
+// on data, mixed otherwise), its period and the series its Plans bound, the
+// longest Slot's wall time and what it spent where (SlowestRound), and what
+// its dispatches waited for an execution slot. Replica is the replica that
+// holds it, set on the deployment's list.
 type ReadinessSlackFacts struct {
 	QueryGroup      string     `json:"query_group"`
 	PeriodSeconds   *int64     `json:"period_seconds"`
 	Series          uint64     `json:"series"`
-	Slots           uint32     `json:"slots"`
-	SlotsOverHalf   uint32     `json:"slots_over_0_5s"`
-	SlotsOver2      uint32     `json:"slots_over_2s"`
+	Rounds          uint32     `json:"rounds"`
+	Slices          uint64     `json:"slices"`
+	RoundsOverHalf  uint32     `json:"rounds_over_0_5s"`
+	RoundsOver2     uint32     `json:"rounds_over_2s"`
 	SlackMaxSeconds float64    `json:"slack_max_seconds"`
 	SlackP99Seconds float64    `json:"slack_p99_seconds"`
 	Boundary        string     `json:"boundary"`
 	WallMaxSeconds  float64    `json:"wall_max_seconds"`
+	SlowestRound    *SlowRound `json:"slowest_round,omitempty"`
 	SlotWaitSeconds float64    `json:"slot_wait_seconds"`
 	SlotWaits       uint32     `json:"slot_waits"`
 	WindowStart     *time.Time `json:"window_start,omitempty"`
 	Replica         string     `json:"replica,omitempty"`
+}
+
+// SlowRound is what the object's slowest round in the window spent its wall
+// time on: its queries' waits for their answers' first byte and their
+// answers' bodies, summed over the queries of every read; the tails of its
+// reads, after their last series, and the changes into the next read,
+// summed; and the slices it was read in. Read against WallSeconds: what is
+// left is evaluation and writing.
+type SlowRound struct {
+	WallSeconds        float64 `json:"wall_seconds"`
+	QueryWaitSeconds   float64 `json:"query_wait_seconds"`
+	QueryBodySeconds   float64 `json:"query_body_seconds"`
+	InputTailSeconds   float64 `json:"input_tail_seconds"`
+	InputChangeSeconds float64 `json:"input_change_seconds"`
+	Slices             uint64  `json:"slices"`
 }
 
 // ReadinessSlack is the held objects' normal Slots over the last hour - or
@@ -193,34 +237,42 @@ func (tracker *Tracker) ReadinessSlack(held []string, startedAt time.Time, withi
 		window := state.readiness
 		var merged readinessBucket
 		for _, b := range window.buckets {
-			if b.start < from || b.slots == 0 && b.waits == 0 && b.wallMax == 0 {
+			if b.start < from || b.rounds == 0 && b.waits == 0 && b.wallMax == 0 {
 				continue
 			}
-			merged.slots += b.slots
+			merged.rounds += b.rounds
+			merged.slices += b.slices
 			merged.over05 += b.over05
 			merged.over2 += b.over2
 			merged.notUnified += b.notUnified
 			merged.none += b.none
 			merged.slackMax = max(merged.slackMax, b.slackMax)
-			merged.wallMax = max(merged.wallMax, b.wallMax)
+			if b.wallMax > merged.wallMax {
+				merged.wallMax, merged.slowest = b.wallMax, b.slowest
+			}
 			merged.waitSeconds += b.waitSeconds
 			merged.waits += b.waits
 			for cell, count := range b.histogram {
 				merged.histogram[cell] += count
 			}
 		}
-		if merged.slots == 0 {
+		if merged.rounds == 0 {
 			continue
 		}
 		row := ReadinessSlackFacts{QueryGroup: queryGroup, Series: tracker.seriesMatchedLocked(queryGroup, since),
-			Slots: merged.slots, SlotsOverHalf: merged.over05, SlotsOver2: merged.over2, SlackMaxSeconds: merged.slackMax,
-			SlackP99Seconds: histogramP99(merged.histogram, merged.slackMax), WallMaxSeconds: merged.wallMax.Seconds(),
-			SlotWaitSeconds: merged.waitSeconds, SlotWaits: merged.waits, WindowStart: windowStart,
-			Boundary: observability.ReadinessBoundaryMixed}
+			Rounds: merged.rounds, Slices: merged.slices, RoundsOverHalf: merged.over05, RoundsOver2: merged.over2,
+			SlackMaxSeconds: merged.slackMax, SlackP99Seconds: histogramP99(merged.histogram, merged.slackMax),
+			WallMaxSeconds: merged.wallMax.Seconds(), SlotWaitSeconds: merged.waitSeconds, SlotWaits: merged.waits,
+			WindowStart: windowStart, Boundary: observability.ReadinessBoundaryMixed}
+		if slowest := merged.slowest; slowest.wall > 0 {
+			row.SlowestRound = &SlowRound{WallSeconds: slowest.wall.Seconds(), QueryWaitSeconds: float64(slowest.waitMillis) / 1000,
+				QueryBodySeconds: float64(slowest.bodyMillis) / 1000, InputTailSeconds: float64(slowest.tailMillis) / 1000,
+				InputChangeSeconds: float64(slowest.changeMillis) / 1000, Slices: slowest.slicesInRead}
+		}
 		switch {
 		case merged.notUnified == 0:
 			row.Boundary = observability.ReadinessBoundaryUnified
-		case merged.none == merged.slots:
+		case merged.none == merged.rounds:
 			row.Boundary = observability.ReadinessBoundaryNone
 		}
 		if period := cmp.Or(window.interval, window.leastDistance); period > 0 {
@@ -257,10 +309,10 @@ func histogramP99(histogram [12]uint32, largest float64) float64 {
 	return largest
 }
 
-// mostSlackFirst orders objects by their Slots with slack past 2 s, the most
-// first, then by their largest slack, then by replica and name.
+// mostSlackFirst orders objects by their rounds with slack past 2 s, the
+// most first, then by their largest slack, then by replica and name.
 func mostSlackFirst(a, b ReadinessSlackFacts) int {
-	return cmp.Or(cmp.Compare(b.SlotsOver2, a.SlotsOver2), cmp.Compare(b.SlackMaxSeconds, a.SlackMaxSeconds),
+	return cmp.Or(cmp.Compare(b.RoundsOver2, a.RoundsOver2), cmp.Compare(b.SlackMaxSeconds, a.SlackMaxSeconds),
 		cmp.Compare(a.Replica, b.Replica), cmp.Compare(a.QueryGroup, b.QueryGroup))
 }
 

@@ -27,7 +27,20 @@ type handoverMetrics struct {
 	// tierPaused counts the control rounds a fallback Leader ran without
 	// the second tier's functions, by function.
 	tierPaused *prometheus.CounterVec
+	// ledgers counts the handover ledgers written and read, by result;
+	// ledgerOwn the open alerts they carried, by direction.
+	ledgers   *prometheus.CounterVec
+	ledgerOwn *prometheus.CounterVec
 }
+
+// What a handover ledger's open alerts were, closed: exported, written down
+// for the next owner; imported, taken from the previous one.
+const (
+	HandoverLedgerOwnExported = "exported"
+	HandoverLedgerOwnImported = "imported"
+)
+
+var handoverLedgerOwnDirections = []string{HandoverLedgerOwnExported, HandoverLedgerOwnImported}
 
 // ControlTierLookbackPlanning is the second-tier control function that plans
 // the lookback; ControlTierFunctions every such function, closed.
@@ -93,6 +106,36 @@ func newHandoverMetrics() handoverMetrics {
 			"the functions only the preferred control process runs, which detection never depends on. Non-zero " +
 			"while a Worker holds the control lease for want of a control process; it stops when control is handed back.",
 	}, []string{"function"})
+	metrics.ledgers = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: metricSubsystem, Name: "handover_ledger_total",
+		Help: "Query Groups' handover ledgers, by result: what a process that lets a Query Group go (moved away, " +
+			"declined, stopping, or opened and never started) writes under the Query Group's fence before it " +
+			"releases the lease, and its next owner reads once it holds it. It carries what the lookback had of the " +
+			"Query Group - its Slots on the reread ladder and its series_late state - written wherever the process " +
+			"runs a lookback, and the recovery gate's record of the open alerts where that gate answers from its own " +
+			"record (recovery_gate_source{source=\"own\"}: without it the next owner holds every RECOVERY of an alert " +
+			"the previous one opened); where the gate answers from the link's copy, that part is empty. On the writer: " +
+			"written; empty (nothing to hand " +
+			"over, nothing written); write_failed (refused by the fence - the handover's grace ran out first - or " +
+			"Redis failed: the next owner does as before the ledger). On the reader, for each Query Group taken " +
+			"over - not one this process rebuilt, which it held the epoch before: loaded; absent; stale (left by an " +
+			"owner before the previous one, which left none: not read); unreadable; read_failed. Every result has " +
+			"a series at startup; loaded is read against the previous owners' written." +
+			" Reader: the release acceptance, from /metrics after each deploy.",
+	}, []string{"result"})
+	metrics.ledgerOwn = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: metricSubsystem, Name: "handover_ledger_open_alerts_total",
+		Help: "Open alerts the handover ledgers carried, by direction: exported (written for the next owner) and " +
+			"imported (taken from the previous one into the recovery gate's record; one the record already held " +
+			"from a later ABNORMAL is not counted). Both series exist from startup." +
+			" Reader: the release acceptance, from /metrics after each deploy.",
+	}, []string{"direction"})
+	for _, result := range observability.HandoverLedgerResults {
+		metrics.ledgers.WithLabelValues(result)
+	}
+	for _, direction := range handoverLedgerOwnDirections {
+		metrics.ledgerOwn.WithLabelValues(direction)
+	}
 	for _, function := range ControlTierFunctions {
 		metrics.tierPaused.WithLabelValues(function)
 	}
@@ -121,7 +164,22 @@ func handoverDrainOutcomes() []string {
 }
 
 func (m handoverMetrics) collectors() []prometheus.Collector {
-	return []prometheus.Collector{m.drains, m.drainSeconds, m.outputUnapplied, m.executionsHung, m.tierPaused}
+	return []prometheus.Collector{m.drains, m.drainSeconds, m.outputUnapplied, m.executionsHung, m.tierPaused, m.ledgers, m.ledgerOwn}
+}
+
+// RecordHandoverLedger counts one handover ledger written or read, and the
+// open alerts it carried (exported on a write, imported on a read).
+func (r *Recorder) RecordHandoverLedger(result string, exported, imported int) {
+	if r == nil || !knownLabel(observability.HandoverLedgerResults, result) {
+		return
+	}
+	r.phaseTwo.handover.ledgers.WithLabelValues(result).Inc()
+	if exported > 0 {
+		r.phaseTwo.handover.ledgerOwn.WithLabelValues(HandoverLedgerOwnExported).Add(float64(exported))
+	}
+	if imported > 0 {
+		r.phaseTwo.handover.ledgerOwn.WithLabelValues(HandoverLedgerOwnImported).Add(float64(imported))
+	}
 }
 
 // RecordHandoverDrain counts one planned handover's wait for its Slot.

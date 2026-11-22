@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -124,9 +125,19 @@ func TestAnExecutionHungPastItsOwnDeadlineIsDeclinedUntilItReturns(t *testing.T)
 	hung.runner.marker.Enter(execution.SlotStageQuery)
 	hung.runner.marker.Extend(deadline, deadline)
 
+	var missesMu sync.Mutex
+	var misses []execution.QueryGroupIdentity
+	hung.bundle.dependencies.ForgetOpenAlertMisses = func(queryGroup execution.QueryGroupIdentity) {
+		missesMu.Lock()
+		misses = append(misses, queryGroup)
+		missesMu.Unlock()
+	}
 	// Inside the grace: nothing happens.
 	hung.bundle.declineHungExecutions(deadline.Add(executionPastDeadlineGrace / 2))
 	hung.stillHeld(t, "inside the grace")
+	if forgotten := forgottenTakeovers(hung.owner); len(forgotten) != 0 {
+		t.Fatalf("takeovers forgotten inside the grace: %v", forgotten)
+	}
 	// Past it: declined.
 	hung.bundle.declineHungExecutions(deadline.Add(executionPastDeadlineGrace + time.Second))
 	bound := testwait.Deadline(t)
@@ -135,6 +146,17 @@ func TestAnExecutionHungPastItsOwnDeadlineIsDeclinedUntilItReturns(t *testing.T)
 	}
 	if released := hung.runner.released.Load(); released != 1 {
 		t.Fatalf("release calls = %d, want the lease released once without waiting on the hung Slot", released)
+	}
+	// Let go of, its return is a takeover: forgotten once the lease is back.
+	testwait.Until(t, "the declined Query Group's takeover forgotten", func() bool { return len(forgottenTakeovers(hung.owner)) > 0 })
+	if forgotten := forgottenTakeovers(hung.owner); len(forgotten) != 1 || forgotten[0] != hung.queryGroup {
+		t.Fatalf("takeovers forgotten %v, want the declined Query Group's once", forgotten)
+	}
+	missesMu.Lock()
+	letGo := append([]execution.QueryGroupIdentity(nil), misses...)
+	missesMu.Unlock()
+	if len(letGo) != 1 || letGo[0] != hung.queryGroup {
+		t.Fatalf("open-alert misses let go of for %v, want the declined Query Group's once", letGo)
 	}
 	if heldRunner(hung.bundle, hung.queryGroup) != nil {
 		t.Fatal("the declined Query Group is still a current runner")

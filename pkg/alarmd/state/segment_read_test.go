@@ -16,6 +16,7 @@ import (
 	"go/token"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -120,7 +121,10 @@ func TestAMembersRecordReadsTheSameFromTheCacheTheStoreAndACarry(t *testing.T) {
 // beside them would read a member as its stored points only - its segment's
 // normal points a gap - and nothing else would say so.
 func TestOneFunctionTurnsAStoredRecordIntoAView(t *testing.T) {
-	allowed := map[string]string{"decodeRuntimePacked": "decodeRuntimeCovered", "decodeRuntimeCovered": "decodeRuntime"}
+	// decodedForCompare reads a record's bytes for the State cache to compare
+	// what it keeps with, and hands its view to no reader.
+	allowed := map[string][]string{"decodeRuntimePacked": {"decodeRuntimeCovered", "decodedForCompare"},
+		"decodeRuntimeCovered": {"decodeRuntime"}}
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatal(err)
@@ -150,13 +154,13 @@ func TestOneFunctionTurnsAStoredRecordIntoAView(t *testing.T) {
 				if !ok {
 					return true
 				}
-				caller, ruled := allowed[identifier.Name]
+				callers, ruled := allowed[identifier.Name]
 				if !ruled {
 					return true
 				}
-				if function.Name.Name != caller {
+				if !slices.Contains(callers, function.Name.Name) {
 					t.Errorf("%s:%d: %s calls %s; a stored record becomes a view in %s alone",
-						name, fileSet.Position(call.Pos()).Line, function.Name.Name, identifier.Name, caller)
+						name, fileSet.Position(call.Pos()).Line, function.Name.Name, identifier.Name, callers[0])
 				}
 				found[identifier.Name] = true
 				return true

@@ -36,13 +36,16 @@ func newStateWitnessCollector() *stateWitnessCollector {
 			"Preflight witnesses held in the runtime witness cache, kept from a Slot's load of Runtime State to its "+
 				"apply so the write compares without reading the value again. No budget charges the cache. It is "+
 				"bounded at 2^18 witnesses and 4096 Query Groups, the least recently filled Query Group evicted "+
-				"first, and a Query Group's witnesses leave when this worker releases its lease. Read with "+
+				"first; a Slot's witnesses leave as each of its attempts ends, those its writes did not take with "+
+				"them, and a Query Group's when this worker releases its lease - so between rounds it reads zero, "+
+				"and above zero only while an attempt runs. Read with "+
 				"state_witness_bytes against the resident heap term in the sizing table."),
 		bytes: descriptor("state_witness_bytes",
 			"The runtime witness cache's estimated heap, a fixed 320 B per witness for its map entry plus the "+
 				"digests it alone keeps alive, each rounded to its allocation. No budget charges the cache. It is "+
-				"bounded at 2^18 witnesses, and a Query Group's witnesses leave when this worker releases its "+
-				"lease. Read it against the resident heap term in the sizing table. It is an estimate from the "+
+				"bounded at 2^18 witnesses; a Slot's witnesses leave as each of its attempts ends, and a Query "+
+				"Group's when this worker releases its lease, so between rounds it reads zero. Read it against the "+
+				"resident heap term in the sizing table. It is an estimate from the "+
 				"layout, not a measurement, and leaves out the Plan identity every series of a Plan shares."),
 	}
 }

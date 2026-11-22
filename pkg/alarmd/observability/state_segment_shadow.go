@@ -231,6 +231,24 @@ const (
 	SegmentDegradedStopped     = "stopped"
 )
 
+// Carries, closed: what the stable segments of the State generation a Plan
+// carries from read as, a Plan once a Slot (014 B4 H8). carried: its book
+// read, its members extended as any read is; absent: no book under it;
+// undecodable: the book did not decode - a page of it gone, its pages no
+// longer renewed since the edit; read_failed: the read did not answer.
+const (
+	SegmentCarryCarried     = "carried"
+	SegmentCarryAbsent      = "absent"
+	SegmentCarryUndecodable = "undecodable"
+	SegmentCarryReadFailed  = "read_failed"
+)
+
+// AllSegmentCarries is every carry result, the cells the counter has from
+// the start.
+func AllSegmentCarries() []string {
+	return []string{SegmentCarryCarried, SegmentCarryAbsent, SegmentCarryUndecodable, SegmentCarryReadFailed}
+}
+
 // AllSegmentDegradations is every degradation, the cells the counter has
 // from the start.
 func AllSegmentDegradations() []string {
@@ -333,6 +351,9 @@ type SegmentShadowFacts struct {
 	// Degraded is the Plans whose segments the Slot could not use as
 	// written, by why (AllSegmentDegradations).
 	Degraded map[string]int64 `json:"degraded,omitempty"`
+	// Carries is the Plans' reads of the generation they carry from, by what
+	// they read as (AllSegmentCarries).
+	Carries map[string]int64 `json:"carries,omitempty"`
 	// NotSkipped is the members compared a match and written all the same, by
 	// the first gate that kept them written (AllSegmentNotSkippedGates).
 	NotSkipped map[SegmentNotSkippedKey]int64 `json:"not_skipped,omitempty"`
@@ -480,7 +501,19 @@ func (facts *SegmentShadowFacts) Pages(class string, pages, bytes int64) {
 func (facts SegmentShadowFacts) Empty() bool {
 	return len(facts.Outcomes) == 0 && len(facts.Members) == 0 && len(facts.PageWrites) == 0 && len(facts.Skipped) == 0 &&
 		len(facts.Renewals) == 0 && len(facts.SkipFlagIgnored) == 0 && len(facts.Samples) == 0 && len(facts.Degraded) == 0 &&
-		len(facts.RenewScripts) == 0 && len(facts.NotSkipped) == 0 && len(facts.Rounds) == 0
+		len(facts.RenewScripts) == 0 && len(facts.NotSkipped) == 0 && len(facts.Rounds) == 0 && len(facts.Carries) == 0
+}
+
+// Carry counts a Plan's carry read as result, one outside the closed list
+// not counted.
+func (facts *SegmentShadowFacts) Carry(result string) {
+	if !slices.Contains(AllSegmentCarries(), result) {
+		return
+	}
+	if facts.Carries == nil {
+		facts.Carries = map[string]int64{}
+	}
+	facts.Carries[result]++
 }
 
 func normalizeSegmentShadowOutcome(outcome SegmentShadowOutcome) SegmentShadowOutcome {

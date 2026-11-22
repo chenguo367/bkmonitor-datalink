@@ -207,6 +207,9 @@ func (*convergeObservingPorts) CommitProgress(context.Context, execution.Progres
 	return execution.ProgressCommitResult{Status: execution.ProgressCommitted}, nil
 }
 
+// ReleaseSlotWitnesses keeps no witnesses to let go of.
+func (*convergeObservingPorts) ReleaseSlotWitnesses(execution.SlotIdentity) {}
+
 func (*convergeObservingPorts) RenewFrozenRuntime(
 	_ context.Context, request execution.FrozenStateRenewalRequest,
 ) (execution.FrozenStateRenewalResult, error) {

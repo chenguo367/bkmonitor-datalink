@@ -497,6 +497,14 @@ type phaseTwoOwnershipRuntime interface {
 	// old, and nothing read it again until the new owner's own write
 	// conflicted.
 	LoadOpened(context.Context, []execution.QueryGroupIdentity)
+	// ForgetTakeover lets go of when this process took a Query Group over
+	// (scheduler.TakeoverClock.Forget), for one it let go of - moved away or
+	// declined - once its Runner stopped and its lease was given back: given
+	// back to this process before anyone else acquired it, it comes back one
+	// epoch later and is a takeover all the same. Required: a Query Group
+	// read as rebuilt here would give up for distance the Slots due while
+	// nobody here could run them.
+	ForgetTakeover(execution.QueryGroupIdentity)
 	Close() error
 }
 
@@ -693,6 +701,10 @@ type phaseTwoWorkerBundleDependencies struct {
 	// into the process copy and brings what evaluates by it up to date; run
 	// once at start and then once a minute.
 	RefreshPlatformSettings func(context.Context)
+	// SizeStateCache sizes the State cache by the series this replica holds
+	// and gives back what the soft limit is passed by (014 next7 3.4), once a
+	// minute; nil without a cache.
+	SizeStateCache func()
 	// PublishFleet writes this replica's contribution to them.
 	FleetAPI http.Handler
 	// NoDataCloseAPI records manual closes of no-data alerts (decision-024),
@@ -718,6 +730,18 @@ type phaseTwoWorkerBundleDependencies struct {
 	// State cache when this process starts, stops, declines or hands it over;
 	// nil where there is no cache.
 	DropStateCache func(execution.QueryGroupIdentity)
+	// ForgetOpenAlertMisses lets go of what the link's active-alert copy
+	// judged missed for a Query Group's strategies when this process lets
+	// it go (activecopy.Copy.ForgetMisses); nil without a copy.
+	ForgetOpenAlertMisses func(execution.QueryGroupIdentity)
+	// WriteHandoverLedger writes a Query Group's handover ledger as this
+	// process lets it go - moved away, declined, stopping, or opened and not
+	// started - after its last Slot here and before its release; nil where
+	// there is nothing to hand over (productionHandoverLedger).
+	// HoldLookbackHandover keeps what the lookback had of it as it was
+	// forgotten on its way out, for that ledger.
+	WriteHandoverLedger  func(context.Context, execution.QueryGroupIdentity)
+	HoldLookbackHandover func(execution.QueryGroupIdentity, *lookback.Handover)
 	// MeasureStores takes a census of what the stores this process writes to
 	// hold, by key family (package storecensus), while it is the Control
 	// Leader, and forgets the last one when it is not: one census for the
@@ -2939,6 +2963,7 @@ func (bundle *phaseTwoWorkerBundle) Shutdown(ctx context.Context) error {
 			}
 		}
 		for index, lifecycle := range runners {
+			bundle.writeHandoverLedger(ctx, queryGroups[index])
 			releaseErr := lifecycle.runner.Release(ctx)
 			result = append(result, releaseErr)
 			transitionResult := observability.Result(observability.ResultSuccess)
@@ -3272,6 +3297,10 @@ func (bundle *phaseTwoWorkerBundle) startMaintenance() {
 		bundle.maintenanceWG.Add(1)
 		go bundle.refreshPlatformSettings()
 	}
+	if bundle.dependencies.SizeStateCache != nil {
+		bundle.maintenanceWG.Add(1)
+		go bundle.sizeStateCache()
+	}
 	if bundle.dependencies.MeasureStores != nil {
 		bundle.maintenanceWG.Add(1)
 		go bundle.measureStores()
@@ -3318,6 +3347,23 @@ func (bundle *phaseTwoWorkerBundle) refreshPlatformSettings() {
 			return
 		case <-ticker.C:
 			bundle.dependencies.RefreshPlatformSettings(bundle.maintenanceCtx)
+		}
+	}
+}
+
+// sizeStateCache sizes the State cache once a minute (014 next7 3.4): the
+// series held move with every Query Group taken or let go, and the budget
+// with them.
+func (bundle *phaseTwoWorkerBundle) sizeStateCache() {
+	defer bundle.maintenanceWG.Done()
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-bundle.maintenanceCtx.Done():
+			return
+		case <-ticker.C:
+			bundle.dependencies.SizeStateCache()
 		}
 	}
 }
@@ -3633,6 +3679,8 @@ func (bundle *phaseTwoWorkerBundle) releaseUnstarted(
 	queryGroup execution.QueryGroupIdentity,
 	runner phaseTwoQueryGroupRuntime,
 ) error {
+	// What its ledger was read for goes on to the next owner.
+	bundle.writeHandoverLedger(ctx, queryGroup)
 	err := runner.Release(ctx)
 	if err != nil {
 		bundle.observeOwnership(ctx, observability.StageAssignmentLost, observability.ResultFailed, queryGroup, err)
@@ -3786,7 +3834,11 @@ func (bundle *phaseTwoWorkerBundle) handOverQueryGroup(
 	lifecycle *phaseTwoQueryGroupLifecycle,
 ) {
 	bundle.dropStateCache(queryGroup)
+	bundle.forgetOpenAlertMisses(queryGroup)
 	defer bundle.maintenanceWG.Done()
+	// Last, once the Runner has stopped and the lease was given back or let
+	// run out: a round still draining would note the epoch let go of again.
+	defer bundle.dependencies.Ownership.ForgetTakeover(queryGroup)
 	bound := bundle.dependencies.Config.ShutdownTimeout.Duration()
 	began := time.Now()
 	waited, idle := bundle.slotsInFlight(lifecycle)
@@ -3823,6 +3875,9 @@ func (bundle *phaseTwoWorkerBundle) handOverQueryGroup(
 	}
 	releaseCtx, cancel := context.WithTimeout(context.Background(), bound)
 	defer cancel()
+	// After the Runner stopped, so every Slot that ran here is in it; under
+	// the lease the move's grace still lets this process hold.
+	bundle.writeHandoverLedger(releaseCtx, queryGroup)
 	if err := lifecycle.runner.Release(releaseCtx); err != nil {
 		bundle.observeOwnership(releaseCtx, observability.StageAssignmentLost, observability.ResultFailed, queryGroup,
 			fmt.Errorf("phase-two release Query Group %s: %w", queryGroup, err))
@@ -4000,7 +4055,17 @@ func (bundle *phaseTwoWorkerBundle) removeRunnerLocked(queryGroup execution.Quer
 	bundle.setOwnedQueryGroupsLocked()
 	// A Query Group no longer owned is no longer rechecked. The lookback
 	// never takes the bundle's lock under its own, so this order is safe.
-	bundle.dependencies.Lookback.Forget(queryGroup, reason)
+	// One let go to another owner takes its lookback with it, to its ledger
+	// (014 B4 H1): on the lost paths no ledger is written.
+	switch reason {
+	case lookback.ForgottenMoved, lookback.ForgottenDeclinedHung, lookback.ForgottenShutdown:
+		handover := bundle.dependencies.Lookback.ForgetHandingOver(queryGroup, reason)
+		if hold := bundle.dependencies.HoldLookbackHandover; hold != nil {
+			hold(queryGroup, handover)
+		}
+	default:
+		bundle.dependencies.Lookback.Forget(queryGroup, reason)
+	}
 }
 
 // setOwnedQueryGroupsLocked follows every change to the owned Runner set, so
@@ -4247,7 +4312,10 @@ func (bundle *phaseTwoWorkerBundle) declineHungExecutions(now time.Time) {
 // next round rather than at the next renewal.
 func (bundle *phaseTwoWorkerBundle) declineQueryGroup(queryGroup execution.QueryGroupIdentity, entry *declinedQueryGroup) {
 	bundle.dropStateCache(queryGroup)
+	bundle.forgetOpenAlertMisses(queryGroup)
 	defer bundle.maintenanceWG.Done()
+	// As for a Query Group handed over: let go of, its return is a takeover.
+	defer bundle.dependencies.Ownership.ForgetTakeover(queryGroup)
 	bound := bundle.dependencies.Config.ShutdownTimeout.Duration()
 	lifecycle := entry.lifecycle
 	lifecycle.cancel()
@@ -4257,6 +4325,9 @@ func (bundle *phaseTwoWorkerBundle) declineQueryGroup(queryGroup execution.Query
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), bound)
 	defer cancel()
+	// The hung Slot writes nothing more once claimed (execution.EnterCommit),
+	// so what the ledger hands over is all this process did.
+	bundle.writeHandoverLedger(ctx, queryGroup)
 	releaseErr := lifecycle.runner.Release(ctx)
 	bundle.recordHungExecution(queryGroup, entry, observability.ExecutionHungDeclined, releaseErr)
 	if err := bundle.register(ctx, ownership.WorkerReady); err != nil {
@@ -5002,6 +5073,22 @@ func (dispatcher *phaseTwoRunnerDispatcher) slotsFull() bool {
 // dropStateCache takes the Query Group's entries out of the State cache
 // (fourth-batch design §4.3, rule 1): a held entry is written under a fence
 // this process no longer holds, or will hold anew.
+// forgetOpenAlertMisses lets go of the active-alert copy's misses for a
+// Query Group's strategies as this process lets it go: at once, as its
+// strategies are still known, and harmless early - a miss let go of is
+// only asked of the link again.
+func (bundle *phaseTwoWorkerBundle) writeHandoverLedger(ctx context.Context, queryGroup execution.QueryGroupIdentity) {
+	if write := bundle.dependencies.WriteHandoverLedger; write != nil {
+		write(ctx, queryGroup)
+	}
+}
+
+func (bundle *phaseTwoWorkerBundle) forgetOpenAlertMisses(queryGroup execution.QueryGroupIdentity) {
+	if forget := bundle.dependencies.ForgetOpenAlertMisses; forget != nil {
+		forget(queryGroup)
+	}
+}
+
 func (bundle *phaseTwoWorkerBundle) dropStateCache(queryGroup execution.QueryGroupIdentity) {
 	if drop := bundle.dependencies.DropStateCache; drop != nil {
 		drop(queryGroup)

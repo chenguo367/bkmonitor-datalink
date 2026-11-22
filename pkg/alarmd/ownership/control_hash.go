@@ -12,6 +12,7 @@ import (
 	"github.com/go-redis/redis/v8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisbatch"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisscript"
 )
 
@@ -84,6 +85,25 @@ func (store *RedisStore) ReadControlHash(ctx context.Context, queryGroup executi
 		return map[string]string{}, nil
 	}
 	return fields, err
+}
+
+// ReadControlHashFieldBatch reads one field of one control hash namespace
+// for many Query Groups in pipelined batches (redisbatch.HashFields), one
+// round trip per ControlReadBatch of them: Missing where the hash or the
+// field is not there.
+func (store *RedisStore) ReadControlHashFieldBatch(
+	ctx context.Context,
+	queryGroups []execution.QueryGroupIdentity,
+	namespace, field string,
+) ([]ControlRead, error) {
+	if field == "" {
+		return nil, errors.New("alarmd ownership: invalid control read")
+	}
+	keys, err := store.controlKeys(queryGroups, namespace)
+	if err != nil {
+		return nil, err
+	}
+	return redisbatch.HashFields(ctx, store.client, keys, field)
 }
 
 var fencedHashScript = redisscript.New("ownership_fenced_hash", FenceLua+`

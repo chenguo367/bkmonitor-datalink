@@ -417,29 +417,39 @@ func packedFrame(raw []byte) bool {
 	return len(raw) >= packedFrameHeaderLen && string(raw[:4]) == packedFrameMagic
 }
 
+// parsePackedFrame splits a framed record into its header, its frame schema
+// and the bytes of its points, refusing one this binary does not read.
+func parsePackedFrame(raw []byte) (packedHeader, byte, []byte, error) {
+	if !packedFrame(raw) {
+		return packedHeader{}, 0, nil, fmt.Errorf("%w: not a framed record", ErrCorruptState)
+	}
+	if (raw[4] != packedFrameSchemaV1 && raw[4] != packedFrameSchemaV2) || raw[5] != packedFrameCodecNone {
+		return packedHeader{}, 0, nil, fmt.Errorf("%w: frame schema %d codec %d", ErrUnsupportedState, raw[4], raw[5])
+	}
+	headerLen, rest, err := consumeUvarint(raw[packedFrameHeaderLen:])
+	if err != nil {
+		return packedHeader{}, 0, nil, err
+	}
+	if headerLen > uint64(len(rest)) {
+		return packedHeader{}, 0, nil, fmt.Errorf("%w: truncated header", ErrCorruptState)
+	}
+	var header packedHeader
+	if err := json.Unmarshal(rest[:headerLen], &header); err != nil {
+		return packedHeader{}, 0, nil, fmt.Errorf("%w: header: %v", ErrCorruptState, err)
+	}
+	if header.Schema != executionStateSchemaV3 {
+		return packedHeader{}, 0, nil, fmt.Errorf("%w: schema %q", ErrUnsupportedState, header.Schema)
+	}
+	return header, raw[4], rest[headerLen:], nil
+}
+
 // decodeRuntimePacked reads the framed record back into the same view the JSON
 // envelope produces, reconstructing each point's record id and each fact's
 // detect fingerprint.
 func decodeRuntimePacked(raw []byte, identity execution.StateKeyIdentity) (execution.RuntimeStateView, error) {
-	if !packedFrame(raw) {
-		return execution.RuntimeStateView{}, fmt.Errorf("%w: not a framed record", ErrCorruptState)
-	}
-	if (raw[4] != packedFrameSchemaV1 && raw[4] != packedFrameSchemaV2) || raw[5] != packedFrameCodecNone {
-		return execution.RuntimeStateView{}, fmt.Errorf("%w: frame schema %d codec %d", ErrUnsupportedState, raw[4], raw[5])
-	}
-	headerLen, rest, err := consumeUvarint(raw[packedFrameHeaderLen:])
+	header, _, rest, err := parsePackedFrame(raw)
 	if err != nil {
 		return execution.RuntimeStateView{}, err
-	}
-	if headerLen > uint64(len(rest)) {
-		return execution.RuntimeStateView{}, fmt.Errorf("%w: truncated header", ErrCorruptState)
-	}
-	var header packedHeader
-	if err := json.Unmarshal(rest[:headerLen], &header); err != nil {
-		return execution.RuntimeStateView{}, fmt.Errorf("%w: header: %v", ErrCorruptState, err)
-	}
-	if header.Schema != executionStateSchemaV3 {
-		return execution.RuntimeStateView{}, fmt.Errorf("%w: schema %q", ErrUnsupportedState, header.Schema)
 	}
 	legacyByIndex := make(map[int]string, len(header.LegacyRecordIDs))
 	for _, entry := range header.LegacyRecordIDs {
@@ -454,10 +464,9 @@ func decodeRuntimePacked(raw []byte, identity execution.StateKeyIdentity) (execu
 	if header.Identity != identity || header.BlobRevision == 0 {
 		return execution.RuntimeStateView{}, fmt.Errorf("%w: identity or revision", ErrCorruptState)
 	}
-	rest = rest[headerLen:]
-
-	bitmapBytes := (len(header.Levels) + 7) / 8
 	levels := make([]execution.RuntimeLevelStateView, len(header.Levels))
+	levelIDs := make([]uint32, len(header.Levels))
+	fingerprints := make([]string, len(header.Levels))
 	for index, level := range header.Levels {
 		levels[index] = execution.RuntimeLevelStateView{LevelID: level.Mutation.LevelID,
 			LevelStateCompatibility: level.Mutation.LevelStateCompatibility,
@@ -466,18 +475,37 @@ func decodeRuntimePacked(raw []byte, identity execution.StateKeyIdentity) (execu
 			LastProcessedEventTime: level.Mutation.LastProcessedEventTime,
 			GapReasonOriginSlot:    level.Mutation.GapReasonOriginSlot,
 			LastRealPointTime:      level.Mutation.LastRealPointTime}
+		levelIDs[index], fingerprints[index] = level.Mutation.LevelID, level.DetectFingerprint
 	}
-	history := make([]execution.StateHistoryPoint, 0, header.PointCount)
+	history, err := decodePackedHistory(rest, levelIDs, fingerprints, header.PointCount, identity.SeriesIdentityDigest, legacyByIndex)
+	if err != nil {
+		return execution.RuntimeStateView{}, err
+	}
+	return execution.RuntimeStateView{Identity: identity, BlobRevision: header.BlobRevision,
+		PersistedApplyVersion: header.ApplyVersion, PersistedMutationDigest: header.MutationDigest,
+		LastProcessedEventTime: header.LastEventTime, SeriesGuard: header.SeriesGuard,
+		Levels: levels, History: history}, nil
+}
+
+// decodePackedHistory reads a framed record's points - pointCount of them,
+// over the Levels levelIDs names in their order, each with its detect
+// fingerprint - back into the history, every byte of rest read. A point's
+// record id is the one legacy holds at its index, else derived from the
+// series and its source time.
+func decodePackedHistory(rest []byte, levelIDs []uint32, fingerprints []string, pointCount int, series execution.SeriesIdentityDigest,
+	legacy map[int]string) ([]execution.StateHistoryPoint, error) {
+	bitmapBytes := (len(levelIDs) + 7) / 8
+	history := make([]execution.StateHistoryPoint, 0, pointCount)
 	previous := int64(0)
-	derive := seriesRecordIDs(string(identity.SeriesIdentityDigest))
-	for point := 0; point < header.PointCount; point++ {
+	derive := seriesRecordIDs(string(series))
+	for point := 0; point < pointCount; point++ {
 		delta, next, decodeErr := consumeUvarint(rest)
 		if decodeErr != nil {
-			return execution.RuntimeStateView{}, decodeErr
+			return nil, decodeErr
 		}
 		rest = next
 		if len(rest) < 3*bitmapBytes {
-			return execution.RuntimeStateView{}, fmt.Errorf("%w: truncated point %d", ErrCorruptState, point)
+			return nil, fmt.Errorf("%w: truncated point %d", ErrCorruptState, point)
 		}
 		sourceTime := int64(delta)
 		if point > 0 {
@@ -488,16 +516,16 @@ func decodeRuntimePacked(raw []byte, identity execution.StateKeyIdentity) (execu
 		// The stored id wins where there is one: a point the derivation cannot
 		// rebuild carries its id in the header, and handing back the derived
 		// one instead would return a different record than was written.
-		recordID, stored := legacyByIndex[point]
+		recordID, stored := legacy[point]
 		if !stored {
 			derived, deriveErr := derive(sourceTime)
 			if deriveErr != nil {
-				return execution.RuntimeStateView{}, fmt.Errorf("%w: derive record id: %v", ErrCorruptState, deriveErr)
+				return nil, fmt.Errorf("%w: derive record id: %v", ErrCorruptState, deriveErr)
 			}
 			recordID = derived
 		}
-		facts := make([]execution.StateLevelFact, 0, len(header.Levels))
-		for position, level := range header.Levels {
+		facts := make([]execution.StateLevelFact, 0, len(levelIDs))
+		for position, levelID := range levelIDs {
 			if !bitSet(present, position) {
 				continue
 			}
@@ -510,17 +538,13 @@ func decodeRuntimePacked(raw []byte, identity execution.StateKeyIdentity) (execu
 			case bitSet(anomalous, position):
 				result = execution.LevelFactError
 			}
-			facts = append(facts, execution.StateLevelFact{LevelID: level.Mutation.LevelID,
-				DetectFingerprint: level.DetectFingerprint, Result: result})
+			facts = append(facts, execution.StateLevelFact{LevelID: levelID, DetectFingerprint: fingerprints[position], Result: result})
 		}
 		history = append(history, execution.StateHistoryPoint{RecordID: recordID, SourceTime: sourceTime, Levels: facts})
 		previous = sourceTime
 	}
 	if len(rest) != 0 {
-		return execution.RuntimeStateView{}, fmt.Errorf("%w: %d trailing bytes", ErrCorruptState, len(rest))
+		return nil, fmt.Errorf("%w: %d trailing bytes", ErrCorruptState, len(rest))
 	}
-	return execution.RuntimeStateView{Identity: identity, BlobRevision: header.BlobRevision,
-		PersistedApplyVersion: header.ApplyVersion, PersistedMutationDigest: header.MutationDigest,
-		LastProcessedEventTime: header.LastEventTime, SeriesGuard: header.SeriesGuard,
-		Levels: levels, History: history}, nil
+	return history, nil
 }

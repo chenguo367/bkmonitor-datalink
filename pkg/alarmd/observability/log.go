@@ -959,6 +959,14 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.Int("state_carry_count", facts.Count),
 		)
 	}
+	if facts := observation.StateCacheMismatch; facts != nil {
+		attributes = append(attributes,
+			slog.Int("state_cache_mismatch_count", facts.Count),
+			slog.String("state_cache_mismatch_strategy_id", facts.StrategyID),
+			slog.String("state_cache_mismatch_kind", facts.Kind),
+			slog.String("state_cache_mismatch_field", facts.Field),
+		)
+	}
 	if facts := observation.ActivationHold; facts != nil {
 		attributes = append(attributes,
 			slog.Int("activation_reappeared", facts.Reappeared),

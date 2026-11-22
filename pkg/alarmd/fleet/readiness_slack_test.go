@@ -108,7 +108,7 @@ func TestTheObjectsWithTheMostSlackPast2sAreNamedFirst(t *testing.T) {
 		t.Fatalf("order %s, want qg-a qg-b qg-p99 qg-e qg-c qg-d", got)
 	}
 	a := rows[0]
-	if a.Slots != 6 || a.SlotsOverHalf != 4 || a.SlotsOver2 != 3 || a.SlackMaxSeconds != 3 || a.SlackP99Seconds != 3 ||
+	if a.Rounds != 6 || a.RoundsOverHalf != 4 || a.RoundsOver2 != 3 || a.SlackMaxSeconds != 3 || a.SlackP99Seconds != 3 ||
 		a.Boundary != observability.ReadinessBoundaryUnified || a.WallMaxSeconds != 7 || a.SlotWaitSeconds != 2 || a.SlotWaits != 2 ||
 		a.Series != 7 {
 		t.Fatalf("qg-a %+v, want 6 Slots, 4 past 0.5 s, 3 past 2 s, slack 3 at most and at p99, unified, 7 s wall, 2 s over 2 waits, 7 series", a)
@@ -116,10 +116,10 @@ func TestTheObjectsWithTheMostSlackPast2sAreNamedFirst(t *testing.T) {
 	if a.PeriodSeconds == nil || *a.PeriodSeconds != 60 || a.WindowStart == nil || !a.WindowStart.Equal(base.Add(-10*time.Minute)) {
 		t.Fatalf("qg-a period %v since %v, want its queries' 60 s and the process's start", a.PeriodSeconds, a.WindowStart)
 	}
-	if b := rows[1]; b.PeriodSeconds == nil || *b.PeriodSeconds != 600 || b.SlotsOver2 != 2 || b.SlackMaxSeconds != 12 {
+	if b := rows[1]; b.PeriodSeconds == nil || *b.PeriodSeconds != 600 || b.RoundsOver2 != 2 || b.SlackMaxSeconds != 12 {
 		t.Fatalf("qg-b %+v, want the 600 s between its two Slots, both past 2 s, 12 s at most", b)
 	}
-	if p := rows[2]; p.Slots != 100 || p.SlackP99Seconds != 0.5 || p.SlackMaxSeconds != 40 || p.SlotsOver2 != 1 {
+	if p := rows[2]; p.Rounds != 100 || p.SlackP99Seconds != 0.5 || p.SlackMaxSeconds != 40 || p.RoundsOver2 != 1 {
 		t.Fatalf("qg-p99 %+v, want 100 Slots, p99 in the 0.5 s bucket, 40 s at most", p)
 	}
 	if c, d := rows[4], rows[5]; c.Boundary != observability.ReadinessBoundaryMixed || c.PeriodSeconds != nil || c.SlackMaxSeconds != 0 ||
@@ -144,8 +144,8 @@ func TestTheObjectsWithTheMostSlackPast2sAreNamedFirst(t *testing.T) {
 		t.Fatalf("an hour on, %d rows: %+v", len(rows), rows)
 	}
 	slotTiming(tracker, "qg-b", 6200, observability.OperationNormal, unified(0.2), 0, time.Second)
-	if rows := tracker.ReadinessSlack(held, time.Time{}, time.Hour); len(rows) != 1 || rows[0].Slots != 1 ||
-		rows[0].SlotsOver2 != 0 || rows[0].SlackMaxSeconds != 0.2 {
+	if rows := tracker.ReadinessSlack(held, time.Time{}, time.Hour); len(rows) != 1 || rows[0].Rounds != 1 ||
+		rows[0].RoundsOver2 != 0 || rows[0].SlackMaxSeconds != 0.2 {
 		t.Fatalf("an hour on, one new Slot reads %+v", rows)
 	}
 }
@@ -182,8 +182,8 @@ func TestTheDeploymentsHealthNamesTheObjectsWithTheMostSlackAcrossReplicas(t *te
 			qg := fmt.Sprintf("%s-%02d", prefix, index)
 			ids = append(ids, qg)
 			s.OwnedObjects = append(s.OwnedObjects, qg)
-			s.ReadinessSlack = append(s.ReadinessSlack, ReadinessSlackFacts{QueryGroup: qg, PeriodSeconds: &period, Slots: 60,
-				SlotsOver2: uint32(20 - index), SlackMaxSeconds: 9, Boundary: observability.ReadinessBoundaryUnified})
+			s.ReadinessSlack = append(s.ReadinessSlack, ReadinessSlackFacts{QueryGroup: qg, PeriodSeconds: &period, Rounds: 60,
+				RoundsOver2: uint32(20 - index), SlackMaxSeconds: 9, Boundary: observability.ReadinessBoundaryUnified})
 		}
 		return s
 	}
@@ -214,5 +214,40 @@ func TestTheDeploymentsHealthNamesTheObjectsWithTheMostSlackAcrossReplicas(t *te
 	}
 	if public, _ := json.Marshal(PublicHealth(health)); strings.Contains(string(public), "readiness_slack") {
 		t.Fatalf("the public summary names Query Groups: %s", public)
+	}
+}
+
+// An object's Slot is one round however many slices it is read in: the
+// access layer reports its arrival once, at its first read, and its
+// completion says the slices; the row counts the rounds and their slices,
+// and names its slowest round's wall time and what it went to - its queries'
+// waits for their first byte and their bodies, its reads' tails and the
+// changes between them, its slices.
+func TestAnObjectsRowCountsItsRoundsAndSlicesAndNamesItsSlowestRound(t *testing.T) {
+	base := time.Date(2026, 11, 22, 8, 0, 0, 0, time.UTC)
+	tracker := newTracker(t, &clock{at: base})
+	ctx := context.Background()
+	for index, usage := range []observability.SlotBudgetUsageFacts{
+		{QueryWaitMillis: 900, QueryBodyMillis: 300, InputSliceTailMillis: 40, InputSliceChangeMillis: 70, InputSlices: 5},
+		{QueryWaitMillis: 100, QueryBodyMillis: 50, InputSlices: 1},
+	} {
+		trace := observability.TraceFields{QueryGroupKey: "qg-a", EvaluationTime: 1000 + int64(index)*60}
+		tracker.Observe(ctx, observability.Observation{Component: observability.ComponentAccess,
+			Stage: observability.StageSlotReadinessArrival, Result: observability.ResultSuccess, Operation: observability.OperationNormal,
+			SlotReadiness: &observability.SlotReadinessFacts{Boundary: observability.ReadinessBoundaryUnified, SlackSeconds: 3, Slack: true},
+			Trace:         trace})
+		usage := usage
+		tracker.Observe(ctx, observability.Observation{Component: observability.ComponentScheduler, Stage: observability.StageSlotCompleted,
+			Result: observability.ResultSuccess, Operation: observability.OperationNormal, Duration: time.Duration(4-3*index) * time.Second,
+			DurationKnown: true, Trace: trace, SlotBudgetUsage: &usage})
+	}
+	rows := tracker.ReadinessSlack([]string{"qg-a"}, time.Time{}, time.Hour)
+	if len(rows) != 1 {
+		t.Fatalf("rows %+v", rows)
+	}
+	row := rows[0]
+	want := &SlowRound{WallSeconds: 4, QueryWaitSeconds: 0.9, QueryBodySeconds: 0.3, InputTailSeconds: 0.04, InputChangeSeconds: 0.07, Slices: 5}
+	if row.Rounds != 2 || row.Slices != 6 || row.RoundsOver2 != 2 || row.WallMaxSeconds != 4 || row.SlowestRound == nil || *row.SlowestRound != *want {
+		t.Fatalf("row %+v (slowest %+v), want two rounds of six slices, both past 2 s, the slowest the five-slice one's 4 s", row, row.SlowestRound)
 	}
 }

@@ -647,6 +647,39 @@ func TestRuntimeWitnessCacheScopesBySlotAndEvictsOldGroups(t *testing.T) {
 	}
 }
 
+// A Slot's witnesses are let go once its attempt is done - one never taken,
+// as a member left unwritten leaves its own, among them - and the counts with
+// them; a later Slot's of the same Query Group, and another Query Group's,
+// stay.
+func TestRuntimeWitnessCacheReleasesTheSlotsWitnessesOnly(t *testing.T) {
+	cache := newRuntimeWitnessCache()
+	done := execution.SlotIdentity{QueryGroup: "q", EvaluationTime: 60}
+	later := execution.SlotIdentity{QueryGroup: "q", EvaluationTime: 120}
+	other := execution.SlotIdentity{QueryGroup: "other", EvaluationTime: 60}
+	cache.remember(done, seriesIdentity(0), runtimeWitness{missing: true})
+	cache.remember(done, seriesIdentity(1), runtimeWitness{framedDigest: "framed", digest: "framed"})
+	cache.remember(other, seriesIdentity(0), runtimeWitness{missing: true})
+	if _, ok := cache.take(done, seriesIdentity(0)); !ok {
+		t.Fatal("the written series found no witness")
+	}
+	cache.release(done)
+	if stats := cache.stats(); stats.Items != 1 || stats.Bytes != runtimeWitnessBytes(seriesIdentity(0), runtimeWitness{missing: true}) {
+		t.Fatalf("after the Slot's release: %+v, want the other Query Group's one witness alone", stats)
+	}
+	if _, ok := cache.take(done, seriesIdentity(1)); ok {
+		t.Fatal("the unwritten series' witness outlived its Slot")
+	}
+
+	cache.remember(later, seriesIdentity(1), runtimeWitness{missing: true})
+	cache.release(done)
+	if _, ok := cache.take(later, seriesIdentity(1)); !ok {
+		t.Fatal("an earlier Slot's release took a later Slot's witness")
+	}
+	if _, ok := cache.take(other, seriesIdentity(0)); !ok {
+		t.Fatal("a Slot's release took another Query Group's witness")
+	}
+}
+
 // A released Query Group's witnesses leave with it, and the counts with them;
 // a later Slot's, remembered by a newer session of the same Query Group before
 // the old one's release ran, stay for that Slot's writes.

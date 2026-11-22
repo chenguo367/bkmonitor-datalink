@@ -35,9 +35,21 @@ const MaxSupplementSeries = 1 << 16
 type SupplementScope struct {
 	// Series is sorted and holds no repeats.
 	Series []SeriesIdentityDigest
+	// All is every series the read returned, Series empty: a Slot read
+	// again without the series its first read held (014 B4 H1), whose
+	// supplement decides each series nothing has decided at T or after -
+	// which is each its first read did not hold. Bounded by the read, as a
+	// Slot's own series are.
+	All bool
 }
 
 func (scope SupplementScope) Validate() error {
+	if scope.All {
+		if len(scope.Series) != 0 {
+			return errors.New("alarmd execution: a supplement of every series names none")
+		}
+		return nil
+	}
 	if len(scope.Series) == 0 || len(scope.Series) > MaxSupplementSeries {
 		return fmt.Errorf("alarmd execution: a supplement names between 1 and %d series", MaxSupplementSeries)
 	}
@@ -63,13 +75,28 @@ type SupplementFacts struct {
 	Admitted int    `json:"admitted"`
 	Points   uint64 `json:"points"`
 	// CrossedT pairs had State at T or later already; nothing is decided
-	// for them a second time.
+	// for them a second time. CoveredT is those of them whose Plan's stable
+	// segment covered their read at T - a member judged and compared there,
+	// its write left out (014 B3) - told without their State being read
+	// (014 B4 H1): its version stays at its last write, and its segment
+	// says the Slot was decided for it all the same.
 	CrossedT int `json:"crossed_t"`
+	CoveredT int `json:"covered_t,omitempty"`
+	// Unreached pairs had their State read and found it short of T: what a
+	// supplement read back and went on to decide. Not an outcome: each is
+	// one of the outcomes after the read.
+	Unreached int `json:"unreached,omitempty"`
 	// NoDataFact pairs belong to a no-data group recorded absent at T.
 	NoDataFact int `json:"no_data_fact"`
 	// ConfigDrift pairs belong to a Plan whose activation is no longer the
 	// one T was frozen with, or whose side effects are no longer admitted.
 	ConfigDrift int `json:"config_drift"`
+	// GenerationMoved is the admitted pairs of a Plan whose last normal Slot
+	// on this process ran under another State generation than T's (014 B4
+	// H7): an edit came between T and its supplement, which writes T's
+	// generation's key - one the Plan reads no more for a series its new
+	// generation has a record of. Not an outcome.
+	GenerationMoved int `json:"generation_moved,omitempty"`
 	// InputIncomplete pairs were read without a whole primary input.
 	InputIncomplete int `json:"input_incomplete"`
 	// Withheld pairs reached their evaluation and had nothing written: a

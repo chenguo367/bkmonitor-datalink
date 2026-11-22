@@ -204,6 +204,9 @@ func (ports *activationSiblingPorts) CommitProgress(context.Context, execution.P
 	return execution.ProgressCommitResult{}, errors.New("unexpected Progress commit")
 }
 
+// ReleaseSlotWitnesses keeps no witnesses to let go of.
+func (*activationSiblingPorts) ReleaseSlotWitnesses(execution.SlotIdentity) {}
+
 func (ports *activationSiblingPorts) RenewFrozenRuntime(
 	_ context.Context, request execution.FrozenStateRenewalRequest,
 ) (execution.FrozenStateRenewalResult, error) {

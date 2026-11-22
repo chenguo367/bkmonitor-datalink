@@ -2726,6 +2726,9 @@ func publicMethodNames(value reflect.Type) []string {
 	return methods
 }
 
+// ReleaseSlotWitnesses keeps no witnesses to let go of.
+func (*recordingPorts) ReleaseSlotWitnesses(execution.SlotIdentity) {}
+
 // RenewFrozenRuntime records what the Slot asked about and answers with what
 // the test set, so a test can put a renewal failure or a vanished key in front
 // of a whole Slot and read what the Slot then did.

@@ -235,6 +235,8 @@ type Copy struct {
 	retryWait time.Duration
 	answers   map[Answer]uint64
 	outcomes  map[string]uint64
+	// forgotten counts the misses ForgetMisses let go of.
+	forgotten uint64
 }
 
 // New builds the copy.
@@ -319,6 +321,35 @@ func (c *Copy) KnowsOpen(tenantID, strategyID string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.open[StrategyKey{TenantID: tenantID, StrategyID: strategyID}] > 0
+}
+
+// ForgetMisses lets go of every miss of the given strategies, judged or
+// young, any tenant: the next lookup of their fingerprints asks the link
+// again, as for one never asked. For the strategies of a Query Group this
+// process let go of: given back after another owner held it, an alert that
+// owner opened would otherwise read as missed for up to MissLife, its
+// RECOVERY held and its no-data end let go of. Sends and hits stay - they
+// say an alert is open, which a later search confirms or ends. Says how
+// many it let go of.
+func (c *Copy) ForgetMisses(strategyIDs []string) int {
+	if c == nil || len(strategyIDs) == 0 {
+		return 0
+	}
+	strategies := make(map[string]struct{}, len(strategyIDs))
+	for _, strategy := range strategyIDs {
+		strategies[strategy] = struct{}{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	forgotten := 0
+	for m, w := range c.words {
+		if _, ours := strategies[m.key.StrategyID]; ours && w.kind == kindMiss {
+			c.forget(m)
+			forgotten++
+		}
+	}
+	c.forgotten += uint64(forgotten)
+	return forgotten
 }
 
 // set and forget change a word, keeping open. Called with the lock held.
@@ -794,6 +825,8 @@ type Stats struct {
 	// Unsupported is a link that answers it cannot search, until it answers
 	// a search again.
 	Unsupported bool
+	// MissesForgotten is the misses ForgetMisses let go of.
+	MissesForgotten uint64
 }
 
 // Stats reads the counts, every word present.
@@ -817,6 +850,7 @@ func (c *Copy) Stats() Stats {
 		stats.Outcomes[outcome] = n
 	}
 	stats.Known, stats.Queued, stats.Unsupported = len(c.words), len(c.queued), c.unsupported
+	stats.MissesForgotten = c.forgotten
 	return stats
 }
 

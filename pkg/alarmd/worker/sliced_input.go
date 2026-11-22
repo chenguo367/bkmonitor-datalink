@@ -736,6 +736,15 @@ func (trees *sliceTrees) lastInput(group execution.QueryGroupIdentity) slicedRea
 	return trees.input[group]
 }
 
+// heldInput is lastInput, and whether a read of the Query Group here left
+// it: a Query Group read whole holds one too, its counts maybe zero.
+func (trees *sliceTrees) heldInput(group execution.QueryGroupIdentity) (slicedReading, bool) {
+	trees.mu.Lock()
+	defer trees.mu.Unlock()
+	reading, held := trees.input[group]
+	return reading, held
+}
+
 func (trees *sliceTrees) remember(group execution.QueryGroupIdentity, reading slicedReading) {
 	trees.mu.Lock()
 	defer trees.mu.Unlock()

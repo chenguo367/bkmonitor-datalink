@@ -12,7 +12,6 @@ package uq
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -40,6 +39,10 @@ type handoffClock struct {
 	at                       time.Time
 	readerBegun, readerEnded int
 	slotCalls                int
+	// unknown is every caller in readSharedFrames or decodeShared the clock
+	// does not know - none but the version frame's time, in readSharedFrames
+	// itself, is expected - named so a change of their shape says so.
+	unknown []string
 	// slotWaiting is sent to, without blocking, when the Slot begins a wait.
 	slotWaiting chan struct{}
 }
@@ -77,8 +80,23 @@ func (clock *handoffClock) now() time.Time {
 			default:
 			}
 		}
+	case strings.Contains(caller, "readSharedFrames") && !strings.HasSuffix(caller, ".readSharedFrames"),
+		strings.Contains(caller, "decodeShared"):
+		clock.unknown = append(clock.unknown, caller)
 	}
 	return clock.at
+}
+
+// settled fails t unless the decode's clock was asked only by the callers it
+// knows, and every wait it saw begin ended: an answer decoded to its end.
+func (clock *handoffClock) settled(t *testing.T) {
+	t.Helper()
+	clock.mu.Lock()
+	defer clock.mu.Unlock()
+	if len(clock.unknown) != 0 || clock.readerBegun != clock.readerEnded || clock.slotCalls%2 != 0 {
+		t.Fatalf("the decode's clock was asked by %v, which the case does not know; the reader began %d waits and ended %d, "+
+			"the Slot asked it %d times (want an even count)", clock.unknown, clock.readerBegun, clock.readerEnded, clock.slotCalls)
+	}
 }
 
 func (clock *handoffClock) readerWaiting() bool {
@@ -113,37 +131,30 @@ func (sink *holdingSink) ConsumeProviderSeries(context.Context, execution.Provid
 	return nil
 }
 
-// pacedBody hands the reader one line of the answer at a time: each line the
-// reader hands the Slot a frame for only once the Slot waits for it, the
-// clock moved by step first - an answer whose frames come apart, the Slot's
-// wait the case counts - and a schema frame's, which the reader keeps, at
-// once. Its end is no line and moves nothing.
-type pacedBody struct {
-	lines   []string
-	clock   *handoffClock
-	step    time.Duration
-	expired <-chan time.Time
-	pending string
-}
-
-func (body *pacedBody) Read(buffer []byte) (int, error) {
-	if body.pending == "" {
-		if len(body.lines) == 0 {
-			return 0, io.EOF
-		}
-		if !strings.Contains(body.lines[0], `"schemas"`) {
-			select {
-			case <-body.clock.slotWaiting:
-			case <-body.expired:
-				return 0, errors.New("the Slot never waited for the next frame")
+// pacedAnswer serves a shared answer one line at a time: its headers at once,
+// then each line the reader hands the Slot a frame for only once the Slot
+// waits for it, the clock moved by step first - an answer whose frames come
+// apart, the Slot's wait the case counts - and a schema frame's, which the
+// reader keeps, at once. A Slot that never waits ends the answer short,
+// which fails its decode.
+func pacedAnswer(lines []string, clock *handoffClock, step time.Duration, expired <-chan time.Time) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", SharedSchemaMediaType)
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		for _, line := range lines {
+			if !strings.Contains(line, `"schemas"`) {
+				select {
+				case <-clock.slotWaiting:
+				case <-expired:
+					return
+				}
+				clock.advance(step)
 			}
-			body.clock.advance(body.step)
+			_, _ = io.WriteString(w, line)
+			w.(http.Flusher).Flush()
 		}
-		body.pending, body.lines = body.lines[0], body.lines[1:]
 	}
-	count := copy(buffer, body.pending)
-	body.pending = body.pending[count:]
-	return count, nil
 }
 
 // Each side of a shared-schema answer's frames counts what it waited for the
@@ -154,7 +165,9 @@ func (body *pacedBody) Read(buffer []byte) (int, error) {
 // for the Slot (the version, six series frames, the footer; each series
 // frame after its schema frame, which the reader keeps) each come only once
 // the Slot waits, 30 ms after, leaves the Slot waiting 240 ms and the reader
-// none. A legacy answer counts neither, however slow either side is.
+// none, on the completion Execute returns. A legacy answer counts neither,
+// however slow either side is. The clock is asked only by the callers it
+// knows, which it says by name otherwise.
 func TestEachSideOfASharedAnswersFramesCountsItsWaitForTheOther(t *testing.T) {
 	const step = 30 * time.Millisecond
 	series := make([]responseSeries, 6)
@@ -177,16 +190,31 @@ func TestEachSideOfASharedAnswersFramesCountsItsWaitForTheOther(t *testing.T) {
 
 	clock := newHandoffClock()
 	consumer, reader := decode(clock, strings.NewReader(body), &holdingSink{t: t, clock: clock, step: step, holds: 3})
+	clock.settled(t)
 	if consumer != 3*step || reader != 0 {
 		t.Fatalf("a slow Slot: the reader waited %v on it and it %v on the reader, want 90ms and none", consumer, reader)
 	}
 
+	// The slow answer through Execute: what decoding counted is what the
+	// completion it returns says.
 	clock = newHandoffClock()
 	lines := strings.SplitAfter(body, "\n")
 	if lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
 	}
-	consumer, reader = decode(clock, &pacedBody{lines: lines, clock: clock, step: step, expired: testwait.Expired(t)}, &collectingSink{})
+	paced := httptest.NewServer(pacedAnswer(lines, clock, step, testwait.Expired(t)))
+	defer paced.Close()
+	client, err := NewClientWithLimits(paced.URL, "alarmd", paced.Client(), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	done, err := client.WithNow(clock.now).Execute(context.Background(), validAttempt(t), &collectingSink{})
+	if err != nil || done.Completeness != execution.CompletenessFull {
+		t.Fatalf("Execute = %+v, %v", done, err)
+	}
+	clock.settled(t)
+	consumer = time.Duration(done.Stats.SharedFrameWaitConsumerMicros) * time.Microsecond
+	reader = time.Duration(done.Stats.SharedFrameWaitReaderMicros) * time.Microsecond
 	if len(lines) != 14 || reader != 8*step || consumer != 0 {
 		t.Fatalf("a slow answer of %d lines: the Slot waited %v on the reader and the reader %v on it, want 240ms and none",
 			len(lines), reader, consumer)
@@ -200,11 +228,11 @@ func TestEachSideOfASharedAnswersFramesCountsItsWaitForTheOther(t *testing.T) {
 		_, _ = io.WriteString(w, `{"series":[`+identityTestSeriesJSON()+`],"is_partial":false}`)
 	}))
 	defer server.Close()
-	client, err := NewClientWithLimits(server.URL, "alarmd", server.Client(), DefaultLimits())
+	client, err = NewClientWithLimits(server.URL, "alarmd", server.Client(), DefaultLimits())
 	if err != nil {
 		t.Fatal(err)
 	}
-	done, err := client.Execute(context.Background(), validAttempt(t), pausingSink{pause: step})
+	done, err = client.Execute(context.Background(), validAttempt(t), pausingSink{pause: step})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -53,6 +53,9 @@ func (ports *windowedPorts) ApplyRuntime(ctx context.Context, request execution.
 	return ports.activationSiblingPorts.ApplyRuntime(ctx, request)
 }
 
+// ReleaseSlotWitnesses keeps no witnesses to let go of.
+func (*windowedPorts) ReleaseSlotWitnesses(execution.SlotIdentity) {}
+
 func (ports *windowedPorts) RenewFrozenRuntime(ctx context.Context, request execution.FrozenStateRenewalRequest) (execution.FrozenStateRenewalResult, error) {
 	for _, item := range request.Items {
 		ports.trace = append(ports.trace, "renew:"+string(item.Identity.SeriesIdentityDigest))

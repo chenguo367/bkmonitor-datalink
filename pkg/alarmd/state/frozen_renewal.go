@@ -135,7 +135,8 @@ func (store *ExecutionStore) RenewFrozenRuntime(
 				result.Items[index].Outcome = execution.FrozenRenewalMissing
 				// Nor served from the State cache: the key it would answer for
 				// is gone (rule 4).
-				store.cache.drop(group.keys[position], StateCacheDepartRenewalMissing)
+				store.cache.dropState(group.keys[position], request.Contract.Slot.QueryGroup, request.Items[index].Identity,
+					StateCacheDepartRenewalMissing)
 			default:
 				result.Items[index].Outcome = execution.FrozenRenewalFresh
 				store.frozenRenewals.Answered(group.keys[position], RenewalAskInterval(ttl))

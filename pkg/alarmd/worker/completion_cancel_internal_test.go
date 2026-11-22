@@ -59,6 +59,9 @@ func TestShortCompletionDownstreamCancellationPreservesACKStateProgressOrder(t *
 	}
 }
 
+// ReleaseSlotWitnesses keeps no witnesses to let go of.
+func (*completionCancelPorts) ReleaseSlotWitnesses(execution.SlotIdentity) {}
+
 func (p *completionCancelPorts) RenewFrozenRuntime(
 	_ context.Context, request execution.FrozenStateRenewalRequest,
 ) (execution.FrozenStateRenewalResult, error) {

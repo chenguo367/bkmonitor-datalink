@@ -200,15 +200,23 @@ type Permit func() (release func(), yield <-chan struct{}, refused string)
 // Supplement runs a supplement of one Slot on the late series a directed
 // read kept for it (see directed.go); nil reads no Query Group directed.
 type Options struct {
-	Now                  func() time.Time
-	Recheck              Recheck
-	Permit               Permit
-	Refusals             []string
-	Owns                 func(execution.QueryGroupIdentity) bool
-	Owned                func() int
-	OnFault              func(reason string, queryGroup execution.QueryGroupIdentity)
-	Memory               func(bytes uint64) bool
-	Supplement           func(context.Context, SupplementJob) SupplementOutcome
+	Now        func() time.Time
+	Recheck    Recheck
+	Permit     Permit
+	Refusals   []string
+	Owns       func(execution.QueryGroupIdentity) bool
+	Owned      func() int
+	OnFault    func(reason string, queryGroup execution.QueryGroupIdentity)
+	Memory     func(bytes uint64) bool
+	Supplement func(context.Context, SupplementJob) SupplementOutcome
+	// Respec plans a Slot handed over by the previous owner again, for its
+	// reread (handover.go); nil reads none of them. ShapeKnown says whether
+	// this process has read the Query Group, so knows the slices a reread
+	// of it is read in: a restored Slot waits for it before it is planned,
+	// and so does every later Slot of its Query Group. Asked under the
+	// engine's lock, it takes none of its own callers'. Nil knows every one.
+	Respec               Respec
+	ShapeKnown           func(execution.QueryGroupIdentity) bool
 	UnspreadFirstSamples bool
 	ProbeFirstSamples    bool
 	// FreePermits is how many of the process's query permits are free now,

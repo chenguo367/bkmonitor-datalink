@@ -2377,10 +2377,12 @@ type fakePhaseTwoOwnership struct {
 	// opens counts OpenQueryGroup calls, refused ones included, and the call
 	// numbered failOpenAt fails with failOpenErr; loadOpened, when set, is
 	// called with each LoadOpened's Query Groups.
-	opens         int
-	failOpenAt    int
-	failOpenErr   error
-	loadOpened    func([]execution.QueryGroupIdentity)
+	opens       int
+	failOpenAt  int
+	failOpenErr error
+	loadOpened  func([]execution.QueryGroupIdentity)
+	// forgotten is every Query Group ForgetTakeover was called for, in order.
+	forgotten     []execution.QueryGroupIdentity
 	follower      bool
 	controlLeader int
 	published     int
@@ -2512,6 +2514,19 @@ func (owner *fakePhaseTwoOwnership) OpenQueryGroup(
 
 // LoadOpened reads nothing: no read hold is kept here. A test that hooks it
 // sees the Query Groups each round passed.
+// forgottenTakeovers is what owner was asked to forget, in order.
+func forgottenTakeovers(owner *fakePhaseTwoOwnership) []execution.QueryGroupIdentity {
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	return append([]execution.QueryGroupIdentity(nil), owner.forgotten...)
+}
+
+func (owner *fakePhaseTwoOwnership) ForgetTakeover(queryGroup execution.QueryGroupIdentity) {
+	owner.mu.Lock()
+	owner.forgotten = append(owner.forgotten, queryGroup)
+	owner.mu.Unlock()
+}
+
 func (owner *fakePhaseTwoOwnership) LoadOpened(_ context.Context, queryGroups []execution.QueryGroupIdentity) {
 	owner.mu.Lock()
 	hook := owner.loadOpened

@@ -22,6 +22,15 @@ type Coverage struct {
 	Position  int64
 	Interval  int64
 	Retention uint32
+	// Leaves is whether the round leaves the member's State write out, as
+	// far as its Slot can tell before evaluating the series: an open member
+	// of its Plan, read in a normal round that follows the segment skip and
+	// is not its Plan's sampled round, the Plan not stopped, its page not
+	// written whole for want of renewal. Renewal is then its page's last
+	// renewal in the mark the Slot read, which the member's key outlives:
+	// how long a value of it read back stays the store's (014 next7 3.1).
+	Leaves  bool
+	Renewal Renewal
 }
 
 // Extension is what Extend did with a read, closed: extended, points made

@@ -16,6 +16,19 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
 
+// What a process's recovery gate and no-data end answer from, a word for
+// its startup line and metric: GateOwn, the alerts this process opened
+// (Own), on a deployment with no phase_two.linkd block; GateCopy, alarmd's
+// copy of the link's active alerts (Copy), on one with it. Closed: a metric
+// label.
+const (
+	GateOwn  = "own"
+	GateCopy = "copy"
+)
+
+// Gates lists both, for the metric that pre-creates them.
+var Gates = []string{GateOwn, GateCopy}
+
 // Own is the recovery gate's answer on a deployment whose alerts do not go
 // to the link (no phase_two.linkd block): the record of the alerts this
 // process opened, and nothing else. There is no link to search, so the
@@ -245,4 +258,86 @@ func ownStaler(a, b ownRecord) bool {
 		return !a.recoveredAt.IsZero()
 	}
 	return a.lastSent.Before(b.lastSent)
+}
+
+// OwnRecord is one alert of the record, as a process hands it to the next
+// owner of its Query Group (Export, Import): the alert, when this process
+// last sent its ABNORMAL and when the broker took the first RECOVERY that
+// did not end it (zero for none), and its standing level. Its JSON names
+// are one letter: a Query Group with thousands of open alerts hands over
+// thousands of these at once.
+type OwnRecord struct {
+	TenantID      string `json:"t,omitempty"`
+	StrategyID    string `json:"s"`
+	Fingerprint   string `json:"f"`
+	LastSentMs    int64  `json:"l"`
+	RecoveredAtMs int64  `json:"r,omitempty"`
+	LevelID       uint32 `json:"i"`
+	LevelPriority uint32 `json:"p"`
+}
+
+// Export is the record's alerts of the given strategies, for the next owner
+// of a Query Group this process lets go of: without them that owner sees no
+// alert this process opened, and holds its RECOVERY for good.
+func (o *Own) Export(keys []StrategyKey) []OwnRecord {
+	if o == nil || len(keys) == 0 {
+		return nil
+	}
+	wanted := make(map[StrategyKey]struct{}, len(keys))
+	for _, key := range keys {
+		wanted[key] = struct{}{}
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	var records []OwnRecord
+	for m, record := range o.opened {
+		if _, ours := wanted[m.key]; !ours {
+			continue
+		}
+		exported := OwnRecord{TenantID: m.key.TenantID, StrategyID: m.key.StrategyID, Fingerprint: m.fingerprint,
+			LastSentMs: record.lastSent.UnixMilli(), LevelID: record.standing.id, LevelPriority: record.standing.priority}
+		if !record.recoveredAt.IsZero() {
+			exported.RecoveredAtMs = record.recoveredAt.UnixMilli()
+		}
+		records = append(records, exported)
+	}
+	return records
+}
+
+// Import takes the alerts the previous owner of a Query Group handed over:
+// each joins the record as if this process had sent it, unless the record
+// holds one sent later; and their strategies count as tracked now, so the
+// next Track does not take them for strategies tracked again after
+// untrackedGap and let them go. Says how many it took.
+func (o *Own) Import(records []OwnRecord) int {
+	if o == nil || len(records) == 0 {
+		return 0
+	}
+	now := o.now()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	taken := 0
+	for _, imported := range records {
+		if imported.Fingerprint == "" || imported.StrategyID == "" {
+			continue
+		}
+		key := StrategyKey{TenantID: imported.TenantID, StrategyID: imported.StrategyID}
+		m := member{key: key, fingerprint: imported.Fingerprint}
+		record := ownRecord{lastSent: time.UnixMilli(imported.LastSentMs),
+			standing: standingLevel{id: imported.LevelID, priority: imported.LevelPriority}}
+		if imported.RecoveredAtMs != 0 {
+			record.recoveredAt = time.UnixMilli(imported.RecoveredAtMs)
+		}
+		if held, ok := o.opened[m]; ok && !held.lastSent.Before(record.lastSent) {
+			o.tracked[key] = now
+			continue
+		}
+		if _, ok := o.opened[m]; !ok && len(o.opened) >= MaxEntries {
+			o.evictStalestLocked(now)
+		}
+		o.opened[m] = record
+		o.tracked[key] = now
+		taken++
+	}
+	return taken
 }
