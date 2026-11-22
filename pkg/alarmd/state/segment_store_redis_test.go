@@ -207,7 +207,18 @@ func writeSegments(t *testing.T, store *ExecutionStore, fence execution.StateApp
 
 func readSegments(t *testing.T, store *ExecutionStore, fence execution.OwnerFence, keys ...segment.PlanKey) []segment.Stored {
 	t.Helper()
-	request := segment.ReadRequest{Contract: frozenRef(), OwnerFence: fence}
+	return readSegmentsAt(t, store, fence, frozenRef().Slot.EvaluationTime, keys...)
+}
+
+// readSegmentsAt is readSegments for the Slot at evaluation: a case whose
+// reads are successive rounds gives each its own Slot, as the cache sweeps a
+// Query Group once a Slot.
+func readSegmentsAt(t *testing.T, store *ExecutionStore, fence execution.OwnerFence, evaluation execution.EvaluationTime,
+	keys ...segment.PlanKey) []segment.Stored {
+	t.Helper()
+	contract := frozenRef()
+	contract.Slot.EvaluationTime = evaluation
+	request := segment.ReadRequest{Contract: contract, OwnerFence: fence}
 	for _, key := range keys {
 		request.Plans = append(request.Plans, segment.ReadPlan{Key: key, Lifetime: segmentLifetime()})
 	}
@@ -495,16 +506,20 @@ func TestASegmentUntouchedForTwoIntervalsLeavesAndIsReadAsEvicted(t *testing.T) 
 	if stats := store.SegmentStats(); stats.Plans != 2 || stats.Pages != 2 {
 		t.Fatalf("after the write the cache holds %+v", stats)
 	}
-	// One interval on, the other Plan is read: both stay.
+	// One interval on, the other Plan is read: both stay. Each read is the
+	// next round's Slot.
+	round := frozenRef().Slot.EvaluationTime
 	clock.Add(int64(time.Minute + time.Second))
-	readSegments(t, store, testApplyFence().Fence, other)
+	round += 60
+	readSegmentsAt(t, store, testApplyFence().Fence, round, other)
 	if stats := store.SegmentStats(); stats.Plans != 2 {
 		t.Fatalf("within two intervals the cache holds %+v", stats)
 	}
 	// Two intervals past the first Plan's last touch, the read of the other
 	// sweeps it out, mark and page.
 	clock.Add(int64(time.Minute))
-	if stored := readSegments(t, store, testApplyFence().Fence, other); stored[0].Source != segment.SourceCache {
+	round += 60
+	if stored := readSegmentsAt(t, store, testApplyFence().Fence, round, other); stored[0].Source != segment.SourceCache {
 		t.Fatalf("the Plan read every round: %+v, want it still served from the cache", stored[0])
 	}
 	if stats := store.SegmentStats(); stats.Plans != 1 || stats.Pages != 1 {
@@ -671,14 +686,17 @@ func TestAWriteInDoubtsNoteIsSweptOnceThePlanIsGone(t *testing.T) {
 	}
 	// Its entries leave untouched first, its group then holding none; the
 	// note goes with a later sweep of the group past segmentNoteLife.
-	group := frozenRef().Slot.QueryGroup
+	// Each sweep is a later Slot's: a Slot sweeps its group once.
+	group, slot := frozenRef().Slot.QueryGroup, frozenRef().Slot
 	clock.Add(int64(3 * time.Minute))
-	store.cache.sweep(group)
+	slot.EvaluationTime += 180
+	store.cache.sweep(slot)
 	if stats := store.SegmentStats(); stats.Plans != 0 || stats.Pages != 0 {
 		t.Fatalf("the untouched Plan's entries stayed: %+v", stats)
 	}
 	clock.Add(int64(segmentNoteLife))
-	store.cache.sweep(group)
+	slot.EvaluationTime += execution.EvaluationTime(segmentNoteLife / time.Second)
+	store.cache.sweep(slot)
 	if _, noted := store.cache.segmentInvalidOf(group, mark); noted {
 		t.Fatal("the note of a Plan no read cleared outlived segmentNoteLife")
 	}

@@ -1100,6 +1100,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("state_cache_fallback_mget_total")] = len(state.StateCacheFallbackReasons)
 	bounds[fqName("state_cache_compact_declined_total")] = len(state.StateCacheCompactDeclineReasons)
 	bounds[fqName("state_cache_readback_verify_total")] = len(state.StateCacheVerifyResults)
+	bounds[fqName("state_cache_sweeps_total")] = len(state.StateCacheSweepResults)
+	bounds[fqName("state_cache_sweep_entries_total")] = 1
 	bounds[fqName("state_witness_items")] = 1
 	bounds[fqName("state_witness_bytes")] = 1
 	bounds[fqName("container_memory_cgroup_info")] = 1

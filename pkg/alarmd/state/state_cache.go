@@ -81,6 +81,18 @@ const (
 // StateCacheVerifyResults lists them.
 var StateCacheVerifyResults = []string{StateCacheVerifyMatch, StateCacheVerifyMismatch}
 
+// What a read asking for a Query Group's sweep did, closed:
+// state_cache_sweeps_total. walked is a Slot's first read, which walks the
+// group's entries; already_swept a later read of a Slot whose group the cache
+// has swept.
+const (
+	StateCacheSweepWalked       = "walked"
+	StateCacheSweepAlreadySwept = "already_swept"
+)
+
+// StateCacheSweepResults lists them.
+var StateCacheSweepResults = []string{StateCacheSweepWalked, StateCacheSweepAlreadySwept}
+
 // Entry kinds, closed: a Runtime State value, or a Plan's stable segment - a
 // mark or a member page (014 B3). The two share the cache's budget.
 const (
@@ -266,8 +278,11 @@ type StateCacheStats struct {
 	Entries                             map[string]int64
 	Readback, MemberRenewals, Fallbacks map[string]uint64
 	// CompactDeclined is the counts of StateCacheCompactDeclineReasons,
-	// Verified those of StateCacheVerifyResults.
-	CompactDeclined, Verified map[string]uint64
+	// Verified those of StateCacheVerifyResults, Sweeps those of
+	// StateCacheSweepResults; SweptEntries the entries and compact members
+	// the sweeps walked.
+	CompactDeclined, Verified, Sweeps map[string]uint64
+	SweptEntries                      uint64
 }
 
 // stateCache is per ExecutionStore. Nil is a disabled cache: every method is
@@ -302,7 +317,11 @@ type stateCache struct {
 	refused map[execution.QueryGroupIdentity]*stateCacheRefusal
 	// segmentNotes is what is remembered of the Query Groups' segments past
 	// their entries (segmentNotes).
-	segmentNotes                map[execution.QueryGroupIdentity]*segmentNotes
+	segmentNotes map[execution.QueryGroupIdentity]*segmentNotes
+	// swept is the Slot each Query Group was last swept for: a Slot's reads
+	// - its segments, then its State in calls of at most a batch's keys -
+	// sweep its group at the first, not at each (sweep).
+	swept                       map[execution.QueryGroupIdentity]execution.SlotIdentity
 	bytes                       int64
 	lookups, restored, declined map[string]*atomic.Uint64
 	// stateDepartures and segmentDepartures count each kind's departures
@@ -321,6 +340,11 @@ type stateCache struct {
 	compactDeclined map[string]*atomic.Uint64
 	// verified counts the sampled round's checks by result.
 	verified map[string]*atomic.Uint64
+	// sweeps counts the reads that asked for a sweep by
+	// StateCacheSweepResults; sweptEntries the entries and compact members
+	// the walks went through.
+	sweeps       map[string]*atomic.Uint64
+	sweptEntries atomic.Uint64
 }
 
 func newStateCache(budget int64, replayAge time.Duration, now func() time.Time) *stateCache {
@@ -337,13 +361,13 @@ func newStateCache(budget int64, replayAge time.Duration, now func() time.Time) 
 	return &stateCache{budget: budget, replayAge: replayAge, now: now,
 		byKey: map[string]*stateCacheEntry{}, groups: map[execution.QueryGroupIdentity]*stateCacheGroup{},
 		refused: map[execution.QueryGroupIdentity]*stateCacheRefusal{}, lookups: counters(StateCacheLookupResults),
-		segmentNotes:    map[execution.QueryGroupIdentity]*segmentNotes{},
+		segmentNotes: map[execution.QueryGroupIdentity]*segmentNotes{}, swept: map[execution.QueryGroupIdentity]execution.SlotIdentity{},
 		stateDepartures: counters(StateCacheDepartureReasons), segmentDepartures: counters(StateCacheDepartureReasons),
 		restored: counters(StateCacheRestoreCauses), declined: counters(StateCacheDeclineReasons),
 		entries: map[string]int64{}, readback: counters(StateCacheReadbackResults),
 		memberRenewals: counters(StateCacheMemberRenewalResults), fallbacks: counters(StateCacheFallbackReasons),
 		compactPlans: map[compactPlanKey]*compactPlan{}, compactDeclined: counters(StateCacheCompactDeclineReasons),
-		verified: counters(StateCacheVerifyResults)}
+		verified: counters(StateCacheVerifyResults), sweeps: counters(StateCacheSweepResults)}
 }
 
 // entryKind is a State entry's kind; "" for a segment's.
@@ -749,23 +773,41 @@ func (cache *stateCache) dropQueryGroup(group execution.QueryGroupIdentity) {
 	}
 	delete(cache.refused, group)
 	delete(cache.segmentNotes, group)
+	delete(cache.swept, group)
 }
 
 // sweep removes a Query Group's entries past their life or untouched for
 // two of their own intervals: an entry is dropped by an active sweep, not
-// left until it is asked for.
-func (cache *stateCache) sweep(group execution.QueryGroupIdentity) {
+// left until it is asked for. It walks every entry of the group, so it is
+// done once for a Slot, at its first read: a Slot of n series reads its
+// State in about n ÷ a batch's keys calls, and a sweep at each walked the
+// group that many times under the cache's lock (014 n8 (i) measurement:
+// 3.9 s of a 100,000-series Slot's CPU). A lookup judges an entry's life
+// itself (judgeLocked), so a Slot's later reads lose nothing by it.
+func (cache *stateCache) sweep(slot execution.SlotIdentity) {
 	if cache == nil {
 		return
 	}
+	group := slot.QueryGroup
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
+	if last, swept := cache.swept[group]; swept && last == slot {
+		cache.sweeps[StateCacheSweepAlreadySwept].Add(1)
+		return
+	}
+	cache.swept[group] = slot
+	cache.sweeps[StateCacheSweepWalked].Add(1)
 	now := cache.now()
 	// A group with no entries left may still hold notes of its segments.
 	held := cache.groups[group]
 	if held == nil {
 		held = &stateCacheGroup{}
 	}
+	walked := uint64(len(held.entries))
+	for _, plan := range held.compact {
+		walked += uint64(len(plan.members))
+	}
+	cache.sweptEntries.Add(walked)
 	for _, entry := range held.entries {
 		interval := entry.interval
 		if entry.segment {
@@ -948,7 +990,8 @@ func (cache *stateCache) stats() StateCacheStats {
 	stats := StateCacheStats{Bytes: bytes, BudgetBytes: budget, QueryGroups: groups,
 		Lookups: read(cache.lookups), Restored: read(cache.restored), Declined: read(cache.declined), SegmentBytes: segmentBytes,
 		Entries: entries, Readback: read(cache.readback), MemberRenewals: read(cache.memberRenewals), Fallbacks: read(cache.fallbacks),
-		CompactDeclined: read(cache.compactDeclined), Verified: read(cache.verified)}
+		CompactDeclined: read(cache.compactDeclined), Verified: read(cache.verified), Sweeps: read(cache.sweeps),
+		SweptEntries: cache.sweptEntries.Load()}
 	stats.StateDepartures, stats.SegmentDepartures = read(cache.stateDepartures), read(cache.segmentDepartures)
 	stats.Departures = make(map[string]uint64, len(stats.StateDepartures))
 	for reason, count := range stats.StateDepartures {

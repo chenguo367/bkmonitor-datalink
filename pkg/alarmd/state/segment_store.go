@@ -170,7 +170,7 @@ func (store *ExecutionStore) segmentLife(lifetime segment.Lifetime) (time.Durati
 func (store *ExecutionStore) ReadSegments(ctx context.Context, request segment.ReadRequest) (segment.ReadResult, error) {
 	result := segment.ReadResult{Plans: make([]segment.Stored, len(request.Plans))}
 	group := request.Contract.Slot.QueryGroup
-	store.cache.sweep(group)
+	store.cache.sweep(request.Contract.Slot)
 	type cold struct {
 		index  int
 		mark   string

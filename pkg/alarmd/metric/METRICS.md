@@ -2361,6 +2361,16 @@ Labels: `cause`
 
 Values written back over an external change to a key the State cache served, by cause: missing (the key was deleted or evicted) and rolled_back (older bytes than this process last wrote, with the Query Group's Progress still at this Slot). A legitimate writer is never written over: see state_cache_restore_declined_total.
 
+## alarmd_state_cache_sweep_entries_total
+
+Entries and compact members the State cache's sweeps walked (state_cache_sweeps_total{result=walked}), all of a Query Group's at each walk.
+
+## alarmd_state_cache_sweeps_total
+
+Labels: `result`
+
+Runtime State and segment reads that asked the State cache to sweep their Query Group - take out the entries past their life or untouched for two of their intervals - by result: walked (a Slot's first read, which walks every entry and compact member of the group under the cache's lock) or already_swept (a later read of the same Slot: its State is read in calls of at most a batch's keys, and the group is walked once a Slot). walked's rate is about the Slots' of the Query Groups the cache holds; state_cache_sweep_entries_total over it is the entries a walk goes through.
+
 ## alarmd_state_generation_carry_total
 
 Labels: `scope`, `result`

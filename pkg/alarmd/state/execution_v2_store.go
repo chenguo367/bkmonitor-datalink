@@ -309,7 +309,7 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 		return execution.StatePreflightResult{}, fmt.Errorf("state: invalid runtime load request")
 	}
 	result := execution.StatePreflightResult{Items: make([]execution.RuntimeStateView, len(request.Items))}
-	store.cache.sweep(request.Contract.Slot.QueryGroup)
+	store.cache.sweep(request.Contract.Slot)
 	pass := &runtimeLoadPass{}
 	// The Slot's own read under its fence offers the cache what it reads
 	// back of the members their round leaves unwritten (014 next7 3.1).

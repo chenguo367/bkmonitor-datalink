@@ -166,6 +166,71 @@ func TestEachRuleThatDoesNotHoldReadsTheStoreBack(t *testing.T) {
 	}
 }
 
+// A Slot reads its State in calls of at most a preflight batch's items, and
+// the sweep that walks its Query Group's entries is made at the first of
+// them, not at each: a group of n series was walked n ÷ a batch's items
+// times a Slot under the cache's lock (014 n8 (i) measurement). An entry past
+// its usable life leaves at the sweep of the next Slot's first read, not at a
+// later read of the Slot that has swept.
+func TestAQueryGroupIsSweptAtASlotsFirstReadNotAtEach(t *testing.T) {
+	rig := newCacheRig(t, 1<<20)
+	start := rig.now
+	rig.round(first, 2, 0)
+	ttl, err := rig.store.runtimeTTL(testRetention(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expired := func() uint64 { return rig.store.StateCacheStats().Departures[StateCacheDepartExpired] }
+	// The second Slot's first read and write renew the first series; the
+	// other keeps the life of its write in the first Slot.
+	rig.now = start.Add(time.Minute)
+	rig.round(second, 1, 1)
+	// Past the other's usable life and not the first's, a later read of the
+	// same Slot, asking for the first, sweeps nothing.
+	rig.now = start.Add(ttl - 30*time.Second)
+	rig.load(second, 1)
+	if expired() != 0 {
+		t.Fatalf("a later read of a Slot that has swept swept again: %d expired departures", expired())
+	}
+	// The next Slot's first read sweeps: the series past its life leaves,
+	// asked for or not; the one renewed stays.
+	third := second
+	third.at += 60
+	rig.load(third, 1)
+	if expired() != 1 {
+		t.Fatalf("the next Slot's first read left %d expired departures, want the other series' 1", expired())
+	}
+}
+
+// The sweeps are counted by what each read that asked for one did: a Slot's
+// first read walks its group's entries, its later reads find it swept; a
+// group the cache let go (DropStateCacheQueryGroup) forgets the Slot it was
+// swept for, so its next read walks it again and nothing of it outlives it.
+func TestASlotsReadsAreCountedOneWalkAndAGroupLetGoIsWalkedAgain(t *testing.T) {
+	rig := newCacheRig(t, 1<<20)
+	rig.round(first, 2, 0)
+	sweeps := func() (walked, already, entries uint64) {
+		stats := rig.store.StateCacheStats()
+		return stats.Sweeps[StateCacheSweepWalked], stats.Sweeps[StateCacheSweepAlreadySwept], stats.SweptEntries
+	}
+	walked, already, entries := sweeps()
+	rig.load(second, 2)
+	rig.load(second, 2)
+	rig.load(second, 1)
+	nowWalked, nowAlready, nowEntries := sweeps()
+	if nowWalked-walked != 1 || nowAlready-already != 2 {
+		t.Fatalf("three reads of one Slot: %d walked and %d already swept, want 1 and 2", nowWalked-walked, nowAlready-already)
+	}
+	if nowEntries-entries != 2 {
+		t.Fatalf("the walk went through %d entries, want the group's 2", nowEntries-entries)
+	}
+	rig.store.DropStateCacheQueryGroup(second.contract().Slot.QueryGroup)
+	rig.load(second, 2)
+	if afterWalked, _, _ := sweeps(); afterWalked-nowWalked != 1 {
+		t.Fatalf("the read after the group was let go walked it %d times, want once again", afterWalked-nowWalked)
+	}
+}
+
 // A frozen series is read every Slot and never written, so its entry ages
 // while it is touched: served up to its usable life (the write's TTL less
 // the replay age) and not past it, where the key it answers for may have
