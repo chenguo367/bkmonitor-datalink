@@ -114,9 +114,12 @@ type slicedSource struct {
 	// beforeRead, when set, runs as each read is asked, before anything of it.
 	beforeRead func()
 	// afterLast is how long each read takes after its last series, before it
-	// completes; frameWait is the shared-schema frame waits each read's
-	// answer says, on the consumer side, the reader side twice it.
+	// completes, and beforeFirst how long each read after the Slot's first
+	// takes before its first series; frameWait is the shared-schema frame
+	// waits each read's answer says, on the consumer side, the reader side
+	// twice it.
 	afterLast   time.Duration
+	beforeFirst time.Duration
 	frameWait   uint64
 	t           *testing.T
 	ports       *recordingPorts
@@ -282,6 +285,9 @@ func (source *slicedSource) answer(ctx context.Context, request execution.QueryE
 				continue
 			}
 		}
+		if source.beforeFirst > 0 && reads > 1 && len(call.delivered) == 0 {
+			time.Sleep(source.beforeFirst) // fixed-wait: the read's own time before its first series, the seam the case times
+		}
 		host, _ := json.Marshal(series.host)
 		dimensions := map[string]json.RawMessage{"host": host,
 			"padding": json.RawMessage(`"` + strings.Repeat("p", series.padding) + `"`)}
@@ -388,6 +394,9 @@ type slicedFixture struct {
 	source       *slicedSource
 	coordinator  *worker.SlotExecutionCoordinator
 	observations *[]observability.Observation
+	// queryPermits is the process's query permits build gives the
+	// coordinator: none set, two slices read at once (one ahead); two, one.
+	queryPermits int
 }
 
 // newSlicedFixture builds the fixture with a 1 MiB pool; maxStates is the
@@ -420,7 +429,8 @@ func (fixture *slicedFixture) build(t *testing.T, replaced worker.Ports, maxStat
 		Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
 			*observations = append(*observations, observability.NormalizeObservation(observation))
 		})},
-		worker.ProvisionalBudget{MaxSeries: 200, MaxRetainedBytes: slicedPool, MaxStateMutations: maxStates, MaxEvents: 200, MaxGapMutations: 10})
+		worker.ProvisionalBudget{MaxSeries: 200, MaxRetainedBytes: slicedPool, MaxStateMutations: maxStates, MaxEvents: 200, MaxGapMutations: 10,
+			QueryPermits: fixture.queryPermits})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2021,29 +2031,27 @@ func TestTheSlicesAQueryGroupIsReadInDoNotGrowRoundByRound(t *testing.T) {
 	}
 }
 
-// slowEvents writes each batch of events pause after it is handed it.
-type slowEvents struct {
-	*recordingPorts
-	pause time.Duration
-}
-
-func (events *slowEvents) WriteBatch(ctx context.Context, batch []contract.TriggerEventV1) error {
-	time.Sleep(events.pause) // fixed-wait: the slice's completion writing its events, the seam the case times
-	return events.recordingPorts.WriteBatch(ctx, batch)
-}
-
 // The seams of a Slot's reads are timed on its usage: a read's tail, from
 // its last series reaching the Slot to the read ending - the source taking
 // 30 ms after its last series - and the change into the next read, from that
-// end to the next read's first series - each slice's events taking 40 ms to
-// write as it completes, while the next is read ahead. Its answers' frame
-// waits are summed beside them. A Slot read whole has a tail and no change.
+// end to the next read's first series - the source taking 40 ms before it.
+// Its answers' frame waits are summed beside them. A Slot read whole has a
+// tail and no change.
+//
+// The Slot's query permits leave one slice read at a time, none ahead:
+// every read is on the Slot's goroutine, which times both ends of each seam
+// around the source's own wait, so each tail is 30 ms or more and each
+// change 40 ms or more however busy the machine is. Read ahead, a change
+// is what the Slot did between the reads plus what it waited for the read
+// ahead, which depends on where its windows were cut and when the read
+// ahead came back, and bounds nothing.
 func TestTheSeamsOfASlotsReadsAreTimedOnItsUsage(t *testing.T) {
-	const tail, write = 30 * time.Millisecond, 40 * time.Millisecond
+	const tail, before = 30 * time.Millisecond, 40 * time.Millisecond
 	fixture := newSlicedFixture(t, slicedHosts(24, 40<<10), sliceableFacts(), 200)
-	fixture.source.afterLast, fixture.source.frameWait = tail, 2_500_000
+	fixture.source.afterLast, fixture.source.beforeFirst, fixture.source.frameWait = tail, before, 2_500_000
+	fixture.queryPermits = 2
 	fixture.coordinator = fixture.build(t, worker.Ports{Activation: fixture.ports, State: fixture.state,
-		GapGuard: fixture.ports, Events: &slowEvents{recordingPorts: fixture.ports, pause: write}}, 200)
+		GapGuard: fixture.ports, Events: fixture.ports}, 200)
 	result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
 	if err != nil || !result.Completed {
 		t.Fatalf("Execute() result=%+v err=%v", result, err)
@@ -2053,14 +2061,30 @@ func TestTheSeamsOfASlotsReadsAreTimedOnItsUsage(t *testing.T) {
 	if landed < 2 || usage.InputSlices != landed {
 		t.Fatalf("landed %d reads, usage %d slices: want the Slot read in slices", landed, usage.InputSlices)
 	}
-	// The first slice is read on the Slot's goroutine, its tail the source's;
-	// every change holds the slice before writing its events.
-	if usage.InputSliceTailMillisMax < 30 || usage.InputSliceTailMillis < usage.InputSliceTailMillisMax {
-		t.Errorf("tails %d ms, the longest %d: want one of 30 ms or more", usage.InputSliceTailMillis, usage.InputSliceTailMillisMax)
+	if ahead := usage.InputSlicesReadAhead + usage.InputSlicesReadAheadOtherLeaf + usage.InputSlicesReadAheadYielded +
+		usage.InputSlicesReadAheadFailed; ahead != 0 {
+		t.Fatalf("%d slices read ahead, want every read on the Slot's goroutine", ahead)
 	}
-	if usage.InputSliceChangeMillisMax < 40 || usage.InputSliceChangeMillis < (landed-1)*40 {
-		t.Errorf("changes %d ms over %d slices, the longest %d: want each 40 ms or more", usage.InputSliceChangeMillis, landed,
-			usage.InputSliceChangeMillisMax)
+	// Every read on the Slot's goroutine: a tail past the source's 30 ms for
+	// each read that delivered a series, a change past its 40 ms for each of
+	// them but the first. A read of none has neither, and how many there are
+	// depends on how the Slot sized its slices, which a busy machine moves.
+	var delivered uint64
+	for _, call := range fixture.source.landed() {
+		if len(call.delivered) > 0 {
+			delivered++
+		}
+	}
+	if delivered < 2 {
+		t.Fatalf("%d of %d reads delivered series, want two or more", delivered, landed)
+	}
+	if usage.InputSliceTailMillisMax < 30 || usage.InputSliceTailMillis < delivered*30 {
+		t.Errorf("tails %d ms over %d reads with series, the longest %d: want each 30 ms or more", usage.InputSliceTailMillis,
+			delivered, usage.InputSliceTailMillisMax)
+	}
+	if usage.InputSliceChangeMillisMax < 40 || usage.InputSliceChangeMillis < (delivered-1)*40 {
+		t.Errorf("changes %d ms into %d reads with series, the longest %d: want each 40 ms or more", usage.InputSliceChangeMillis,
+			delivered, usage.InputSliceChangeMillisMax)
 	}
 	fixture.source.mu.Lock()
 	reads := uint64(len(fixture.source.calls))
