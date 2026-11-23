@@ -69,15 +69,18 @@ func queryDurationBucket(measured time.Duration) int64 {
 
 // MeasureQueryDuration gives the controller the group's query duration as
 // this process measured it, for the record the group's next Slot freezes to
-// keep (noteQueryDurationLocked). It is given outside every lock: the
-// measuring side calls into the controller under its own.
+// keep (noteQueryDurationLocked); zero is a group measured here whose
+// readings have all aged, which the record is no longer given: the reading it
+// keeps is not written again, and goes stale as an owner's reading does once
+// the owner stops measuring it. It is given outside every lock: the measuring
+// side calls into the controller under its own.
 func (controller *Controller) MeasureQueryDuration(qg execution.QueryGroupIdentity, measured time.Duration) {
 	state := controller.known(qg)
-	if measured <= 0 || state == nil {
+	if state == nil {
 		return
 	}
 	state.mu.Lock()
-	state.measuredQueryDuration = measured
+	state.measuredQueryDuration = max(measured, 0)
 	state.mu.Unlock()
 }
 

@@ -1156,7 +1156,12 @@ func (runner *Runner) runOneTracked(
 	if err == nil && result.Completed && result.QueryFreeCause != "" {
 		runner.observeSlotSkipped(ctx, slot, operation, fence, result)
 	}
-	if queried := runner.stage.QueryReturnedAt(); err == nil && !queried.IsZero() {
+	// The live reserve sizes the deadline a normal round's query runs under,
+	// so only a normal round's tail sizes it: a replay rewrites the group
+	// whole, its tail far past a normal round's, and judged under the replay
+	// deadline it would move the next normal round's live deadline earlier,
+	// toward another divert.
+	if queried := runner.stage.QueryReturnedAt(); err == nil && !queried.IsZero() && operation == execution.OperationNormal {
 		runner.flights.RecordPostQueryTail(runner.lastExecutionReturnedAt, runner.queryGroup, runner.lastExecutionReturnedAt.Sub(queried))
 	}
 	if due := runner.stage.CompletionDeadline(); !due.IsZero() && runner.lastExecutionReturnedAt.After(due) {

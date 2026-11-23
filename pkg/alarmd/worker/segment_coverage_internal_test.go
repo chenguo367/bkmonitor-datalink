@@ -228,6 +228,88 @@ func TestTheRoundLeavesOnlyAnOpenMemberWithNoExceptionWhoseMadeReadMatches(t *te
 	if fresh().leaves(shadowDue, back.view, back.write, back.class, false) {
 		t.Error("a member back after it departed is left")
 	}
+	// The Plan's write decides on the same facts before admission (014 n8
+	// (i)): the member left when it sent none, written when it sent events,
+	// the decision noting nothing on the round either way.
+	for sent, wantLeft := range map[bool]int{false: 1, true: 0} {
+		round := fresh()
+		apply := &slotApply{shadow: round}
+		decided, writing, leaving := apply.decideLeaving(shadowDue, []execution.StateMutation{series.write},
+			map[execution.StateKeyIdentity]shadowed{series.write.Identity: {view: series.view, class: series.class, eventsSent: sent}})
+		if len(leaving) != wantLeft || len(writing) != 1-wantLeft || decided[series.write.Identity].leave != (wantLeft == 1) {
+			t.Errorf("events sent %t: %d left, %d written, want %d left", sent, len(leaving), len(writing), wantLeft)
+		}
+		if len(round.plans) != 0 {
+			t.Errorf("events sent %t: the decision started %d Plan rounds, want it to note nothing", sent, len(round.plans))
+		}
+	}
+}
+
+// A Plan's members decided together before admission build the round the
+// shadow would start for the Plan once, not once a member (014 n8 (i)): the
+// decision keeps nothing of it, and its building - a round's tallies and the
+// sampled round's hash of the piece's name - is the cost the skip removes
+// from the apply. Member for member, deciding twenty more of them together
+// allocates less than deciding each alone by half a round's building at
+// least, that building measured here.
+func TestAPlansMembersDecidedTogetherBuildTheRoundItWouldStartOnce(t *testing.T) {
+	const many = 21
+	store := newMemorySegments()
+	roundOf := func(at int64) []shadowRoundOf {
+		written := make([]shadowRoundOf, many)
+		for index := range written {
+			written[index] = steady(t, shadowSeries(index), at)
+		}
+		return written
+	}
+	// They join, and are compared two rounds, as the case of a member left
+	// above.
+	runShadowFor(t, store, shadowDue, roundOf(1320), false)
+	runShadowFor(t, store, shadowDue, roundOf(store.at+60), false)
+	runShadowFor(t, store, shadowDue, roundOf(store.at+60), false)
+	request := shadowRequest(execution.OperationNormal, store.at+60)
+	slot := shadowSlot(t, store, request, shadowDue)
+	slot.skip = true
+	round := newSegmentShadowRound(request, slot)
+	var at int64
+	for _, state := range slot.plans {
+		at = state.position + 60
+	}
+	writes := make([]execution.StateMutation, many)
+	written := make(map[execution.StateKeyIdentity]shadowed, many)
+	for index, series := range roundOf(at) {
+		writes[index] = series.write
+		written[series.write.Identity] = shadowed{view: series.view, class: series.class}
+	}
+	apply := &slotApply{shadow: round}
+	if _, _, leaving := apply.decideLeaving(shadowDue, writes, written); len(leaving) != many {
+		t.Fatalf("%d of %d steady members left: the case is not the one it is about", len(leaving), many)
+	}
+	if len(round.plans) != 0 {
+		t.Fatalf("the decisions kept %d Plan rounds, want none: kept, a round is built once whatever the decision does", len(round.plans))
+	}
+	together := func(members int) float64 {
+		return testing.AllocsPerRun(50, func() { apply.decideLeaving(shadowDue, writes[:members], written) })
+	}
+	alone := func(members int) float64 {
+		return testing.AllocsPerRun(50, func() {
+			for _, write := range writes[:members] {
+				facts := written[write.Identity]
+				round.decideLeave(nil, shadowDue, facts.view, write, facts.class, facts.eventsSent)
+			}
+		})
+	}
+	building := testing.AllocsPerRun(50, func() { round.peekPlanRound(shadowDue, writes[0].Identity, writes[0].RetentionPoints) })
+	if building < 2 {
+		t.Fatalf("building the Plan's round allocates %v times: the case is not the one it is about", building)
+	}
+	perTogether := (together(many) - together(1)) / (many - 1)
+	perAlone := (alone(many) - alone(1)) / (many - 1)
+	t.Logf("allocations a member: %.2f decided together, %.2f alone; the round's building %.0f", perTogether, perAlone, building)
+	if perTogether > perAlone-building/2 {
+		t.Fatalf("a member decided with its Plan's others allocates %.2f times, alone %.2f: the round, built in %.0f, is built again for each",
+			perTogether, perAlone, building)
+	}
 }
 
 // A member departing is renewed whole with the mark when the round before

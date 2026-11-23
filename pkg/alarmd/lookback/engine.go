@@ -451,8 +451,12 @@ type group struct {
 	// period is the observed time between two of its Slots, lastSlot the
 	// latest one seen; a Query Group is sampled at its first reads, so how
 	// fresh its measurement can be depends on how often it reads.
-	period     time.Duration
-	lastSlot   execution.EvaluationTime
+	period   time.Duration
+	lastSlot execution.EvaluationTime
+	// interval is the time between two of its Slots as its frozen schedule
+	// has it (Query.FollowingSlot), which its readings age by
+	// (readingAgeLocked).
+	interval   time.Duration
 	measured   bool
 	measuredAt time.Time
 	completion time.Duration
@@ -648,6 +652,9 @@ func (engine *Engine) Begin(query Query) *Read {
 		state.lastSlot = slot.EvaluationTime
 	}
 	state.source, state.step = source, step
+	if query.FollowingSlot > slot.EvaluationTime {
+		state.interval = time.Duration(query.FollowingSlot-slot.EvaluationTime) * time.Second
+	}
 	state.delayUnit = delayUnitOf(facts, step, slot.EvaluationTime, query.FollowingSlot)
 	if state.seriesLate != nil && engine.options.Supplement != nil {
 		read.directed = engine.captureDirectedLocked(state, query, source, step, now)
@@ -848,9 +855,9 @@ func (read *Read) Complete(completion execution.ProviderCompletion, err error) {
 		now := read.engine.options.Now()
 		read.engine.mu.Lock()
 		if state := read.engine.groups[read.queryGroup]; state != nil {
-			state.requests.add(now.Sub(read.sentAt))
+			state.requests.add(now, now.Sub(read.sentAt))
 			if read.slice.IsZero() {
-				state.firstReads.add(now.Sub(read.sentAt))
+				state.firstReads.add(now, now.Sub(read.sentAt))
 			} else {
 				state.sliceRound.complete(&state.firstReads, read.evaluation, read.sentAt, now)
 			}
@@ -983,12 +990,17 @@ func (engine *Engine) RereadBound(queryGroup execution.QueryGroupIdentity) (time
 }
 
 // QueryDuration is the group's own reading of how long its query takes - the
-// longest of its last whole first reads, as measured - and false when this
-// process has no such reading. RereadBound keeps that reading at
-// RecheckTimeout or more, the least a read again is given; a scheduler asking
-// whether a round still has time to finish needs what the query takes, and a
-// quick query given RecheckTimeout would be judged short of time with seconds
-// to spare. Read-only.
+// longest of its last whole first reads, as measured, of those no older than
+// readingsKept of its rounds (readingAgeLocked) - and whether this process
+// has measured the group at all: zero with true is a group whose readings
+// have all aged, its rounds read otherwise than by a first read this long - a
+// group a round of which is diverted every round takes no reading - and which
+// is then judged by none, not by a reading older still. False is a group this
+// process has not measured. RereadBound keeps the reading at RecheckTimeout or
+// more, the least a read again is given; a scheduler asking whether a round
+// still has time to finish needs what the query takes, and a quick query
+// given RecheckTimeout would be judged short of time with seconds to spare.
+// Read-only.
 func (engine *Engine) QueryDuration(queryGroup execution.QueryGroupIdentity) (time.Duration, bool) {
 	if engine == nil {
 		return 0, false
@@ -996,11 +1008,26 @@ func (engine *Engine) QueryDuration(queryGroup execution.QueryGroupIdentity) (ti
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
 	state := engine.groups[queryGroup]
-	if state == nil {
+	if state == nil || state.firstReads.count == 0 {
 		return 0, false
 	}
-	longest := state.firstReads.longest()
-	return longest, longest > 0
+	return state.firstReads.longestSince(engine.options.Now().Add(-state.readingAgeLocked())), true
+}
+
+// readingAgeLocked is how old a reading of the group may be and still bound
+// it: readingsKept of its rounds, the span its readings cover while it reads
+// every round - by its frozen schedule's interval, else the time seen between
+// two of its Slots, else its step - so a group read every round keeps every
+// reading its ring holds, as before readings aged.
+func (state *group) readingAgeLocked() time.Duration {
+	round := state.interval
+	if round <= 0 {
+		round = state.period
+	}
+	if round <= 0 {
+		round = state.step
+	}
+	return readingsKept * round
 }
 
 // Busy is what the lookback has of a Query Group in flight or reserved at
@@ -1096,11 +1123,11 @@ type sliceRound struct {
 func (round *sliceRound) complete(readings *durations, evaluation execution.EvaluationTime, sent, now time.Time) {
 	if round.evaluation != evaluation || readings.count == 0 {
 		round.evaluation, round.begun = evaluation, sent
-		readings.add(now.Sub(sent))
+		readings.add(now, now.Sub(sent))
 		return
 	}
 	round.begun = minTime(round.begun, sent)
-	readings.widenLatest(now.Sub(round.begun))
+	readings.widenLatest(now, now.Sub(round.begun))
 }
 
 func minTime(left, right time.Time) time.Time {

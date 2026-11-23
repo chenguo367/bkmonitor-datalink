@@ -175,7 +175,7 @@ func deriveSharedRecordsDigest(domain string, records []CanonicalRecordV2, encod
 // fields, and the digest, lowercase hexadecimal, as the string it is.
 // Anything else is encoded whole.
 func dimensionIdentityPart(identity DimensionIdentityV2, encoded DimensionIdentityEncodingV2) ([]byte, error) {
-	if encoded.canonical == nil || encoded.Digest != identity.Digest || !sha256Pattern.MatchString(identity.Digest) ||
+	if encoded.canonical == nil || encoded.Digest != identity.Digest || !isSHA256Hex(identity.Digest) ||
 		!sameSlice(encoded.fields, identity.Fields) {
 		return CanonicalJSONV2(identity)
 	}

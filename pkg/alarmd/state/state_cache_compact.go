@@ -67,6 +67,14 @@ var StateCacheCompactDeclineReasons = []string{StateCacheCompactLegacyFrame, Sta
 // one Level and one point; the calibration test holds the sum to the heap.
 const compactMemberOverhead = 384
 
+// stateCacheCompactCharge is what a compact member is estimated to be charged
+// before any of its Query Group's has been measured: the charge compactOf
+// gives (member.cost) a one-Level member whose points take one 128-byte class
+// and whose two times one 16-byte class. A refused round with no value
+// measured is charged it (stateCacheRefusal.mean), and the budget is to be
+// sized by it while nothing is held (014 n8).
+const stateCacheCompactCharge = compactMemberOverhead + 128 + 16
+
 type compactDigest [32]byte
 
 // compactPlanKey names one Plan generation's compact members under one
@@ -123,6 +131,9 @@ type compactMember struct {
 	usableUntil time.Time
 	touched     time.Time
 	cost        int64
+	// sharded and openMember are what the member's latest lookup said of it
+	// (StateCacheCell), openMember also its read back's.
+	sharded, openMember bool
 }
 
 func digestBytes(digest string) (compactDigest, bool) {
@@ -294,6 +305,7 @@ func (cache *stateCache) judgeCompactLocked(request execution.StatePreflightRequ
 // signature and its Slot digest.
 func (cache *stateCache) keepCompactLocked(entry stateCacheEntry, member *compactMember, room int64) {
 	member.slot, member.usableUntil, member.touched = entry.slot, entry.usableUntil, cache.now()
+	member.sharded, member.openMember = entry.sharded, entry.openMember
 	if previous := cache.byKey[entry.key]; previous != nil {
 		cache.removeLocked(previous)
 	}
@@ -308,10 +320,11 @@ func (cache *stateCache) keepCompactLocked(entry stateCacheEntry, member *compac
 			}
 		}
 	}
-	if !cache.admitLocked(entry.group, entry.slot, member.cost, false, min(cache.budget, room)) {
+	if !cache.admitLocked(entry.group, entry.slot, member.cost, false, true, min(cache.budget, room)) {
 		return
 	}
 	group := cache.groupLocked(entry.group)
+	group.read(entry.identity)
 	plan := cache.compactPlans[key]
 	if plan == nil {
 		plan = &compactPlan{key: key, fence: entry.fence, epoch: entry.epoch, segmentStart: entry.segmentStart, interval: entry.interval,

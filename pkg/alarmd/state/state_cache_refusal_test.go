@@ -103,7 +103,8 @@ func heldOf(cache *stateCache, group execution.QueryGroupIdentity) int {
 // missOf is the word a lookup of group's first key gets.
 func missOf(cache *stateCache, group execution.QueryGroupIdentity) string {
 	_, _, word := cache.lookup(cacheKey(group, 0), execution.StatePreflightRequest{
-		Contract: execution.FrozenExecutionContractRef{Slot: execution.SlotIdentity{QueryGroup: group}}}, execution.StatePreflightItem{})
+		Contract: execution.FrozenExecutionContractRef{Slot: execution.SlotIdentity{QueryGroup: group}}}, execution.StatePreflightItem{},
+		stateCacheMembershipUnknown)
 	return word
 }
 
@@ -211,5 +212,71 @@ func TestAQueryGroupKeptOutLeavesTheRoomToTheGroupsThatFit(t *testing.T) {
 	}
 	if left := cache.stats().Departures[StateCacheDepartOverBudget]; left != 6 {
 		t.Fatalf("over_budget %d; want only the 6 the large group filled the cache with in its first round", left)
+	}
+}
+
+// A refused round's values are counted with its size wherever a refusal is
+// made - a value refused at admission, with the residents of its Slot the
+// Query Group leaves with, or the residents it gives back whole
+// (YieldRetainedBytes) - each at what it costs, so the next Slot judges the
+// group by its whole round; and only its State values read back are
+// measured, so a value read back and not made compact is charged at what
+// they cost (stateCacheRefusal.mean), not at a write's bytes or a segment's
+// page. A refusal with nothing read back measured yet charges a compact
+// member's estimate, never nothing: charged nothing, a kept-out group would
+// come back each round and be put out again.
+func TestARefusedRoundsMeanIsWhatItsValuesReadBackMeasuredAndACompactEstimateBeforeAnything(t *testing.T) {
+	cost := entryCost(cacheKey("big", 0), make([]byte, 1000))
+	readback := entryCost(cacheKey("big", 0), make([]byte, 400))
+	segment := entryCost(cacheKey("big", 0), make([]byte, 3000))
+	held := 2*cost + 2*readback + segment
+	// residents is a cache holding, for the Slot at 60, two writes, two
+	// values read back kept as their bytes and a segment of the group's.
+	residents := func(group execution.QueryGroupIdentity) *stateCache {
+		now := time.Unix(1_700_000_000, 0)
+		cache := newStateCache(held, time.Minute, func() time.Time { return now })
+		writeSeries(cache, group, 60, 0, 2)
+		for index := 2; index < 4; index++ {
+			cache.insert(stateCacheEntry{key: cacheKey(group, index), group: group, raw: make([]byte, 400), slot: 60,
+				usableUntil: now.Add(time.Hour), readback: true}, false)
+		}
+		cache.insert(stateCacheEntry{key: cacheKey(group, 4), group: group, raw: make([]byte, 3000), slot: 60,
+			usableUntil: now.Add(time.Hour), segment: true}, false)
+		if got := heldOf(cache, group); got != 5 {
+			t.Fatalf("the cache holds %d of the group's entries, want its 5", got)
+		}
+		return cache
+	}
+	refusalOf := func(cache *stateCache, group execution.QueryGroupIdentity) stateCacheRefusal {
+		cache.mu.Lock()
+		defer cache.mu.Unlock()
+		if refusal := cache.refused[group]; refusal != nil {
+			return *refusal
+		}
+		t.Fatalf("the group %s is not refused", group)
+		return stateCacheRefusal{}
+	}
+	cache := residents("big")
+	cache.YieldRetainedBytes(1)
+	if refusal := refusalOf(cache, "big"); refusal.members != 5 || refusal.size != held || refusal.mean() != readback {
+		t.Fatalf("the group given back whole is refused as %+v, want its 5 residents' %d bytes, its mean its values read back's %d",
+			refusal, held, readback)
+	}
+	cache = residents("big")
+	writeSeries(cache, "big", 60, 5, 6)
+	if refusal := refusalOf(cache, "big"); refusal.members != 6 || refusal.size != held+cost || refusal.mean() != readback {
+		t.Fatalf("the group put out by a write is refused as %+v, want its 5 residents and the write, %d bytes, its mean its "+
+			"values read back's %d", refusal, held+cost, readback)
+	}
+	// A round refused at its eleventh write in a cache of ten counts the
+	// ten given back, the one refused and the four after it; none read back.
+	cache = bareCache(10)
+	writeSeries(cache, "next", 60, 0, 15)
+	if refusal := refusalOf(cache, "next"); refusal.members != 15 || refusal.size != 15*cost || refusal.mean() != stateCacheCompactCharge {
+		t.Fatalf("a round of 15 writes refused at the eleventh is refused as %+v, want its 15 values of %d each and nothing "+
+			"measured, its mean a compact member's %d", refusal, cost, stateCacheCompactCharge)
+	}
+	if got := (&stateCacheRefusal{bound: StateCacheDepartYielded, slot: 60}).mean(); got != stateCacheCompactCharge {
+		t.Fatalf("a refusal with nothing measured estimates a value at %d, want a compact member's %d", got, stateCacheCompactCharge)
 	}
 }

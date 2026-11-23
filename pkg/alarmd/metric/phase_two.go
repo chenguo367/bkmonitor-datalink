@@ -417,8 +417,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		}, []string{"budget", "result"}),
 		stateSeriesClass: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: metricSubsystem, Name: "state_series_class_total",
-			Help: "Runtime State mutations admitted for writing, by what their series decided this round, " +
-				"one per mutation per attempt, counted where state_write_reuse_total counts them, so the two " +
+			Help: "Runtime State mutations classified for writing, by what their series decided this round, " +
+				"one per mutation per attempt, counted before the round's stable segments leave any out and " +
+				"before admission, where state_write_reuse_total counts them, so the two " +
 				"families sum alike. Both are reported at the attempt's census, so an attempt whose census was " +
 				"never reported - a Slot still running when its process stopped - is in neither. " +
 				"Each Level is classed from its own result and windows, never from the " +
@@ -441,7 +442,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		}, []string{"class", "series"}),
 		stateSeriesNotWritten: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: metricSubsystem, Name: "state_series_not_written_total",
-			Help: "Runtime State mutations admitted for writing (state_series_class_total) that their attempt " +
+			Help: "Runtime State mutations classified for writing (state_series_class_total) that their attempt " +
 				"did not write, by why: the exit they left at, or the skip. output_withheld is a Plan whose output did not start " +
 				"or did not land - a lease too short for a batch, a refusal decided in this process, an " +
 				"acknowledgement unknown - so none of its State was written; output_partial is a series whose " +
@@ -450,7 +451,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"segment_member_skipped is not an exit but the skip (014 B3 stage 3): an open member of its Plan's " +
 				"stable segments, steady, normal and quiet on the grid, its State left as it was and read through " +
 				"the segment - on by default, held while a ready worker does not declare it, stopped by the " +
-				"Control's phase_two.control.segment_skip: false; " +
+				"Control's phase_two.control.segment_skip: false. A member left is left before admission: not " +
+				"encoded, not reserved, not written; its new record meets admission in the round that writes it " +
+				"again, at the latest its Plan's next sampled round, a day at most, when every member is written; " +
 				"slot_failed is the rest the attempt admitted when it ended with an error by any other exit, " +
 				"its own Plan's or a later one's; unaccounted stays zero, each non-zero attempt saying so on a " +
 				"line with reason internal_unknown: admitted mutations no named exit counted on an attempt that " +
@@ -461,7 +464,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		segmentShadow: newSegmentShadowMetrics(),
 		stateWriteReuse: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: metricSubsystem, Name: "state_write_reuse_total",
-			Help: "Runtime State mutations admitted for writing, by how much of what the write carries was " +
+			Help: "Runtime State mutations classified for writing, by how much of what the write carries was " +
 				"already stored, reported with state_series_class_total at the attempt's census. Nothing is skipped: this measures what a skip could save before the write " +
 				"path changes. identical is the whole blob reproduced; decision_stable is a series that " +
 				"decided stable_normal this round (state_series_class_total) with its Level state and series " +
@@ -473,12 +476,12 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"reason. changed is everything else that was compared; unobserved is a key with nothing stored yet, kept " +
 				"apart so a starting worker's warm-up does not depress the others. Read the classes " +
 				"separately: identical and decision_stable are what two different changes could save and do " +
-				"not add up. Their sum is the admitted population, so every class zero with a zero sum " +
+				"not add up. Their sum is the population classified for writing, so every class zero with a zero sum " +
 				"means the classifier never ran rather than that nothing was reusable. stored says what was " +
 				"held when the comparison was made, because a series that keeps recovering and one that " +
 				"never leaves history warming are both steady and both pay a write every round, but reach " +
 				"it through different branches; averaged together the rate describes neither. The population is " +
-				"State mutations admitted for writing, one per mutation per round, and not Redis commands: " +
+				"State mutations classified for writing, one per mutation per round, and not Redis commands: " +
 				"a storage-layer retry reissues a command without a new admission, and a request with " +
 				"repeated keys leaves the pipeline for the sequential path. So a saving estimated by " +
 				"multiplying a rate from here by a Redis command total mixes two populations. The " +
@@ -1367,8 +1370,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		Help: "Runtime State admission calls by how they ended: success when every mutation was admitted; " +
 			"terminal when some were refused (STATE_BUDGET_EXCEEDED: the Plan's state lifetime is past the " +
 			"store's ceiling or a record is past the value limit; STATE_CORRUPT: the record breaks the framed " +
-			"contract); failed when the call did not complete. One per admission call, which is one per Plan " +
-			"per round unless the Plan's mutations take more than one call; the refused Plan, the rule and the " +
+			"contract); failed when the call did not complete. One per admission call: one per Plan per round " +
+			"that has a mutation to write once its stable segments left their members out, more when its " +
+			"mutations take more than one call, none for a Plan whose every member was left; the refused Plan, the rule and the " +
 			"store's sentence with its numbers are on the state_admission line and the object row.",
 	}, []string{"result", "reason"})
 	for _, result := range observability.StateAdmissionResults {

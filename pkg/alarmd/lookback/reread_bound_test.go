@@ -32,14 +32,14 @@ func TestRereadBoundIsTheGroupsOwnReading(t *testing.T) {
 		t.Fatal("a group with no whole first read has a reading")
 	}
 	f.engine.mu.Lock()
-	state.requests.add(8 * time.Second)
+	state.requests.add(time.Time{}, 8*time.Second)
 	f.engine.mu.Unlock()
 	if got, ok := f.engine.RereadBound("qg"); !ok || got != 8*time.Second {
 		t.Fatalf("slow group: %v %v, want 8s", got, ok)
 	}
 	f.engine.mu.Lock()
 	state.requests = durations{}
-	state.requests.add(2 * time.Second)
+	state.requests.add(time.Time{}, 2*time.Second)
 	f.engine.mu.Unlock()
 	if got, ok := f.engine.RereadBound("qg"); !ok || got != RecheckTimeout {
 		t.Fatalf("quick group: %v %v, want RecheckTimeout", got, ok)
@@ -66,8 +66,8 @@ func TestQueryDurationIsTheGroupsReadingAsMeasured(t *testing.T) {
 		t.Fatal("a group with no whole first read has a reading")
 	}
 	f.engine.mu.Lock()
-	state.firstReads.add(300 * time.Millisecond)
-	state.requests.add(300 * time.Millisecond)
+	state.firstReads.add(f.clock.now(), 300*time.Millisecond)
+	state.requests.add(f.clock.now(), 300*time.Millisecond)
 	f.engine.mu.Unlock()
 	if got, ok := f.engine.QueryDuration("qg"); !ok || got != 300*time.Millisecond {
 		t.Fatalf("quick group: %v %v, want 300ms", got, ok)

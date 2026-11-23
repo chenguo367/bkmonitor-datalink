@@ -1161,11 +1161,14 @@ func (store *ExecutionStore) keepReadback(request execution.StatePreflightReques
 		store.cache.countReadback(StateCacheReadbackDeclinedNoRenewal)
 		return
 	}
-	store.cache.keepReadback(stateCacheEntry{key: key, group: request.Contract.Slot.QueryGroup, identity: item.Identity, raw: raw,
+	if !store.cache.keepReadback(stateCacheEntry{key: key, group: request.Contract.Slot.QueryGroup, identity: item.Identity, raw: raw,
 		digest: ExpectedValueDigest(raw), applyVersion: view.PersistedApplyVersion, fence: request.OwnerFence,
 		epoch: item.ApplyVersion.StateApplyEpoch, segmentStart: request.Contract.ScheduleSegmentStart,
 		slot: request.Contract.Slot.EvaluationTime, usableUntil: usableUntil,
-		interval: time.Duration(member.coverage.Interval) * time.Second})
+		interval: time.Duration(member.coverage.Interval) * time.Second}) {
+		store.cache.countReadback(StateCacheReadbackDeclinedRefused)
+		return
+	}
 	store.cache.countReadback(StateCacheReadbackKept)
 }
 

@@ -409,7 +409,7 @@ func TestTheEarlierReadStartsAsEarlyAsTheGroupsReadsTake(t *testing.T) {
 	q = heldQuery(slow)
 	slow.engine.mu.Lock()
 	slowState := slow.engine.groupLocked(q, slow.clock.now())
-	slowState.requests.add(8 * time.Second)
+	slowState.requests.add(time.Time{}, 8*time.Second)
 	slow.engine.mu.Unlock()
 	slow.engine.Prepare(q)
 	if trial := slowState.prepared; trial == nil || !trial.at.Equal(trial.readyAt.Add(-8*time.Second)) {

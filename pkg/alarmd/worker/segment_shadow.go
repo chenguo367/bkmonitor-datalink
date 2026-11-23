@@ -761,18 +761,41 @@ func (state *segmentShadowPlan) markFallback(now int64) {
 }
 
 // leaves is whether the round leaves the series' State write out (3.3 step
-// 2): the round skips, its Plan's round was not retried, and the series is
-// an open member, present on the grid, with none of the shadow's exceptions,
-// whose made read matches what the round would write - the shadow's match.
-// A series left is observed here, as observe counts a match, and the caller
-// neither writes it nor observes it again; any other is written and observed
-// as before.
+// 2), decided and noted at once: decideLeave and then noteLeft.
 func (round *segmentShadowRound) leaves(due execution.DuePlan, view execution.RuntimeStateView, mutation execution.StateMutation,
 	class execution.SeriesClass, eventsSent bool) bool {
+	decision := round.decideLeave(nil, due, view, mutation, class, eventsSent)
+	round.noteLeft(due, mutation, decision)
+	return decision.leave
+}
+
+// leaveDecision is what the round decides of a series' write before it is
+// admitted (014 n8 (i)): whether it leaves it out, at the source time of its
+// last point; or whether it is a member on a fallback page, written whole
+// and taken off its page.
+type leaveDecision struct {
+	leave    bool
+	fallback bool
+	last     int64
+}
+
+// decideLeave is whether the round leaves the series' State write out (3.3
+// step 2): the round skips, its Plan's round was not retried or sampled, and
+// the series is an open member, present on the grid, with none of the
+// shadow's exceptions, whose made read matches what the round would write -
+// the shadow's match. Deciding changes nothing of the round: a series left is
+// noted as the shadow's match, and a fallback member taken off its page, by
+// noteLeft once the Plan's events have landed; the caller neither admits nor
+// writes a series left, nor observes it. The Plan's round it reads is
+// peeked's when the caller keeps one for the Plan's mutations, so that a
+// Plan's members decided together build the round it would start once, not
+// once each (014 n8 (i)); nil peeks it for this decision alone.
+func (round *segmentShadowRound) decideLeave(peeked peekedPlanRounds, due execution.DuePlan, view execution.RuntimeStateView,
+	mutation execution.StateMutation, class execution.SeriesClass, eventsSent bool) leaveDecision {
 	if round == nil || !round.skip || len(mutation.Points) == 0 {
-		return false
+		return leaveDecision{}
 	}
-	planRound := round.planRound(due, mutation.Identity, mutation.RetentionPoints)
+	planRound := round.peekOnce(peeked, due, mutation.Identity, mutation.RetentionPoints)
 	// A retried or sampled round writes every member and returns before the
 	// fallback below: a member on a fallback page stays on it this round,
 	// its key renewed by the write, and leaves it in the next round that
@@ -781,31 +804,50 @@ func (round *segmentShadowRound) leaves(due execution.DuePlan, view execution.Ru
 	// A stopped Plan leaves none (§9.7), nor one whose segments cannot be
 	// written for want of a lifetime: its round's write would not be made.
 	if planRound == nil || planRound.retried || planRound.sample || planRound.state.stopped || planRound.state.ttl <= 0 {
-		return false
+		return leaveDecision{}
 	}
 	digest := mutation.Identity.SeriesIdentityDigest
 	// A member on a page unrenewed for half its lifetime is written whole
 	// and taken off its page: its key's life is no longer what the pages'
 	// renewals promise (3.5 fallback).
 	if planRound.state.onFallback(digest) {
-		if entry, member := planRound.state.book.Entry(digest); member && entry.Open() {
-			planRound.fallbackWritten = append(planRound.fallbackWritten, digest)
-		}
-		return false
+		entry, member := planRound.state.book.Entry(digest)
+		return leaveDecision{fallback: member && entry.Open()}
 	}
 	// A closed entry - a member back after it departed - is never left: its
 	// made read ends at its close, before the round's point, and so never
 	// matches the write.
 	entry, member := planRound.state.book.Entry(digest)
 	if !member || planRound.wouldLeave(view, mutation, class, eventsSent) != "" {
-		return false
+		return leaveDecision{}
 	}
 	last := mutation.Points[len(mutation.Points)-1].SourceTime
 	outcomes := compareMadeRead(view, mutation, segment.Coverage{Entry: entry, Position: last,
 		Interval: planRound.interval, Retention: planRound.retention})
 	if len(outcomes) != 1 || outcomes[0] != observability.SegmentShadowMatch {
-		return false
+		return leaveDecision{}
 	}
+	return leaveDecision{leave: true, last: last}
+}
+
+// noteLeft does what the round's decision of a series asks of its Plan's
+// round, once the Plan's events have landed: a series left is present at its
+// last point, compared a match and counted skipped; a fallback member is
+// taken off its page. Any other decision notes nothing.
+func (round *segmentShadowRound) noteLeft(due execution.DuePlan, mutation execution.StateMutation, decision leaveDecision) {
+	if !decision.leave && !decision.fallback {
+		return
+	}
+	planRound := round.planRound(due, mutation.Identity, mutation.RetentionPoints)
+	if planRound == nil {
+		return
+	}
+	digest := mutation.Identity.SeriesIdentityDigest
+	if decision.fallback {
+		planRound.fallbackWritten = append(planRound.fallbackWritten, digest)
+		return
+	}
+	last := decision.last
 	planRound.present[digest] = last
 	tally := planRound.compared[last]
 	if tally == nil {
@@ -815,7 +857,6 @@ func (round *segmentShadowRound) leaves(due execution.DuePlan, view execution.Ru
 	tally.members = append(tally.members, digest)
 	tally.outcomes[observability.SegmentShadowMatch]++
 	planRound.skipped++
-	return true
 }
 
 // planInterval is a Plan's evaluation interval in seconds, its schedule's
@@ -832,6 +873,38 @@ func planInterval(due execution.DuePlan) int64 {
 
 func (round *segmentShadowRound) planRound(due execution.DuePlan, identity execution.StateKeyIdentity, retention uint32) *segmentShadowPlanRound {
 	key := shadowKey(due, identity.StateGeneration)
+	planRound := round.peekPlanRound(due, identity, retention)
+	if planRound != nil && round.plans[key] == nil {
+		round.plans[key] = planRound
+	}
+	return planRound
+}
+
+// peekedPlanRounds is the Plan's rounds the decisions on one Plan's
+// mutations have peeked, by the generation each is of: the round the shadow
+// keeps or the one it would start, built once for all of them.
+type peekedPlanRounds map[execution.StateGeneration]*segmentShadowPlanRound
+
+// peekOnce is peekPlanRound, kept in peeked for the Plan's next decision; a
+// round there is not built again. None peeked - no State of the Plan read, no
+// interval or retention - is asked again, as each mutation's retention is its
+// own. nil peeked keeps nothing.
+func (round *segmentShadowRound) peekOnce(peeked peekedPlanRounds, due execution.DuePlan, identity execution.StateKeyIdentity,
+	retention uint32) *segmentShadowPlanRound {
+	if planRound := peeked[identity.StateGeneration]; planRound != nil {
+		return planRound
+	}
+	planRound := round.peekPlanRound(due, identity, retention)
+	if planRound != nil && peeked != nil {
+		peeked[identity.StateGeneration] = planRound
+	}
+	return planRound
+}
+
+// peekPlanRound is planRound without keeping it: the Plan's round the shadow
+// has, or the one it would start, which a decision reads and changes not.
+func (round *segmentShadowRound) peekPlanRound(due execution.DuePlan, identity execution.StateKeyIdentity, retention uint32) *segmentShadowPlanRound {
+	key := shadowKey(due, identity.StateGeneration)
 	if planRound := round.plans[key]; planRound != nil {
 		return planRound
 	}
@@ -840,12 +913,10 @@ func (round *segmentShadowRound) planRound(due execution.DuePlan, identity execu
 	if state == nil || interval <= 0 || retention == 0 {
 		return nil
 	}
-	planRound := &segmentShadowPlanRound{due: due, state: state, interval: interval, retention: retention,
+	return &segmentShadowPlanRound{due: due, state: state, interval: interval, retention: retention,
 		class: observability.SegmentPeriodClass(interval), present: map[execution.SeriesIdentityDigest]int64{},
 		compared: map[int64]*segmentShadowTally{}, exceptions: map[observability.SegmentShadowOutcome][]execution.SeriesIdentityDigest{},
 		joins: map[int64][]execution.SeriesIdentityDigest{}, sample: sampleRound(key, round.at, interval)}
-	round.plans[key] = planRound
-	return planRound
 }
 
 // retried is a Plan the attempt found series of applied by one before it,

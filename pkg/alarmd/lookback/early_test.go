@@ -537,24 +537,24 @@ func TestEarlyReadsDueTogetherStartByTheirRounds(t *testing.T) {
 // an older one past them no longer counts.
 func TestTheLeadIsTheLongestOfTheLastReadings(t *testing.T) {
 	var readings durations
-	readings.add(time.Minute)
+	readings.add(time.Time{}, time.Minute)
 	for index := 0; index < readingsKept-1; index++ {
-		readings.add(time.Second)
+		readings.add(time.Time{}, time.Second)
 	}
 	if readings.longest() != time.Minute || readings.count != readingsKept {
 		t.Fatalf("longest %v of %d, want the minute among the last %d", readings.longest(), readings.count, readingsKept)
 	}
-	readings.add(time.Second)
+	readings.add(time.Time{}, time.Second)
 	if readings.longest() != time.Second {
 		t.Fatalf("longest %v, want the minute gone once %d more readings came", readings.longest(), readingsKept)
 	}
 	engine := &Engine{holdMax: 3 * time.Second}
 	state := &group{}
-	state.took.add(2 * time.Second)
+	state.took.add(time.Time{}, 2*time.Second)
 	if lead := engine.leadLocked(state, nil); lead != 5*time.Second {
 		t.Fatalf("lead %v, want the first read and the process's longest hold while the group has none", lead)
 	}
-	state.holds.add(time.Second)
+	state.holds.add(time.Time{}, time.Second)
 	if lead := engine.leadLocked(state, nil); lead != 3*time.Second {
 		t.Fatalf("lead %v, want the group's own hold once it has one", lead)
 	}
@@ -571,7 +571,7 @@ func TestASlicedSlotLeadsByTheLongerOfItsGroupsReadingsAndItsOwnSlices(t *testin
 	if lead := engine.leadLocked(state, slot); lead != 2*time.Second {
 		t.Fatalf("lead %v, want the Slot's own slices' times while its group has no reading", lead)
 	}
-	state.took.add(5 * time.Second)
+	state.took.add(time.Time{}, 5*time.Second)
 	if lead := engine.leadLocked(state, slot); lead != 5*time.Second {
 		t.Fatalf("lead %v, want the group's longer reading", lead)
 	}

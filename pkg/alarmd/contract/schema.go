@@ -31,8 +31,23 @@ const (
 var (
 	canonicalDecimalPattern       = regexp.MustCompile(`^(?:0|[1-9][0-9]*)$`)
 	canonicalSignedDecimalPattern = regexp.MustCompile(`^(?:0|-?[1-9][0-9]*)$`)
-	sha256Pattern                 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
+
+// isSHA256Hex is whether text is a SHA-256 digest as the contract writes one:
+// 64 lowercase hexadecimal characters. It is checked byte by byte, not by a
+// regular expression: every series a round reads is checked
+// (NewRecordIDDeriverV2), and the match cost microseconds a series.
+func isSHA256Hex(text string) bool {
+	if len(text) != 64 {
+		return false
+	}
+	for index := 0; index < len(text); index++ {
+		if c := text[index]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
 
 type Schema struct {
 	Name  string `json:"name"`

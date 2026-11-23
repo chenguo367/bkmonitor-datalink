@@ -12,6 +12,7 @@ package state
 import (
 	"context"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -308,4 +309,108 @@ func TestTheCachesBudgetFollowsTheSeriesHeldAndItGivesBackPastTheSoftLimit(t *te
 	if reads, _ := rig.round(second, 2, 1); reads == 0 || rig.lookups(StateCacheMissYielded) != 2 {
 		t.Fatalf("reads %d, miss_yielded %d; want the group given back read from the store", reads, rig.lookups(StateCacheMissYielded))
 	}
+}
+
+// A Query Group put out by a round of writes kept as their bytes - a replayed
+// round, a sampled round of the day, its members written whole - comes back
+// once a round of its values read back, compact, fits: each refused round is
+// priced by what it measures itself, not by the round before.
+func TestAGroupPutOutByARoundOfBytesComesBackOnceItsCompactRoundFits(t *testing.T) {
+	const members = 12
+	writer := newCacheRig(t, 0)
+	writer.round(first, members, 0)
+	indexes := make([]int, members)
+	for index := range indexes {
+		indexes[index] = index
+	}
+	one := compactChargeOf(t, writer)
+	reader := segmentRig(t, writer.backend, 1<<20, nil)
+	var room atomic.Int64
+	bytesCost := entryCost(cacheKey("big", 0), make([]byte, 1000))
+	room.Store(bytesCost + bytesCost/2)
+	reader.store.StateCacheBorrower().BorrowRetainedWithin(func() uint64 { return uint64(room.Load()) })
+	// The round of writes as bytes: the group is put out at its second.
+	group := second.contract().Slot.QueryGroup
+	for index := range members {
+		key, err := RuntimeStateKeyV3("alarmd", seriesIdentity(index))
+		if err != nil {
+			t.Fatal(err)
+		}
+		reader.store.cache.applied(stateCacheEntry{key: key, group: group, identity: seriesIdentity(index), raw: make([]byte, 1000),
+			fence: second.fence, epoch: 1, segmentStart: 60, slot: second.at, usableUntil: reader.now.Add(time.Hour)})
+	}
+	if left := reader.store.StateCacheStats().Departures[StateCacheDepartYielded]; left != 1 {
+		t.Fatalf("the round of bytes left %d departures, want the group put out once", left)
+	}
+	room.Store(members*one + one/2)
+	ctx := segment.WithSource(context.Background(), readbackCover(reader.now, true, indexes...))
+	for _, evaluation := range []execution.EvaluationTime{180, 240} {
+		reader.now = reader.now.Add(time.Minute)
+		s := slot{at: evaluation, epoch: 1, segmentStart: 60, fence: fenceOf(3)}
+		reader.loadRequest(ctx, execution.StatePreflightRequest{Contract: s.contract(), Items: readbackItems(s, members), OwnerFence: s.fence})
+	}
+	if held := reader.store.StateCacheStats().Entries[StateCacheEntryCompact]; held != members {
+		t.Fatalf("after a round of bytes and a round read back compact the group holds %d members, want all %d back", held, members)
+	}
+}
+
+// Each refused round measures its first stateCacheRefusalMeasured values read
+// back and charges the rest at their mean, and only theirs: a first value
+// that does not compress, as costly as bytes, does not price the round alone,
+// and a round before it, priced otherwise, does not either. The round's
+// segments - read before its State, a page tens of KB - and its writes add
+// what they cost and price nothing.
+func TestARefusedRoundIsChargedAtTheMeanOfItsFirstMeasuredValues(t *testing.T) {
+	// The round's first eight (014 next8), as the design has it, not as
+	// the constant says.
+	const measured = 8
+	cache := bareCache(1)
+	const group = execution.QueryGroupIdentity("big")
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	cache.refused[group] = &stateCacheRefusal{bound: StateCacheDepartYielded}
+	cache.refused[group].begin(60, 1_000_000, true)
+	const mark, page, write = 300, 40_000, 1500
+	const costly, cheap = 1600, 520
+	capacity := int64(100)
+	if cache.admitLocked(group, 120, mark, true, false, capacity) {
+		t.Fatal("the next round's mark was taken in")
+	}
+	cache.admitLocked(group, 120, page, true, false, capacity)
+	if cache.refusedReadbackLocked(group, 120) {
+		t.Fatal("the round's first value read back, after its segments, was declined before it was measured")
+	}
+	cache.admitLocked(group, 120, costly, false, true, capacity)
+	for range measured - 1 {
+		if cache.refusedReadbackLocked(group, 120) {
+			t.Fatal("a value of the round's first eight was declined before it was measured")
+		}
+		cache.admitLocked(group, 120, cheap, false, true, capacity)
+	}
+	cache.admitLocked(group, 120, write, false, false, capacity)
+	for range 4 {
+		if !cache.refusedReadbackLocked(group, 120) {
+			t.Fatal("a value past the round's first eight was left to be measured")
+		}
+	}
+	refusal := cache.refused[group]
+	mean := int64(costly+(measured-1)*cheap) / measured
+	want := int64(mark + page + write + costly + (measured-1)*cheap + 4*mean)
+	if refusal.size != want || refusal.members != measured+7 {
+		t.Fatalf("the round is charged %d over %d values, want %d over %d: its segments and write as they cost, the values read "+
+			"back past its first eight at the mean of those, %d", refusal.size, refusal.members, want, measured+7, mean)
+	}
+}
+
+// compactChargeOf is what a compact member of writer's series is charged.
+func compactChargeOf(t *testing.T, writer *cacheRig) int64 {
+	t.Helper()
+	probe := segmentRig(t, writer.backend, 1<<20, nil)
+	probe.loadRequest(segment.WithSource(context.Background(), readbackCover(probe.now, true, 0)),
+		execution.StatePreflightRequest{Contract: second.contract(), Items: readbackItems(second, 1), OwnerFence: second.fence})
+	stats := probe.store.StateCacheStats()
+	if stats.Entries[StateCacheEntryCompact] != 1 || stats.Bytes <= 0 {
+		t.Fatalf("the probe kept %v, %d bytes; want one compact member", stats.Entries, stats.Bytes)
+	}
+	return stats.Bytes
 }

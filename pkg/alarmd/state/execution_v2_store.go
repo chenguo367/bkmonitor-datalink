@@ -347,12 +347,18 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 			result.Items[index] = runtimeLoadFailure(view, err)
 			continue
 		}
+		// What the Slot's coverage says of the series, the cache told it
+		// with the lookup (StateCacheCell): nothing without coverage or for
+		// a split strategy's piece.
+		membership := stateCacheMembershipUnknown
 		if source != nil && !item.Sharded {
+			membership = stateCacheMembershipNot
 			if coverage, member := source.Coverage(item.Identity); member && coverage.Entry.Open() {
 				pass.members[index] = readbackMember{member: true, coverage: coverage}
+				membership = stateCacheMembershipOpen
 			}
 		}
-		entry, member, word := store.cache.lookup(framedKey, request, item)
+		entry, member, word := store.cache.lookup(framedKey, request, item, membership)
 		// Served from what this process last wrote, or read back while its
 		// round left it unwritten: the same bytes the store holds while every
 		// rule of §4.3 holds, decoded and witnessed exactly as bytes read

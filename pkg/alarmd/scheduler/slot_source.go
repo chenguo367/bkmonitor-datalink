@@ -257,8 +257,10 @@ type ProductionSlotSource struct {
 	readinessDiverted atomic.Int64
 }
 
-// QueryLatency answers how long a Query Group's query has taken here, and
-// false when this process has no reading for it.
+// QueryLatency answers how long a Query Group's query has taken, and false
+// when there is no reading of it. The group's own (WithQueryLatency) answers
+// true also with zero: the group was measured here, and its readings have
+// all aged (lookback QueryDuration).
 type QueryLatency func(execution.QueryGroupIdentity) (time.Duration, bool)
 
 // WithQueryLatency lets the source judge whether a round taken over with
@@ -1373,7 +1375,11 @@ func (source *ProductionSlotSource) divertShortOfTime(
 // record keeps (InheritedQueryDuration), a measurement of the same query and
 // so a reading too. A group that never completes a first read in time never
 // gets a reading, and stays on the fallback, as does a group whose record
-// keeps no reading (a group never measured keeps no record).
+// keeps no reading (a group never measured keeps no record). The inherited
+// reading stands in only until the group is measured here: once it is, a
+// group whose own readings have all aged - every round of it diverted, so
+// none read - is on the fallback too, not on a reading older than its own,
+// which would divert it again.
 //
 // The inherited reading is asked only when there is no own one, and outside
 // every lock of the source's: the read-hold controller takes the group's own
@@ -1390,11 +1396,13 @@ func (source *ProductionSlotSource) divertBound(evaluationTime execution.Evaluat
 }
 
 // queryReading is how long the group's query takes by the first reading
-// there is - its own here, then its previous owner's - and which it was.
+// there is - its own here, then its previous owner's while it has none here
+// - and which it was. A group measured here whose readings have aged has
+// none.
 func (source *ProductionSlotSource) queryReading() (time.Duration, string, bool) {
 	if source.queryLatency != nil {
-		if observed, ok := source.queryLatency(source.queryGroup); ok {
-			return observed, observability.TakeoverFloorObserved, true
+		if observed, measured := source.queryLatency(source.queryGroup); measured {
+			return observed, observability.TakeoverFloorObserved, observed > 0
 		}
 	}
 	if source.inheritedLatency != nil {

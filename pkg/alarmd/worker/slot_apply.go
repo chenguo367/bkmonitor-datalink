@@ -407,8 +407,10 @@ func (apply *slotApply) applyPlanState(
 				observability.StateWriteReuseClass(execution.ClassifyStateWriteReuse(view, stateResult.Mutation, stateResult.Class)),
 				storedStateLabel(view.Status),
 			)
-			// Counted where write_reuse counts it, once per admitted
-			// mutation, and both added to the census below: the census
+			// Counted where write_reuse counts it, once per mutation
+			// classified for writing - before the round's segments leave
+			// any out and before admission - and both added to the
+			// census below: the census
 			// settles each against how it left, and reports the two on
 			// one observation.
 			admittedClasses = append(admittedClasses, observability.StateSeriesClassKey{
@@ -506,7 +508,13 @@ func (apply *slotApply) applyPlanState(
 	// Plan it refused rather than the Query Group alone.
 	planCtx := observability.ContextWithTraceFields(ctx, observability.TraceFields{
 		StrategyID: plan.StrategyID, BusinessID: plan.BusinessID})
-	rejected, encodedBytes, held, err := coordinator.admitState(planCtx, request.Operation, request.Contract, retention, horizon, mutations)
+	// The members the round leaves unwritten (014 B3 3.3 step 2) are decided
+	// before admission (014 n8 (i)): they are written by no one this round,
+	// so they are neither encoded nor reserved nor admitted. A member left
+	// sends no events (an event keeps it written), so the Plan's events are
+	// what they were; its old record was admitted when it was written.
+	decided, writing, leaving := apply.decideLeaving(due, mutations, shadowedByState)
+	rejected, encodedBytes, held, err := coordinator.admitState(planCtx, request.Operation, request.Contract, retention, horizon, writing)
 	if err != nil {
 		return 0, err
 	}
@@ -514,9 +522,9 @@ func (apply *slotApply) applyPlanState(
 	// admission took for them, released when this Plan's write is over or
 	// it stops short of one; deferred as well, for the exits that return.
 	defer held.release()
-	accepted := make([]execution.StateMutation, 0, len(mutations)-len(rejected))
-	acceptedBytes := make([]admittedState, 0, len(mutations)-len(rejected))
-	for index, mutation := range mutations {
+	accepted := make([]execution.StateMutation, 0, len(writing)-len(rejected))
+	acceptedBytes := make([]admittedState, 0, len(writing)-len(rejected))
+	for index, mutation := range writing {
 		if reason, terminal := rejected[mutation.Identity]; terminal {
 			if apply.deterministicTerminalReason == "" {
 				apply.deterministicTerminalReason = reason
@@ -530,12 +538,16 @@ func (apply *slotApply) applyPlanState(
 		acceptedBytes = append(acceptedBytes, encodedBytes[index])
 	}
 	held.settle(acceptedBytes)
+	// What lands with the Plan's output: the series admitted, the members
+	// left among them in the order they were evaluated, as before admission
+	// left them out.
+	landing := landingOf(mutations, rejected)
 	// A user may have closed one of these absences after the round
 	// read its memory; its alert must not go out (decision-024). The
 	// series' events are taken out where they are kept, so what is
 	// counted as sent below is what went to the sink.
-	eventsByState = coordinator.withoutManuallyClosed(planCtx, request.Operation, plan, accepted, eventsByState)
-	events, withoutMessage := outputsOf(accepted, eventsByState, withoutMessageByState)
+	eventsByState = coordinator.withoutManuallyClosed(planCtx, request.Operation, plan, landing, eventsByState)
+	events, withoutMessage := outputsOf(landing, eventsByState, withoutMessageByState)
 	sortTriggerEvents(events)
 	if err := coordinator.writeEvents(ctx, request.Operation, plan, events, withoutMessage); err != nil {
 		if notWritten, partial := outputNotWritten(err); partial {
@@ -568,7 +580,7 @@ func (apply *slotApply) applyPlanState(
 				apply.retryPendingReason = reason
 			}
 			apply.withheldNoData[plan] = struct{}{}
-			apply.frozenRenewals.RecordNotWritten(observability.StateNotWrittenOutputWithheld, len(accepted))
+			apply.frozenRenewals.RecordNotWritten(observability.StateNotWrittenOutputWithheld, len(accepted)+len(leaving))
 			held.release()
 			return planOutputWithheld, nil
 		} else if reason, rejected := outputRejectionReason(err); rejected {
@@ -584,7 +596,7 @@ func (apply *slotApply) applyPlanState(
 				apply.deterministicTerminalReason = reason
 			}
 			apply.withheldNoData[plan] = struct{}{}
-			apply.frozenRenewals.RecordNotWritten(observability.StateNotWrittenOutputWithheld, len(accepted))
+			apply.frozenRenewals.RecordNotWritten(observability.StateNotWrittenOutputWithheld, len(accepted)+len(leaving))
 			held.release()
 			return planOutputWithheld, nil
 		} else {
@@ -598,15 +610,15 @@ func (apply *slotApply) applyPlanState(
 			// continue healthy sibling Plans, but do not apply this Plan's State
 			// or advance Progress until the stable event identity is replayed.
 			apply.withheldNoData[plan] = struct{}{}
-			apply.frozenRenewals.RecordNotWritten(observability.StateNotWrittenOutputWithheld, len(accepted))
+			apply.frozenRenewals.RecordNotWritten(observability.StateNotWrittenOutputWithheld, len(accepted)+len(leaving))
 			held.release()
 			return planOutputWithheld, nil
 		}
 	}
-	// The members the round leaves unwritten (014 B3 3.3 step 2) - after
-	// the events, which they have none of - keep their State as it was,
-	// read through the segment; the census counts them not written.
-	accepted, acceptedBytes = apply.leaveMembers(due, accepted, acceptedBytes, shadowedByState)
+	// The members the round leaves unwritten - after the events, which they
+	// have none of - keep their State as it was, read through the segment;
+	// the census counts them not written.
+	apply.noteLeftMembers(due, landing, accepted, leaving, decided)
 	if len(accepted) > 0 {
 		rejectedApply, err := coordinator.applyState(ctx, request.Operation, request.Contract, request.OwnerFence, request.ContentScope, retention, horizon, accepted, acceptedBytes)
 		if err != nil {
@@ -651,27 +663,74 @@ type shadowed struct {
 	noData     bool
 }
 
-// leaveMembers takes out of a Plan's write the series the round's shadow
-// leaves (segmentShadowRound.leaves), counted not written as
-// segment_member_skipped. A no-data series is written as today, its
+// decideLeaving is the round's shadow's decision on each of a Plan's
+// mutations (segmentShadowRound.decideLeave), by identity, and the
+// mutations it writes and those it leaves, each in the order given; nil
+// decisions when the round leaves none. A no-data series is written, its
 // presence the no-data memory's (014 B3 3.7): kept out by name here, though
-// the shadow would not leave it either - its write is never decided
-// steady (wouldLeave's unsteady) - so the rule does not rest on that.
-func (apply *slotApply) leaveMembers(due execution.DuePlan, accepted []execution.StateMutation, bytes []admittedState,
-	shadowed map[execution.StateKeyIdentity]shadowed) ([]execution.StateMutation, []admittedState) {
+// the shadow would not leave it either - its write is never decided steady
+// (wouldLeave's unsteady) - so the rule does not rest on that. The Plan's
+// round is peeked once for all its mutations (peekedPlanRounds).
+func (apply *slotApply) decideLeaving(due execution.DuePlan, mutations []execution.StateMutation,
+	shadowed map[execution.StateKeyIdentity]shadowed) (map[execution.StateKeyIdentity]leaveDecision, []execution.StateMutation, []execution.StateMutation) {
 	if apply.shadow == nil || !apply.shadow.skip {
-		return accepted, bytes
+		return nil, mutations, nil
 	}
-	kept, keptBytes := accepted[:0:0], bytes[:0:0]
-	for index, mutation := range accepted {
-		if written := shadowed[mutation.Identity]; !written.noData &&
-			apply.shadow.leaves(due, written.view, mutation, written.class, written.eventsSent) {
+	decided := make(map[execution.StateKeyIdentity]leaveDecision, len(mutations))
+	writing := make([]execution.StateMutation, 0, len(mutations))
+	var leaving []execution.StateMutation
+	peeked := peekedPlanRounds{}
+	for _, mutation := range mutations {
+		var decision leaveDecision
+		if written := shadowed[mutation.Identity]; !written.noData {
+			decision = apply.shadow.decideLeave(peeked, due, written.view, mutation, written.class, written.eventsSent)
+		}
+		decided[mutation.Identity] = decision
+		if decision.leave {
+			leaving = append(leaving, mutation)
 			continue
 		}
-		kept, keptBytes = append(kept, mutation), append(keptBytes, bytes[index])
+		writing = append(writing, mutation)
 	}
-	apply.frozenRenewals.RecordNotWritten(observability.StateNotWrittenSegmentMemberSkipped, len(accepted)-len(kept))
-	return kept, keptBytes
+	return decided, writing, leaving
+}
+
+// landingOf is the mutations admission did not refuse, in their order: the
+// series a Plan's output lands for, the members left unadmitted among them.
+func landingOf(mutations []execution.StateMutation, rejected map[execution.StateKeyIdentity]execution.ReasonCode) []execution.StateMutation {
+	if len(rejected) == 0 {
+		return mutations
+	}
+	landing := make([]execution.StateMutation, 0, len(mutations)-len(rejected))
+	for _, mutation := range mutations {
+		if _, refused := rejected[mutation.Identity]; !refused {
+			landing = append(landing, mutation)
+		}
+	}
+	return landing
+}
+
+// noteLeftMembers notes on the round's shadow what it decided of a Plan's
+// series once its output has landed (segmentShadowRound.noteLeft), in the
+// order they landed: each member left, counted not written as
+// segment_member_skipped, and each fallback member still written - one a
+// partial output took out is not. Nothing when the round decided none.
+func (apply *slotApply) noteLeftMembers(due execution.DuePlan, landing, accepted, leaving []execution.StateMutation,
+	decided map[execution.StateKeyIdentity]leaveDecision) {
+	if decided == nil {
+		return
+	}
+	written := make(map[execution.StateKeyIdentity]struct{}, len(accepted))
+	for _, mutation := range accepted {
+		written[mutation.Identity] = struct{}{}
+	}
+	for _, mutation := range landing {
+		decision := decided[mutation.Identity]
+		if _, kept := written[mutation.Identity]; decision.leave || decision.fallback && kept {
+			apply.shadow.noteLeft(due, mutation, decision)
+		}
+	}
+	apply.frozenRenewals.RecordNotWritten(observability.StateNotWrittenSegmentMemberSkipped, len(leaving))
 }
 
 // noteRetryPending keeps the first Plan reason a retry is pending on.

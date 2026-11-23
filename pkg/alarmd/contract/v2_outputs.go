@@ -137,7 +137,7 @@ func DeriveEventSemanticDigestV1(eventKind string, results []LevelResultV1, dete
 	if eventKind != TriggerEventAbnormal && eventKind != TriggerEventRecovery {
 		return "", invalid("trigger_event.event_kind", "unsupported value")
 	}
-	if !sha256Pattern.MatchString(detectPlanFingerprint) || !sha256Pattern.MatchString(triggerStateFingerprint) {
+	if !isSHA256Hex(detectPlanFingerprint) || !isSHA256Hex(triggerStateFingerprint) {
 		return "", invalid("trigger_event", "Plan fingerprints must be 64 lowercase hexadecimal characters")
 	}
 	type semanticLevel struct {
@@ -148,7 +148,7 @@ func DeriveEventSemanticDigestV1(eventKind string, results []LevelResultV1, dete
 	}
 	levels := make([]semanticLevel, 0, len(results))
 	for _, result := range results {
-		if !sha256Pattern.MatchString(result.LevelTriggerFingerprint) {
+		if !isSHA256Hex(result.LevelTriggerFingerprint) {
 			return "", invalid("trigger_event.level_results.level_trigger_fingerprint", "must be 64 lowercase hexadecimal characters")
 		}
 		levels = append(levels, semanticLevel{
@@ -166,8 +166,8 @@ func DeriveEventSemanticDigestV1(eventKind string, results []LevelResultV1, dete
 
 func DeriveTriggerEventIDV1(tenantID, businessID, strategyID, stateCompatibilityHash, recordID, eventKind, semanticDigest string) (string, error) {
 	if tenantID == "" || !utf8.ValidString(tenantID) || !canonicalSignedDecimalPattern.MatchString(businessID) ||
-		!canonicalDecimalPattern.MatchString(strategyID) || !sha256Pattern.MatchString(stateCompatibilityHash) ||
-		!sha256Pattern.MatchString(recordID) || !sha256Pattern.MatchString(semanticDigest) {
+		!canonicalDecimalPattern.MatchString(strategyID) || !isSHA256Hex(stateCompatibilityHash) ||
+		!isSHA256Hex(recordID) || !isSHA256Hex(semanticDigest) {
 		return "", invalid("trigger_event.event_id", "contains invalid identity")
 	}
 	if eventKind != TriggerEventAbnormal && eventKind != TriggerEventRecovery {
@@ -215,9 +215,9 @@ func ValidateTriggerEventV1(event *TriggerEventV1) error {
 	}
 	if event.TenantID == "" || !utf8.ValidString(event.TenantID) || !canonicalSignedDecimalPattern.MatchString(event.BusinessID) ||
 		!canonicalDecimalPattern.MatchString(event.PlanRef.StrategyID) || event.PlanRef.StrategyRevision == "" || !utf8.ValidString(event.PlanRef.StrategyRevision) ||
-		!sha256Pattern.MatchString(event.PlanRef.StateCompatibilityHash) || !sha256Pattern.MatchString(event.EventSemanticDigest) ||
-		!sha256Pattern.MatchString(event.RecordRef.RecordID) || !sha256Pattern.MatchString(event.RecordRef.DimensionIdentityDigest) ||
-		!sha256Pattern.MatchString(event.DetectPlanFingerprint) || !sha256Pattern.MatchString(event.TriggerStateFingerprint) ||
+		!isSHA256Hex(event.PlanRef.StateCompatibilityHash) || !isSHA256Hex(event.EventSemanticDigest) ||
+		!isSHA256Hex(event.RecordRef.RecordID) || !isSHA256Hex(event.RecordRef.DimensionIdentityDigest) ||
+		!isSHA256Hex(event.DetectPlanFingerprint) || !isSHA256Hex(event.TriggerStateFingerprint) ||
 		event.RecordRef.SourceTime < 0 || event.EvaluationTime < 0 || !isOpaqueASCII(event.Trace.ExecutionID) {
 		return invalid("trigger_event", "contains invalid identity, fingerprint or time")
 	}
@@ -407,7 +407,7 @@ func validateSuccessfulLevelResultsV1(results []LevelResultV1, absent bool) erro
 		if result.LevelID == 0 || result.Priority == 0 || (index > 0 && result.LevelID <= previous) {
 			return invalid("trigger_event.level_results", "Level ids must be positive, sorted and unique")
 		}
-		if !sha256Pattern.MatchString(result.LevelTriggerFingerprint) {
+		if !isSHA256Hex(result.LevelTriggerFingerprint) {
 			return invalid("trigger_event.level_results.level_trigger_fingerprint", "must be 64 lowercase hexadecimal characters")
 		}
 		switch result.Result {
@@ -422,7 +422,7 @@ func validateSuccessfulLevelResultsV1(results []LevelResultV1, absent bool) erro
 			window.Trigger.RequiredAnomalies == 0 ||
 			window.Trigger.ObservedAnomalies > window.Trigger.WindowSize ||
 			window.Recovery.OldestWindowStart < 0 || window.Recovery.OldestWindowStart > window.SourceTime ||
-			!sha256Pattern.MatchString(window.WindowEvidence.AnomalyTimestampsDigest) {
+			!isSHA256Hex(window.WindowEvidence.AnomalyTimestampsDigest) {
 			return invalid("trigger_event.level_results.decision_window", "contains invalid bounded window evidence")
 		}
 		if window.HistoryCompleteness != "FULL" && window.HistoryCompleteness != "WARMING" && window.HistoryCompleteness != "GAPPED" {
@@ -447,7 +447,7 @@ func validateSuccessfulLevelResultsV1(results []LevelResultV1, absent bool) erro
 		}
 		detect := *result.DetectEvidence
 		if (detect.DetectionResult != "ANOMALOUS" && detect.DetectionResult != "NORMAL") ||
-			!sha256Pattern.MatchString(detect.PredicateDigest) || len(detect.NormalizedValue) == 0 ||
+			!isSHA256Hex(detect.PredicateDigest) || len(detect.NormalizedValue) == 0 ||
 			detect.EffectiveTimeStatus != "ACTIVE" {
 			return invalid("trigger_event.level_results.detect_evidence", "contains invalid successful active Detect evidence")
 		}

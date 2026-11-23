@@ -113,23 +113,40 @@ func EarlyGroupOf(outcome string) string {
 // is longer than the longest of sixteen one time in seventeen.
 const readingsKept = 16
 
-// durations are the last readingsKept of a kind of reading.
+// durations are the last readingsKept of a kind of reading, each with when
+// it was taken.
 type durations struct {
 	values [readingsKept]time.Duration
+	at     [readingsKept]time.Time
 	count  int
 	next   int
 }
 
-func (readings *durations) add(value time.Duration) {
-	readings.values[readings.next] = value
+func (readings *durations) add(at time.Time, value time.Duration) {
+	readings.values[readings.next], readings.at[readings.next] = value, at
 	readings.next = (readings.next + 1) % readingsKept
 	readings.count = min(readings.count+1, readingsKept)
 }
 
-// widenLatest makes the latest reading value when value is longer.
-func (readings *durations) widenLatest(value time.Duration) {
+// widenLatest makes the latest reading value, taken at at, when value is
+// longer: a reading widened is as recent as its widest part.
+func (readings *durations) widenLatest(at time.Time, value time.Duration) {
 	latest := (readings.next + readingsKept - 1) % readingsKept
-	readings.values[latest] = max(readings.values[latest], value)
+	if value > readings.values[latest] {
+		readings.values[latest], readings.at[latest] = value, at
+	}
+}
+
+// longestSince is the longest of the readings taken at since or later, zero
+// when none is.
+func (readings *durations) longestSince(since time.Time) time.Duration {
+	longest := time.Duration(0)
+	for index := 0; index < readings.count; index++ {
+		if !readings.at[index].Before(since) {
+			longest = max(longest, readings.values[index])
+		}
+	}
+	return longest
 }
 
 func (readings *durations) longest() time.Duration {
@@ -634,7 +651,7 @@ func (engine *Engine) noteHoldLocked(state *group, source string, held time.Dura
 	engine.counts.supplementHoldMax[source] = max(engine.counts.supplementHoldMax[source], held)
 	engine.holdMax = max(engine.holdMax, held)
 	if state != nil {
-		state.holds.add(held)
+		state.holds.add(engine.options.Now(), held)
 	}
 }
 

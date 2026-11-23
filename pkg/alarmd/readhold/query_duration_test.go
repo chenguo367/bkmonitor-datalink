@@ -169,3 +169,35 @@ func TestARecordWithoutAQueryDurationHasNone(t *testing.T) {
 		t.Fatalf("an old record read as a query duration of %v", got)
 	}
 }
+
+// A reading this process measured and then stopped having - its readings
+// aged, the lookback answering zero (014 next8) - is not written again: the
+// record keeps what was last written, which is not refreshed half way to
+// stale and goes stale a day after that write, as an owner's reading does
+// once the owner stops measuring it.
+func TestAReadingThatAgedIsNotWrittenAgain(t *testing.T) {
+	c, store, now := controllerFixture(t)
+	spec := groupSpec("qg", 0)
+	prepare(t, c, spec)
+	observeEarly(t, c, "qg", 60*time.Second+spec.SettlingWait, 0)
+	schedule := scheduleEvery(t, "qg", 60, 60)
+	ctx := context.Background()
+	freeze := func(slot execution.EvaluationTime) {
+		t.Helper()
+		if _, err := c.SlotReadHold(ctx, schedule, slot, holdFence("qg")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.MeasureQueryDuration("qg", 9*time.Second)
+	freeze(120)
+	c.MeasureQueryDuration("qg", 0)
+	*now = now.Add(QueryDurationStaleAfter / 2)
+	freeze(180)
+	if got := c.Stats().QueryDurationWrites; got[QueryDurationWriteChanged] != 1 || got[QueryDurationWriteRefreshed] != 0 {
+		t.Fatalf("writes %v, want the one changed and the aged reading not refreshed", got)
+	}
+	*now = now.Add(QueryDurationStaleAfter / 2)
+	if got, ok := nextOwner(t, store, now, spec).InheritedQueryDuration("qg"); ok {
+		t.Fatalf("a day after its last write the aged reading still reads as %v", got)
+	}
+}

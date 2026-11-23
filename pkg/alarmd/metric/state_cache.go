@@ -10,6 +10,7 @@
 package metric
 
 import (
+	"strconv"
 	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -27,6 +28,7 @@ type stateCacheCollector struct {
 	lookups, departures, restored, declined, bytes, budget, groups *prometheus.Desc
 	entries, readback, memberRenewals, fallbacks, compactDeclined  *prometheus.Desc
 	verified, sweeps, sweptEntries                                 *prometheus.Desc
+	cells, cellBytes                                               *prometheus.Desc
 }
 
 func newStateCacheCollector() *stateCacheCollector {
@@ -91,7 +93,9 @@ func newStateCacheCollector() *stateCacheCollector {
 				"stable segment, or a Plan of a split strategy), declined_operation (a member its round writes whole: "+
 				"not a normal round, the segment skip not followed, the Plan's sampled round, a stopped Plan, a page "+
 				"past half its life unrenewed), declined_no_renewal (a member left out whose page's last renewal leaves "+
-				"its key less than the replay age). Read kept against state_cache_lookups_total{result=\"hit\"}: a "+
+				"its key less than the replay age), declined_refused (a member of a Query Group the cache keeps out for "+
+				"the Slot, state_cache_lookups_total{result=miss_over_budget|miss_yielded}: read back from Redis "+
+				"and not made compact, as before the cache). Read kept against state_cache_lookups_total{result=\"hit\"}: a "+
 				"member kept is served on the rounds after. Every cell exists from the start.", "result"),
 		memberRenewals: descriptor("state_cache_member_renewed_total",
 			"State entries of stable members at their page's renewal, by result: renewed (the renewal found every key "+
@@ -121,6 +125,24 @@ func newStateCacheCollector() *stateCacheCollector {
 				"and the group is walked once a Slot). walked's rate is about the Slots' of the Query Groups the "+
 				"cache holds; state_cache_sweep_entries_total over it is the entries a walk goes through.",
 			"result"),
+		cells: descriptor("state_cache_entry_cells",
+			"State cache entries of the Query Groups it holds by cell, as each group's sweep at its latest Slot's "+
+				"first read found them (014 n8): kind (written, readback, compact); generation, current when the "+
+				"group's lookups since the sweep before read the entry's own of its Plan, other for another or none; "+
+				"sharded, a piece of a split strategy's key, never served, as the entry's latest lookup marked it and "+
+				"kept by the write that replaces it (false while no lookup has); member, an open member of its Plan's "+
+				"stable segment as its latest lookup's coverage or its read back marked it, kept by the write that "+
+				"replaces it (false while no lookup with coverage has; a lookup without coverage leaves it), so a member "+
+				"its round closed and wrote counts as one until the round after. A piece has no coverage and its member "+
+				"is false: read split strategies' entries by sharded. touched, looked up and served, written or read "+
+				"back since that sweep before. A group's "+
+				"cells are counted at a Slot later than its last counted one only: a supplement's earlier Slot sweeps "+
+				"and counts nothing. Read against state_cache_entries and state_cache_entry_cell_bytes; every cell "+
+				"exists from the start.", "kind", "generation", "sharded", "member", "touched"),
+		cellBytes: descriptor("state_cache_entry_cell_bytes",
+			"The charge, in bytes against the State cache's budget, of state_cache_entry_cells' entries, cell by "+
+				"cell as the same counts found them. Every cell exists from the start.",
+			"kind", "generation", "sharded", "member", "touched"),
 		sweptEntries: descriptor("state_cache_sweep_entries_total",
 			"Entries and compact members the State cache's sweeps walked (state_cache_sweeps_total{result=walked}), "+
 				"all of a Query Group's at each walk."),
@@ -146,7 +168,8 @@ func (r *Recorder) SetStateCacheSource(source func() state.StateCacheStats) {
 
 func (c *stateCacheCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, desc := range []*prometheus.Desc{c.lookups, c.departures, c.restored, c.declined, c.bytes, c.budget, c.groups,
-		c.entries, c.readback, c.memberRenewals, c.fallbacks, c.compactDeclined, c.verified, c.sweeps, c.sweptEntries} {
+		c.entries, c.readback, c.memberRenewals, c.fallbacks, c.compactDeclined, c.verified, c.sweeps, c.sweptEntries,
+		c.cells, c.cellBytes} {
 		ch <- desc
 	}
 }
@@ -189,6 +212,13 @@ func (c *stateCacheCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.bytes, prometheus.GaugeValue, float64(stats.Bytes-stats.SegmentBytes), state.StateCacheKindState)
 	ch <- prometheus.MustNewConstMetric(c.bytes, prometheus.GaugeValue, float64(stats.SegmentBytes), state.StateCacheKindSegment)
 	ch <- prometheus.MustNewConstMetric(c.sweptEntries, prometheus.CounterValue, float64(stats.SweptEntries))
+	for _, cell := range state.StateCacheCells() {
+		labels := []string{cell.Kind, cell.Generation, strconv.FormatBool(cell.Sharded), strconv.FormatBool(cell.Member),
+			strconv.FormatBool(cell.Touched)}
+		counted := stats.Cells[cell]
+		ch <- prometheus.MustNewConstMetric(c.cells, prometheus.GaugeValue, float64(counted.Entries), labels...)
+		ch <- prometheus.MustNewConstMetric(c.cellBytes, prometheus.GaugeValue, float64(counted.Bytes), labels...)
+	}
 	ch <- prometheus.MustNewConstMetric(c.budget, prometheus.GaugeValue, float64(stats.BudgetBytes))
 	ch <- prometheus.MustNewConstMetric(c.groups, prometheus.GaugeValue, float64(stats.QueryGroups))
 	for _, kind := range state.StateCacheEntryKinds {

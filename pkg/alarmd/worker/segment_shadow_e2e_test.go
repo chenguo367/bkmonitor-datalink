@@ -95,6 +95,10 @@ type shadowObserved struct {
 	// Plans' rounds, by skip mode.
 	notSkipped map[string]int64
 	rounds     map[string]int64
+	// admissionKeys is the mutations the State admission was asked about,
+	// by its observations; written the census's written.
+	admissionKeys int64
+	written       int64
 	// next, when set, is handed every observation after it is summed: the
 	// observer the replica's observations go on to (the fleet tracker).
 	next observability.Observer
@@ -121,8 +125,14 @@ func (observed *shadowObserved) Observe(ctx context.Context, observation observa
 		}
 		observed.mu.Unlock()
 	}
+	if observation.Stage == observability.StageStateAdmission {
+		observed.mu.Lock()
+		observed.admissionKeys += observation.Counts.Keys
+		observed.mu.Unlock()
+	}
 	if census := observation.FrozenStateRenewal; census != nil {
 		observed.mu.Lock()
+		observed.written += int64(census.Written)
 		for kind, classes := range census.SeriesClasses {
 			for class, count := range classes {
 				if observed.classes == nil {
@@ -525,6 +535,11 @@ type lateLandingStore struct {
 	// items how many they were in all.
 	written map[execution.StateKeyIdentity]execution.StateMutation
 	items   int
+	// admitted is every mutation the State admission was asked about;
+	// refuse the series it refuses as a record past the value limit, as a
+	// limit lowered under them would.
+	admitted []execution.StateKeyIdentity
+	refuse   map[execution.SeriesIdentityDigest]bool
 	// failSegments is how many of the next segment writes fail, as of
 	// unknown result, nothing sent; failReads the next segment reads.
 	failSegments int

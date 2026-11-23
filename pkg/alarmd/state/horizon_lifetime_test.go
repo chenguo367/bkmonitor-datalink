@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/segment"
 )
 
 // A series' runtime state lives at most H past its last write, never longer
@@ -133,5 +134,40 @@ func TestAFrozenRenewalGivesTheCappedLifetime(t *testing.T) {
 	}
 	if got := backend.remaining[key]; got != 200*time.Second {
 		t.Fatalf("renewed lifetime = %s, want the 200 s horizon", got)
+	}
+}
+
+// A Plan's stable segments live as long as its State is admitted to: the
+// segments' life is the admission's lifetime (runtimeTTL), less nothing, and
+// none for a Plan whose lifetime is past the store's ceiling - so the round
+// leaves none of its members (014 n8 (i)), whose writes it would admit and
+// refuse by name.
+func TestASegmentsLifeIsTheAdmissionsLifetimeAndNoneOverTheCeiling(t *testing.T) {
+	router, err := NewFixedRouter("state-01", newTTLRecordingBackend())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewExecutionStore(ExecutionStoreOptions{Prefix: "alarmd", Router: router, MaxValueBytes: 1 << 20,
+		MaxItemsPerCall: 64, MinTTL: time.Minute, MaxTTL: 720 * time.Hour, RestartMargin: 10 * time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, arm := range map[string]struct {
+		retention []execution.StateRetentionRequirement
+		horizon   int64
+	}{
+		"within the ceiling":      {testRetention(), 0},
+		"capped by its horizon":   {ttlTestRetention(14, 60*time.Hour, 0), 86400},
+		"past the ceiling":        {ttlTestRetention(2, 721*time.Hour, 0), 86400},
+		"past it with no horizon": {ttlTestRetention(14, 60*time.Hour, 0), 0},
+	} {
+		admitted, err := store.runtimeTTL(arm.retention, arm.horizon)
+		life, _, served := store.segmentLife(segment.Lifetime{Retention: arm.retention, Horizon: arm.horizon})
+		switch {
+		case err != nil && (life != 0 || served || !errors.Is(err, ErrStateBudget)):
+			t.Fatalf("%s: admission refused it (%v), the segments live %s (%t); want no life", name, err, life, served)
+		case err == nil && (life != admitted || !served):
+			t.Fatalf("%s: admission gives %s, the segments %s (%t); want the same", name, admitted, life, served)
+		}
 	}
 }

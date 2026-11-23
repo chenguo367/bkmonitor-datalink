@@ -375,7 +375,7 @@ func EncodeDimensionIdentityV2(tenantID, businessID string, fields []DimensionFi
 }
 
 func DeriveRecordIDV2(dimensionIdentityDigest string, sourceTime int64) (string, error) {
-	if !sha256Pattern.MatchString(dimensionIdentityDigest) {
+	if !isSHA256Hex(dimensionIdentityDigest) {
 		return "", invalid("record_id.dimension_identity_digest", "must be 64 lowercase hexadecimal characters")
 	}
 	if sourceTime < 0 {
@@ -416,7 +416,7 @@ type RecordIDDeriverV2 struct {
 // NewRecordIDDeriverV2 fixes the series, refused as DeriveRecordIDV2 refuses
 // it.
 func NewRecordIDDeriverV2(dimensionIdentityDigest string) (*RecordIDDeriverV2, error) {
-	if !sha256Pattern.MatchString(dimensionIdentityDigest) {
+	if !isSHA256Hex(dimensionIdentityDigest) {
 		return nil, invalid("record_id.dimension_identity_digest", "must be 64 lowercase hexadecimal characters")
 	}
 	digest := sha256.New()
@@ -488,7 +488,7 @@ func DeriveStateCompatibilityHashV1(input StateCompatibilityInputV1) (string, er
 		input.SourceTimeSemanticsVersion == "" || input.HistoryCellSemanticsVersion == "" {
 		return "", invalid("state_compatibility", "semantic versions must be non-empty")
 	}
-	if !sha256Pattern.MatchString(input.IdentitySchemaDigest) {
+	if !isSHA256Hex(input.IdentitySchemaDigest) {
 		return "", invalid("state_compatibility.identity_schema_digest", "must be 64 lowercase hexadecimal characters")
 	}
 	if input.EvaluationScope != EvaluationScopeSeries && input.EvaluationScope != EvaluationScopeCrossSeries {
@@ -504,14 +504,14 @@ func DeriveLevelDetectFingerprintV1(input LevelDetectSemanticV1) (string, error)
 	if input.LevelID == 0 {
 		return "", invalid("level_detect_fingerprint.level_id", "must be positive")
 	}
-	if !sha256Pattern.MatchString(input.ProjectionDigest) || !sha256Pattern.MatchString(input.DetectorSemanticDigest) {
+	if !isSHA256Hex(input.ProjectionDigest) || !isSHA256Hex(input.DetectorSemanticDigest) {
 		return "", invalid("level_detect_fingerprint", "semantic digests must be 64 lowercase hexadecimal characters")
 	}
 	return digestCanonicalV2("level_detect_fingerprint", "level-detect-fingerprint-v1", input)
 }
 
 func DeriveLevelTriggerFingerprintV1(levelDetectFingerprint string, triggerPlan, recoveryPlan TypedPlanV1) (string, error) {
-	if !sha256Pattern.MatchString(levelDetectFingerprint) {
+	if !isSHA256Hex(levelDetectFingerprint) {
 		return "", invalid("level_trigger_fingerprint", "detect fingerprint must be 64 lowercase hexadecimal characters")
 	}
 	return digestCanonicalV2("level_trigger_fingerprint", "level-trigger-fingerprint-v1", struct {
@@ -537,7 +537,7 @@ func DerivePlanFingerprintV1(domain string, fingerprints map[uint32]string) (str
 	entries := make([]entry, 0, len(levels))
 	for _, levelID := range levels {
 		fingerprint := fingerprints[levelID]
-		if levelID == 0 || !sha256Pattern.MatchString(fingerprint) {
+		if levelID == 0 || !isSHA256Hex(fingerprint) {
 			return "", invalid("plan_fingerprint", fmt.Sprintf("invalid Level %d fingerprint", levelID))
 		}
 		entries = append(entries, entry{LevelID: levelID, Fingerprint: fingerprint})

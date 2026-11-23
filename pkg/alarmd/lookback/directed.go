@@ -382,7 +382,7 @@ func (engine *Engine) completeDirectedLocked(captured *directedQuery, completion
 	}
 	if captured.complete {
 		if captured.slice.IsZero() {
-			state.took.add(now.Sub(captured.begunAt))
+			state.took.add(now, now.Sub(captured.begunAt))
 		} else {
 			// A slice's time is a part of its Slot's: the slices' times
 			// summed are counted once, as one reading, when the Slot is
@@ -643,7 +643,7 @@ func (engine *Engine) rereadSlices(readCtx context.Context, slot *directedSlot) 
 	// A slice's first read time is its Slot's once its slices are all read:
 	// counted here, once, as the Slot's (completeDirectedLocked).
 	if state := engine.groups[slot.queryGroup]; state != nil && slot.sliceTook > 0 && !slot.tookCounted {
-		state.took.add(slot.sliceTook)
+		state.took.add(engine.options.Now(), slot.sliceTook)
 		slot.tookCounted = true
 	}
 	engine.mu.Unlock()

@@ -8,6 +8,18 @@
 // specific language governing permissions and limitations under the License.
 package worker
 
+import (
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/segment"
+)
+
 // SegmentCoverageAfterFold is how many coverages were asked of a Slot's
 // segment books after its round folded into them, in this process.
 func SegmentCoverageAfterFold() uint64 { return segmentCoverageAfterFold.Load() }
+
+// SegmentSampledRound is whether the round at at is the sampled round of
+// the day of the Plan's piece under generation (sampleRound), every member
+// written whole.
+func SegmentSampledRound(plan execution.PlanIdentity, generation execution.StateGeneration, at, interval int64) bool {
+	return sampleRound(segment.PlanKey{Plan: plan, Generation: generation}, at, interval)
+}

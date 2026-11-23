@@ -24,6 +24,7 @@ import (
 	"github.com/go-redis/redis/v8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
@@ -66,6 +67,13 @@ func (full *segmentSkipFull) restartControl(asked bool) {
 // nil states none, the configuration's default.
 func openSegmentSkipFull(t *testing.T, asked *bool) *segmentSkipFull {
 	t.Helper()
+	return openSegmentSkipFullOn(t, asked, "")
+}
+
+// openSegmentSkipFullOn is openSegmentSkipFull on the output protocol given,
+// "" the configuration's.
+func openSegmentSkipFullOn(t *testing.T, asked *bool, protocol string) *segmentSkipFull {
+	t.Helper()
 	address, redisClient := startPhaseTwoRedis(t)
 	ctx := context.Background()
 	strategy, err := os.ReadFile("testdata/g1_full_threshold_strategy.json")
@@ -94,6 +102,9 @@ func openSegmentSkipFull(t *testing.T, asked *bool) *segmentSkipFull {
 	cfg := validGoAccessRuntimeConfig()
 	cfg.Redis.Address = address
 	withCompatibilityOutput(&cfg, address)
+	if protocol != "" {
+		cfg.PhaseTwo.Output.Protocol = protocol
+	}
 	cfg.Redis.StatePrefix = "alarmd-segment-skip-full"
 	cfg.PhaseTwo.Control.RefreshInterval = config.Duration(time.Millisecond)
 	if asked != nil {
@@ -380,5 +391,51 @@ func TestTheDefaultConfigurationLeavesAStableSeriesWriteOutUntilAReplicaCannot(t
 	}
 	if ran() <= before || full.skipped() != skipped {
 		t.Fatalf("the next Slot: ran %v, left %v more; want it run with every State written", ran() > before, full.skipped()-skipped)
+	}
+}
+
+// Through the production processes on the compatible protocol, a quiet
+// series its round leaves - its recovery decided each round with no message -
+// still has what it decided handed to the output (014 n8 (i)): the
+// processes leaving it count as many RECOVERY events by kind, round for
+// round, as processes that write every series - those the protocol has no
+// message for among them.
+func TestAMemberLeftStillCountsTheRecoveryItDecidedWithoutAMessage(t *testing.T) {
+	yes, no := true, false
+	skipping := openSegmentSkipFullOn(t, &yes, config.OutputProtocolLegacy)
+	writing := openSegmentSkipFullOn(t, &no, config.OutputProtocolLegacy)
+	sum := func(full *segmentSkipFull) float64 {
+		t.Helper()
+		families, err := full.recorder.Gatherer().Gather()
+		if err != nil {
+			t.Fatal(err)
+		}
+		total := 0.0
+		for _, family := range families {
+			if family.GetName() != "alarmd_output_events_by_kind_total" {
+				continue
+			}
+			for _, sample := range family.GetMetric() {
+				for _, label := range sample.GetLabel() {
+					if label.GetName() == "event_kind" && label.GetValue() == contract.TriggerEventRecovery {
+						total += sample.GetCounter().GetValue()
+					}
+				}
+			}
+		}
+		return total
+	}
+	for round := 0; round < 8; round++ {
+		skipping.round()
+		writing.round()
+		if left, all := sum(skipping), sum(writing); left != all {
+			t.Fatalf("round %d: %v RECOVERY events where members are left, %v where every series is written", round, left, all)
+		}
+	}
+	if skipping.skipped() == 0 {
+		t.Fatal("no round left the quiet series' write out")
+	}
+	if sum(writing) == 0 {
+		t.Fatal("no RECOVERY was decided: the case is not the one it is about")
 	}
 }

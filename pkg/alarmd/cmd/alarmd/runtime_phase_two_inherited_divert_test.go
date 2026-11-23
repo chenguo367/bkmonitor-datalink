@@ -21,6 +21,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 )
 
@@ -167,6 +168,15 @@ func successorRound(t *testing.T, store *runtimeTestReadHoldControl, fact execut
 	schedule execution.FrozenQueryGroupSchedule, deadline int64, hold time.Duration,
 ) ([]observability.ReplayTakeoverFacts, *productionReadHolds, execution.Operation) {
 	t.Helper()
+	return successorRoundWith(t, store, fact, schedule, deadline, hold, nil)
+}
+
+// successorRoundWith is successorRound with the group's own reading, if any,
+// answered by latency as the bundle wires the lookback's (lookbackQueryLatency).
+func successorRoundWith(t *testing.T, store *runtimeTestReadHoldControl, fact execution.FrozenSlotContractFact,
+	schedule execution.FrozenQueryGroupSchedule, deadline int64, hold time.Duration, latency scheduler.QueryLatency,
+) ([]observability.ReplayTakeoverFacts, *productionReadHolds, execution.Operation) {
+	t.Helper()
 	ctx := context.Background()
 	qg := schedule.Segment.QueryGroup
 	// The Segment the successor finds open starts at the round it is handed,
@@ -187,6 +197,9 @@ func successorRound(t *testing.T, store *runtimeTestReadHoldControl, fact execut
 	holds := inheritedTestHolds(t, store, fixture.clock.Now)
 	fixture.production.dependencies.ReadHolds = holds
 	fixture.production.dependencies.InheritedQueryLatency = readHoldInheritedQueryLatency(holds)
+	if latency != nil {
+		fixture.production.dependencies.QueryLatency = latency
+	}
 	fixture.production.dependencies.Catalog = &inheritedDivertCatalog{schedule: schedule, fact: fact}
 	fixture.production.dependencies.Progress = &fakeProductionProgressReader{byGroup: map[execution.QueryGroupIdentity]execution.ProgressLoadResult{
 		qg: {Status: execution.ProgressMissing}}}
