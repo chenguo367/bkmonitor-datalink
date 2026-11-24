@@ -1515,6 +1515,9 @@ type recordingPorts struct {
 	stateLoadStatus           execution.StateLoadStatus
 	// stateLoadedBytes is what the fake store says a preflight read back.
 	stateLoadedBytes int64
+	// stateCacheDiverged is the State cache's first defect of its compact
+	// form the fake store hands every preflight.
+	stateCacheDiverged *execution.StateCacheMismatch
 	// stateFetch and stateDecode are what the fake store adds to the
 	// preflight timing its caller asked for.
 	stateFetch, stateDecode time.Duration
@@ -1988,7 +1991,8 @@ func (ports *recordingPorts) LoadRuntime(ctx context.Context, request execution.
 		timing.Fetch += ports.stateFetch
 		timing.Decode += ports.stateDecode
 	}
-	return execution.StatePreflightResult{Items: items, LoadedBytes: ports.stateLoadedBytes}, ports.fail("state_load")
+	return execution.StatePreflightResult{Items: items, LoadedBytes: ports.stateLoadedBytes, CacheDiverged: ports.stateCacheDiverged},
+		ports.fail("state_load")
 }
 
 func (ports *recordingPorts) LoadGapsInto(ctx context.Context, request execution.GapLoadRequest, accept func(execution.GapGuardSnapshot) error) error {

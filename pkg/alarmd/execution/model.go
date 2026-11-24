@@ -1013,6 +1013,11 @@ type StatePreflightResult struct {
 	// CacheVerify is what the sampled round's check of the State cache found
 	// (StatePreflightItem.VerifyCached).
 	CacheVerify StateCacheVerifyFacts
+	// CacheDiverged is the first defect of the State cache's compact form
+	// the process found - a compact member that parted from the bytes it was
+	// taken in from (014 next9 1) - on every preflight after it, nil before:
+	// the Worker reports it once.
+	CacheDiverged *StateCacheMismatch
 }
 
 // StateCacheVerifyFacts is what a preflight's check of the State cache
@@ -1110,7 +1115,7 @@ func ClassifyStatePreflight(request StatePreflightRequest, result StatePreflight
 		// reading of how much history crossed a moved generation would be
 		// zero on every round that carried any.
 		CarryFound: result.CarryFound, CarryMissing: result.CarryMissing, CarryUnreadable: result.CarryUnreadable,
-		CacheVerify: result.CacheVerify}
+		CacheVerify: result.CacheVerify, CacheDiverged: result.CacheDiverged}
 	seen := make(map[StateKeyIdentity]struct{}, len(result.Items))
 	for index, view := range result.Items {
 		candidate, ok := wanted[view.Identity]

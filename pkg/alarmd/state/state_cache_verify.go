@@ -26,17 +26,22 @@ import (
 // would serve is read back all the same and compared: an entry's bytes with
 // the bytes read, a compact member's digest with theirs. One that differs is
 // let go and the round goes on with what was read; the first is reported by
-// the field the two part at, never by either value.
+// the field the two part at, never by either value. A compact member whose
+// digest is the bytes' is rebuilt all the same and held to them: a value
+// written is taken in unchecked (014 next9 1, the second step), and one that
+// does not rebuild to the bytes it was taken in from is a defect of the
+// compact form (writtenDiverged) besides a mismatch.
 
 // verifyCached checks what the cache held of a series against raw, what its
 // sampled round read back of it, counting the check and noting the first
 // that differs on the pass.
 func (store *ExecutionStore) verifyCached(request execution.StatePreflightRequest, item execution.StatePreflightItem, key string,
 	raw []byte, cached cachedValue, pass *runtimeLoadPass) {
-	kind, field := "", ""
+	kind, field, diverged := "", "", false
 	switch {
 	case cached.member != nil:
-		kind, field = StateCacheEntryCompact, compactMismatch(cached.member, item.Identity, raw)
+		kind = StateCacheEntryCompact
+		field, diverged = compactMismatch(cached.member, item.Identity, raw)
 	case cached.entry != nil:
 		kind = entryKind(cached.entry)
 		if !bytes.Equal(cached.entry.raw, raw) {
@@ -56,26 +61,33 @@ func (store *ExecutionStore) verifyCached(request execution.StatePreflightReques
 		pass.verified.First = &execution.StateCacheMismatch{Plan: item.Identity.Plan, Kind: kind, Field: field}
 	}
 	store.cache.dropState(key, request.Contract.Slot.QueryGroup, item.Identity, StateCacheDepartMismatch)
+	if diverged {
+		store.cache.writtenDiverged(item.Identity, field)
+	}
 }
 
-// compactMismatch is where a compact member parts from raw, "" for none:
-// the same bytes are the same view, checked as the member was taken in.
-func compactMismatch(member *compactMember, identity execution.StateKeyIdentity, raw []byte) string {
+// compactMismatch is where a compact member parts from raw, "" for none,
+// and whether it parts from the very bytes it was taken in from - its digest
+// theirs, its frame rebuilt to others: a defect of the compact form.
+func compactMismatch(member *compactMember, identity execution.StateKeyIdentity, raw []byte) (string, bool) {
 	if raw == nil {
-		return "absent"
+		return "absent", false
 	}
-	if sha1.Sum(raw) == member.witness {
-		return ""
+	diverged := sha1.Sum(raw) == member.witness
+	if diverged {
+		if rebuilt, err := member.frame(identity); err == nil && bytes.Equal(rebuilt, raw) {
+			return "", false
+		}
 	}
 	held, err := member.view(identity)
 	if err != nil {
-		return "bytes"
+		return "bytes", diverged
 	}
 	stored, err := decodedForCompare(raw, identity)
 	if err != nil {
-		return "bytes"
+		return "bytes", diverged
 	}
-	return viewMismatch(held, stored)
+	return viewMismatch(held, stored), diverged
 }
 
 // bytesMismatch is where cached bytes part from raw, which differ: the

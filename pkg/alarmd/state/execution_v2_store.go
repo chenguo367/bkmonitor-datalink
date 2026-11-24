@@ -437,6 +437,7 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 	flush()
 	result.CarryFound, result.CarryMissing, result.CarryUnreadable = pass.carryFound, pass.carryMissing, pass.carryUnreadable
 	result.CacheVerify = pass.verified
+	result.CacheDiverged = store.cache.writtenDivergedFirst()
 	// One commit for the whole preflight: the round read every key of the
 	// Query Group, so this is a complete measurement of the population rather
 	// than whatever the last batch happened to hold.

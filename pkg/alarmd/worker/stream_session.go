@@ -2545,6 +2545,19 @@ func (stream *streamedExecution) evaluateReadBatch(ctx context.Context, batch []
 				StrategyID: verify.First.Plan.StrategyID, Kind: verify.First.Kind, Field: verify.First.Field},
 		})
 	}
+	diverged := loaded.CacheDiverged
+	if diverged != nil && stream.coordinator.cacheDivergedSaid.CompareAndSwap(false, true) {
+		// The State cache found a defect of its compact form: it checks
+		// every value it keeps compact from now on, and let every compact
+		// member go (014 next9 1). Said once a process.
+		stream.coordinator.emitObservation(ctx, observability.Observation{
+			Component: observability.ComponentState, Stage: observability.StageStateCacheDiverged,
+			Operation: observability.Operation(stream.request.Operation), Result: observability.ResultFailed,
+			ReasonCode: observability.ReasonCode(contract.ReasonStateStaleVersion),
+			StateCacheMismatch: &observability.StateCacheMismatchFacts{Count: 1,
+				StrategyID: diverged.Plan.StrategyID, Kind: diverged.Kind, Field: diverged.Field},
+		})
+	}
 	outcomes := make(map[string]int)
 	defer stream.observeCarries(ctx, outcomes)
 	// The series are evaluated side by side and merged one after another in

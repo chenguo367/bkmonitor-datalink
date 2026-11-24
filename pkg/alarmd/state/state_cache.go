@@ -504,6 +504,12 @@ type stateCache struct {
 	// Group; compactDeclined counts the values kept as their bytes instead.
 	compactPlans    map[compactPlanKey]*compactPlan
 	compactDeclined map[string]*atomic.Uint64
+	// writtenChecked is set, for good, at the first defect of the compact
+	// form found (writtenDiverged): every value kept compact is checked from
+	// then on. diverged is that first one, handed on every preflight after
+	// it (writtenDivergedFirst).
+	writtenChecked atomic.Bool
+	diverged       atomic.Pointer[execution.StateCacheMismatch]
 	// verified counts the sampled round's checks by result.
 	verified map[string]*atomic.Uint64
 	// sweeps counts the reads that asked for a sweep by
@@ -705,12 +711,13 @@ func (cache *stateCache) lastWritten(key string, group execution.QueryGroupIdent
 	return nil, false
 }
 
-// applied records a write that came back APPLIED: compact when it can be
-// (compactOf, the rule a value read back is kept by), as its bytes otherwise
-// (014 next9 1, the first step of writes kept compact). A written value had
-// always been kept as its bytes, some four times its compact form, and the
-// sampled round of each Plan, which writes every member, turned each compact
-// member back into bytes.
+// applied records a write that came back APPLIED: compact when it can be,
+// as its bytes otherwise (014 next9 1, the first step of writes kept
+// compact). A written value had always been kept as its bytes, some four
+// times its compact form, and the sampled round of each Plan, which writes
+// every member, turned each compact member back into bytes. The member is
+// taken in unchecked but for the ones writtenCompact checks (the second
+// step).
 func (cache *stateCache) applied(entry stateCacheEntry) {
 	if cache == nil {
 		return
@@ -719,11 +726,20 @@ func (cache *stateCache) applied(entry stateCacheEntry) {
 		cache.insert(entry, true)
 		return
 	}
-	member, _ := compactOf(entry.identity, entry.raw)
+	member, checked := cache.writtenCompact(entry)
+	cache.keepWritten(entry, member, checked)
+}
+
+// keepWritten takes in a value written as writtenCompact made it: compact,
+// or as its bytes for no member. One made unchecked while another write -
+// on a Slot of its own - found a defect of the compact form, which lets
+// every member go, is kept as its bytes instead: no member is taken in
+// unchecked after that.
+func (cache *stateCache) keepWritten(entry stateCacheEntry, member *compactMember, checked bool) {
 	room := cache.roomNow()
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	if member == nil {
+	if member == nil || (!checked && cache.writtenChecked.Load()) {
 		cache.insertLocked(entry, true, room)
 		return
 	}

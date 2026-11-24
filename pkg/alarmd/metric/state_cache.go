@@ -57,7 +57,9 @@ func newStateCacheCollector() *stateCacheCollector {
 				"of its own intervals), over_budget (its Query Group did not fit the budget: it left whole, or a write "+
 				"of it was not taken in), yielded (the same for what the Slots leave of the retained pool, or its "+
 				"Query Group given back whole for a Slot that needed the room), mismatch (a value a Plan's sampled "+
-				"round found the store no longer held as the cache did), reclaimed (a value its Query Group's latest "+
+				"round found the store no longer held as the cache did, or every compact member, let go at a defect of "+
+				"the compact form: state_cache_compact_declined_total{reason=\"written_diverged\"}), "+
+				"reclaimed (a value its Query Group's latest "+
 				"whole round neither read nor wrote, let go for a value of another group that did not fit, before any "+
 				"group is put out whole). A group kept out is judged again "+
 				"once a round, by a whole round of it, so one that never fits leaves once rather than every round. "+
@@ -112,8 +114,14 @@ func newStateCacheCollector() *stateCacheCollector {
 				"series guard), digest_shape (a digest not 64 lowercase hexadecimal characters), rebuilt_bytes (the member "+
 				"rebuilt to other bytes than were read back: a header written another way, by another build), "+
 				"rebuilt_view (it decoded to another view than the bytes did), unreadable (the bytes did not parse). Each "+
-				"kept as its bytes costs some four times a compact one in state_cache_bytes. Every cell exists from the "+
-				"start.", "reason"),
+				"kept as its bytes costs some four times a compact one in state_cache_bytes. "+
+				"written_diverged is no value kept as its bytes but a defect of the compact form, never expected: a "+
+				"compact member found to part from the bytes it was taken in from - a value this process wrote, taken in "+
+				"unchecked, that the check found otherwise (the first of each template and one in 1024 of the rest are "+
+				"checked as they are taken in), or one the Plan's sampled round of the day found not to rebuild to the "+
+				"stored bytes its digest names. From the first, the process checks every value it keeps compact and lets "+
+				"every compact member go, and a state_cache_diverged line names the strategy and the field. "+
+				"Every cell exists from the start.", "reason"),
 		verified: descriptor("state_cache_readback_verify_total",
 			"Values the State cache held that a Plan's sampled round of the day read from the store all the same and "+
 				"compared, by result: match, or mismatch (the store held another value, or none: the cache's value was "+

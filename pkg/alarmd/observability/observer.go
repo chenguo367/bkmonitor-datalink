@@ -87,6 +87,12 @@ const (
 	// is a Worker carrying it for each series. See StateCarryFacts.
 	StageStateCarryDecided = "state_carry_decided"
 	StageStateCarried      = "state_carried"
+	// StageStateCacheDiverged is the first defect of the State
+	// cache's compact form the process found: a compact member that parted
+	// from the bytes it was taken in from (014 next9 1). Said once a
+	// process; the count is state_cache_compact_declined_total
+	// {reason="written_diverged"}. See StateCacheMismatchFacts.
+	StageStateCacheDiverged = "state_cache_diverged"
 	// StageStateCacheVerified is a Slot's sampled round finding values the
 	// State cache held that the store did not (014 next7 3.6). See
 	// StateCacheMismatchFacts.
@@ -1547,7 +1553,10 @@ type StateCarryFacts struct {
 // first, its strategy, the kind the cache held it as (written, readback,
 // compact) and the first field of its view the two differ in ("absent" for a
 // key gone, "bytes" for bytes that differ in no field). No value of either
-// is carried.
+// is carried. On StageStateCacheDiverged it is the first defect of the
+// cache's compact form instead: Count 1, Kind compact, and where the member
+// parted from its bytes - a view field, "bytes", the reason the check
+// declined it, "witness" or "member".
 type StateCacheMismatchFacts struct {
 	Count      int
 	StrategyID string
@@ -4168,6 +4177,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentControlPlane, StageDrainingQGReconciled},
 	{ComponentControlPlane, StageFrozenPlanGeneration}, {ComponentControlPlane, StageActivationHold},
 	{ComponentControlPlane, StageStateCarryDecided}, {ComponentState, StageStateCarried}, {ComponentState, StageStateCacheVerified},
+	{ComponentState, StageStateCacheDiverged},
 	{ComponentOwnership, StageAssignmentAcquired}, {ComponentOwnership, StageAssignmentLost},
 	{ComponentOwnership, StageRebalancePlanned},
 	{ComponentOwnership, StageControlReadsSpent},

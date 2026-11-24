@@ -147,6 +147,10 @@ type SlotExecutionCoordinator struct {
 	ports        Ports
 	budget       ProvisionalBudget
 	reservations processProvisionalReservations
+	// cacheDivergedSaid is whether the State cache's first defect of its
+	// compact form has been said (StageStateCacheDiverged): once a
+	// process, though every preflight after it hands it on.
+	cacheDivergedSaid atomic.Bool
 	// slicedInput is each Query Group's last read on this replica, for its
 	// next Slot's first slices (sliced_input.go).
 	slicedInput sliceTrees

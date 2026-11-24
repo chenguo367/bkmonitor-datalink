@@ -35,9 +35,19 @@ import (
 // other is kept as its bytes (compact_declined). A lookup builds the view
 // from the template and the member without the JSON, and hands it on to be
 // finished - extended, classified, witnessed - as bytes read are.
+//
+// A value this process wrote is the encoder's own bytes, just written: it is
+// taken in parsed once and unchecked (014 next9 1, the second step), but for
+// the first of its template in its Plan's table and one in writtenCheckEvery
+// of the rest, which are checked as a value read back is; and the sampled
+// round of the day rebuilds every member it finds at its stored bytes. A
+// member found to differ is a defect of the compact form
+// (written_diverged): from the first, every value kept compact is checked,
+// and every compact member is let go.
 
 // Why a read-back value was kept as its bytes rather than compact, closed:
-// state_cache_compact_declined_total.
+// state_cache_compact_declined_total. written_diverged, in the same family,
+// is the defect above rather than a value kept as its bytes.
 const (
 	// StateCacheCompactLegacyFrame: the frame of a record carrying stored
 	// record ids (the second frame schema).
@@ -55,11 +65,32 @@ const (
 	StateCacheCompactRebuiltView = "rebuilt_view"
 	// StateCacheCompactUnreadable: the bytes did not parse as a frame.
 	StateCacheCompactUnreadable = "unreadable"
+	// StateCacheCompactWrittenDiverged: a compact member found to differ
+	// from the bytes it was taken in from - a value written, taken in
+	// unchecked, that the check found otherwise, or a member the sampled
+	// round found not to rebuild to the stored bytes its digest names. Never
+	// expected: one is a defect of the compact form.
+	StateCacheCompactWrittenDiverged = "written_diverged"
 )
 
 // StateCacheCompactDeclineReasons lists them.
 var StateCacheCompactDeclineReasons = []string{StateCacheCompactLegacyFrame, StateCacheCompactSeriesGuard,
-	StateCacheCompactDigestShape, StateCacheCompactRebuiltBytes, StateCacheCompactRebuiltView, StateCacheCompactUnreadable}
+	StateCacheCompactDigestShape, StateCacheCompactRebuiltBytes, StateCacheCompactRebuiltView, StateCacheCompactUnreadable,
+	StateCacheCompactWrittenDiverged}
+
+// writtenCheckEvery is how many of the values written of a template already
+// held one is checked as it is taken in: one in 1024, picked by its digest
+// (writtenSampled), so a defect any value of a round shows is found within
+// the first rounds at a cost of a thousandth of the check.
+const writtenCheckEvery = 1024
+
+// writtenSampled is whether a value written with this digest is checked as
+// it is taken in: the low ten bits of its first two bytes are zero. Fixed by
+// the value, not drawn: the same bytes are picked or passed alike, and each
+// round's writes, of new revisions, are other values.
+func writtenSampled(witness [sha1.Size]byte) bool {
+	return binary.BigEndian.Uint16(witness[:2])%writtenCheckEvery == 0
+}
 
 // compactMemberOverhead is a compact member's fixed heap beyond its points
 // and Level times: the member struct, its Slot digest, and its slot in its
@@ -204,9 +235,25 @@ func (member *compactMember) frame(identity execution.StateKeyIdentity) ([]byte,
 // in shares the Plan's template of the same signature and Slot digest
 // (keepCompactLocked).
 func compactOf(identity execution.StateKeyIdentity, raw []byte) (*compactMember, string) {
+	member, declined := compactParsed(identity, raw, sha1.Sum(raw))
+	if member == nil {
+		return nil, declined
+	}
+	if declined := compactChecked(member, identity, raw); declined != "" {
+		return nil, declined
+	}
+	return member, ""
+}
+
+// compactParsed is the member raw holds under identity, parsed and not yet
+// checked to rebuild to raw: what compactOf checks, and what a value this
+// process wrote is taken in as (writtenCompact). witness is raw's SHA-1. A
+// frame whose header names another series than identity is unreadable here,
+// as decoding it is.
+func compactParsed(identity execution.StateKeyIdentity, raw []byte, witness [sha1.Size]byte) (*compactMember, string) {
 	header, schema, points, err := parsePackedFrame(raw)
 	switch {
-	case err != nil:
+	case err != nil || header.Identity != identity:
 		return nil, StateCacheCompactUnreadable
 	case schema != packedFrameSchemaV1 || len(header.LegacyRecordIDs) > 0:
 		return nil, StateCacheCompactLegacyFrame
@@ -236,19 +283,135 @@ func compactOf(identity execution.StateKeyIdentity, raw []byte) (*compactMember,
 	}
 	member := &compactMember{template: template, series: series, revision: header.BlobRevision, applyVersion: header.ApplyVersion,
 		mutationDigest: mutation, lastEventTime: header.LastEventTime, times: times, pointCount: header.PointCount,
-		points: append([]byte(nil), points...), witness: sha1.Sum(raw)}
+		points: append([]byte(nil), points...), witness: witness}
+	member.cost = compactMemberOverhead + sizeClass(len(member.points)) + sizeClass(8*len(times))
+	return member, ""
+}
+
+// compactChecked is "" when member rebuilds to raw and decodes to the view
+// raw decodes to, and otherwise the reason it is not kept compact.
+func compactChecked(member *compactMember, identity execution.StateKeyIdentity, raw []byte) string {
 	if rebuilt, err := member.frame(identity); err != nil || !bytes.Equal(rebuilt, raw) {
-		return nil, StateCacheCompactRebuiltBytes
+		return StateCacheCompactRebuiltBytes
 	}
 	decoded, err := decodedForCompare(raw, identity)
 	if err != nil {
-		return nil, StateCacheCompactUnreadable
+		return StateCacheCompactUnreadable
 	}
 	if view, err := member.view(identity); err != nil || !reflect.DeepEqual(view, decoded) {
-		return nil, StateCacheCompactRebuiltView
+		return StateCacheCompactRebuiltView
 	}
-	member.cost = compactMemberOverhead + sizeClass(len(member.points)) + sizeClass(8*len(times))
-	return member, ""
+	return ""
+}
+
+// writtenCompact is the compact member a value this process wrote is kept
+// as, nil to keep it as its bytes, and whether it was checked as a value
+// read back is (014 next9 1, the second step). The bytes are the encoder's
+// own, and entry.digest their SHA-1 as the write named it: the member is
+// parsed from them once and taken in unchecked - the frame not rebuilt, the
+// view not decoded twice, the digest not hashed again - unless the
+// process has found a defect of the compact form, the member's template is
+// not yet held in its Plan's table, or the value is one of the
+// writtenCheckEvery picked; those are checked, and a member the check
+// builds otherwise, or declines, is a defect (writtenDiverged).
+func (cache *stateCache) writtenCompact(entry stateCacheEntry) (*compactMember, bool) {
+	witness, ok := witnessOf(entry.digest)
+	if !ok || cache.writtenChecked.Load() {
+		member, _ := compactOf(entry.identity, entry.raw)
+		return member, true
+	}
+	member, _ := compactParsed(entry.identity, entry.raw, witness)
+	if member == nil {
+		return nil, true
+	}
+	if !writtenSampled(witness) && cache.templateHeld(entry.group, entry.identity, member.template.signature) {
+		return member, false
+	}
+	checked, declined := compactOf(entry.identity, entry.raw)
+	if checked != nil && reflect.DeepEqual(checked, member) {
+		return checked, true
+	}
+	cache.writtenDiverged(entry.identity, divergedField(entry.identity, member, checked, declined))
+	return checked, true
+}
+
+// witnessOf is a value's digest, as ExpectedValueDigest names it, as the
+// bytes a compact member keeps; false for one of another shape.
+func witnessOf(digest string) ([sha1.Size]byte, bool) {
+	var witness [sha1.Size]byte
+	if len(digest) != 2*sha1.Size {
+		return witness, false
+	}
+	if _, err := hex.Decode(witness[:], []byte(digest)); err != nil {
+		return witness, false
+	}
+	return witness, true
+}
+
+// templateHeld is whether the Plan generation of identity under group holds
+// a template of signature: its first member was checked as it was taken in.
+func (cache *stateCache) templateHeld(group execution.QueryGroupIdentity, identity execution.StateKeyIdentity,
+	signature string) bool {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	plan := cache.compactPlans[compactPlanKey{group: group, plan: identity.Plan, generation: identity.StateGeneration}]
+	return plan != nil && plan.templates[signature] != nil
+}
+
+// divergedField is where a member taken in unchecked parts from the one the
+// check builds: the reason the check declined it, the digest, the first
+// field of their views that differs, or the member alone.
+func divergedField(identity execution.StateKeyIdentity, member, checked *compactMember, declined string) string {
+	switch {
+	case checked == nil:
+		return declined
+	case member.witness != checked.witness:
+		return "witness"
+	}
+	held, heldErr := member.view(identity)
+	want, wantErr := checked.view(identity)
+	if heldErr == nil && wantErr == nil {
+		if field := viewMismatch(held, want); field != "bytes" {
+			return field
+		}
+	}
+	return "member"
+}
+
+// writtenDiverged is a defect of the compact form found under identity, at
+// field (written_diverged): counted, and the first kept for every preflight
+// after it to hand on (writtenDivergedFirst); from it, every value kept
+// compact is checked as it is taken in (writtenCompact), and every compact
+// member is let go - each read back at its next lookup and taken in again
+// checked. The members go once, at the first: none is taken in unchecked
+// after it (applied).
+func (cache *stateCache) writtenDiverged(identity execution.StateKeyIdentity, field string) {
+	cache.compactDeclined[StateCacheCompactWrittenDiverged].Add(1)
+	if !cache.writtenChecked.CompareAndSwap(false, true) {
+		return
+	}
+	cache.diverged.Store(&execution.StateCacheMismatch{Plan: identity.Plan, Kind: StateCacheEntryCompact, Field: field})
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	for _, plan := range cache.compactPlans {
+		for _, member := range plan.members {
+			cache.departCompactLocked(plan, member, StateCacheDepartMismatch)
+		}
+	}
+}
+
+// writtenDivergedFirst is the first defect of the compact form found, nil
+// before it: a copy, so a reader that changes it changes nothing kept.
+func (cache *stateCache) writtenDivergedFirst() *execution.StateCacheMismatch {
+	if cache == nil {
+		return nil
+	}
+	first := cache.diverged.Load()
+	if first == nil {
+		return nil
+	}
+	copied := *first
+	return &copied
 }
 
 // decodedForCompare is a framed record's view as its bytes hold it, before
