@@ -53,26 +53,40 @@ func TestEveryDecidedSlotsLagIsHeardOnce(t *testing.T) {
 // The lag is a normal round's: a normal Slot and its retry are heard; a
 // replay, a probe and a supplement are late by what they are -- a missed
 // Slot run again, a recovery's test read, a completed Slot read once more --
-// and are not, so the histogram shows the rounds as they run.
+// and are not, so the histogram shows the rounds as they run. A replay short
+// of time is the normal round in its place and is heard; one past its
+// deadline is a missed Slot run again and is not.
 func TestOnlyNormalRoundsLagIsHeard(t *testing.T) {
 	evaluation := time.Now().Add(-90 * time.Second).Truncate(time.Second)
-	heard := map[execution.Operation]int{}
-	for _, operation := range []execution.Operation{execution.OperationNormal, execution.OperationRetry,
-		execution.OperationReplay, execution.OperationProbe, execution.OperationSupplement} {
-		request := execution.SlotExecutionRequest{AttemptNo: 1, Operation: operation}
+	heard := map[string]int{}
+	for _, round := range []struct {
+		name      string
+		operation execution.Operation
+		ageMillis int64
+	}{
+		{"normal", execution.OperationNormal, 0}, {"retry", execution.OperationRetry, 0},
+		// A replay short of time - distance one, age zero - is the normal
+		// round in its place (014 next9 2); one past its deadline is late.
+		{"replay short of time", execution.OperationReplay, 0}, {"replay past its deadline", execution.OperationReplay, 5_000},
+		{"probe", execution.OperationProbe, 0}, {"supplement", execution.OperationSupplement, 0},
+	} {
+		request := execution.SlotExecutionRequest{AttemptNo: 1, Operation: round.operation}
+		if round.operation == execution.OperationReplay {
+			request.ReplayDistance, request.ReplayAgeMillis = 1, round.ageMillis
+		}
 		request.Contract.Slot.EvaluationTime = execution.EvaluationTime(evaluation.Unix())
 		executor := observedProductionSlotExecutor{
 			next: slotExecutorFunc(func(context.Context, execution.SlotExecutionRequest) (execution.SlotExecutionResult, error) {
 				return execution.SlotExecutionResult{Completed: true, CompletionKind: execution.CompletionFull, Result: observability.ResultSuccess}, nil
 			}),
 			observer:    observability.ObserverFunc(func(context.Context, observability.Observation) {}),
-			decisionLag: func(time.Duration) { heard[operation]++ },
+			decisionLag: func(time.Duration) { heard[round.name]++ },
 		}
 		if _, err := executor.Execute(context.Background(), request); err != nil {
 			t.Fatal(err)
 		}
 	}
-	want := map[execution.Operation]int{execution.OperationNormal: 1, execution.OperationRetry: 1}
+	want := map[string]int{"normal": 1, "retry": 1, "replay short of time": 1}
 	if !maps.Equal(heard, want) {
 		t.Fatalf("heard = %v, want %v", heard, want)
 	}

@@ -86,6 +86,7 @@ func moveStrategyOutOfItsGroup(t *testing.T, shift, editAt time.Duration) (*clos
 		t.Fatalf("revision 1 runs in %v, want one Query Group", before)
 	}
 	fixture.life.clock.Store(origin.Add(editAt).UnixMilli())
+	fixture.clockSteppedBack = editAt < 0
 	fixture.start = origin.Add(shift)
 	if edited := fixture.publish(2, []string{"bk_target_ip", "bk_target_cloud_id"}, false, nil); edited.Revision != 2 {
 		t.Fatalf("the publication carries %+v, want revision 2", edited)

@@ -158,9 +158,10 @@ type PhaseTwoSchedulerConfig struct {
 	// duration - any group whose reads this process has not timed yet - and
 	// its read-hold record keeps none from its previous owner either: a group
 	// just taken over is judged by the previous owner's reading first. A
-	// group that never completes a first read in time never gets a reading,
-	// and stays on the fallback, as does a group whose record keeps no reading
-	// (a group never measured keeps no record). Below it the round goes to replay at
+	// group none of whose first reads completes whole within a normal round's
+	// budget - a replay short of time is timed as one when it does - never
+	// gets a reading, and stays on the fallback, as does a group whose record
+	// keeps no reading (a group never measured keeps no record). Below it the round goes to replay at
 	// once (scheduler.RecoveryLimits.TakeoverDivertFloor): one taken over late
 	// in its period, or one whose readiness landed at the edge of its deadline
 	// (execution.StartsTooLate). The default is

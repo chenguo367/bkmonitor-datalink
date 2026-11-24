@@ -85,6 +85,10 @@ type cutoverStallFixture struct {
 	// second as partial, so the PRIMARY input is genuinely incomplete; nil
 	// answers every query FULL.
 	uqPartial func(end int64) bool
+	// uqTakes, when set, is how long the UQ stub's read of a query ending at
+	// the given Unix second takes on the fixture's clock, which it moves on
+	// by that much before it answers.
+	uqTakes atomic.Pointer[func(end int64) time.Duration]
 	// stopInRead, when set, is called by the next query that arrives, which then
 	// answers nothing: the round is stopped inside its read.
 	stopInRead atomic.Pointer[context.CancelFunc]
@@ -225,6 +229,9 @@ func openCutoverFixtureSharing(
 		for _, host := range hosts {
 			series = append(series, `{"name":"_result0","columns":["_time","_result"],"types":["int64","float64"],"group_keys":["host"],"group_values":["`+host+`"],"values":[[`+
 				strconv.FormatInt(at*1000, 10)+`,5]]}`)
+		}
+		if takes := fixture.uqTakes.Load(); takes != nil {
+			fixture.clock.Add((*takes)(end).Milliseconds())
 		}
 		partial := "false"
 		if fixture.uqPartial != nil && fixture.uqPartial(end) {

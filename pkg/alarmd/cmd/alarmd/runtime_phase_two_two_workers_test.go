@@ -358,10 +358,15 @@ func aggregatedByMax(strategy map[string]any) {
 }
 
 // A strategy moved by a query edit from worker-a's Query Group to a new one
-// on worker-b, and moved back, is not served on its first Slot back what
-// worker-a cached before it left. worker-a held its group throughout - the
-// strategy beside it stayed - so the owner fence the cache keys on never
-// moved; only the Plan's activation in the group did (lookup rule 6).
+// on worker-b for three Slots, and moved back, is not served on its first
+// Slot back what worker-a cached before it left. worker-a held its group
+// throughout - the strategy beside it stayed - so the owner fence the cache
+// keys on never moved; only the Plan's activation in the group did. Away
+// three Slots - past two of its intervals on the process's clock, which the
+// State cache keeps time by - its values left worker-a's cache untouched,
+// and the first Slot back reads them as absent. Back within two intervals,
+// they are held and refused by the activation:
+// TestAStrategyBackOnItsWorkerWithinTwoIntervalsIsRefusedByItsActivation.
 //
 // The two histories decide the first evaluated Slot back differently, and
 // the events show which one it read. The strategy fires on two points over
@@ -393,6 +398,7 @@ func TestAStrategyBackOnItsWorkerIsNotServedWhatItCachedBeforeAnotherWorkerHeldI
 	if ended := fixture.runUntilEnded(a, old, left); ended != fullEnding {
 		t.Fatalf("worker-a's Slot %d ended %q, want FULL_COMPLETED", left, ended)
 	}
+	untouched := a.departureReading(t, "untouched")
 
 	var moved execution.QueryGroupIdentity
 	away := fixture.edit(map[int64][]byte{1001: sharedGroupStrategy(t, 1001, 1725000600, aggregatedByMax), 1003: unedited()[1003]},
@@ -425,7 +431,7 @@ func TestAStrategyBackOnItsWorkerIsNotServedWhatItCachedBeforeAnotherWorkerHeldI
 		t.Fatalf("placement did not hold: worker-a holds %v, worker-b %v", a.holds(), b.holds())
 	}
 	cache := func(family, label, value string) float64 { return a.cacheReading(t, family, label, value) }
-	hits, activations := cache("alarmd_state_cache_lookups_total", "result", "hit"), cache("alarmd_state_cache_lookups_total", "result", "miss_activation")
+	hits, absents := cache("alarmd_state_cache_lookups_total", "result", "hit"), cache("alarmd_state_cache_lookups_total", "result", "miss_absent")
 	conflicts := a.departureReading(t, "conflict")
 	declined := cache("alarmd_state_cache_restore_declined_total", "reason", "newer_version")
 	// Back, over the threshold again.
@@ -433,12 +439,16 @@ func TestAStrategyBackOnItsWorkerIsNotServedWhatItCachedBeforeAnotherWorkerHeldI
 	first := nextGridAfter(back)
 	ended := fixture.runUntilEnded(a, old, first)
 	// The first Slot back reads the store for every key of the group: no
-	// lookup is served from the cache, the strategy's by its activation.
+	// lookup is served from the cache, the strategy's as absent - its values
+	// let go untouched while it was away.
 	if got := cache("alarmd_state_cache_lookups_total", "result", "hit"); got != hits {
 		t.Fatalf("the first Slot back (%s) was served %v lookups from the cache, want none", ended, got-hits)
 	}
-	if got := cache("alarmd_state_cache_lookups_total", "result", "miss_activation"); got <= activations {
-		t.Fatalf("state_cache_lookups_total{miss_activation} rose by %v, want the strategy back read from the store", got-activations)
+	if got := a.departureReading(t, "untouched"); got <= untouched {
+		t.Fatalf("state_cache_departures_total{untouched} rose by %v while the strategy was away three Slots, want its values let go", got-untouched)
+	}
+	if got := cache("alarmd_state_cache_lookups_total", "result", "miss_absent"); got <= absents {
+		t.Fatalf("state_cache_lookups_total{miss_absent} rose by %v, want the strategy back read from the store", got-absents)
 	}
 	// The first Slot back that evaluates the strategy: on the store's history
 	// it has one point of two over the threshold and writes no event.
@@ -467,5 +477,62 @@ func TestAStrategyBackOnItsWorkerIsNotServedWhatItCachedBeforeAnotherWorkerHeldI
 	}
 	if b.holds()[old] || a.holds()[moved] {
 		t.Fatalf("placement did not hold: worker-a holds %v, worker-b %v", a.holds(), b.holds())
+	}
+}
+
+// A strategy moved by a query edit from worker-a's Query Group and moved back
+// within two of its intervals is refused by its activation on its first Slot
+// back (lookup rule 6): worker-a held its group throughout, so the owner
+// fence never moved, and no round has let the strategy's values go
+// untouched, two intervals not having passed since the last Slot before the
+// move wrote them; but the activation they were written under is not the
+// one the strategy came back on. No lookup is served from the cache. The
+// long absence, its values let go:
+// TestAStrategyBackOnItsWorkerIsNotServedWhatItCachedBeforeAnotherWorkerHeldIt.
+func TestAStrategyBackOnItsWorkerWithinTwoIntervalsIsRefusedByItsActivation(t *testing.T) {
+	unedited := func() map[int64][]byte {
+		return map[int64][]byte{1001: sharedGroupStrategy(t, 1001, 1725000000, twoOfTwo), 1003: sharedGroupStrategy(t, 1003, 1725000000, twoOfTwo)}
+	}
+	fixture := startTwoWorkerFixture(t, func(ctx context.Context, client *redis.Client, _ config.Config) {
+		installSharedGroup(t, ctx, client, unedited())
+	}, 2)
+	old := fixture.queryGroup
+	a, b := fixture.a, fixture.b
+	left := execution.EvaluationTime(fixture.base + 60)
+	fixture.value.Store(aboveThreshold)
+	if ended := fixture.runUntilEnded(a, old, left); ended != fullEnding {
+		t.Fatalf("worker-a's Slot %d ended %q, want FULL_COMPLETED", left, ended)
+	}
+	var moved execution.QueryGroupIdentity
+	fixture.edit(map[int64][]byte{1001: sharedGroupStrategy(t, 1001, 1725000600, aggregatedByMax), 1003: unedited()[1003]},
+		"the query edit", func() bool {
+			for queryGroup := range b.holds() {
+				if settledRunner(b.bundle, queryGroup) != nil {
+					moved = queryGroup
+				}
+			}
+			return moved != "" && a.holds()[old]
+		})
+	// The move back at a boundary of its own, two seconds on: worker-b runs
+	// no Slot of the strategy in between.
+	fixture.clock.Store(fixture.now().UnixMilli() + 2000)
+	back := fixture.edit(unedited(), "the move back", func() bool {
+		return a.holds()[old] && settledRunner(a.bundle, old) != nil
+	})
+	if b.holds()[old] || a.holds()[moved] {
+		t.Fatalf("placement did not hold: worker-a holds %v, worker-b %v", a.holds(), b.holds())
+	}
+	first := nextGridAfter(back)
+	if first > left+120 {
+		t.Fatalf("fixture: the first Slot back is %d, not within two intervals of %d, the last before the move", first, left)
+	}
+	cache := func(family, label, value string) float64 { return a.cacheReading(t, family, label, value) }
+	hits, activations := cache("alarmd_state_cache_lookups_total", "result", "hit"), cache("alarmd_state_cache_lookups_total", "result", "miss_activation")
+	ended := fixture.runUntilEnded(a, old, first)
+	if got := cache("alarmd_state_cache_lookups_total", "result", "hit"); got != hits {
+		t.Fatalf("the first Slot back (%s) was served %v lookups from the cache, want none", ended, got-hits)
+	}
+	if got := cache("alarmd_state_cache_lookups_total", "result", "miss_activation"); got <= activations {
+		t.Fatalf("state_cache_lookups_total{miss_activation} rose by %v, want the strategy's values refused by its activation", got-activations)
 	}
 }

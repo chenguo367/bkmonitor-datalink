@@ -183,7 +183,9 @@ func TestMeasureALargeQueryGroupsSlotAgainstTheHeap(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = bundle.Shutdown(ctx) }()
-	settleExecutableView(ctx, bundle, 10*time.Second)
+	if err := settleExecutableView(ctx, bundle, 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
 
 	for slot := int64(0); slot < slots-1; slot++ {
 		answering.Store(slot)
@@ -376,7 +378,9 @@ func TestMeasureALargeQueryGroupsTakeoverAgainstTheHeap(t *testing.T) {
 		if err := bundle.Start(ctx); err != nil {
 			t.Fatal(err)
 		}
-		settleExecutableView(ctx, bundle, 10*time.Second)
+		if err := settleExecutableView(ctx, bundle, 10*time.Second); err != nil {
+			t.Fatal(err)
+		}
 		return bundle
 	}
 

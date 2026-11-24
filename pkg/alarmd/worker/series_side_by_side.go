@@ -43,6 +43,14 @@ type seriesEvaluation struct {
 	err, invalid error
 	validated    bool
 	took         time.Duration
+	// retained is the series' retained size and observation its evaluation
+	// line, made beside the evaluation from the job alone (014 next9 3,
+	// (ii-a)) when it evaluated - the line only when it validated there too
+	// - and said on the Slot's goroutine in the order the series were
+	// prepared; sized and observed say which were made.
+	retained        uint64
+	sized, observed bool
+	observation     observability.Observation
 }
 
 // mergeResumedSeries merges a series this attempt finds already written at
@@ -150,11 +158,29 @@ func (stream *streamedExecution) evaluateSideBySide(ctx context.Context, jobs []
 	leave := stream.enter(slotPhaseEvaluate)
 	execution.MarkStage(ctx, execution.SlotStageEvaluate)
 	evaluator := stream.coordinator.ports.Evaluator
+	// The Plans' series counts the evaluation lines carry, read here: the
+	// first read of a Plan's fills the stream's cache, and the lines made
+	// beside the evaluations only read it.
+	for _, job := range jobs {
+		stream.planSeriesMatched(job.entry.due)
+	}
 	evaluate := func(job *seriesEvaluation) {
 		started := time.Now()
 		job.evaluated, job.err = evaluator.Evaluate(ctx, job.request)
+		if job.err == nil {
+			// Its retained size reads its own State alone.
+			if retained, err := evaluationRetainedSize(job.loaded, execution.EvaluationResult{}); err == nil {
+				job.retained, job.sized = retained, true
+			}
+		}
 		if job.err == nil && len(job.incomplete) == 0 {
 			job.invalid, job.validated = job.evaluated.Validate(job.request), true
+			if job.invalid == nil {
+				// Its line reads the job, its Plan and what the stream froze
+				// for the Slot; it is said, or not, in finishSeriesEvaluation.
+				job.observation, job.observed = stream.evaluationObservation(started, job.entry.due, job.entry.series,
+					job.request.Inputs, job.evaluated)
+			}
 		}
 		job.took = time.Since(started)
 	}
@@ -211,10 +237,17 @@ func (stream *streamedExecution) finishSeriesEvaluation(ctx context.Context, job
 		stream.observeEvaluationFailure(ctx, started, due, invalid)
 		return wrapEvaluationError(codeEvaluationResultInvalid, fmt.Errorf("alarmd worker: invalid series evaluation: %w", invalid))
 	}
-	stream.observeEvaluationCompleted(ctx, started, due, series, inputs, evaluated)
-	retained, err := evaluationRetainedSize(job.loaded, execution.EvaluationResult{})
-	if err != nil {
-		return fmt.Errorf("alarmd worker: measure evaluated retention: %w", err)
+	if job.observed {
+		stream.sayEvaluation(ctx, due, job.observation)
+	} else {
+		stream.observeEvaluationCompleted(ctx, started, due, series, inputs, evaluated)
+	}
+	retained := job.retained
+	if !job.sized {
+		var err error
+		if retained, err = evaluationRetainedSize(job.loaded, execution.EvaluationResult{}); err != nil {
+			return fmt.Errorf("alarmd worker: measure evaluated retention: %w", err)
+		}
 	}
 	if stream.supplement != nil {
 		stream.noteSupplementEvaluated(due, series, inputs, &evaluated)

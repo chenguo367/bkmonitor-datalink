@@ -844,7 +844,9 @@ func TestAnUngroupedEventCountAnsweredWithNothingIsNoDataNotQuiet(t *testing.T) 
 // it owns from the records - and reads the object back from its own API.
 func restoredRowKind(t *testing.T, ctx context.Context, bundle *phaseTwoWorkerBundle) string {
 	t.Helper()
-	settleExecutableView(ctx, bundle, 10*time.Second)
+	if err := settleExecutableView(ctx, bundle, 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
 	deadline := testwait.Deadline(t)
 	var owned []execution.QueryGroupIdentity
 	for owned = bundle.ownedQueryGroups(); len(owned) == 0 && time.Now().Before(deadline); owned = bundle.ownedQueryGroups() {

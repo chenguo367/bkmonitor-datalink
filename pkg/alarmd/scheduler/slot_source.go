@@ -1316,9 +1316,12 @@ func (source *ProductionSlotSource) observeReplayExpiry(
 // What "cannot finish" means is the group's own query duration where this
 // process has read it; where it has not - every group just taken over - the
 // previous owner's reading, as the group's read-hold record keeps it; and
-// TakeoverDivertFloor otherwise. A group that never completes a first read in
-// time never gets a reading, and stays on the fallback, as does a group whose
-// record keeps no reading (a group never measured keeps no record). A round with more
+// TakeoverDivertFloor otherwise. A group none of whose first reads completes
+// whole within a normal round's budget - its normal rounds cut at their
+// deadline, and any replay short of time slower than that budget timing
+// nothing (lookback timedRead) - never gets a reading, and stays on the
+// fallback, as does a group whose record keeps no reading (a group never
+// measured keeps no record). A round with more
 // budget left than that runs as a normal round, as any round does. A round
 // due before the takeover is reported as a takeover diverted
 // (ReplayTakeoverFacts), any other as readiness_late (SlotDiversionFacts):
@@ -1373,13 +1376,15 @@ func (source *ProductionSlotSource) divertShortOfTime(
 // group is judged only by a reading. A reading is evidence and applies to any
 // group: the group's own first, then the previous owner's its read-hold
 // record keeps (InheritedQueryDuration), a measurement of the same query and
-// so a reading too. A group that never completes a first read in time never
-// gets a reading, and stays on the fallback, as does a group whose record
-// keeps no reading (a group never measured keeps no record). The inherited
-// reading stands in only until the group is measured here: once it is, a
-// group whose own readings have all aged - every round of it diverted, so
-// none read - is on the fallback too, not on a reading older than its own,
-// which would divert it again.
+// so a reading too. A group none of whose first reads completes whole within
+// a normal round's budget - a normal round's cut at its deadline, a replay
+// short of time's slower than that budget (lookback timedRead) - never gets a
+// reading, and stays on the fallback, as does a group whose record keeps no
+// reading (a group never measured keeps no record). The inherited reading
+// stands in only until the group is measured here: once it is, a group whose
+// own readings have all aged - every round of it diverted and none of its
+// replays timed, or cut - is on the fallback too, not on a reading older
+// than its own, which would divert it again.
 //
 // The inherited reading is asked only when there is no own one, and outside
 // every lock of the source's: the read-hold controller takes the group's own

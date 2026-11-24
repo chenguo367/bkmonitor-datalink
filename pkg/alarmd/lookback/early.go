@@ -128,6 +128,20 @@ func (readings *durations) add(at time.Time, value time.Duration) {
 	readings.count = min(readings.count+1, readingsKept)
 }
 
+// dropLatest takes back the latest reading add put in: the ring shrinks by it
+// while it is not full, and once full the place keeps no reading - no value,
+// no time - until the next add takes it.
+func (readings *durations) dropLatest() {
+	if readings.count == 0 {
+		return
+	}
+	latest := (readings.next + readingsKept - 1) % readingsKept
+	readings.values[latest], readings.at[latest] = 0, time.Time{}
+	if readings.count < readingsKept {
+		readings.next, readings.count = latest, readings.count-1
+	}
+}
+
 // widenLatest makes the latest reading value, taken at at, when value is
 // longer: a reading widened is as recent as its widest part.
 func (readings *durations) widenLatest(at time.Time, value time.Duration) {

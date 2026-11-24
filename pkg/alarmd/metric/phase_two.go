@@ -253,6 +253,7 @@ type phaseTwoMetrics struct {
 	renewalGate                     *renewalGateCollector
 	stateCache                      *stateCacheCollector
 	stateWitness                    *stateWitnessCollector
+	stateRedisReads                 *stateRedisReadsCollector
 	canonicalEncoding               *canonicalEncodingCollector
 	datasetRecordIDs                *datasetRecordIDCollector
 	algorithmInputs                 *prometheus.CounterVec
@@ -940,6 +941,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.renewalGate = newRenewalGateCollector()
 	metrics.stateCache = newStateCacheCollector()
 	metrics.stateWitness = newStateWitnessCollector()
+	metrics.stateRedisReads = newStateRedisReadsCollector()
 	metrics.canonicalEncoding = newCanonicalEncodingCollector()
 	metrics.datasetRecordIDs = newDatasetRecordIDCollector()
 	metrics.shortPeriod = newShortPeriodMetrics()
@@ -1320,6 +1322,10 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"(the group's own reading, the previous owner's as the group's read-hold record keeps it, or the configured floor), so a normal read would have been cut off at " +
 			"the deadline with no data; replay reads it late but whole under a deadline of its own. A Slot due " +
 			"before a takeover is counted under replay_takeover_slots_total{outcome=\"diverted\"} instead. " +
+			"The group's own reading is its last whole first reads, a Slot sent here among them: its replay's whole " +
+			"read is timed as the normal round in its place, when it took no longer than that round's whole budget, " +
+			"readiness to the query deadline its read is cut at, the live one - longer, no normal round could read it, and the degraded pool, which " +
+			"only a normal round decides, judges the group instead of every round being sent here. " +
 			"Read with progress_completion_causes_total{cause=\"PRIMARY_INPUT_UNAVAILABLE\",reason=\"QUERY_TIMEOUT\"}: " +
 			"the rounds counted here are the ones that no longer appear there.",
 	}, []string{"reason"})
@@ -2429,7 +2435,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 	}...), append(append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), append(append(m.handover.collectors(), m.slotProgress.collectors()...), m.sreActions.actions, m.sreActions.rollouts, m.sreActions.watched, m.sreActions.receipts, m.cliAuth.total, m.cliAuth.rosterApplied)...), append(append(m.controlFacts.collectors(), m.traceExport.collectors()...), m.segmentShadow.collectors()...)...),
 		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.activeCopy, m.fleetTracker, m.effectiveTimeRefresh, m.activationRebuild, m.timelineRepair, m.activationSkippedTimelines, m.timelineUnreadableReports, m.activationHeader, m.activationBlocked, m.liveReserve, m.roundMemory, m.stateSeriesHeld, m.targetGroup, m.effectiveClose, m.logLines, m.observerPanics, m.absentClose, m.editClose, m.noDataCloseAPI, m.linkdFilterClose, m.linkdFilterCloseRequests, m.openEpisodeRecord, m.newOpens, m.frontRefused, m.processMemory, m.strategyScopeClose, m.targetScopeClose, m.controlSourceRounds, m.apmCarried, m.apmCarriedBytes, m.sourceLivenessChecks, m.sourceLivenessSeconds, m.sourceLivenessDeferred, m.sourceLivenessEvicted, m.sourceLivenessHeldEvicted, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.controlFactsWrites, m.planCarriesReads, m.planSegmentsReads, m.queryCooldownLoads, m.eventBusinessAttribution, m.detectionSnapshots, m.detectionSnapshotStates, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
 		m.controlSourceRetainedStale, m.controlSourceLastGoodIdentity, m.platformSettings,
-		m.redisPool, m.renewalGate, m.stateCache, m.stateWitness, m.canonicalEncoding, m.datasetRecordIDs, m.legacyPodCache,
+		m.redisPool, m.renewalGate, m.stateCache, m.stateWitness, m.stateRedisReads, m.canonicalEncoding, m.datasetRecordIDs, m.legacyPodCache,
 		m.seriesAdmission, m.cmdbAddressDiffers, m.cmdbPlacedByHostID, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.cmdbIndexBusinessMappings, m.cmdbIndexRecordsRefused, m.hostDisableMonitorStates, m.cmdbIndexAge, m.cmdbIndexPublish,
 		m.fleetSnapshotBytes, m.fleetViewSnapshotLoads, m.fleetViewSnapshotBytes,
 		m.fleetSummaryBytes, m.fleetViewSummaryLoads, m.fleetViewSummaryBytes, m.fleetViewOwnedLoads, m.fleetViewOwnedBytes, m.retainedPeakCensusGroups, m.retainedPeakCensusOverflow,

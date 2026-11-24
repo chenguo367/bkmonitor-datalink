@@ -71,8 +71,8 @@ const compactMemberOverhead = 384
 // before any of its Query Group's has been measured: the charge compactOf
 // gives (member.cost) a one-Level member whose points take one 128-byte class
 // and whose two times one 16-byte class. A refused round with no value
-// measured is charged it (stateCacheRefusal.mean), and the budget is to be
-// sized by it while nothing is held (014 n8).
+// measured is charged it (stateCacheRefusal.mean), and no State entry is
+// charged less by the budget (resize).
 const stateCacheCompactCharge = compactMemberOverhead + 128 + 16
 
 type compactDigest [32]byte
@@ -297,21 +297,41 @@ func (cache *stateCache) judgeCompactLocked(request execution.StatePreflightRequ
 	return StateCacheHit, member
 }
 
-// keepCompactLocked takes in a read-back value compact, stamped as entry
-// says, within the budget and the pool's room as any entry: what was kept of
-// the series before goes, and a Plan table under another fence or
-// activation goes whole - no read under this one is served what it holds
-// (rules 1 and 6). The member shares its Plan's template of the same
-// signature and its Slot digest.
+// keepCompactLocked takes in a value compact - one read back, or one written
+// (applied) - stamped as entry says, within the budget and the pool's room as
+// any entry: what was kept of the series before goes, and a Plan table under
+// another fence or activation goes whole - no read under this one is served
+// what it holds (rules 1 and 6). A written value keeps what the lookups
+// marked of what it replaces, as insertLocked's does, and its Plan's interval
+// is read from the write before it under its key, or else from its write's
+// retention, when the Plan's table has none. The member shares its Plan's template of the same signature and its
+// Slot digest.
 func (cache *stateCache) keepCompactLocked(entry stateCacheEntry, member *compactMember, room int64) {
-	member.slot, member.usableUntil, member.touched = entry.slot, entry.usableUntil, cache.now()
-	member.sharded, member.openMember = entry.sharded, entry.openMember
+	now := cache.now()
+	member.slot, member.usableUntil, member.touched = entry.slot, entry.usableUntil, now
 	if previous := cache.byKey[entry.key]; previous != nil {
+		if !entry.readback && previous.group == entry.group {
+			entry.sharded, entry.openMember = previous.sharded, previous.openMember
+			if entry.interval == 0 && previous.written.Before(now) {
+				entry.interval = now.Sub(previous.written)
+			}
+		}
 		cache.removeLocked(previous)
+	}
+	// A written value with no write before it kept as bytes to read its
+	// interval from - its Plan's values all kept compact, or rounds that left
+	// it unwritten since - takes the one its write's retention names, so that
+	// what no round reads any more is let go untouched two intervals on
+	// (sweep), as a value kept as its bytes is.
+	if entry.interval == 0 && !entry.readback {
+		entry.interval = entry.planInterval
 	}
 	key := compactPlanKey{group: entry.group, plan: entry.identity.Plan, generation: entry.identity.StateGeneration}
 	if plan := cache.compactPlans[key]; plan != nil {
 		if old := plan.members[member.series]; old != nil {
+			if !entry.readback {
+				entry.sharded, entry.openMember = old.sharded, old.openMember
+			}
 			cache.removeCompactLocked(plan, old)
 		}
 		if plan.fence != entry.fence || plan.epoch != entry.epoch || plan.segmentStart != entry.segmentStart {
@@ -320,6 +340,7 @@ func (cache *stateCache) keepCompactLocked(entry stateCacheEntry, member *compac
 			}
 		}
 	}
+	member.sharded, member.openMember = entry.sharded, entry.openMember
 	if !cache.admitLocked(entry.group, entry.slot, member.cost, false, true, min(cache.budget, room)) {
 		return
 	}
@@ -332,6 +353,8 @@ func (cache *stateCache) keepCompactLocked(entry stateCacheEntry, member *compac
 			slotDigests: map[execution.SlotIdentityDigest]execution.SlotIdentityDigest{}}
 		cache.compactPlans[key] = plan
 		group.compact[key] = plan
+	} else if plan.interval == 0 {
+		plan.interval = entry.interval
 	}
 	if template := plan.templates[member.template.signature]; template != nil {
 		member.template = template

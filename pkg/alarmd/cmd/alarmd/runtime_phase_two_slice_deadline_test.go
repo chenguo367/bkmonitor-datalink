@@ -110,7 +110,9 @@ func TestASliceWhosePermitWaitMeetsTheDeadlineIsNoSliceTooLarge(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = bundle.Shutdown(ctx) }()
-	settleExecutableView(ctx, bundle, 10*time.Second)
+	if err := settleExecutableView(ctx, bundle, 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
 
 	// slicesOf runs the Slot at base+60*slot, and returns the slices its
 	// queries read, sorted, and its usage when it completed. A run that

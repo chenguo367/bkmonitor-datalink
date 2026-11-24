@@ -232,10 +232,17 @@ type SlotExecutionRequest struct {
 	// memory holds.
 	QueryCooldownProbe bool
 	Operation          Operation
-	AttemptNo          uint32
-	OwnerFence         OwnerFence
-	ExpectedNextSlot   EvaluationTime
-	ExpiredRange       *ExpiredRangeProjectionV1
+	// ReplayDistance and ReplayAgeMillis are a replay's distance and its age
+	// past its deadline as the scheduler judged them (SlotRecoveryFacts),
+	// non-identity facts like ReplayExpired, zero for any other operation. A
+	// replay at distance one and age zero is not behind, only short of the
+	// time a normal round's read takes (ReplayShortOfTime).
+	ReplayDistance   uint32
+	ReplayAgeMillis  int64
+	AttemptNo        uint32
+	OwnerFence       OwnerFence
+	ExpectedNextSlot EvaluationTime
+	ExpiredRange     *ExpiredRangeProjectionV1
 	// ContentScope names the execution content this Slot runs under: the
 	// ObjectDigest of the Schedule Segment it was frozen from (decision-016).
 	// Every fenced write the Slot makes -- State, Progress, the expired range
@@ -278,6 +285,10 @@ func (request SlotExecutionRequest) Validate() error {
 	if err := request.Operation.Validate(); err != nil {
 		return err
 	}
+	if request.Operation != OperationReplay && (request.ReplayDistance != 0 || request.ReplayAgeMillis != 0) ||
+		request.ReplayAgeMillis < 0 {
+		return errors.New("alarmd execution: a replay's distance and age go with the replay operation, the age never negative")
+	}
 	if (request.Operation == OperationSupplement) != (request.Supplement != nil) {
 		return errors.New("alarmd execution: a supplement scope goes with the supplement operation and only with it")
 	}
@@ -310,6 +321,23 @@ func (request SlotExecutionRequest) Validate() error {
 	return nil
 }
 
+// ReplayShortOfTime is whether the request is a replay that is not behind -
+// distance one, age zero - sent to replay only because a normal round's read
+// would not fit the time left it (014 next9 2): its round leaves its stable
+// members' State writes out as a normal round's does. Any other replay, a
+// retry and a takeover replay of a Slot past its deadline among them, writes
+// its members whole.
+func (request SlotExecutionRequest) ReplayShortOfTime() bool {
+	return request.Operation == OperationReplay && request.ReplayDistance == 1 && request.ReplayAgeMillis == 0
+}
+
+// ReplayShortOfTime is SlotExecutionRequest.ReplayShortOfTime of the Slot the
+// read is of: its first read is timed as its group's, as the normal round's
+// in its place would be (014 next9a, the boundary of B' and E).
+func (request QueryExecutionRequest) ReplayShortOfTime() bool {
+	return request.Operation == OperationReplay && request.ReplayDistance == 1 && request.ReplayAgeMillis == 0
+}
+
 func (request SlotExecutionRequest) UnfinishedProjection() UnfinishedSlotProjection {
 	return UnfinishedSlotProjection{
 		Contract: request.Contract, DuePlanTargets: request.DuePlanTargets.Clone(),
@@ -323,6 +351,11 @@ type QueryExecutionRequest struct {
 	Contract  FrozenExecutionContractRef
 	Operation Operation
 	AttemptNo uint32
+	// ReplayDistance and ReplayAgeMillis are the Slot's, a replay's distance
+	// and age past its deadline (SlotExecutionRequest): the read of a replay
+	// short of time is timed as its group's first read (ReplayShortOfTime).
+	ReplayDistance  uint32
+	ReplayAgeMillis int64
 	// Slice is the slice of the Query Group's series this read is of; the
 	// zero slice is all of them (InputSlice).
 	Slice InputSlice

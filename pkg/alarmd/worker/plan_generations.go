@@ -17,10 +17,11 @@ import (
 )
 
 // planGenerations is the State generation each due Plan of a Query Group's
-// last normal Slot on this process ran under (014 B4 H7): a supplement of
-// an earlier Slot writing another generation's key writes one that Plan
-// reads no more for a series its generation now has a record of. A Query
-// Group with no normal Slot here for planGenerationsIdle is let go.
+// last normal Slot on this process - or replay short of time, the normal
+// round in its place - ran under (014 B4 H7): a supplement of an earlier
+// Slot writing another generation's key writes one that Plan reads no more
+// for a series its generation now has a record of. A Query Group with no
+// such Slot here for planGenerationsIdle is let go.
 type planGenerations struct {
 	mu     sync.Mutex
 	groups map[execution.QueryGroupIdentity]planGenerationsAt

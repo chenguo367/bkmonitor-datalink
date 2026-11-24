@@ -331,6 +331,10 @@ func openPhaseTwoCoreResources(ctx context.Context, cfg config.Config, recorder 
 			return nil, err
 		}
 		options := executionStoreOptions(cfg, storageRouter)
+		// The store keeps time by the process's clock, as Progress does: the
+		// State cache's lifetimes, its untouched rule and the lookups' horizons
+		// are read on it.
+		options.Now = now
 		options.ReadHoldBound = recoveryLimits.MaxReplayAge
 		// Runtime State writes verify the owner lease inside Redis; without the
 		// resolver the store would fall back to unfenced batched writes.
@@ -367,6 +371,7 @@ func openPhaseTwoCoreResources(ctx context.Context, cfg config.Config, recorder 
 			return nil, err
 		}
 		recorder.SetStateWitnessSource(executionStore.RuntimeWitnessStats)
+		recorder.SetStateRedisReadsSource(executionStore.StateReadStats)
 	}
 	// The control role records manual closes in the runtime-state store the
 	// owning worker reads them from. A process that is also a worker reuses
@@ -383,7 +388,9 @@ func openPhaseTwoCoreResources(ctx context.Context, cfg config.Config, recorder 
 			if err != nil {
 				return nil, err
 			}
-			noDataCloses, err = state.NewExecutionStore(executionStoreOptions(cfg, closeRouter))
+			closeOptions := executionStoreOptions(cfg, closeRouter)
+			closeOptions.Now = now
+			noDataCloses, err = state.NewExecutionStore(closeOptions)
 			if err != nil {
 				return nil, err
 			}

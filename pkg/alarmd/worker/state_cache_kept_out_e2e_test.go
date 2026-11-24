@@ -33,7 +33,14 @@ const keptOutRoomOpen = int64(math.MaxInt64)
 
 func newKeptOutRig(t *testing.T, hosts int) *keptOutRig {
 	t.Helper()
-	rig := &keptOutRig{shadowRig: newThresholdShadowRig(t, hosts, 16<<20)}
+	return newKeptOutRigWithin(t, hosts, 16<<20)
+}
+
+// newKeptOutRigWithin is the rig with a State cache opened with budget, its
+// floor.
+func newKeptOutRigWithin(t *testing.T, hosts int, budget int64) *keptOutRig {
+	t.Helper()
+	rig := &keptOutRig{shadowRig: newThresholdShadowRig(t, hosts, budget)}
 	rig.skipWord.Store(7)
 	rig.room.Store(keptOutRoomOpen)
 	rig.store.StateCacheBorrower().BorrowRetainedWithin(func() uint64 { return uint64(rig.room.Load()) })

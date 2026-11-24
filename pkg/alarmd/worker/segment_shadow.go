@@ -172,7 +172,10 @@ func (coordinator *SlotExecutionCoordinator) segmentDues(header execution.Intern
 // its owner's term is stopped: none of its members is left.
 func (coordinator *SlotExecutionCoordinator) loadSegments(ctx context.Context, request execution.SlotExecutionRequest,
 	header execution.InternalExecutionHeader) (*segmentSlot, string, error) {
-	if request.Operation == execution.OperationNormal {
+	// A replay short of time is the normal round in its place (014 next9 2),
+	// so it notes its Plans' generations too: a group diverted round after
+	// round has no normal Slot, and a supplement would read as never moved.
+	if request.Operation == execution.OperationNormal || request.ReplayShortOfTime() {
 		coordinator.generations.note(request.Contract.Slot.QueryGroup, header.DuePlans, coordinator.now())
 	}
 	store, ok := coordinator.ports.State.(segment.Store)
@@ -211,7 +214,7 @@ func (coordinator *SlotExecutionCoordinator) loadSegments(ctx context.Context, r
 	}
 	slot.skip = skip
 	slot.writeFailed = coordinator.segmentWriteFailures.failed(request.Contract.Slot.QueryGroup)
-	slot.leaves = slot.skip && !slot.writeFailed && request.Operation == execution.OperationNormal
+	slot.leaves = slot.skip && !slot.writeFailed && leavesMembers(request)
 	slot.at = int64(request.Contract.Slot.EvaluationTime)
 	now := coordinator.now().UnixMilli()
 	for key, state := range slot.plans {
@@ -650,6 +653,16 @@ type segmentShadowTally struct {
 	notSkipped map[string]int64
 }
 
+// leavesMembers is whether a round of request's operation may leave its
+// stable members' State writes out: a normal round, or a replay short of
+// time - not behind, only sent to replay for a read that would not fit what
+// was left of its time (014 next9 2) - which reads and writes as a normal
+// round would. Any other replay, a retry among them, writes its members
+// whole.
+func leavesMembers(request execution.SlotExecutionRequest) bool {
+	return request.Operation == execution.OperationNormal || request.ReplayShortOfTime()
+}
+
 func newSegmentShadowRound(request execution.SlotExecutionRequest, slot *segmentSlot) *segmentShadowRound {
 	// A supplement completes no Slot - a round's late points, not a round -
 	// and a probe writes none.
@@ -657,7 +670,7 @@ func newSegmentShadowRound(request execution.SlotExecutionRequest, slot *segment
 		return nil
 	}
 	return &segmentShadowRound{slot: slot, plans: map[segment.PlanKey]*segmentShadowPlanRound{},
-		skip: slot.skip && !slot.writeFailed && request.Operation == execution.OperationNormal,
+		skip: slot.skip && !slot.writeFailed && leavesMembers(request),
 		at:   int64(request.Contract.Slot.EvaluationTime)}
 }
 
@@ -1408,16 +1421,20 @@ func settleSegmentShadow(ctx context.Context, store segment.Store, request execu
 				// failing: first a Plan whose rounds stopped - this Slot's
 				// evaluation time past the one its mark was written in by
 				// more than its interval, a round between not settled, or a
-				// replay or retry late for its time - then a page no earlier
-				// round could have renewed, the round before coming before
-				// it fell due, a quarter of its shorter lifetime after its
-				// renewal. The mark is written every round that settles,
-				// members present or not, so a Plan with none present, or an
-				// empty page, shows its stop as well.
+				// replay or retry late for its time (a replay short of time,
+				// sent before its deadline for a read that would not fit, is
+				// the normal round in its place, not late: 014 next9 2) -
+				// then a page no earlier round could have renewed, the round
+				// before coming before it fell due, a quarter of its shorter
+				// lifetime after its renewal. The mark is written every
+				// round that settles, members present or not, so a Plan
+				// with none present, or an empty page, shows its stop as
+				// well.
 				result := observability.SegmentRenewalFallbackWrite
 				switch {
 				case state.hadMark && (int64(request.Contract.Slot.EvaluationTime-state.mark.Version.EvaluationTime) > state.interval ||
-					request.Operation == execution.OperationReplay || request.Operation == execution.OperationRetry):
+					request.Operation == execution.OperationReplay && !request.ReplayShortOfTime() ||
+					request.Operation == execution.OperationRetry):
 					result = observability.SegmentRenewalFallbackStalled
 				case now-renewal.At < state.interval*1000+min(renewal.TTL, ttl)/4:
 					result = observability.SegmentRenewalFallbackUnrenewable

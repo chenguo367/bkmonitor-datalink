@@ -474,7 +474,11 @@ func (fixture *electionFixture) pass(r int64, settled bool, want int) int {
 			// passes before it.
 			var err error
 			if settled {
-				err = runScheduledOnceSettled(fixture.ctx, process.bundle)
+				// A fleet whose Control process is gone, flapping or in a
+				// crash loop has no steady Leader to settle the view from:
+				// the pass goes on past the bound, as the Worker's own
+				// scheduler does.
+				err = runScheduledOnceBestEffort(fixture.ctx, process.bundle)
 			} else {
 				err = process.bundle.runScheduledOnce(fixture.ctx)
 			}

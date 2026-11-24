@@ -301,6 +301,16 @@ type Query struct {
 	Spec      execution.PhysicalQuerySpec
 	Operation execution.Operation
 	AttemptNo uint32
+	// ReplayShortOfTime marks a replay sent before its deadline for a read
+	// that would not fit (execution.QueryExecutionRequest.ReplayShortOfTime):
+	// its first read is timed for its Query Group's reading and nothing more
+	// (Begin). NormalDeadline is then the query deadline the normal round in
+	// its place is cut at - the live one, which it was diverted against: a
+	// read longer than that round's whole budget, from ReadyAt to
+	// NormalDeadline, is no reading that round could have taken, and is not
+	// timed (timedRead).
+	ReplayShortOfTime bool
+	NormalDeadline    time.Time
 	// ReadyAt is when the query was ready to read, its Slot's evaluation
 	// time plus its readiness offset; FollowingSlot is the Slot its frozen
 	// schedule has next, zero when unknown. Together they say when the
@@ -611,8 +621,14 @@ func New(options Options) (*Engine, error) {
 // Begin sees every formal first read before it is sent. It counts it, and
 // takes it as its Query Group's sample when the group has none in flight
 // and has rested since its last; the Read it returns counts the bytes the
-// read delivers either way, and keeps a summary only of a sample.
+// read delivers either way, and keeps a summary only of a sample. The first
+// read of a replay short of time is only timed (timedRead); no other replay,
+// retry or probe is seen.
 func (engine *Engine) Begin(query Query) *Read {
+	if engine != nil && query.Operation == execution.OperationReplay && query.ReplayShortOfTime && query.AttemptNo == 1 &&
+		!query.Secondary {
+		return engine.timedRead(query)
+	}
 	if engine == nil || query.Operation != execution.OperationNormal || query.AttemptNo != 1 {
 		return nil
 	}
@@ -745,6 +761,57 @@ type Read struct {
 	// a probation reread; either keeps summary.
 	sampled   bool
 	probation bool
+	// timedOnly is a replay short of time's first read (timedRead): timed
+	// for its group's reading, no request reading, count, byte, sample,
+	// probe or trial; and only when it took no longer than budget, the whole
+	// budget of the normal round in its place.
+	timedOnly bool
+	budget    time.Duration
+}
+
+// timedRead is the Read of a replay short of time's first read (014 next9a,
+// the boundary of B' and E): the normal round in its place, sent to replay
+// before its deadline because a read would not fit, it is timed from here -
+// after its permit - into its Query Group's first-read reading when it reads
+// whole, so a group diverted round after round by its reading keeps one. It
+// is counted among no first reads and their bytes, takes no sample, probe or
+// trial, and moves nothing else of its group: those are a normal round's.
+// A read cut short times nothing, as a normal one's; the reading ages as a
+// normal one's.
+//
+// It is timed only up to the whole budget of the normal round in its place,
+// from the Slot's readiness to the query deadline that round's read is cut
+// at - the live one, less the live reserve, which is also what the round was
+// diverted against: no reading of a normal round is longer, and every
+// reading the group has is one a normal round could finish. A replay that
+// reads whole in longer - a query slower than any normal round of its group
+// can wait for, which a replay's longer budget still answers - times nothing.
+// Timed, it would divert every normal round after it to a replay that reads
+// as long and is timed again, the group never running a normal round, and
+// the degraded pool, which only a normal round decides, never deciding: such
+// a query is the pool's to judge. A Slot read in slices is judged by its
+// round, from its first slice's send: a slice that takes the round past the
+// budget takes back the reading the Slot's earlier slices left, and its
+// later slices leave none (sliceRound.timedWithin).
+//
+// The reading ages by the Slot's frozen schedule, as a normal first read's
+// does: the interval to its next Slot.
+func (engine *Engine) timedRead(query Query) *Read {
+	step := time.Duration(query.Spec.PlanFacts.StepMillis) * time.Millisecond
+	budget := query.NormalDeadline.Sub(query.ReadyAt)
+	if step <= 0 || query.ReadyAt.UnixMilli() <= 0 || budget <= 0 {
+		return nil
+	}
+	now := engine.options.Now()
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	state := engine.groupLocked(query, now)
+	slot := query.Contract.Slot
+	if query.FollowingSlot > slot.EvaluationTime {
+		state.interval = time.Duration(query.FollowingSlot-slot.EvaluationTime) * time.Second
+	}
+	return &Read{engine: engine, queryGroup: slot.QueryGroup, sentAt: now, evaluation: slot.EvaluationTime, slice: query.Slice,
+		timedOnly: true, budget: budget}
 }
 
 // Series counts one delivered series' bytes, and on a sample adds it to the
@@ -753,7 +820,9 @@ func (read *Read) Series(dataset *execution.Dataset, bytes uint64) {
 	if read == nil {
 		return
 	}
-	read.bytes.Add(bytes)
+	if read.bytes != nil {
+		read.bytes.Add(bytes)
+	}
 	if read.summary != nil {
 		read.summary.add(dataset)
 	}
@@ -854,8 +923,11 @@ func (read *Read) Complete(completion execution.ProviderCompletion, err error) {
 	if !read.sentAt.IsZero() && err == nil && completion.Completeness == execution.CompletenessFull {
 		now := read.engine.options.Now()
 		read.engine.mu.Lock()
-		if state := read.engine.groups[read.queryGroup]; state != nil {
-			state.requests.add(now, now.Sub(read.sentAt))
+		if state := read.engine.groups[read.queryGroup]; state != nil &&
+			(!read.timedOnly || state.sliceRound.timedWithin(&state.firstReads, read.evaluation, read.slice, read.sentAt, now, read.budget)) {
+			if !read.timedOnly {
+				state.requests.add(now, now.Sub(read.sentAt))
+			}
 			if read.slice.IsZero() {
 				state.firstReads.add(now, now.Sub(read.sentAt))
 			} else {
@@ -994,7 +1066,8 @@ func (engine *Engine) RereadBound(queryGroup execution.QueryGroupIdentity) (time
 // readingsKept of its rounds (readingAgeLocked) - and whether this process
 // has measured the group at all: zero with true is a group whose readings
 // have all aged, its rounds read otherwise than by a first read this long - a
-// group a round of which is diverted every round takes no reading - and which
+// group diverted every round takes a reading only from its replays short of
+// time that read whole within a normal round's budget (timedRead) - and which
 // is then judged by none, not by a reading older still. False is a group this
 // process has not measured. RereadBound keeps the reading at RecheckTimeout or
 // more, the least a read again is given; a scheduler asking whether a round
@@ -1115,6 +1188,9 @@ func (state *group) rereadBound() time.Duration {
 type sliceRound struct {
 	evaluation execution.EvaluationTime
 	begun      time.Time
+	// over is set once a replay short of time's slice took the round of the
+	// Slot at evaluation past its normal round's budget (timedWithin).
+	over bool
 }
 
 // complete takes a whole slice's first read of the Slot at evaluation, sent
@@ -1122,12 +1198,43 @@ type sliceRound struct {
 // reading, each later slice widens it.
 func (round *sliceRound) complete(readings *durations, evaluation execution.EvaluationTime, sent, now time.Time) {
 	if round.evaluation != evaluation || readings.count == 0 {
-		round.evaluation, round.begun = evaluation, sent
+		round.evaluation, round.begun, round.over = evaluation, sent, false
 		readings.add(now, now.Sub(sent))
 		return
 	}
 	round.begun = minTime(round.begun, sent)
 	readings.widenLatest(now, now.Sub(round.begun))
+}
+
+// timedWithin reports whether a replay short of time's whole read of the
+// Slot at evaluation, of slice, sent at sent and ended now, leaves a reading
+// within budget: its own time, or for a later slice of the Slot the round's
+// from its first slice's send. A slice that takes the round past it takes
+// back the reading the Slot's earlier slices left, and no later slice of the
+// Slot leaves one: the Slot's read is the round's, and a part of it within
+// the budget is no reading of what the round took (timedRead).
+func (round *sliceRound) timedWithin(readings *durations, evaluation execution.EvaluationTime, slice execution.InputSlice,
+	sent, now time.Time, budget time.Duration,
+) bool {
+	if slice.IsZero() {
+		return now.Sub(sent) <= budget
+	}
+	if round.evaluation == evaluation && round.over {
+		return false
+	}
+	ongoing := round.evaluation == evaluation && readings.count > 0
+	span := now.Sub(sent)
+	if ongoing {
+		span = now.Sub(minTime(round.begun, sent))
+	}
+	if span <= budget {
+		return true
+	}
+	if ongoing {
+		readings.dropLatest()
+	}
+	round.evaluation, round.over = evaluation, true
+	return false
 }
 
 func minTime(left, right time.Time) time.Time {

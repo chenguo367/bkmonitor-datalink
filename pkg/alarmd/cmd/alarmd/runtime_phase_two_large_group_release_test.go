@@ -140,7 +140,9 @@ func TestALargeQueryGroupsSlotLeavesNothingLiveOnceItsReservationIsBack(t *testi
 		t.Fatal(err)
 	}
 	defer func() { _ = bundle.Shutdown(ctx) }()
-	settleExecutableView(ctx, bundle, 10*time.Second)
+	if err := settleExecutableView(ctx, bundle, 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
 
 	const slots = 3
 	for slot := int64(0); slot < slots-1; slot++ {

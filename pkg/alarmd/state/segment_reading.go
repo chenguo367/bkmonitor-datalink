@@ -172,7 +172,7 @@ func (store *ExecutionStore) PlanSegments(ctx context.Context, group execution.Q
 		for position, index := range indexes {
 			names[position] = markKeys[index]
 		}
-		marks, err := segmentMGet(ctx, backends[name], names, nil)
+		marks, err := store.segmentMGet(ctx, backends[name], StateReadPlanSegments, names, nil)
 		if err != nil {
 			return segment.PlansReading{}, err
 		}

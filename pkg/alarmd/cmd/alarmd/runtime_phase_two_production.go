@@ -3130,9 +3130,12 @@ func (executor observedProductionSlotExecutor) Execute(
 		// Every period's decision in a normal round, for the overview's
 		// evaluate stage. A Slot booked without a decision lags by its
 		// booking, not its detection; a replay, a probe and a supplement are
-		// late by what they are and would read as the rounds running late.
+		// late by what they are and would read as the rounds running late. A
+		// replay short of time is the normal round in its place, sent before
+		// its deadline (014 next9 2): its lag is the period's, and a group
+		// diverted round after round would show no decision without it.
 		decided := result.CompletionKind != execution.CompletionGapSkipped && result.CompletionKind != execution.CompletionSnapshotUnavailable &&
-			(request.Operation == execution.OperationNormal || request.Operation == execution.OperationRetry)
+			(request.Operation == execution.OperationNormal || request.Operation == execution.OperationRetry || request.ReplayShortOfTime())
 		if executor.decisionLag != nil && decided {
 			executor.decisionLag(lag)
 		}

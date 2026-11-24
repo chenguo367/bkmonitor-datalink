@@ -2056,7 +2056,9 @@ func measureWindowedShape(t *testing.T, shape windowMeasureShape) windowMeasureR
 		t.Fatal(err)
 	}
 	defer func() { _ = bundle.Shutdown(ctx) }()
-	settleExecutableView(ctx, bundle, 10*time.Second)
+	if err := settleExecutableView(ctx, bundle, 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
 	idleRSS := windowMeasureIdleRSS()
 	mu.Lock()
 	measured.idleRSS = idleRSS

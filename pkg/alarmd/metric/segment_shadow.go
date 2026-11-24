@@ -91,7 +91,8 @@ func newSegmentShadowMetrics() segmentShadowMetrics {
 				"quarter lifetime it falls due by - by design: a lifetime of two intervals or less (a Plan keeping one " +
 				"point, or one its horizon cuts short), or a new page, made staggered, of a Plan whose keys live under " +
 				"four intervals; fallback_stalled, the same of a Plan whose rounds stopped - the Slot's evaluation time " +
-				"past its mark's round by more than its interval, or the round a replay or a retry - whatever its " +
+				"past its mark's round by more than its interval, or the round a retry or a replay late for its time (a " +
+				"replay short of time is the normal round in its place) - whatever its " +
 				"renewals did. " +
 				"missing and fallback_write zero, and over_budget at most 1e-4 of the state_segment_renew scripts " +
 				"that ran (redis_script_total{script=\"state_segment_renew\",command=~\"eval|evalsha\",outcome=\"ok\"}, " +
@@ -142,7 +143,9 @@ func newSegmentShadowMetrics() segmentShadowMetrics {
 			Help: "Open members of a Plan's stable segments the shadow compared as a match and wrote all the same, by " +
 				"the first gate that kept them written and the Plan's period class. The gates, in the order the round " +
 				"checks them: slot_skip_off (the Slot follows no segment skip word), write_failed (an earlier attempt's " +
-				"segment write did not land), not_normal_operation (the Slot is not a normal one), plan_stopped (the " +
+				"segment write did not land), not_normal_operation (the Slot is neither a normal one nor a replay short of " +
+				"time - one sent before its deadline for a read that would not fit, the normal round in its place), " +
+				"plan_stopped (the " +
 				"Plan degraded twice in its owner's term), sampled (the Plan's sampled round of the day), ttl_zero (the " +
 				"Plan's segments have no lifetime to be written with), fallback_page (the member's page went unrenewed " +
 				"for half its lifetime). other is none of these and a defect: a match is written only for one of them. " +
@@ -152,8 +155,8 @@ func newSegmentShadowMetrics() segmentShadowMetrics {
 		rounds: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: metricSubsystem, Name: "state_segment_rounds_total",
 			Help: "Plans' rounds of Slots whose output landed, by the skip mode each ran under and the Plan's period " +
-				"class. The modes: off (the Slot follows no segment skip word), write_failed, operation (not a normal " +
-				"Slot), stopped, retried (an attempt that found the Plan's series applied in part and started its shadow " +
+				"class. The modes: off (the Slot follows no segment skip word), write_failed, operation (neither a normal " +
+				"Slot nor a replay short of time), stopped, retried (an attempt that found the Plan's series applied in part and started its shadow " +
 				"over: it compares nothing), sampled - every member written whole - and skip, members compared a match " +
 				"left unwritten: the rounds state_segment_match_not_skipped_total and the members left are read against. " +
 				"Counted by the attempts that fold, as the matches are; a replay of a round already folded is none.",

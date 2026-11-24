@@ -42,6 +42,7 @@ func TestASameBoundaryCutoverLeavesTheOldQueryGroupDrainingNotCurrent(t *testing
 				t.Fatal(err)
 			}
 			fixture.life.clock.Store(fixture.start.Add(edit.editAt).UnixMilli())
+			fixture.clockSteppedBack = edit.editAt < 0
 			if edited := fixture.publish(2, []string{"bk_target_ip", "bk_target_cloud_id"}, false, nil); edited.Revision != 2 {
 				t.Fatalf("the publication carries %+v, want revision 2", edited)
 			}

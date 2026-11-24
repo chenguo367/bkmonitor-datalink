@@ -73,12 +73,14 @@ func noReadHoldRecords() *runtimeTestReadHoldControl {
 }
 
 // A group whose own reading - one first read of 30 s - leaves its round 7 s
-// short of it is diverted to replay, and takes no reading while it is: a
-// replay is not a first read (lookback Begin). Within sixteen of its rounds
-// since that reading the round is diverted by it; past them the reading has
-// aged, and the round runs as a normal round on the 5 s fallback, through
-// the slot source the bundle wires to the lookback's reading (014 next8).
-// Before readings aged, the group was diverted every round for good.
+// short of it is diverted to replay, and takes no reading while no read of it
+// completes whole - here its replays are never read. Within sixteen of its
+// rounds since that reading the round is diverted by it; past them the
+// reading has aged, and the round runs as a normal round on the 5 s fallback,
+// through the slot source the bundle wires to the lookback's reading (014
+// next8). Before readings aged, the group was diverted every round for good.
+// A replay short of time that reads whole is timed as the group's first read
+// (014 next9a): TestAGroupDivertedEveryRoundWhoseReplaysReadAsSlowlyStaysDiverted.
 func TestAGroupDivertedEveryRoundByItsReadingRunsAsANormalRoundOnceTheReadingAged(t *testing.T) {
 	fact, schedule, deadline := inheritedDivertGroup(t)
 	qg := schedule.Segment.QueryGroup
@@ -102,6 +104,46 @@ func TestAGroupDivertedEveryRoundByItsReadingRunsAsANormalRoundOnceTheReadingAge
 		if got.Outcome == observability.ReplayTakeoverDiverted {
 			t.Fatalf("its reading aged, the round was diverted again: %+v", got)
 		}
+	}
+}
+
+// A group diverted round after round by its own reading - one first read of
+// 30 s, each round left 7 s - whose replays read as slowly, each whole, stays
+// diverted, judged by its own reading round after round: a replay short of
+// time is the normal round in its place, and its first read is timed into
+// the group's reading as that round's would be (014 next9a, the boundary of
+// B' and E), so the reading does not age while the group is read. The
+// replays' reads are timed here as access times them (lookbackQuery, Begin
+// after the permit, Complete). Before, a replay took no reading: sixteen
+// rounds on the reading aged, and the round ran as a normal round on the 5 s
+// fallback with 7 s left for a 30 s read - cut at its deadline, a cut first
+// read timing nothing, and so every round after.
+func TestAGroupDivertedEveryRoundWhoseReplaysReadAsSlowlyStaysDiverted(t *testing.T) {
+	fact, schedule, deadline := inheritedDivertGroup(t)
+	qg := schedule.Segment.QueryGroup
+	clock := &agingClock{at: time.Unix(1_700_000_060, 0)}
+	const took = 30 * time.Second
+	engine := readingLookback(t, qg, clock, took)
+	read := clock.now()
+
+	for round := 1; round <= 20; round++ {
+		clock.set(read.Add(time.Duration(round) * time.Minute))
+		facts, _, operation := successorRoundWith(t, noReadHoldRecords(), fact, schedule, deadline, 0, lookbackQueryLatency(engine))
+		if operation != execution.OperationReplay || len(facts) != 1 || facts[0].Outcome != observability.ReplayTakeoverDiverted ||
+			facts[0].FloorSource != observability.TakeoverFloorObserved || facts[0].FloorSeconds != 30 {
+			t.Fatalf("round %d after the first read: %q, takeover facts %+v; want it diverted by its own 30 s reading", round,
+				operation, facts)
+		}
+		// The round's replay: a replay short of time's first read, whole in
+		// 30 s, inside the minute its normal round has from its readiness.
+		query := sampledQuery(qg)
+		query.Contract.Slot.EvaluationTime += execution.EvaluationTime(60 * round)
+		query.Operation, query.ReplayShortOfTime = execution.OperationReplay, true
+		query.ReadyAt = time.Unix(int64(query.Contract.Slot.EvaluationTime), 0)
+		query.NormalDeadline = query.ReadyAt.Add(time.Minute)
+		replay := engine.Begin(query)
+		clock.set(clock.now().Add(took))
+		replay.Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
 	}
 }
 

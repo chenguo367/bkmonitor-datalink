@@ -110,8 +110,9 @@ func newFlowMetrics(work *prometheus.CounterVec) flowMetrics {
 		decisionLag: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Subsystem: metricSubsystem, Name: "slot_decision_lag_seconds",
 			Help: "Seconds from a Slot's data being readable (its evaluation time plus the read hold) to its completion " +
-				"being acknowledged, for every period, in normal rounds: a normal Slot and its retry. Replays, probes and " +
-				"supplements are late by what they are and are not in it; skipped and snapshot-unavailable completions " +
+				"being acknowledged, for every period, in normal rounds: a normal Slot, its retry, and a replay short of " +
+				"time - sent before its deadline for a read that would not fit, the normal round in its place. Other " +
+				"replays, probes and supplements are late by what they are and are not in it; skipped and snapshot-unavailable completions " +
 				"are not decisions and are not in it either.",
 			Buckets: DecisionLagBuckets,
 		}),

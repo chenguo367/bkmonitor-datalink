@@ -261,7 +261,7 @@ func newLookbackCollector() *lookbackCollector {
 			"Points the admitted series of the supplements were evaluated on, by source.", "source"),
 		generationMoved: desc("lookback_supplement_generation_moved_series_total",
 			"Of lookback_supplement_series_total{outcome=\"admitted\"}, the pairs whose Plan's last normal Slot on this "+
-				"process ran under another State generation than the supplemented Slot's (014 B4 H7), by source: an edit "+
+				"process - or replay short of time, the normal round in its place - ran under another State generation than the supplemented Slot's (014 B4 H7), by source: an edit "+
 				"came between the Slot and its supplement, which writes the Slot's generation's key, one the Plan no "+
 				"longer reads for a series its new generation has a record of - that late point is lost. An upper bound: "+
 				"a series the new generation has no record of yet still reads the old key (its carry), and its point is "+

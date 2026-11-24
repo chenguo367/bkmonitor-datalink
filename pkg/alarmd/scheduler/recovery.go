@@ -63,9 +63,11 @@ type RecoveryLimits struct {
 	// process took its Query Group over, or one whose readiness landed at the
 	// edge of its deadline (divertShortOfTime). Below it the round goes to
 	// replay at once, under replay's own deadline, instead of starting a
-	// normal attempt that cannot finish. A group that never completes a first
-	// read in time never gets a reading, and stays on the fallback, as does a
-	// group whose record keeps no reading (a group never measured keeps no record).
+	// normal attempt that cannot finish. A group none of whose first reads
+	// completes whole within a normal round's budget - a replay short of time
+	// is timed as one when it does - never gets a reading, and stays on the
+	// fallback, as does a group whose record keeps no reading (a group never
+	// measured keeps no record).
 	// Zero turns the diversion off where there is no reading.
 	TakeoverDivertFloor time.Duration
 }

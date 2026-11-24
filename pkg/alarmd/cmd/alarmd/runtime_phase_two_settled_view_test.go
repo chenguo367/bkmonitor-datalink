@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -38,11 +39,24 @@ import (
 // (decision-016 batch 4b, the accepted bound: renewal interval plus delta
 // propagation); a fixture that ran the pass at once ran it inside that
 // window and got view_not_executable, which is the answer it would get, not
-// the one the case is about. Bounded: past the deadline the pass runs
-// anyway, so a case whose view never settles fails on its own assertion
-// with the round's word on it rather than here.
+// the one the case is about. Bounded: a view that has not settled by the
+// deadline is the pass's error (viewNotSettledError), and the pass does not
+// run - run on, it would answer on a lease behind its record, and the case
+// would fail, if at all, on an assertion about something else.
 func runScheduledOnceSettled(ctx context.Context, bundle *phaseTwoWorkerBundle) error {
-	settleExecutableView(ctx, bundle, 10*time.Second)
+	if err := settleExecutableView(ctx, bundle, 10*time.Second); err != nil {
+		return err
+	}
+	return bundle.runScheduledOnce(ctx)
+}
+
+// runScheduledOnceBestEffort is runScheduledOnceSettled for a fleet with no
+// steady Control Leader to settle the view from - the Control process gone,
+// flapping or in a crash loop, as the election cases put it - whose Workers'
+// passes go on past the bound on an unsettled view, as their own schedulers
+// do (settleExecutableViewBestEffort).
+func runScheduledOnceBestEffort(ctx context.Context, bundle *phaseTwoWorkerBundle) error {
+	settleExecutableViewBestEffort(ctx, bundle, 10*time.Second)
 	return bundle.runScheduledOnce(ctx)
 }
 
@@ -148,38 +162,69 @@ func restoreControlStreamForTest(bundle *phaseTwoWorkerBundle) {
 	serveControlStreamForTest(bundle)
 }
 
-func settleExecutableView(ctx context.Context, bundle *phaseTwoWorkerBundle, wait time.Duration) bool {
+// viewNotSettledError is a view that did not settle (viewSettled) within the
+// bound a round waits for it: how long it was waited for, and what it still
+// lacked when the wait ended. A round run past it runs on a lease behind its
+// record, so a case reading it would fail, if at all, on an assertion about
+// something else; this says which it was.
+type viewNotSettledError struct {
+	waited, bound time.Duration
+	lacked        string
+}
+
+func (err *viewNotSettledError) Error() string {
+	return fmt.Sprintf("view not settled: waited %s (bound %s), %s", err.waited.Round(time.Millisecond), err.bound, err.lacked)
+}
+
+// settleExecutableView waits, up to wait, for every Query Group of the bundle
+// to be executable from the view with its lease at the record's timeline
+// revision (viewSettled), and is a viewNotSettledError when that has not come
+// by then. A case whose view cannot settle by design - its fleet with no
+// steady Control Leader - says so with settleExecutableViewBestEffort; a case
+// that needs the settled view for longer than the bound waits for it with
+// requireSettledView, to the test's deadline.
+func settleExecutableView(ctx context.Context, bundle *phaseTwoWorkerBundle, wait time.Duration) error {
 	client := bundle.dependencies.ViewClient
 	ownership, ok := bundle.dependencies.Ownership.(*productionPhaseTwoOwnership)
 	if client == nil || !ok {
-		return true
+		return nil
 	}
 	serveControlStreamForTest(bundle)
-	deadline := time.Now().Add(wait)
-	// Best effort by design: a case whose control process is gone or flapping
-	// has a view that cannot settle, and its passes run on unsettled after
-	// this bound (measured: three election cases reach it, twice each, and
-	// pass). A case that needs the settled view waits for it with
-	// requireSettledView, to the test's deadline.
-	for { // fixed-wait: how long a pass tries to settle before it runs unsettled, as the cases without a steady leader must
+	started := time.Now()
+	deadline := started.Add(wait)
+	for { // fixed-wait: how long a round waits for the view to settle before it fails saying so
 		renewLapsedRegistrationForTest(ctx, bundle, ownership)
-		if viewSettled(ctx, bundle, ownership) {
-			return true
+		lacked := viewLacks(ctx, bundle, ownership)
+		if lacked == "" {
+			return nil
 		}
 		if time.Now().After(deadline) {
-			return false
+			return &viewNotSettledError{waited: time.Since(started), bound: wait, lacked: lacked}
 		}
-		time.Sleep(10 * time.Millisecond) // fixed-wait: the poll interval of a best-effort settle; requireSettledView waits on the condition
+		time.Sleep(10 * time.Millisecond) // fixed-wait: the poll interval of a bounded settle; requireSettledView waits on the condition
 	}
+}
+
+// settleExecutableViewBestEffort is settleExecutableView for a case whose view
+// cannot settle by design: a fleet with no steady Control Leader to settle it
+// from - the Control process gone, flapping or in a crash loop, the election
+// cases - or a clock stepped back before a lease's last confirmation, which
+// its session does not take again until the clock passes it
+// (ownership/session.go:179; closePathsFixture.publish). A Worker's pass goes
+// on past the bound on an unsettled view, as its own scheduler does. It says
+// whether the view settled. Every other case fails on a view that does not
+// settle.
+func settleExecutableViewBestEffort(ctx context.Context, bundle *phaseTwoWorkerBundle, wait time.Duration) bool {
+	return settleExecutableView(ctx, bundle, wait) == nil
 }
 
 // requireSettledView waits, until the test's deadline, for every Query Group
 // of the bundle to be executable from the view with its lease at the
 // record's timeline revision (viewSettled), and fails t if that never comes.
-// A case asserting what a settled round reads needs the settled state, not
-// settleExecutableView's bounded best effort: past that bound the round runs
-// on a lease behind the record, and its stale hint is answered through the
-// activation header.
+// A case asserting what a settled round reads past settleExecutableView's
+// bound waits here: run before the view settles, the round runs on a lease
+// behind the record, and its stale hint is answered through the activation
+// header.
 func requireSettledView(t *testing.T, ctx context.Context, bundle *phaseTwoWorkerBundle) {
 	t.Helper()
 	production, ok := bundle.dependencies.Ownership.(*productionPhaseTwoOwnership)
@@ -213,6 +258,13 @@ func renewLapsedRegistrationForTest(ctx context.Context, bundle *phaseTwoWorkerB
 }
 
 func viewSettled(ctx context.Context, bundle *phaseTwoWorkerBundle, ownership *productionPhaseTwoOwnership) bool {
+	return viewLacks(ctx, bundle, ownership) == ""
+}
+
+// viewLacks is what keeps the view from settling - the first Query Group the
+// view or its lease is not yet executable for, and why - or nothing when it
+// has settled.
+func viewLacks(ctx context.Context, bundle *phaseTwoWorkerBundle, ownership *productionPhaseTwoOwnership) string {
 	bundle.mu.RLock()
 	groups := append([]execution.QueryGroupIdentity(nil), bundle.queryGroups...)
 	runners := make(map[execution.QueryGroupIdentity]phaseTwoQueryGroupRuntime, len(bundle.runners))
@@ -220,10 +272,18 @@ func viewSettled(ctx context.Context, bundle *phaseTwoWorkerBundle, ownership *p
 		runners[group] = lifecycle.runner
 	}
 	bundle.mu.RUnlock()
+	worker := bundle.dependencies.Config.PhaseTwo.Worker.ID
 	for _, group := range groups {
 		entry, inView := bundle.dependencies.ViewClient.Entry(group)
 		if !inView {
-			return false
+			// The bundle knows every Query Group, held or not, and a Worker's
+			// view is its own projection of the desired set
+			// (viewstream/view.go:151): a group the record desires on another
+			// Worker is not in this one's view, and nothing waits for it.
+			if record, err := ownership.dependencies.Store.ReadAssignment(ctx, group); err == nil && record.DesiredWorkerID != worker {
+				continue
+			}
+			return fmt.Sprintf("Query Group %s is not in the view", group)
 		}
 		// In the view without content: draining with nothing left to run, or
 		// a Segment that names none. The view has spoken; there is nothing to
@@ -232,11 +292,15 @@ func viewSettled(ctx context.Context, bundle *phaseTwoWorkerBundle, ownership *p
 			continue
 		}
 		if entry.Assignment.TimelineRecordRevision == 0 {
-			return false
+			return fmt.Sprintf("Query Group %s's view entry names no timeline revision", group)
 		}
 		record, err := ownership.dependencies.Store.ReadAssignment(ctx, group)
-		if err != nil || record.TimelineRecordRevision != entry.Assignment.TimelineRecordRevision {
-			return false
+		if err != nil {
+			return fmt.Sprintf("Query Group %s's Assignment record did not read: %v", group, err)
+		}
+		if record.TimelineRecordRevision != entry.Assignment.TimelineRecordRevision {
+			return fmt.Sprintf("Query Group %s's view is at timeline revision %d, its record at %d", group,
+				entry.Assignment.TimelineRecordRevision, record.TimelineRecordRevision)
 		}
 		runtime, opened := runners[group].(*productionPhaseTwoQueryGroup)
 		if !opened {
@@ -244,20 +308,26 @@ func viewSettled(ctx context.Context, bundle *phaseTwoWorkerBundle, ownership *p
 		}
 		lease, held := runtime.session.Current()
 		if !held {
-			return false
+			return fmt.Sprintf("Query Group %s's session holds no lease", group)
 		}
 		if lease.TimelineRecordRevision != record.TimelineRecordRevision || lease.ContentScope != record.ContentScope {
 			ttl := bundle.dependencies.Config.PhaseTwo.Ownership.LeaseTTL.Duration()
-			if err := runtime.session.Renew(ctx, runtime.clock(), ttl); err != nil {
-				return false
+			// A millisecond past the case's clock: a session takes no
+			// confirmation dated at or before its last (ownership/session.go:179),
+			// and a case's clock stands still while this waits, where a
+			// Worker's moves on between the gate's confirmations.
+			if err := runtime.session.Renew(ctx, runtime.clock().Add(time.Millisecond), ttl); err != nil {
+				return fmt.Sprintf("Query Group %s's lease at timeline revision %d did not renew to its record's %d: %v", group,
+					lease.TimelineRecordRevision, record.TimelineRecordRevision, err)
 			}
 			lease, _ = runtime.session.Current()
 			if lease.TimelineRecordRevision != record.TimelineRecordRevision {
-				return false
+				return fmt.Sprintf("Query Group %s's lease renewed at timeline revision %d, its record at %d", group,
+					lease.TimelineRecordRevision, record.TimelineRecordRevision)
 			}
 		}
 	}
-	return true
+	return ""
 }
 
 // settledRunner is a fixture's handle on one of the bundle's Query Group
@@ -265,8 +335,9 @@ func viewSettled(ctx context.Context, bundle *phaseTwoWorkerBundle, ownership *p
 // scheduled pass does through runScheduledOnceSettled. A case that runs a
 // round by hand runs it inside the same window a production Worker waits
 // out after a rollout or a cutover, and would read view_not_executable
-// where the case is about something else. Everything but RunOne is the
-// runtime's own.
+// where the case is about something else. A view that has not settled by
+// the bound is the round's error (viewNotSettledError) and the round does
+// not run. Everything but RunOne is the runtime's own.
 func settledRunner(bundle *phaseTwoWorkerBundle, queryGroup execution.QueryGroupIdentity) phaseTwoQueryGroupRuntime {
 	bundle.mu.RLock()
 	lifecycle := bundle.runners[queryGroup]
@@ -283,11 +354,15 @@ type settlingRuntime struct {
 }
 
 func (runtime *settlingRuntime) RunOne(ctx context.Context) (execution.SlotExecutionResult, bool, error) {
-	settleExecutableView(ctx, runtime.bundle, 10*time.Second)
+	if err := settleExecutableView(ctx, runtime.bundle, 10*time.Second); err != nil {
+		return execution.SlotExecutionResult{}, false, err
+	}
 	return runtime.phaseTwoQueryGroupRuntime.RunOne(ctx)
 }
 
 func (runtime *settlingRuntime) RunOneAdmitted(ctx context.Context, admission scheduler.ExecutionAdmission) (execution.SlotExecutionResult, bool, bool, error) {
-	settleExecutableView(ctx, runtime.bundle, 10*time.Second)
+	if err := settleExecutableView(ctx, runtime.bundle, 10*time.Second); err != nil {
+		return execution.SlotExecutionResult{}, false, false, err
+	}
 	return runtime.phaseTwoQueryGroupRuntime.RunOneAdmitted(ctx, admission)
 }

@@ -52,8 +52,8 @@ func (source *Source) DiscardSliceRead(contract execution.FrozenExecutionContrac
 func lookbackQuery(ctx context.Context, request execution.QueryExecutionRequest, spec execution.PhysicalQuerySpec,
 	attemptNo uint32, readyAtUnixMilli int64, secondary bool) lookback.Query {
 	return lookback.Query{Contract: request.Contract, Spec: spec, Operation: request.Operation, AttemptNo: attemptNo,
-		ReadyAt: time.UnixMilli(readyAtUnixMilli), FollowingSlot: execution.FollowingSlotOf(ctx), Secondary: secondary,
-		Slice: request.Slice}
+		ReplayShortOfTime: request.ReplayShortOfTime(), ReadyAt: time.UnixMilli(readyAtUnixMilli),
+		FollowingSlot: execution.FollowingSlotOf(ctx), Secondary: secondary, Slice: request.Slice}
 }
 
 // slotFirstRead is the index in queries of the Slot's first read: the query
@@ -496,8 +496,15 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 			dispatchErr = err
 			break
 		}
-		kept := lookbackEngine.Begin(lookbackQuery(ctx, request, query.Spec, attempt.AttemptNo, query.ReadyAtUnixMilli,
-			queryIndex != firstRead))
+		seen := lookbackQuery(ctx, request, query.Spec, attempt.AttemptNo, query.ReadyAtUnixMilli, queryIndex != firstRead)
+		if seen.ReplayShortOfTime {
+			// What the normal round in its place could have read: up to the
+			// deadline its read is cut at, the live one (the frozen one where
+			// the live reserve left it no time), which the round was diverted
+			// against.
+			seen.NormalDeadline = time.UnixMilli(query.DeadlineUnixMilli)
+		}
+		kept := lookbackEngine.Begin(seen)
 		// Each query raises the execution's deadline to its own as it
 		// starts, so a later query is judged by its deadline and not by an
 		// earlier one's that has passed.

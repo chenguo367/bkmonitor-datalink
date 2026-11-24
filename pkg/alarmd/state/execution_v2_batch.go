@@ -680,7 +680,8 @@ func (store *ExecutionStore) applyRuntime(
 				fence: execution.OwnerFence{QueryGroup: request.Contract.Slot.QueryGroup, OwnerID: guard.OwnerID,
 					OwnerEpoch: guard.OwnerEpoch, LeaseToken: guard.LeaseToken},
 				epoch: mutation.ApplyVersion.StateApplyEpoch, segmentStart: request.Contract.ScheduleSegmentStart,
-				slot: request.Contract.Slot.EvaluationTime, usableUntil: store.options.Now().Add(ttl - store.options.StateCacheReplayAge)}
+				slot: request.Contract.Slot.EvaluationTime, usableUntil: store.options.Now().Add(ttl - store.options.StateCacheReplayAge),
+				planInterval: longestEvaluationInterval(request.Retention)}
 		}
 		if err := pipeline.add(ctx, batchBackend, target.Name, index, write, witness.framedRevision, witness.cached); err != nil {
 			unknown()
@@ -703,7 +704,7 @@ func (store *ExecutionStore) applyRuntimeSequential(
 	framedKey string, ttl time.Duration, backend CompareAndSetBackend, checked bool,
 ) execution.StateApplyItemResult {
 	item := execution.StateApplyItemResult{Identity: mutation.Identity}
-	values, err := backend.MGet(ctx, []string{framedKey})
+	values, err := store.mget(ctx, backend, StateReadSequential, []string{framedKey})
 	if err != nil {
 		item.Status, item.ReasonCode = execution.StateApplyRetryable, execution.ReasonCode(contract.ReasonRedisUnavailable)
 		return item
@@ -1083,8 +1084,18 @@ func (store *ExecutionStore) loadRuntimeBatch(
 	if len(batch.indexes) == 0 {
 		return 0, 0, false
 	}
+	purpose, verify := StateReadRuntime, 0
+	if pass.carry {
+		purpose = StateReadCarry
+	} else {
+		for _, index := range batch.indexes {
+			if _, checked := pass.verify[index]; checked {
+				verify++
+			}
+		}
+	}
 	fetchStarted := time.Now()
-	values, err := batch.target.Backend.MGet(ctx, batch.keys)
+	values, err := store.mgetVerifying(ctx, batch.target.Backend, purpose, batch.keys, verify)
 	if timing := execution.PreflightTimingFrom(ctx); timing != nil {
 		decodeStarted := time.Now()
 		timing.Fetch += decodeStarted.Sub(fetchStarted)
@@ -1377,4 +1388,15 @@ func (store *ExecutionStore) keepWritten(group execution.QueryGroupIdentity, key
 		}
 		store.cache.dropState(keys[index], group, item.Identity, StateCacheDepartConflict)
 	}
+}
+
+// longestEvaluationInterval is the longest evaluation interval a write's
+// retention names: the interval a value it writes is let go untouched by in
+// the State cache when nothing else names one (keepCompactLocked).
+func longestEvaluationInterval(requirements []execution.StateRetentionRequirement) time.Duration {
+	var longest time.Duration
+	for _, requirement := range requirements {
+		longest = max(longest, requirement.EvaluationInterval)
+	}
+	return longest
 }

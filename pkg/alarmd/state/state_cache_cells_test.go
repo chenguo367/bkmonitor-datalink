@@ -60,25 +60,31 @@ func TestAGroupsEntriesAreCountedByCellAtEachSlotsSweep(t *testing.T) {
 	loadAt(t, rig, ctx, at(180), 1, "")
 	loadAt(t, rig, ctx, at(240), 1, "")
 	cost := rig.store.StateCacheStats().Bytes / 2
-	touched := StateCacheCell{Kind: StateCacheEntryWritten, Generation: StateCacheGenerationCurrent, Touched: true}
+	// Written compact (014 next9 1).
+	touched := StateCacheCell{Kind: StateCacheEntryCompact, Generation: StateCacheGenerationCurrent, Touched: true}
 	untouched := touched
 	untouched.Touched = false
 	want := map[StateCacheCell]StateCacheCellCount{touched: {Entries: 1, Bytes: cost}, untouched: {Entries: 1, Bytes: cost}}
 	if got := cellsOf(rig); !equalCells(got, want) {
 		t.Fatalf("after a round that read the first series alone the cells are %v, want %v", got, want)
 	}
-	// The Plan read under another generation: the entries are of the other.
+	// The Plan read under another generation: the entry left is of the
+	// other. The second series, untouched since the round at 120, is let go
+	// at 300's sweep, three minutes on: "untouched for two intervals, it
+	// leaves" (stateCacheEntry.touched), the Plan's one-minute interval its
+	// write's retention (keepCompactLocked; sweep's untouched rule).
 	loadAt(t, rig, ctx, at(300), 1, "generation-b")
 	loadAt(t, rig, ctx, at(360), 1, "generation-b")
 	entries := int64(0)
 	for cell, counted := range cellsOf(rig) {
 		if cell.Generation != StateCacheGenerationOther {
-			t.Fatalf("after rounds that read another generation the cells are %v, want both entries other", cellsOf(rig))
+			t.Fatalf("after rounds that read another generation the cells are %v, want the entry left other", cellsOf(rig))
 		}
 		entries += counted.Entries
 	}
-	if entries != 2 {
-		t.Fatalf("after rounds that read another generation %d entries are counted, want both", entries)
+	if untouched := rig.store.StateCacheStats().StateDepartures[StateCacheDepartUntouched]; entries != 1 || untouched != 1 {
+		t.Fatalf("after rounds that read another generation %d entries are counted and %d let go untouched, want one of each", entries,
+			untouched)
 	}
 	// A round that reads nothing of the Plan: the generation its round
 	// before read is not kept past that round's count.
@@ -115,14 +121,14 @@ func TestALookupMarksAnEntrySplitOrAMemberAndAReadBackIsAMember(t *testing.T) {
 	loadAt(t, rig, covered, at(120, false), 2, "")
 	loadAt(t, rig, context.Background(), at(180, false), 2, "")
 	cells := cellsOf(rig)
-	member := StateCacheCell{Kind: StateCacheEntryWritten, Generation: StateCacheGenerationCurrent, Member: true, Touched: true}
+	member := StateCacheCell{Kind: StateCacheEntryCompact, Generation: StateCacheGenerationCurrent, Member: true, Touched: true}
 	other := member
 	other.Member = false
 	if cells[member].Entries != 1 || cells[other].Entries != 1 {
 		t.Fatalf("cells %v; want the covered member marked and the other not, the uncovered lookup changing neither", cells)
 	}
 	loadAt(t, rig, context.Background(), at(240, true), 2, "")
-	if cells := cellsOf(rig); cells[StateCacheCell{Kind: StateCacheEntryWritten, Generation: StateCacheGenerationCurrent, Member: true,
+	if cells := cellsOf(rig); cells[StateCacheCell{Kind: StateCacheEntryCompact, Generation: StateCacheGenerationCurrent, Member: true,
 		Touched: true}].Entries != 1 {
 		t.Fatalf("after a round of lookups with no coverage the cells are %v, want the member still marked", cells)
 	}
@@ -204,7 +210,8 @@ func TestARoundsWriteKeepsWhatItsLookupsMarkedOfTheEntryItReplaces(t *testing.T)
 	at := func(evaluation execution.EvaluationTime, sharded bool) slot {
 		return slot{at: evaluation, epoch: 1, segmentStart: 60, fence: fenceOf(3), sharded: sharded}
 	}
-	cell := StateCacheCell{Kind: StateCacheEntryWritten, Generation: StateCacheGenerationCurrent, Touched: true}
+	// The write kept compact (014 next9 1).
+	cell := StateCacheCell{Kind: StateCacheEntryCompact, Generation: StateCacheGenerationCurrent, Touched: true}
 	t.Run("a covered member", func(t *testing.T) {
 		rig := newCacheRig(t, 1<<20)
 		rig.round(first, 1, 0)

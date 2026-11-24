@@ -207,7 +207,7 @@ func (store *ExecutionStore) ReadSegments(ctx context.Context, request segment.R
 		for position, plan := range plans {
 			markKeys[position] = plan.mark
 		}
-		marks, err := segmentMGet(ctx, backend, markKeys, nil)
+		marks, err := store.segmentMGet(ctx, backend, StateReadSegmentMark, markKeys, nil)
 		var pageKeys [][]string
 		var flat []string
 		var sizes []int
@@ -228,7 +228,7 @@ func (store *ExecutionStore) ReadSegments(ctx context.Context, request segment.R
 		}
 		var pages [][]byte
 		if err == nil {
-			pages, err = segmentMGet(ctx, backend, flat, sizes)
+			pages, err = store.segmentMGet(ctx, backend, StateReadSegmentPage, flat, sizes)
 		}
 		if err != nil {
 			// The Slot has no segments at all: every Plan of the request is
@@ -265,8 +265,8 @@ const segmentReadBytes = 8 * fencedScriptBytes
 const segmentReadKeys = 1024
 
 // segmentMGet reads keys in MGETs of at most segmentReadKeys keys and, given
-// their sizes, segmentReadBytes bytes.
-func segmentMGet(ctx context.Context, backend Backend, keys []string, sizes []int) ([][]byte, error) {
+// their sizes, segmentReadBytes bytes, each counted under purpose.
+func (store *ExecutionStore) segmentMGet(ctx context.Context, backend Backend, purpose string, keys []string, sizes []int) ([][]byte, error) {
 	values := make([][]byte, 0, len(keys))
 	for start := 0; start < len(keys); {
 		end, bytes := start, 0
@@ -281,7 +281,7 @@ func segmentMGet(ctx context.Context, backend Backend, keys []string, sizes []in
 			bytes += size
 			end++
 		}
-		chunk, err := backend.MGet(ctx, keys[start:end])
+		chunk, err := store.mget(ctx, backend, purpose, keys[start:end])
 		if err != nil {
 			return nil, err
 		}

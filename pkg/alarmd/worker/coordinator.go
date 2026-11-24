@@ -678,6 +678,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	ctx = withRetainedOwner(ctx, stream)
 	queryRequest := execution.QueryExecutionRequest{
 		Contract: request.Contract, Operation: request.Operation, AttemptNo: request.AttemptNo,
+		ReplayDistance: request.ReplayDistance, ReplayAgeMillis: request.ReplayAgeMillis,
 	}
 	// One read of the whole Query Group, or one a slice when this Slot is
 	// read in slices (sliced_input.go): a slice whose input passes its limit

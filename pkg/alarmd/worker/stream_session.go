@@ -2693,9 +2693,32 @@ func (stream *streamedExecution) observeEvaluationCompleted(
 	inputs []execution.SeriesEvaluationInputRequest,
 	evaluated execution.EvaluationResult,
 ) {
-	defer func() { _ = recover() }()
+	if observation, made := stream.evaluationObservation(started, due, series, inputs, evaluated); made {
+		stream.sayEvaluation(ctx, due, observation)
+	}
+}
+
+// evaluationObservation is a series' evaluation line, and false when making
+// it panicked, which says no line: it reads the series' own facts, its Plan
+// and what the stream froze for the Slot - planSeriesMatched once a Plan's
+// count is cached - so the side-by-side evaluation makes it beside the
+// evaluation (evaluateSideBySide).
+func (stream *streamedExecution) evaluationObservation(
+	started time.Time,
+	due execution.DuePlan,
+	series execution.SeriesIdentityDigest,
+	inputs []execution.SeriesEvaluationInputRequest,
+	evaluated execution.EvaluationResult,
+) (observation observability.Observation, made bool) {
+	// A line that panicked half made is not said: made false is all its
+	// callers read (no empty line is built for them to drop).
+	defer func() {
+		if recover() != nil {
+			made = false
+		}
+	}()
 	evaluations, namedInputs := stream.algorithmObservationFacts(due, inputs, evaluated)
-	observation := observability.Observation{
+	observation = observability.Observation{
 		Component: observability.ComponentEvaluation, Stage: observability.StageEvaluationCompleted,
 		Result: evaluated.Result, Operation: observability.Operation(stream.request.Operation),
 		ReasonCode: evaluated.ReasonCode,
@@ -2711,11 +2734,14 @@ func (stream *streamedExecution) observeEvaluationCompleted(
 		CarriedReason: execution.CarriedReasonFacts(evaluated.ReasonCarried && evaluated.Result != observability.ResultSuccess,
 			evaluated.ReasonOrigin),
 	}
-	stream.sayEvaluation(ctx, due, observation)
+	return observation, true
 }
 
-// sayEvaluation says one series' evaluation line, or merges it.
+// sayEvaluation says one series' evaluation line, or merges it. An observer
+// that panics loses the line and fails nothing, as when the line was made
+// and said in one step.
 func (stream *streamedExecution) sayEvaluation(ctx context.Context, due execution.DuePlan, observation observability.Observation) {
+	defer func() { _ = recover() }()
 	// A routine evaluation - one the line counts and does not write, with no
 	// reason and no gate of its own - is merged with its Plan's others of
 	// the batch into one line: every count read from the lines is the same,

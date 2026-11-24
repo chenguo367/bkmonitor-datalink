@@ -1109,6 +1109,10 @@ func (runner *Runner) runOneTracked(
 		Operation: operation, AttemptNo: runner.attemptNo(slot), OwnerFence: fence, ExpectedNextSlot: slot.ExpectedNextSlot,
 		ContentScope: slot.Dispatch.ContentScope, SegmentSkip: slot.Dispatch.SegmentSkip,
 	}
+	if operation == execution.OperationReplay {
+		// What the worker tells a replay short of time by (ReplayShortOfTime).
+		request.ReplayDistance, request.ReplayAgeMillis = slot.Recovery.Distance, max(slot.Recovery.Age.Milliseconds(), 0)
+	}
 	if err := request.Validate(); err != nil {
 		return execution.SlotExecutionResult{}, false, err
 	}

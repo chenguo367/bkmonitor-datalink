@@ -64,12 +64,16 @@ const (
 	// StateCacheDepartMismatch is a value the sampled round's check found
 	// the store no longer held (014 next7 3.6).
 	StateCacheDepartMismatch = "mismatch"
+	// StateCacheDepartReclaimed is a value its Query Group's latest whole
+	// round did not touch, let go for one that did not fit (014 next9 1)
+	// before any group is put out whole.
+	StateCacheDepartReclaimed = "reclaimed"
 )
 
 // StateCacheDepartureReasons lists them.
 var StateCacheDepartureReasons = []string{StateCacheDepartReleased, StateCacheDepartUnknown, StateCacheDepartConflict,
 	StateCacheDepartExpired, StateCacheDepartRenewalMissing, StateCacheDepartUntouched, StateCacheDepartOverBudget, StateCacheDepartYielded,
-	StateCacheDepartMismatch}
+	StateCacheDepartMismatch, StateCacheDepartReclaimed}
 
 // What the sampled round's check of a value the cache held found (014
 // next7 3.6), closed: state_cache_readback_verify_total.
@@ -107,9 +111,10 @@ var StateCacheKinds = []string{StateCacheKindState, StateCacheKindSegment}
 // cache (014 next7 3.1), closed: kept, taken in (or judged against the budget
 // as a write is); declined_not_member, not an open member of its Plan's
 // stable segment as the Slot read it, or a Plan of a split strategy;
-// declined_operation, a member its round writes whole - not a normal round,
-// the segment skip not followed, the Plan's sampled round, a stopped Plan, a
-// page past half its life unrenewed; declined_no_renewal, a member left out
+// declined_operation, a member its round writes whole - neither a normal
+// round nor a replay short of time, the segment skip not followed, the
+// Plan's sampled round, a stopped Plan, a page past half its life
+// unrenewed; declined_no_renewal, a member left out
 // whose page's last renewal leaves its key less than the replay age. Counted
 // for every record a Slot's own preflight found, under its fence.
 const (
@@ -269,7 +274,12 @@ type stateCacheEntry struct {
 	// leaves.
 	touched, written time.Time
 	interval         time.Duration
-	cost             int64
+	// planInterval is, for a value this process wrote, the longest
+	// evaluation interval its write's retention names: kept compact with no
+	// write before it to read interval from, the value takes this one
+	// (keepCompactLocked).
+	planInterval time.Duration
+	cost         int64
 	// segment is an entry of a Plan's segments, a mark or a page, and
 	// segmentInterval its Plan's evaluation interval: a segment entry is
 	// untouched past two of those, as the Plan's round reads it every one.
@@ -299,6 +309,11 @@ type stateCacheGroup struct {
 	cellsSlot   execution.EvaluationTime
 	cellsAt     time.Time
 	generations map[execution.PlanIdentity]execution.StateGeneration
+	// priorAt is the start of the counted round before cellsAt's: a State
+	// value untouched since is one the group's latest whole round did not
+	// read or write (reclaimLocked). reclaimedAt is the priorAt its values
+	// were last reclaimed by, so a group is walked for them once a round.
+	priorAt, reclaimedAt time.Time
 }
 
 // read notes the generation of identity's Plan the group's round reads: a
@@ -336,20 +351,27 @@ func (group *stateCacheGroup) empty() bool {
 // for slot, its latest Slot: once a write for a later Slot arrives, size is
 // what one whole round of it costs, and the group comes back only when that
 // fits. members is how many values size sums. measured and measuredSize are
-// the State values read back of slot's round that admission measured - each
-// made compact or kept as its bytes, as it would be held - of which the
-// round's first stateCacheRefusalMeasured are; a value read back after them
-// is charged at their mean rather than made compact to be measured
-// (refusedReadbackLocked). A segment's mark or page and a write add to size
-// alone: a page holds up to thousands of members, tens of KB, and the values
-// read back after the round's segments are not priced by them. The mean is
-// the round's own: a round of writes as bytes that put the group out does
-// not price the compact values read back after it.
+// the State values of slot's round that admission measured - each read back,
+// made compact or kept as its bytes, as it would be held, or written and kept
+// compact (keepCompactLocked), what the cache holds of a write - of which the
+// round's first stateCacheRefusalMeasured read back are; a value read back
+// after them is charged at their mean rather than made compact to be
+// measured (refusedReadbackLocked). A segment's mark or page and a write kept
+// as its bytes add to size alone: a page holds up to thousands of members,
+// tens of KB, and the values read back after the round's segments are not
+// priced by them. A group whose rounds write every value back, none left
+// unwritten to read back, is priced by its compact writes: priced at the
+// compact estimate instead, a group of values past it never comes in. The
+// mean is the round's own: a round of writes as bytes that put the group out
+// does not price the compact values read back after it.
 type stateCacheRefusal struct {
 	bound                  string
 	slot                   execution.EvaluationTime
 	size, members          int64
 	measuredSize, measured int64
+	// segments is the round's segment marks and pages, of size: a group kept
+	// out holds none, and the budget sizes their bytes from here (resize).
+	segments int64
 }
 
 // stateCacheRefusalMeasured is how many values read back of each refused
@@ -359,10 +381,13 @@ type stateCacheRefusal struct {
 const stateCacheRefusalMeasured = 8
 
 // add charges the round a value at cost, measured when it is a State value
-// read back.
-func (refusal *stateCacheRefusal) add(cost int64, readback bool) {
+// read back; a segment's mark or page is counted apart as well.
+func (refusal *stateCacheRefusal) add(cost int64, segment, readback bool) {
 	refusal.size += cost
 	refusal.members++
+	if segment {
+		refusal.segments += cost
+	}
 	if readback {
 		refusal.measuredSize += cost
 		refusal.measured++
@@ -371,9 +396,9 @@ func (refusal *stateCacheRefusal) add(cost int64, readback bool) {
 
 // begin starts the round of slot at a value of cost, measured when it is a
 // State value read back.
-func (refusal *stateCacheRefusal) begin(slot execution.EvaluationTime, cost int64, readback bool) {
-	refusal.slot, refusal.size, refusal.members, refusal.measuredSize, refusal.measured = slot, 0, 0, 0, 0
-	refusal.add(cost, readback)
+func (refusal *stateCacheRefusal) begin(slot execution.EvaluationTime, cost int64, segment, readback bool) {
+	refusal.slot, refusal.size, refusal.members, refusal.measuredSize, refusal.measured, refusal.segments = slot, 0, 0, 0, 0, 0
+	refusal.add(cost, segment, readback)
 }
 
 // mean is what a value of the refused round cost on average as measured in
@@ -486,6 +511,35 @@ type stateCache struct {
 	// the walks went through.
 	sweeps       map[string]*atomic.Uint64
 	sweptEntries atomic.Uint64
+	// reads is each Query Group's State keys looked up a round, under mu: what
+	// the budget is sized by (resize).
+	reads map[execution.QueryGroupIdentity]*stateCacheReads
+}
+
+// stateCacheReads is one Query Group's State keys looked up in its latest
+// Slot's round, slot, and in the whole round before it: a key a lookup each,
+// whether the cache served it or not. A Slot before slot - a supplement's -
+// is not counted; a Slot attempted again counts its keys again until the
+// next Slot.
+type stateCacheReads struct {
+	slot           execution.EvaluationTime
+	keys, previous int64
+}
+
+// readLocked counts a State key the group's round of slot looks up.
+func (cache *stateCache) readLocked(group execution.QueryGroupIdentity, slot execution.EvaluationTime) {
+	reads := cache.reads[group]
+	if reads == nil {
+		reads = &stateCacheReads{slot: slot}
+		cache.reads[group] = reads
+	}
+	switch {
+	case slot < reads.slot:
+		return
+	case slot > reads.slot:
+		reads.slot, reads.keys, reads.previous = slot, 0, reads.keys
+	}
+	reads.keys++
 }
 
 func newStateCache(budget int64, replayAge time.Duration, now func() time.Time) *stateCache {
@@ -508,7 +562,8 @@ func newStateCache(budget int64, replayAge time.Duration, now func() time.Time) 
 		entries: map[string]int64{}, readback: counters(StateCacheReadbackResults),
 		memberRenewals: counters(StateCacheMemberRenewalResults), fallbacks: counters(StateCacheFallbackReasons),
 		compactPlans: map[compactPlanKey]*compactPlan{}, compactDeclined: counters(StateCacheCompactDeclineReasons),
-		verified: counters(StateCacheVerifyResults), sweeps: counters(StateCacheSweepResults)}
+		verified: counters(StateCacheVerifyResults), sweeps: counters(StateCacheSweepResults),
+		reads: map[execution.QueryGroupIdentity]*stateCacheReads{}}
 }
 
 // entryKind is a State entry's kind; "" for a segment's.
@@ -556,6 +611,7 @@ func (cache *stateCache) lookup(key string, request execution.StatePreflightRequ
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	group := request.Contract.Slot.QueryGroup
+	cache.readLocked(group, request.Contract.Slot.EvaluationTime)
 	cache.markLocked(key, group, item, membership)
 	result, member := cache.judgeLocked(key, request, item, group)
 	cache.lookups[result].Add(1)
@@ -649,9 +705,29 @@ func (cache *stateCache) lastWritten(key string, group execution.QueryGroupIdent
 	return nil, false
 }
 
-// applied records a write that came back APPLIED.
+// applied records a write that came back APPLIED: compact when it can be
+// (compactOf, the rule a value read back is kept by), as its bytes otherwise
+// (014 next9 1, the first step of writes kept compact). A written value had
+// always been kept as its bytes, some four times its compact form, and the
+// sampled round of each Plan, which writes every member, turned each compact
+// member back into bytes.
 func (cache *stateCache) applied(entry stateCacheEntry) {
-	cache.insert(entry, true)
+	if cache == nil {
+		return
+	}
+	if entry.segment {
+		cache.insert(entry, true)
+		return
+	}
+	member, _ := compactOf(entry.identity, entry.raw)
+	room := cache.roomNow()
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if member == nil {
+		cache.insertLocked(entry, true, room)
+		return
+	}
+	cache.keepCompactLocked(entry, member, room)
 }
 
 // keepReadback takes in a value a preflight read back (014 next7 3.1),
@@ -794,29 +870,35 @@ func (cache *stateCache) admitLocked(group execution.QueryGroupIdentity, slot ex
 	if refusal := cache.refused[group]; refusal != nil {
 		switch {
 		case slot == refusal.slot:
-			refusal.add(cost, readback)
+			refusal.add(cost, segment, readback)
 			return false
 		case slot < refusal.slot:
 			return false
 		}
 		round := refusal.size
-		refusal.begin(slot, cost, readback)
+		refusal.begin(slot, cost, segment, readback)
+		if cache.bytes+round > capacity {
+			cache.reclaimLocked(group)
+		}
 		if cache.bytes+round > capacity {
 			refusal.bound = cache.boundOf(cache.bytes + round)
 			return false
 		}
 		delete(cache.refused, group)
 	}
+	if cache.bytes+cost > capacity {
+		cache.reclaimLocked(group)
+	}
 	if cache.bytes+cost <= capacity {
 		return true
 	}
 	bound := cache.boundOf(cache.bytes + cost)
 	refusal := &stateCacheRefusal{bound: bound}
-	refusal.begin(slot, cost, readback)
+	refusal.begin(slot, cost, segment, readback)
 	if held := cache.groups[group]; held != nil {
-		cache.departGroupLocked(held, bound, func(residentSlot execution.EvaluationTime, residentCost int64, residentReadback bool) {
+		cache.departGroupLocked(held, bound, func(residentSlot execution.EvaluationTime, residentCost int64, residentSegment, residentReadback bool) {
 			if residentSlot == slot {
-				refusal.add(residentCost, residentReadback)
+				refusal.add(residentCost, residentSegment, residentReadback)
 			}
 		})
 	} else {
@@ -826,20 +908,49 @@ func (cache *stateCache) admitLocked(group execution.QueryGroupIdentity, slot ex
 	return false
 }
 
+// reclaimLocked lets go, for a value of group that did not fit, every State
+// value of every other Query Group that group's latest whole round did not
+// touch - neither looked up nor written since the start of the round before
+// its latest - before any group is put out whole (014 next9 1): a value no
+// round reads any more does not keep out a group whose rounds do. Each group
+// is walked once a round for them (reclaimedAt); its segments, and group's
+// own values, are not let go.
+func (cache *stateCache) reclaimLocked(group execution.QueryGroupIdentity) {
+	for name, held := range cache.groups {
+		if name == group || held.priorAt.IsZero() || !held.reclaimedAt.Before(held.priorAt) {
+			continue
+		}
+		held.reclaimedAt = held.priorAt
+		for _, entry := range held.entries {
+			if !entry.segment && entry.touched.Before(held.priorAt) {
+				cache.departLocked(entry, StateCacheDepartReclaimed)
+			}
+		}
+		for _, plan := range held.compact {
+			for _, member := range plan.members {
+				if member.touched.Before(held.priorAt) {
+					cache.departCompactLocked(plan, member, StateCacheDepartReclaimed)
+				}
+			}
+		}
+	}
+}
+
 // departGroupLocked lets every entry and compact member of the group go for
-// reason, telling each's Slot and charge to seen first, and whether it is a
-// State value read back - a compact member always is.
-func (cache *stateCache) departGroupLocked(held *stateCacheGroup, reason string, seen func(execution.EvaluationTime, int64, bool)) {
+// reason, telling each's Slot and charge to seen first, whether it is a
+// segment's mark or page, and whether it is a State value read back - a
+// compact member always is.
+func (cache *stateCache) departGroupLocked(held *stateCacheGroup, reason string, seen func(execution.EvaluationTime, int64, bool, bool)) {
 	for _, entry := range held.entries {
 		if seen != nil {
-			seen(entry.slot, entry.cost, entry.readback)
+			seen(entry.slot, entry.cost, entry.segment, entry.readback)
 		}
 		cache.departLocked(entry, reason)
 	}
 	for _, plan := range held.compact {
 		for _, member := range plan.members {
 			if seen != nil {
-				seen(member.slot, member.cost, true)
+				seen(member.slot, member.cost, false, true)
 			}
 			cache.departCompactLocked(plan, member, reason)
 		}
@@ -847,32 +958,81 @@ func (cache *stateCache) departGroupLocked(held *stateCacheGroup, reason string,
 }
 
 // stateCacheBudgetMargin is the room the budget leaves above what the held
-// series were measured to take, in quarters: a quarter more (014 next7 3.4).
+// Query Groups read a round, in quarters: a quarter more (014 next7 3.4).
 const stateCacheBudgetMargin = 5
 
-// resize sets the budget to what the series this process holds take in the
-// cache (014 next7 3.4): heldSeries times the charge of a State entry as the
-// cache measures it now, a quarter more, beside what the segments hold;
-// never less than floor, and floor while nothing is held or measured. The
-// budget moves with what is held, as the series do; the pool's room and the
-// soft limit (yield) bound it from above as before.
-func (cache *stateCache) resize(heldSeries uint64, floor int64) {
+// resize sets the budget to what the Query Groups this process holds read a
+// round (014 next9 1): the State keys each looked up in its latest round, or
+// in the whole round before when that was more (stateCacheReads), each at a
+// State entry's charge, a quarter more, beside the segments - those the cache
+// holds and those a group kept out read in its round; never less than floor. The charge is the mean of the entries the cache holds, or
+// of the values a group kept out measured (stateCacheRefusal), whichever is
+// more, and never less than a compact member's estimate
+// (stateCacheCompactCharge). It counts what the rounds read, not what the
+// cache holds: entries no round reads any more do not raise it, and a group
+// kept out, which holds nothing, is counted all the same. Before, the budget
+// was the series held at the mean of the entries held, floor while there
+// were none, so a process whose one group's round was larger than floor
+// stayed at floor for good - no entry of that group ever came in to be
+// measured. The pool's room and the soft limit (yield) bound it from above
+// as before.
+func (cache *stateCache) resize(floor int64) {
 	if cache == nil {
 		return
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	budget := floor
 	entries := int64(0)
 	for _, kind := range StateCacheEntryKinds {
 		entries += cache.entries[kind]
 	}
-	if heldSeries > 0 && entries > 0 {
-		perEntry := (cache.bytes - cache.segmentBytes) / entries
-		series := int64(min(heldSeries, uint64(math.MaxInt64/max(perEntry*stateCacheBudgetMargin, 1))))
-		budget = max(floor, series*perEntry*stateCacheBudgetMargin/4+cache.segmentBytes)
+	charge := int64(stateCacheCompactCharge)
+	if entries > 0 {
+		charge = max(charge, (cache.bytes-cache.segmentBytes)/entries)
+	}
+	for _, refusal := range cache.refused {
+		if refusal.measured > 0 {
+			charge = max(charge, refusal.mean())
+		}
+	}
+	keys := int64(0)
+	for _, reads := range cache.reads {
+		keys = cappedSum(keys, max(reads.keys, reads.previous))
+	}
+	segments := cache.segmentBytes
+	for _, refusal := range cache.refused {
+		segments = cappedSum(segments, refusal.segments)
+	}
+	demand := cappedProduct(keys, charge)
+	budget := floor
+	if demand > 0 {
+		budget = max(floor, cappedSum(cappedProduct(demand/4, stateCacheBudgetMargin), demand%4*stateCacheBudgetMargin/4, segments))
 	}
 	cache.budget = budget
+}
+
+// cappedSum is the sum of values, or the most an int64 holds when that is
+// past it; cappedProduct the same of a times b. Each is of non-negative byte
+// counts.
+func cappedSum(values ...int64) int64 {
+	total := int64(0)
+	for _, value := range values {
+		if value > math.MaxInt64-total {
+			return math.MaxInt64
+		}
+		total += value
+	}
+	return total
+}
+
+func cappedProduct(a, b int64) int64 {
+	if a <= 0 || b <= 0 {
+		return 0
+	}
+	if a > math.MaxInt64/b {
+		return math.MaxInt64
+	}
+	return a * b
 }
 
 // boundOf is the departure word for what bytes did not fit: past the budget
@@ -939,12 +1099,12 @@ func (cache *stateCache) YieldRetainedBytes(need uint64) {
 		held := cache.groups[group]
 		freed += uint64(held.bytes)
 		refusal := &stateCacheRefusal{bound: StateCacheDepartYielded}
-		cache.departGroupLocked(held, StateCacheDepartYielded, func(slot execution.EvaluationTime, cost int64, readback bool) {
+		cache.departGroupLocked(held, StateCacheDepartYielded, func(slot execution.EvaluationTime, cost int64, segment, readback bool) {
 			switch {
 			case slot > refusal.slot:
-				refusal.begin(slot, cost, readback)
+				refusal.begin(slot, cost, segment, readback)
 			case slot == refusal.slot:
-				refusal.add(cost, readback)
+				refusal.add(cost, segment, readback)
 			}
 		})
 		cache.refused[group] = refusal
@@ -993,6 +1153,7 @@ func (cache *stateCache) dropQueryGroup(group execution.QueryGroupIdentity) {
 	delete(cache.refused, group)
 	delete(cache.segmentNotes, group)
 	delete(cache.swept, group)
+	delete(cache.reads, group)
 }
 
 // sweep removes a Query Group's entries past their life or untouched for
@@ -1076,6 +1237,7 @@ func (cache *stateCache) sweep(slot execution.SlotIdentity) {
 	}
 	if cells != nil {
 		// The next count reads the lookups from here on.
+		held.priorAt = held.cellsAt
 		held.cells, held.cellsSlot, held.cellsAt, held.generations = cells, slot.EvaluationTime, now, nil
 	}
 	if notes := cache.segmentNotes[group]; notes != nil {
@@ -1263,17 +1425,18 @@ func (cache *stateCache) stats() StateCacheStats {
 // the cache is off.
 func (store *ExecutionStore) StateCacheStats() StateCacheStats { return store.cache.stats() }
 
-// SizeStateCache sets the State cache's budget to what heldSeries take in it
-// (014 next7 3.4), never below the budget the store was opened with, and
+// SizeStateCache sets the State cache's budget to what the Query Groups it
+// holds and keeps out read a round (014 next9 1, resize), never below the
+// budget the store was opened with, and
 // gives back what the soft limit is passed by (yield, past the line: the
 // live heap after the last collection and what the detection budgets may
 // still take over the limit), the largest Query Groups first. Called once a
 // minute; a no-op without the cache.
-func (store *ExecutionStore) SizeStateCache(heldSeries uint64, pastLimit uint64) {
+func (store *ExecutionStore) SizeStateCache(pastLimit uint64) {
 	if store == nil || store.cache == nil {
 		return
 	}
-	store.cache.resize(heldSeries, store.options.StateCacheBudgetBytes)
+	store.cache.resize(store.options.StateCacheBudgetBytes)
 	if pastLimit > 0 {
 		store.cache.YieldRetainedBytes(pastLimit)
 	}

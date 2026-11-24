@@ -53,6 +53,9 @@ type closePathsFixture struct {
 	// start is the time the strategy's effective window is laid around: in
 	// effect from ten minutes before it to twenty minutes after.
 	start time.Time
+	// clockSteppedBack is set by a case that stepped the clock back before
+	// its next publish, which the view then cannot settle at (publish).
+	clockSteppedBack bool
 }
 
 // startClosePathsFixture installs the strategy at revision 1, grouped by
@@ -117,7 +120,9 @@ func startClosePathsFixtureWith(t *testing.T, install func(*closePathsFixture)) 
 	life.open("alarmd-worker-0", uqServer.Client())
 	// The Worker's executable view carries the Query Group, which the
 	// inactive close reads its Plans under.
-	settleExecutableView(ctx, life.bundle, 10*time.Second)
+	if err := settleExecutableView(ctx, life.bundle, 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
 
 	control, ok := life.bundle.dependencies.Control.(*productionPhaseTwoControl).dependencies.Reconciler.(*controlplane.SourceReconciler)
 	if !ok {
@@ -210,7 +215,20 @@ func (fixture *closePathsFixture) publish(revision int, dimensions []string, noD
 		}
 		facts, available, found := fixture.control.StrategyPlanFacts(closePathsTenant, lifecycleStrategyID)
 		if available && found && facts.Revision == int64(revision) {
-			settleExecutableView(ctx, fixture.life.bundle, 10*time.Second)
+			if fixture.clockSteppedBack {
+				// By design the view does not settle here: the clock stands
+				// before the old Query Group's lease's last confirmation, and
+				// its session takes none dated at or before it
+				// (ownership/session.go:179), so the lease keeps the timeline
+				// revision it had until the clock passes it. The case goes on
+				// as a Worker's pass does past the bound.
+				fixture.clockSteppedBack = false
+				settleExecutableViewBestEffort(ctx, fixture.life.bundle, 10*time.Second)
+				return facts
+			}
+			if err := settleExecutableView(ctx, fixture.life.bundle, 10*time.Second); err != nil {
+				t.Fatal(err)
+			}
 			return facts
 		}
 		if time.Now().After(deadline) {

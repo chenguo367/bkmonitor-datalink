@@ -63,8 +63,9 @@ func TestAMembersValueReadBackIsKeptCompactAndServedAsItsBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireAllStatus(t, result, execution.StateApplied)
-	if stats := reader.store.StateCacheStats(); stats.Entries[StateCacheEntryWritten] != 3 || stats.Entries[StateCacheEntryCompact] != 0 {
-		t.Fatalf("after the write: entries %v, want the writes' replacing the compact ones", stats.Entries)
+	// The writes are kept compact in their place (014 next9 1).
+	if stats := reader.store.StateCacheStats(); stats.Entries[StateCacheEntryCompact] != 3 || stats.Entries[StateCacheEntryWritten] != 0 {
+		t.Fatalf("after the write: entries %v, want the writes' kept compact in place of the ones read back", stats.Entries)
 	}
 }
 

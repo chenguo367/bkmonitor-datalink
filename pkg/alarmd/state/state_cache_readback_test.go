@@ -272,43 +272,100 @@ func TestAPageRenewalMovesItsMembersEntriesOnAndOneFindingAKeyGoneLetsThemGo(t *
 	}
 }
 
-// The cache's budget follows the series held (014 next7 3.4): held times a
-// State entry's charge as the cache measures it, a quarter more, never below
-// the budget the store was opened with, and that while nothing is held or
-// measured. Passed the soft limit, the cache gives back what it is passed
-// by, its Query Group whole, read back on the next round.
-func TestTheCachesBudgetFollowsTheSeriesHeldAndItGivesBackPastTheSoftLimit(t *testing.T) {
-	const floor = 4096
-	rig := newCacheRig(t, floor)
-	rig.store.SizeStateCache(1000, 0)
+// The cache's budget follows what the Query Groups it holds read a round
+// (014 next9 1): the State entries it holds, each at the cache's mean charge
+// and never less than a compact member's estimate, a quarter more, beside
+// what the segments hold; never below the budget the store was opened with,
+// and that while it holds nothing and keeps nothing out. Passed the soft
+// limit, the cache gives back what it is passed by, its Query Group whole,
+// read back on the next round. The group's values come in as a group kept
+// out takes them in: its first round read back, larger than the floor, is
+// kept out, and the resize after sizes the budget for what it read.
+func TestTheCachesBudgetFollowsWhatItsGroupsReadAndItGivesBackPastTheSoftLimit(t *testing.T) {
+	const floor, series = 4096, 20
+	// A compact member's estimate, as the design has it (014 n8), not as the
+	// constant says.
+	const compactCharge = 528
+	writer := newCacheRig(t, 0)
+	writer.round(first, series, 0)
+	rig := segmentRig(t, writer.backend, floor, nil)
+	rig.store.SizeStateCache(0)
 	if budget := rig.store.StateCacheStats().BudgetBytes; budget != floor {
-		t.Fatalf("budget %d with nothing measured, want the floor %d", budget, floor)
+		t.Fatalf("budget %d holding nothing and keeping nothing out, want the floor %d", budget, floor)
 	}
-	rig.round(first, 2, 0)
+	readBackRound(rig, second, series)
+	if stats := rig.store.StateCacheStats(); stats.QueryGroups != 0 {
+		t.Fatalf("fixture: a round of %d values read back held in a cache of %d bytes (%v entries), want it kept out", series,
+			floor, stats.Entries)
+	}
+	rig.store.SizeStateCache(0)
+	rig.now = rig.now.Add(time.Minute)
+	readBackRound(rig, third, series)
 	stats := rig.store.StateCacheStats()
-	if stats.Entries[StateCacheEntryWritten] != 2 {
-		t.Fatalf("fixture: %v entries", stats.Entries)
+	if readBack(stats) != series || stats.QueryGroups != 1 {
+		t.Fatalf("fixture: %v entries in %d groups", stats.Entries, stats.QueryGroups)
 	}
-	perEntry := (stats.Bytes - stats.SegmentBytes) / 2
-	rig.store.SizeStateCache(1000, 0)
-	if budget := rig.store.StateCacheStats().BudgetBytes; budget != 1000*perEntry*5/4+stats.SegmentBytes {
-		t.Fatalf("budget %d for 1000 series of %d bytes each, want %d", budget, perEntry, 1000*perEntry*5/4+stats.SegmentBytes)
+	charge := max((stats.Bytes-stats.SegmentBytes)/series, compactCharge)
+	want := series*charge*5/4 + stats.SegmentBytes
+	if want <= floor {
+		t.Fatalf("fixture: %d entries of %d bytes are sized at %d, not past the floor %d", series, charge, want, floor)
 	}
-	for _, held := range []uint64{0, 1} {
-		rig.store.SizeStateCache(held, 0)
-		if budget := rig.store.StateCacheStats().BudgetBytes; budget != floor {
-			t.Fatalf("budget %d for %d series held, want the floor %d", budget, held, floor)
-		}
+	rig.store.SizeStateCache(0)
+	if budget := rig.store.StateCacheStats().BudgetBytes; budget != want {
+		t.Fatalf("budget %d for %d entries of %d bytes each, want %d", budget, series, charge, want)
 	}
-	rig.store.SizeStateCache(1000, 1)
-	if stats := rig.store.StateCacheStats(); stats.QueryGroups != 0 || stats.StateDepartures[StateCacheDepartYielded] != 2 {
+	rig.store.SizeStateCache(1)
+	if stats := rig.store.StateCacheStats(); stats.QueryGroups != 0 || stats.StateDepartures[StateCacheDepartYielded] != series {
 		t.Fatalf("passed the soft limit by a byte: %d groups, departures %v; want the group given back whole", stats.QueryGroups,
 			stats.StateDepartures)
 	}
 	rig.now = rig.now.Add(time.Minute)
-	if reads, _ := rig.round(second, 2, 1); reads == 0 || rig.lookups(StateCacheMissYielded) != 2 {
+	if reads, _ := rig.round(slot{at: 240, epoch: 1, segmentStart: 60, fence: fenceOf(3)}, series, 1); reads == 0 ||
+		rig.lookups(StateCacheMissYielded) != series {
 		t.Fatalf("reads %d, miss_yielded %d; want the group given back read from the store", reads, rig.lookups(StateCacheMissYielded))
 	}
+}
+
+// The budget follows what the rounds read, not what the cache holds (014
+// next9 1): entries a round read back that no later round reads stay in the
+// cache until they leave, but once the round before has read them no more
+// they do not raise the budget. The first round of them all, larger than the
+// floor, is kept out, and the resize after sizes the budget for it.
+func TestTheBudgetIsWhatTheRoundsReadNotWhatTheCacheHolds(t *testing.T) {
+	const floor, read, unread = 4096, 20, 200
+	// A compact member's estimate, as the design has it (014 n8).
+	const compactCharge = 528
+	writer := newCacheRig(t, 0)
+	writer.round(first, read+unread, 0)
+	rig := segmentRig(t, writer.backend, floor, nil)
+	readBackRound(rig, second, read+unread)
+	rig.store.SizeStateCache(0)
+	readBackRound(rig, third, read+unread)
+	readBackRound(rig, slot{at: 240, epoch: 1, segmentStart: 60, fence: fenceOf(3)}, read)
+	readBackRound(rig, slot{at: 300, epoch: 1, segmentStart: 60, fence: fenceOf(3)}, read)
+	stats := rig.store.StateCacheStats()
+	if readBack(stats) != read+unread {
+		t.Fatalf("fixture: the cache holds %v, want all %d entries read back", stats.Entries, read+unread)
+	}
+	charge := max((stats.Bytes-stats.SegmentBytes)/(read+unread), compactCharge)
+	rig.store.SizeStateCache(0)
+	if budget, want := rig.store.StateCacheStats().BudgetBytes, max(floor, read*charge*5/4+stats.SegmentBytes); budget != want {
+		t.Fatalf("budget %d with %d entries held and %d read a round, want %d: the %d read at %d bytes each", budget, read+unread,
+			read, want, read, charge)
+	}
+}
+
+// readBackRound reads the first series series back at s as a Slot of a
+// frozen Plan does, each an open member of its Plan's segment its round
+// leaves unwritten.
+func readBackRound(rig *cacheRig, s slot, series int) {
+	rig.t.Helper()
+	indexes := make([]int, series)
+	for index := range indexes {
+		indexes[index] = index
+	}
+	ctx := segment.WithSource(context.Background(), readbackCover(rig.now, true, indexes...))
+	rig.loadRequest(ctx, execution.StatePreflightRequest{Contract: s.contract(), Items: readbackItems(s, series), OwnerFence: s.fence})
 }
 
 // A Query Group put out by a round of writes kept as their bytes - a replayed
@@ -369,7 +426,7 @@ func TestARefusedRoundIsChargedAtTheMeanOfItsFirstMeasuredValues(t *testing.T) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	cache.refused[group] = &stateCacheRefusal{bound: StateCacheDepartYielded}
-	cache.refused[group].begin(60, 1_000_000, true)
+	cache.refused[group].begin(60, 1_000_000, false, true)
 	const mark, page, write = 300, 40_000, 1500
 	const costly, cheap = 1600, 520
 	capacity := int64(100)

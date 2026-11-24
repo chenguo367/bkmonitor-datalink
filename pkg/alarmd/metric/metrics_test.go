@@ -1104,6 +1104,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("state_cache_sweep_entries_total")] = 1
 	bounds[fqName("state_cache_entry_cells")] = len(state.StateCacheCells())
 	bounds[fqName("state_cache_entry_cell_bytes")] = len(state.StateCacheCells())
+	bounds[fqName("state_redis_reads_total")] = len(state.StateReadPurposes)
+	bounds[fqName("state_redis_read_keys_total")] = len(state.StateReadPurposes)
 	bounds[fqName("state_witness_items")] = 1
 	bounds[fqName("state_witness_bytes")] = 1
 	bounds[fqName("container_memory_cgroup_info")] = 1

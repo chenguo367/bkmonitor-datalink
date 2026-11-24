@@ -128,6 +128,8 @@ type ExecutionStore struct {
 	uses *segmentUses
 	// cache is the write-through State cache, nil when it is off.
 	cache *stateCache
+	// reads counts every MGET the store sends, by purpose (state_reads.go).
+	reads *stateReads
 	// renewals is what this process already asked Redis about the life of the
 	// generation-scoped keys it loads. Per store rather than per package so
 	// two stores in one process cannot answer for each other's keys.
@@ -182,7 +184,7 @@ func NewExecutionStore(options ExecutionStoreOptions) (*ExecutionStore, error) {
 		options.Now = time.Now
 	}
 	return &ExecutionStore{options: options, witnesses: newRuntimeWitnessCache(),
-		segments: newSegmentStats(), uses: newSegmentUses(),
+		segments: newSegmentStats(), uses: newSegmentUses(), reads: newStateReads(),
 		renewals: newRenewalGate(), frozenRenewals: newRenewalGate(),
 		cache: newStateCache(options.StateCacheBudgetBytes, options.StateCacheReplayAge, options.Now)}, nil
 }
@@ -652,7 +654,7 @@ func (store *ExecutionStore) readOneRenewing(
 	if err != nil {
 		return nil, err
 	}
-	values, err := target.Backend.MGet(ctx, []string{resolved})
+	values, err := store.mget(ctx, target.Backend, StateReadGapLoad, []string{resolved})
 	if err != nil {
 		return nil, err
 	}
@@ -769,7 +771,7 @@ func (store *ExecutionStore) ApplyGap(ctx context.Context, request execution.Gap
 			result.Items[index] = item
 			continue
 		}
-		values, readErr := backend.MGet(ctx, []string{key})
+		values, readErr := store.mget(ctx, backend, StateReadGapApply, []string{key})
 		if readErr != nil || len(values) != 1 {
 			item.Status, item.ReasonCode = execution.GapGuardRetryable, execution.ReasonCode(contract.ReasonRedisUnavailable)
 			result.Items[index] = item

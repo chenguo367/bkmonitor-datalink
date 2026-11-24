@@ -31,6 +31,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/evaluation"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/segment"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/state"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
@@ -54,7 +55,10 @@ type shadowRig struct {
 	// with and the epoch of the view the worker holds: the Slots skip.
 	skipWord atomic.Uint64
 	// attempt, when set, is the attempt number each Slot is dispatched as.
-	attempt     atomic.Uint32
+	attempt atomic.Uint32
+	// replay, when set, dispatches each Slot as a replay at its distance and
+	// its age past the deadline, as the scheduler judged them.
+	replay      atomic.Pointer[shadowReplay]
 	ports       *recordingPorts
 	provider    *shadowProvider
 	frozen      *shadowFrozen
@@ -64,6 +68,41 @@ type shadowRig struct {
 	readAt      time.Time
 	readMu      sync.Mutex
 	observed    *shadowObserved
+}
+
+// shadowReplay is how a replay was judged: its distance and its age past its
+// deadline.
+type shadowReplay struct {
+	distance  uint32
+	ageMillis int64
+}
+
+// shadowPermits admits each physical query as the scheduler's permits do: a
+// normal query on no recovery permit, a retry, replay or probe on a recovery
+// permit of its own Slot and operation that lives to its deadline - the
+// permit the scheduler grants the recovery it dispatches.
+type shadowPermits struct{}
+
+type shadowPermit struct{ recovery *execution.RecoveryPermit }
+
+func (permit shadowPermit) RecoveryPermit() *execution.RecoveryPermit { return permit.recovery }
+func (shadowPermit) Release()                                         {}
+
+func (shadowPermits) AcquireQueryPermit(_ context.Context, slot execution.SlotIdentity, operation execution.Operation,
+	deadline time.Time) (access.QueryPermit, error) {
+	if operation == execution.OperationNormal {
+		return shadowPermit{}, nil
+	}
+	return shadowPermit{recovery: &execution.RecoveryPermit{PermitID: "shadow-rig-" + string(operation), Slot: slot,
+		Operation: operation, ExpiresAtUnixMilli: deadline.UnixMilli()}}, nil
+}
+
+func (permits shadowPermits) Release() {}
+
+// AcquireRecoveryChannels gives a recovery its channels: these permits again.
+func (permits shadowPermits) AcquireRecoveryChannels(context.Context, execution.SlotIdentity, execution.Operation, time.Time, int,
+	func()) (access.RecoveryChannels, error) {
+	return permits, nil
 }
 
 // shadowFrozen is the Plan as each round's Slot froze it.
@@ -363,7 +402,7 @@ func newShadowRigPlanned(t *testing.T, hosts, padding int, cacheBudget int64, fa
 	rig.frozen.plan.DuePlans = []execution.DuePlan{{Identity: planIdentity(), CompiledPlan: compiled, StateGeneration: "state-v1",
 		StateApplyEpoch: 1, ScheduleSpec: execution.ScheduleSpec{EvaluationIntervalSeconds: 60, Timezone: "UTC"},
 		ScheduleRevision: "plan-schedule-v1"}}
-	source, err := access.NewSource(rig.frozen, provider, ringRatioPermits{},
+	source, err := access.NewSource(rig.frozen, provider, shadowPermits{},
 		access.Config{MinReadyDelay: time.Second, Now: func() time.Time {
 			rig.readMu.Lock()
 			defer rig.readMu.Unlock()
@@ -385,24 +424,35 @@ func newShadowRigPlanned(t *testing.T, hosts, padding int, cacheBudget int64, fa
 		t.Fatal(err)
 	}
 	address := startG3ARedis(t)
-	real, backend := openG3AStateStore(t, address, "alarmd-shadow")
+	_, backend := openG3AStateStore(t, address, "alarmd-shadow")
 	rig.client = redis.NewClient(&redis.Options{Addr: address})
 	t.Cleanup(func() { _ = rig.client.Close() })
 	t.Cleanup(func() { _ = backend.Close() })
+	// The owner fence the State and segment writes verify inside Redis, as
+	// production configures the store (cmd/alarmd/runtime_roles_core.go): the
+	// rig's Query Group assigned and leased to its Worker, its Slots asking
+	// under that lease. Without it the writes went unfenced, and none was
+	// taken into the State cache, which keeps only what a fenced write wrote.
+	owners := openG3AOwnershipStore(t, address, "alarmd-shadow-owner")
+	rig.base.OwnerFence = leaseShadowGroup(t, owners, rig.base.OwnerFence.OwnerID)
+	router, err := state.NewFixedRouter("g3a-real-redis", backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := state.ExecutionStoreOptions{Prefix: "alarmd-shadow", Router: router, MaxValueBytes: 1 << 20, MaxItemsPerCall: 16,
+		MinTTL: time.Minute, MaxTTL: time.Hour, RestartMargin: time.Minute, FenceKeys: owners}
 	if cacheBudget > 0 {
-		router, err := state.NewFixedRouter("shadow-cached", backend)
-		if err != nil {
+		if router, err = state.NewFixedRouter("shadow-cached", backend); err != nil {
 			t.Fatal(err)
 		}
 		// The lifetimes in production's relation: the replay age, the
 		// restart margin and the shortest lifetime all ten minutes.
-		real, err = state.NewExecutionStore(state.ExecutionStoreOptions{Prefix: "alarmd-shadow", Router: router,
-			MaxValueBytes: 1 << 20, MaxItemsPerCall: max(16, hosts), MinTTL: 10 * time.Minute, MaxTTL: time.Hour,
-			RestartMargin: 10 * time.Minute, StateCacheBudgetBytes: cacheBudget, StateCacheReplayAge: 10 * time.Minute,
-			Now: time.Now})
-		if err != nil {
-			t.Fatal(err)
-		}
+		options.Router, options.MaxItemsPerCall, options.MinTTL, options.RestartMargin = router, max(16, hosts), 10*time.Minute, 10*time.Minute
+		options.StateCacheBudgetBytes, options.StateCacheReplayAge, options.Now = cacheBudget, 10*time.Minute, time.Now
+	}
+	real, err := state.NewExecutionStore(options)
+	if err != nil {
+		t.Fatal(err)
 	}
 	store := &lateLandingStore{ExecutionStore: real}
 	rig.store = store
@@ -435,6 +485,29 @@ func newShadowRigPlanned(t *testing.T, hosts, padding int, cacheBudget int64, fa
 		t.Fatal(err)
 	}
 	return rig
+}
+
+// leaseShadowGroup assigns the rig's Query Group to owner and leases it to
+// it, as the ownership store does a Worker's, and is the lease's fence: the
+// one the rig's Slots write under.
+func leaseShadowGroup(t *testing.T, owners *ownership.RedisStore, owner string) execution.OwnerFence {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Millisecond)
+	authority, err := owners.AcquireControlLeader(ctx, "shadow-control", now, 3*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	group := frozenContract().Slot.QueryGroup
+	if _, err := owners.PublishAssignment(ctx, authority, ownership.AssignmentDecision{QueryGroup: group, DesiredWorkerID: owner,
+		PlacementReason: ownership.PlacementRendezvous, DecidedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := owners.Acquire(ctx, group, owner, now, 2*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return lease.Fence
 }
 
 // storedMark is the Plan's mark as the store holds it in Redis.
@@ -516,6 +589,9 @@ func (rig *shadowRig) execute(evaluation execution.EvaluationTime, absent []stri
 	request.SegmentSkip = rig.skipWord.Load()
 	if attempt := rig.attempt.Load(); attempt > 0 {
 		request.AttemptNo = attempt
+	}
+	if replay := rig.replay.Load(); replay != nil {
+		request.Operation, request.ReplayDistance, request.ReplayAgeMillis = execution.OperationReplay, replay.distance, replay.ageMillis
 	}
 	return rig.coordinator.Execute(context.Background(), request)
 }

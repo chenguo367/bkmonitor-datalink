@@ -57,7 +57,9 @@ func newStateCacheCollector() *stateCacheCollector {
 				"of its own intervals), over_budget (its Query Group did not fit the budget: it left whole, or a write "+
 				"of it was not taken in), yielded (the same for what the Slots leave of the retained pool, or its "+
 				"Query Group given back whole for a Slot that needed the room), mismatch (a value a Plan's sampled "+
-				"round found the store no longer held as the cache did). A group kept out is judged again "+
+				"round found the store no longer held as the cache did), reclaimed (a value its Query Group's latest "+
+				"whole round neither read nor wrote, let go for a value of another group that did not fit, before any "+
+				"group is put out whole). A group kept out is judged again "+
 				"once a round, by a whole round of it, so one that never fits leaves once rather than every round. "+
 				"Every cell exists from the start.", "reason", "kind"),
 		restored: descriptor("state_cache_restored_total",
@@ -76,22 +78,24 @@ func newStateCacheCollector() *stateCacheCollector {
 				"and member pages (014 B3). The two share one budget (state_cache_budget_bytes): read their sum "+
 				"against it, and each kind for what it takes of it.", "kind"),
 		budget: descriptor("state_cache_budget_bytes",
-			"The most the State cache may hold, set once a minute: the series this replica holds "+
-				"(state_series_held) times a State entry's charge as the cache measures it, a quarter more, beside what "+
-				"the segments hold; never less than the container's thirty-second. Borrowed from the retained-bytes pool "+
+			"The most the State cache may hold, set once a minute: the State keys the Query Groups this replica "+
+				"holds looked up in their latest rounds, each at a State entry's charge (the mean of the entries held or "+
+				"of the values a group kept out measured, never less than a compact member's estimate), a quarter more, "+
+				"beside the segments' bytes; never less than the container's thirty-second. It counts what the rounds "+
+				"read, not what the cache holds, and a group kept out is counted. Borrowed from the retained-bytes pool "+
 				"while no Slot has reserved it and given back when one needs it, or when the soft memory limit is passed. "+
 				"A Query Group that would go past it or past the pool's room is kept out and read back; the resident "+
 				"ones stay."),
 		groups: descriptor("state_cache_query_groups", "Query Groups holding entries in the State cache."),
 		entries: descriptor("state_cache_entries",
-			"Runtime State entries the State cache holds, by kind: written (what this process wrote), readback (what a "+
-				"preflight read back of a stable member its round leaves unwritten, kept as stored), compact (the same "+
-				"kept in its compact form). Every cell exists from the start.", "kind"),
+			"Runtime State entries the State cache holds, by kind: written (what this process wrote that could not be "+
+				"kept compact, kept as stored), readback (what a preflight read back of a stable member its round leaves "+
+				"unwritten, kept as stored), compact (either kept in its compact form). Every cell exists from the start.", "kind"),
 		readback: descriptor("state_cache_readback_inserted_total",
 			"Records a Slot's own preflight found under its fence, by what the State cache did with them: kept (taken "+
 				"in, or judged against the budget as a write is), declined_not_member (not an open member of its Plan's "+
 				"stable segment, or a Plan of a split strategy), declined_operation (a member its round writes whole: "+
-				"not a normal round, the segment skip not followed, the Plan's sampled round, a stopped Plan, a page "+
+				"neither a normal round nor a replay short of time, the segment skip not followed, the Plan's sampled round, a stopped Plan, a page "+
 				"past half its life unrenewed), declined_no_renewal (a member left out whose page's last renewal leaves "+
 				"its key less than the replay age), declined_refused (a member of a Query Group the cache keeps out for "+
 				"the Slot, state_cache_lookups_total{result=miss_over_budget|miss_yielded}: read back from Redis "+

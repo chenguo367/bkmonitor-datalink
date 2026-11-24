@@ -862,7 +862,10 @@ func openProductionPhaseTwoBundleAssembly(
 	// through this once it is set.
 	installedEpoch := &installedControlEpoch{}
 	workerPorts := worker.Ports{
-		Now:           time.Now,
+		// The process's clock, the one its State store, its Progress and its
+		// watchdog keep: the Slot's page renewals, effective-time decisions and
+		// window deadlines are read against theirs.
+		Now:           external.Now,
 		EffectiveTime: legacyTime.Provider(),
 		Finalization:  frozen, Activation: repository, Query: querySource, Sequencer: sequencer,
 		Evaluator: evaluator, Admission: admitter, GapGuard: executionStore, Events: events,
@@ -1305,7 +1308,7 @@ func openProductionPhaseTwoBundleAssembly(
 	surface.warn(logger)
 	// The series this replica's Query Groups bind: the tracker's per-Plan
 	// counts over the Query Groups this replica runs now, read for the State
-	// cache's budget and its metric.
+	// cache's metric (its budget follows what the groups read a round).
 	heldSeries := func() uint64 {
 		owned := bundle.ownedQueryGroups()
 		held := make(map[string]struct{}, len(owned))
@@ -1328,15 +1331,16 @@ func openProductionPhaseTwoBundleAssembly(
 		NoDataCloseAPI:        noDataCloseAPIOf(core.NoDataCloses, external.Now),
 		DropStateCache:        executionStore.DropStateCacheQueryGroup,
 		ForgetOpenAlertMisses: forgetOpenAlertMissesOf(openAlertCopy, fleetTracker.StrategiesFor),
-		// The State cache's budget follows the series held, and the cache
-		// gives back what the soft limit is passed by (014 next7 3.4).
+		// The State cache's budget follows what the held Query Groups read
+		// a round (014 next9 1), and the cache gives back what the soft
+		// limit is passed by (014 next7 3.4).
 		SizeStateCache: func() {
 			reading := observationMemory.Read()
 			past := uint64(0)
 			if !reading.LimitUnlimited && reading.HeadroomBytes < 0 {
 				past = uint64(-reading.HeadroomBytes)
 			}
-			executionStore.SizeStateCache(heldSeries(), past)
+			executionStore.SizeStateCache(past)
 		},
 		WriteHandoverLedger:  writeHandoverLedger,
 		HoldLookbackHandover: holdLookbackHandover,

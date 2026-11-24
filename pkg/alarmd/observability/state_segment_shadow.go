@@ -153,9 +153,10 @@ func AllSegmentShadowSkips() []string {
 // fallback_stalled, the same of a Plan whose rounds stopped: the Slot's
 // evaluation time past the one its mark was written in by more than its
 // interval (a round not settled between - a Plan not active for a while),
-// or the round a replay or a retry, late for the time it was due. fallback_write is the rest, renewals that did not
-// keep a page of a Plan settling every round alive, and the third stage's
-// bar reads it alone.
+// or the round a retry or a replay late for the time it was due (a replay
+// short of time is the normal round in its place). fallback_write is the
+// rest, renewals that did not keep a page of a Plan settling every round
+// alive, and the third stage's bar reads it alone.
 const (
 	SegmentRenewalRenewed             = "renewed"
 	SegmentRenewalFailed              = "failed"
