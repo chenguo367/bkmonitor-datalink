@@ -70,7 +70,9 @@ const (
 // INPUT_SLICE_VALUE_CONCENTRATED: the reason, the dimension the slice was
 // being cut on and the slice's own conditions. It says the values are
 // concentrated, many series under one combination of dimension values, and
-// not that the store or the query is at fault.
+// not that the store or the query is at fault - but for ReasonMaxLeaves,
+// reported as INPUT_SLICE_LEAVES_EXHAUSTED: the tree has no leaves left for
+// the split, whatever the values are.
 type ValueConcentratedError struct {
 	Reason    string
 	Dimension string
@@ -86,8 +88,14 @@ func (err *ValueConcentratedError) Error() string {
 		}
 		conditions = append(conditions, condition.Dimension+" "+operator+" "+condition.Pattern)
 	}
-	return fmt.Sprintf("alarmd inputslice: input value concentrated: %s on dimension %q, slice [%s]",
-		err.Reason, err.Dimension, strings.Join(conditions, ", "))
+	// Said as its code is (worker InputSliceRefusal): a split the tree has
+	// no leaves left for is INPUT_SLICE_LEAVES_EXHAUSTED, whatever the values.
+	what := "input value concentrated"
+	if err.Reason == ReasonMaxLeaves {
+		what = "split leaves exhausted"
+	}
+	return fmt.Sprintf("alarmd inputslice: %s: %s on dimension %q, slice [%s]",
+		what, err.Reason, err.Dimension, strings.Join(conditions, ", "))
 }
 
 // Is makes every ValueConcentratedError match ErrValueConcentrated.

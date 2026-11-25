@@ -19,7 +19,8 @@ type ShareRefusal struct {
 	// Reason is the refusal's own code when it is not the share's
 	// (QG_BUDGET_SHARE_EXCEEDED, empty): a Slot that has to be read in
 	// slices and whose slices no split or no store takes
-	// (INPUT_SLICE_VALUE_CONCENTRATED, INPUT_SLICE_QUERY_TOO_LONG) is as
+	// (INPUT_SLICE_VALUE_CONCENTRATED, INPUT_SLICE_LEAVES_EXHAUSTED,
+	// INPUT_SLICE_QUERY_TOO_LONG) is as
 	// deterministic, and is finalized the same way under its own code.
 	Reason string
 	// Detail is why, for a Reason: the tree's reason and dimension, or the

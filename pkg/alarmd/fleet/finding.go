@@ -745,6 +745,7 @@ var codeChecks = map[string]verdict{
 	"QG_BUDGET_SHARE_EXCEEDED":       lands(CheckPlanUnevaluable),
 	"INPUT_SLICE_UNSUPPORTED":        lands(CheckPlanUnevaluable),
 	"INPUT_SLICE_VALUE_CONCENTRATED": lands(CheckPlanUnevaluable),
+	"INPUT_SLICE_LEAVES_EXHAUSTED":   lands(CheckPlanUnevaluable),
 	"INPUT_SLICE_QUERY_TOO_LONG":     lands(CheckPlanUnevaluable),
 	// A supplement whose kept read did not hold the Slot's planned query.
 	// Supplements never reach the tracker, so this records the decision:

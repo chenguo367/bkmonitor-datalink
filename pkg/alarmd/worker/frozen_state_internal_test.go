@@ -159,6 +159,10 @@ func (store *countingFrozenRenewalStore) ApplyRuntime(
 // ReleaseSlotWitnesses keeps no witnesses to let go of.
 func (*countingFrozenRenewalStore) ReleaseSlotWitnesses(execution.SlotIdentity) {}
 
+// ReleaseRuntimeWitnesses holds nothing to let go of: a test double, in no production wiring.
+func (*countingFrozenRenewalStore) ReleaseRuntimeWitnesses(execution.SlotIdentity, []execution.StateKeyIdentity) {
+}
+
 func (store *countingFrozenRenewalStore) RenewFrozenRuntime(
 	_ context.Context, request execution.FrozenStateRenewalRequest,
 ) (execution.FrozenStateRenewalResult, error) {

@@ -369,6 +369,19 @@ type stateCacheRefusal struct {
 	slot                   execution.EvaluationTime
 	size, members          int64
 	measuredSize, measured int64
+	// pending is the values read back let through to be measured and not
+	// measured yet: let through under the cache's lock and measured under it
+	// again once made compact (keepReadback), so the places of the round's
+	// first values are taken as each is let through. add gives a place back
+	// for every value read back it measures, whatever let it through, so two
+	// kinds give back one they never took: a value of a later Slot let
+	// through before its round began (slot past refusal.slot), and a compact
+	// write-back of the same Slot (keepCompactLocked always passes
+	// readback). A round may then measure one or two values more than its
+	// first - a compactOf each - and lets none through it would decline. A
+	// round begun starts with none taken, so a place a value took and never
+	// gave back goes with its round.
+	pending int64
 	// segments is the round's segment marks and pages, of size: a group kept
 	// out holds none, and the budget sizes their bytes from here (resize).
 	segments int64
@@ -391,6 +404,7 @@ func (refusal *stateCacheRefusal) add(cost int64, segment, readback bool) {
 	if readback {
 		refusal.measuredSize += cost
 		refusal.measured++
+		refusal.pending = max(refusal.pending-1, 0)
 	}
 }
 
@@ -398,6 +412,7 @@ func (refusal *stateCacheRefusal) add(cost int64, segment, readback bool) {
 // State value read back.
 func (refusal *stateCacheRefusal) begin(slot execution.EvaluationTime, cost int64, segment, readback bool) {
 	refusal.slot, refusal.size, refusal.members, refusal.measuredSize, refusal.measured, refusal.segments = slot, 0, 0, 0, 0, 0
+	refusal.pending = 0
 	refusal.add(cost, segment, readback)
 }
 
@@ -717,8 +732,9 @@ func (cache *stateCache) lastWritten(key string, group execution.QueryGroupIdent
 // times its compact form, and the sampled round of each Plan, which writes
 // every member, turned each compact member back into bytes. The member is
 // taken in unchecked but for the ones writtenCompact checks (the second
-// step).
-func (cache *stateCache) applied(entry stateCacheEntry) {
+// step), built from parts, what the encoder framed the value from, when the
+// write has them (the third step); they are not kept.
+func (cache *stateCache) applied(entry stateCacheEntry, parts *packedParts) {
 	if cache == nil {
 		return
 	}
@@ -726,7 +742,7 @@ func (cache *stateCache) applied(entry stateCacheEntry) {
 		cache.insert(entry, true)
 		return
 	}
-	member, checked := cache.writtenCompact(entry)
+	member, checked := cache.writtenCompact(entry, parts)
 	cache.keepWritten(entry, member, checked)
 }
 
@@ -789,6 +805,9 @@ func (cache *stateCache) keepReadback(entry stateCacheEntry) bool {
 // by its whole round. A later Slot's first values, and the refused Slot's
 // first ones, are left to admission (admitLocked), which measures them and
 // starts the round anew: each round is priced by what it measures itself.
+// A value of the refused Slot let through takes its place among the first
+// as it is let through (pending), so values read back side by side measure
+// no more of them.
 func (cache *stateCache) refusedReadbackLocked(group execution.QueryGroupIdentity, slot execution.EvaluationTime) bool {
 	refusal := cache.refused[group]
 	switch {
@@ -796,7 +815,8 @@ func (cache *stateCache) refusedReadbackLocked(group execution.QueryGroupIdentit
 		return false
 	case slot < refusal.slot:
 		return true
-	case refusal.measured < stateCacheRefusalMeasured:
+	case refusal.measured+refusal.pending < stateCacheRefusalMeasured:
+		refusal.pending++
 		return false
 	}
 	refusal.size += refusal.mean()
@@ -1577,7 +1597,7 @@ func (cache *stateCache) segmentKept(key string, raw []byte, group execution.Que
 		raw = []byte{}
 	}
 	cache.applied(stateCacheEntry{key: key, group: group, raw: raw, fence: fence, slot: slot, usableUntil: usableUntil,
-		segment: true, segmentInterval: interval})
+		segment: true, segmentInterval: interval}, nil)
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	if notes := cache.segmentNotes[group]; notes != nil {

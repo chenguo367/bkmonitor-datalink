@@ -11,6 +11,8 @@ package state
 
 import (
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -86,7 +88,7 @@ func cacheKey(group execution.QueryGroupIdentity, index int) string {
 func writeSeries(cache *stateCache, group execution.QueryGroupIdentity, at execution.EvaluationTime, from, to int) {
 	for index := from; index < to; index++ {
 		cache.applied(stateCacheEntry{key: cacheKey(group, index), group: group, raw: make([]byte, 1000), slot: at,
-			usableUntil: cache.now().Add(time.Hour)})
+			usableUntil: cache.now().Add(time.Hour)}, nil)
 	}
 }
 
@@ -278,5 +280,96 @@ func TestARefusedRoundsMeanIsWhatItsValuesReadBackMeasuredAndACompactEstimateBef
 	}
 	if got := (&stateCacheRefusal{bound: StateCacheDepartYielded, slot: 60}).mean(); got != stateCacheCompactCharge {
 		t.Fatalf("a refusal with nothing measured estimates a value at %d, want a compact member's %d", got, stateCacheCompactCharge)
+	}
+}
+
+// Values read back side by side for a kept-out round with one of its first
+// values left to measure: one is measured and the rest are declined at the
+// round's mean (014 next8). Its place is taken as the value is let through,
+// under the cache's lock, so a value let through while another is being made
+// compact and judged against the room does not take it too. Before, each was
+// let through on the count it found, and every one of them was measured.
+func TestAKeptOutRoundMeasuresNoMoreThanItsFirstValuesReadBackSideBySide(t *testing.T) {
+	const group = execution.QueryGroupIdentity("big")
+	const readers = 8
+	for round := range 20 {
+		cache := bareCache(1)
+		// The room is read between letting a value through and measuring it:
+		// slow, so the readers meet there.
+		cache.BorrowRetainedWithin(func() uint64 {
+			time.Sleep(time.Millisecond) // fixed-wait: readers meeting between the check and the admission, the subject of the case
+			return 0
+		})
+		cache.mu.Lock()
+		refusal := &stateCacheRefusal{bound: StateCacheDepartYielded}
+		refusal.begin(120, 1_000, false, true)
+		for range stateCacheRefusalMeasured - 2 {
+			refusal.add(1_000, false, true)
+		}
+		cache.refused[group] = refusal
+		cache.mu.Unlock()
+		var start, done sync.WaitGroup
+		start.Add(1)
+		var through atomic.Int64
+		for index := range readers {
+			done.Add(1)
+			go func() {
+				defer done.Done()
+				start.Wait()
+				if cache.keepReadback(stateCacheEntry{key: cacheKey(group, index), group: group, raw: []byte("not a frame"), slot: 120,
+					usableUntil: cache.now().Add(time.Hour)}) {
+					through.Add(1)
+				}
+			}()
+		}
+		start.Done()
+		done.Wait()
+		cache.mu.Lock()
+		measured := cache.refused[group].measured
+		cache.mu.Unlock()
+		if through.Load() != 1 || measured != stateCacheRefusalMeasured {
+			t.Fatalf("round %d: %d of %d values read back let through and the round measured %d, want one and %d", round,
+				through.Load(), readers, measured, stateCacheRefusalMeasured)
+		}
+	}
+}
+
+// A kept-out group's next round starts with none of its first values' places
+// taken, whatever the round before still had let through (014 next8): its
+// first value read back begins it, and its next seven are let through and
+// measured, eight in all. Places left taken would let fewer through.
+func TestANewRoundOfAKeptOutGroupStartsWithNoPlaceTaken(t *testing.T) {
+	const group = execution.QueryGroupIdentity("big")
+	cache := bareCache(1)
+	// No room: the group stays out round after round.
+	cache.BorrowRetainedWithin(func() uint64 { return 0 })
+	// The round of the Slot at 120 measured five, three more let through and
+	// never measured.
+	cache.mu.Lock()
+	cache.refused[group] = &stateCacheRefusal{bound: StateCacheDepartYielded, slot: 120, size: 5_000, members: 5,
+		measuredSize: 5_000, measured: 5, pending: 3}
+	cache.mu.Unlock()
+	readBack := func(index int) bool {
+		return cache.keepReadback(stateCacheEntry{key: cacheKey(group, index), group: group, raw: []byte("not a frame"), slot: 180,
+			usableUntil: cache.now().Add(time.Hour)})
+	}
+	if !readBack(0) {
+		t.Fatal("the next Slot's first value read back was declined")
+	}
+	through := 0
+	for index := 1; index <= stateCacheRefusalMeasured-1; index++ {
+		if readBack(index) {
+			through++
+		}
+	}
+	cache.mu.Lock()
+	refusal := cache.refused[group]
+	cache.mu.Unlock()
+	if refusal == nil || refusal.slot != 180 {
+		t.Fatalf("the group's refusal is %+v, want it kept out for the Slot at 180", refusal)
+	}
+	if through != stateCacheRefusalMeasured-1 || refusal.measured != stateCacheRefusalMeasured {
+		t.Fatalf("%d of the next %d values read back let through and the round measured %d, want all and %d", through,
+			stateCacheRefusalMeasured-1, refusal.measured, stateCacheRefusalMeasured)
 	}
 }

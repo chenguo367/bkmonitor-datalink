@@ -10,11 +10,13 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/segment"
 )
 
@@ -590,15 +592,24 @@ func TestARefusedSegmentWriteAfterARoundLeftAMemberIsNotedUntilTheQueryGroupGoes
 	}
 	store.refuse = segment.WriteStaleOwner
 	round, left := attempt()
-	if !left || !coordinator.foldSegmentShadow(ctx, request, round, []execution.DuePlan{shadowDue}, nil) {
+	failed, refused := coordinator.foldSegmentShadow(ctx, request, round, []execution.DuePlan{shadowDue}, nil)
+	if !left || !failed {
 		t.Fatalf("left %v, and a refused write after it did not fail the Slot", left)
+	}
+	// Refused by the fence, it is the owner's refusal (014 ⑩ F1).
+	if !errors.Is(refused, ownership.ErrStaleFence) {
+		t.Fatalf("a write the fence refused returned %v, want the owner's refusal", refused)
 	}
 	round, left = attempt()
 	if left {
 		t.Fatal("the attempt after a failed segment write left the member")
 	}
-	if coordinator.foldSegmentShadow(ctx, request, round, []execution.DuePlan{shadowDue}, nil) {
+	failed, refused = coordinator.foldSegmentShadow(ctx, request, round, []execution.DuePlan{shadowDue}, nil)
+	if failed {
 		t.Fatal("a round that left no member was failed by its refused write")
+	}
+	if !errors.Is(refused, ownership.ErrStaleFence) {
+		t.Fatalf("a round that left no member, its write refused by the fence, returned %v", refused)
 	}
 	if mode := store.written[key].SkipMode; mode != segment.SkipModeWriteFailed {
 		t.Fatalf("the attempt's round says %q, want write_failed", mode)

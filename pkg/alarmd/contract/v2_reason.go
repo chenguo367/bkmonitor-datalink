@@ -178,6 +178,7 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	// values split, any other way on a retry.
 	ReasonInputSliceUnsupported:       {ReasonInputSliceUnsupported, ReasonClassDeterministic, ReasonDomainObservation},
 	ReasonInputSliceValueConcentrated: {ReasonInputSliceValueConcentrated, ReasonClassDeterministic, ReasonDomainObservation},
+	ReasonInputSliceLeavesExhausted:   {ReasonInputSliceLeavesExhausted, ReasonClassDeterministic, ReasonDomainObservation},
 	ReasonInputSliceQueryTooLong:      {ReasonInputSliceQueryTooLong, ReasonClassDeterministic, ReasonDomainObservation},
 	// Retryable: the retry reads the slice on its own.
 	ReasonReadAheadContextEnded: {ReasonReadAheadContextEnded, ReasonClassRetryable, ReasonDomainObservation},

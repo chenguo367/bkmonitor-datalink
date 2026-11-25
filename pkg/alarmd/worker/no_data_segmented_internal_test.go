@@ -416,9 +416,11 @@ func TestTheSeriesOfALandedWindowStayInThePresentSet(t *testing.T) {
 	stream.windows.prepared = prepared
 	// The first window, of three series, landed: its inputs go, its groups
 	// stay in the set.
-	if err := stream.dropWindowInputs(context.Background(), 3); err != nil {
+	released, err := stream.letGoWindowInputs(context.Background(), stream.windows.prepared[:3])
+	if err != nil {
 		t.Fatal(err)
 	}
+	stream.unretainInput(released)
 	if stream.windows.present[due.Identity].Len() != 3 {
 		t.Fatalf("the landed window kept %d groups, want its 3", stream.windows.present[due.Identity].Len())
 	}

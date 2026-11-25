@@ -78,6 +78,19 @@ func (stream *streamedExecution) stageAhead(ctx context.Context, due execution.D
 		set[index] = execution.NoDataGroupDelta{GroupKey: group}
 	}
 	stager := stream.coordinator.ports.NoData.(execution.PlanNoDataStager)
+	// A write, so the Slot is begun first (014 ⑩ F5). No fence check: the
+	// staging key is this attempt's own, named by its fence epoch and
+	// attempt number (state.PlanNoDataStageKeyV1), read by no one else, and
+	// the swap that puts it in place is the memory's write, checked there.
+	// Not begun, the staging stops; the attempt returns what its BeginSlot
+	// did.
+	cleared, notCleared := stream.coordinator.beforeWrite(ctx, false)
+	if notCleared != nil {
+		ahead.stopped = true
+		stream.stageAheadEnds[stageAheadStopped]++
+		return
+	}
+	ctx = cleared
 	result, err := stager.StageNoData(ctx, execution.NoDataStageRequest{
 		Contract: stream.request.Contract, Identity: due.NoDataIdentity(), Attempt: stream.noDataWriteAttempt(),
 		PresentAsOf: int64(stream.header.Contract.Slot.EvaluationTime), Set: set, Staged: ahead.staged,

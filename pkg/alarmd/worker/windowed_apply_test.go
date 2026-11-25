@@ -32,8 +32,8 @@ func windowedSeries(letters ...string) []string {
 }
 
 // windowedSlot is the recording fixture with State kept across attempts and
-// a cap of two State writes per Slot, so six series are three windows of two:
-// a b | c d | e f.
+// a cap of four State writes per Slot - two a window, half of it - so six
+// series are three windows of two: a b | c d | e f.
 func windowedSlot(t *testing.T, extra []string) (*recordingPorts, *persistedRetryState, *worker.SlotExecutionCoordinator, *memoryEvidenceStore) {
 	t.Helper()
 	trace := make([]string, 0)
@@ -44,7 +44,7 @@ func windowedSlot(t *testing.T, extra []string) (*recordingPorts, *persistedRetr
 		Query: ports, Sequencer: ports, Evaluator: ports, Admission: ports, GapGuard: ports, NoData: worker.SharedNoDataStore,
 		Hosts: worker.SharedHostBusiness, Events: ports, State: state, Progress: ports, ExecutionEvidence: evidence,
 		Observer: observability.ObserverFunc(func(context.Context, observability.Observation) {})},
-		worker.ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxStateMutations: 2, MaxEvents: 100, MaxGapMutations: 10})
+		worker.ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxStateMutations: 4, MaxEvents: 100, MaxGapMutations: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,9 +102,9 @@ func nthStage(t *testing.T, trace []string, stage string, n int) int {
 }
 
 // A Slot of three windows is written while it is evaluated: each window's
-// events are acknowledged before its State, the next window's series are
-// evaluated after it, and Progress follows the last one. Head, windows and
-// tail are five Sequences, one at a time.
+// events are acknowledged before its State, the windows one after another,
+// and Progress follows the last one. Head, windows and tail are five
+// Sequences, one at a time.
 func TestAWindowedSlotWritesEachWindowsEventsBeforeItsStateAndProgressAfterAll(t *testing.T) {
 	ports, state, coordinator, _ := windowedSlot(t, windowedSeries("a", "b", "d", "e", "f"))
 	result, err := coordinator.Execute(context.Background(), windowedRequest())
@@ -126,14 +126,10 @@ func TestAWindowedSlotWritesEachWindowsEventsBeforeItsStateAndProgressAfterAll(t
 	if want := []string{"event_ack", "state_apply", "event_ack", "state_apply", "event_ack", "state_apply", "progress_commit"}; !reflect.DeepEqual(writes, want) {
 		t.Fatalf("write order = %v, want %v", writes, want)
 	}
-	// The first window is written once the third series' result would have
-	// overfilled it. The series of a preflight batch (two here, the cap) are
-	// evaluated together before any of them is merged, so it is written
-	// before the batch after the third series' is evaluated: before the
-	// fifth evaluation.
-	if nthStage(t, trace, "state_apply", 1) > nthStage(t, trace, "evaluate", 5) {
-		t.Fatalf("the first window was written after the evaluation went on: %v", trace)
-	}
+	// The first window is cut once the third series' result would have
+	// overfilled it, and written on the Slot's apply goroutine while the
+	// evaluation goes on (TestAWindowIsWrittenWhileTheNextIsFilledAndTheSlotWritesWhatItWritesSerially):
+	// written before the second window is, which the write order above says.
 	if sequences := countStage(trace, "sequence"); sequences != 5 {
 		t.Fatalf("Sequences = %d, want a head, three windows and a tail", sequences)
 	}

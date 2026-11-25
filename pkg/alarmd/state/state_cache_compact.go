@@ -252,8 +252,27 @@ func compactOf(identity execution.StateKeyIdentity, raw []byte) (*compactMember,
 // as decoding it is.
 func compactParsed(identity execution.StateKeyIdentity, raw []byte, witness [sha1.Size]byte) (*compactMember, string) {
 	header, schema, points, err := parsePackedFrame(raw)
+	if err != nil {
+		return nil, StateCacheCompactUnreadable
+	}
+	return compactOfHeader(identity, header, schema, points, witness)
+}
+
+// compactOfHeader is the member a frame of header, schema and points holds
+// under identity, not yet checked to rebuild to the frame: compactParsed's,
+// of the header parsed from the bytes, and a value written's, of the header
+// its encoder framed them from (packedParts). The second never went through
+// the JSON the first did, and the two differ only where encoding/json
+// changes a value: a string that is not valid UTF-8, written as U+FFFD. The
+// Levels' strings are a template's, and the first value of every template
+// is checked whole against its bytes, so a template JSON would change is
+// found there (written_diverged); every other string of a header is a
+// digest or an identity the contract checks. A free-text field added to the
+// header outside the Levels needs a check of its own.
+func compactOfHeader(identity execution.StateKeyIdentity, header packedHeader, schema byte, points []byte,
+	witness [sha1.Size]byte) (*compactMember, string) {
 	switch {
-	case err != nil || header.Identity != identity:
+	case header.Schema != executionStateSchemaV3 || header.Identity != identity:
 		return nil, StateCacheCompactUnreadable
 	case schema != packedFrameSchemaV1 || len(header.LegacyRecordIDs) > 0:
 		return nil, StateCacheCompactLegacyFrame
@@ -308,19 +327,26 @@ func compactChecked(member *compactMember, identity execution.StateKeyIdentity, 
 // as, nil to keep it as its bytes, and whether it was checked as a value
 // read back is (014 next9 1, the second step). The bytes are the encoder's
 // own, and entry.digest their SHA-1 as the write named it: the member is
-// parsed from them once and taken in unchecked - the frame not rebuilt, the
-// view not decoded twice, the digest not hashed again - unless the
+// built from the header the encoder framed them from (parts, the third
+// step), or parsed from them once where the write has no parts, and
+// taken in unchecked - the frame not rebuilt, the view not decoded twice,
+// the digest not hashed again - unless the
 // process has found a defect of the compact form, the member's template is
 // not yet held in its Plan's table, or the value is one of the
 // writtenCheckEvery picked; those are checked, and a member the check
 // builds otherwise, or declines, is a defect (writtenDiverged).
-func (cache *stateCache) writtenCompact(entry stateCacheEntry) (*compactMember, bool) {
+func (cache *stateCache) writtenCompact(entry stateCacheEntry, parts *packedParts) (*compactMember, bool) {
 	witness, ok := witnessOf(entry.digest)
 	if !ok || cache.writtenChecked.Load() {
 		member, _ := compactOf(entry.identity, entry.raw)
 		return member, true
 	}
-	member, _ := compactParsed(entry.identity, entry.raw, witness)
+	var member *compactMember
+	if parts != nil && parts.pointsAt <= len(entry.raw) {
+		member, _ = compactOfHeader(entry.identity, parts.header, parts.schema, entry.raw[parts.pointsAt:], witness)
+	} else {
+		member, _ = compactParsed(entry.identity, entry.raw, witness)
+	}
 	if member == nil {
 		return nil, true
 	}

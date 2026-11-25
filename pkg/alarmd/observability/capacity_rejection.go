@@ -251,7 +251,31 @@ type SlotBudgetUsageFacts struct {
 	Windows                    uint64 `json:"windows"`
 	WindowCeilingWindows       uint64 `json:"window_ceiling_windows"`
 	WindowCeilingRaisedWindows uint64 `json:"window_ceiling_raised_windows"`
+	// WindowZeroBoundCuts* are the windows cut while the window bound was
+	// zero, by the retained phase holding the most outside the window
+	// (WindowZeroBoundReasons, slot_window_zero_bound_cuts_total).
+	WindowZeroBoundCutsInput  uint64 `json:"window_zero_bound_cuts_input,omitempty"`
+	WindowZeroBoundCutsGap    uint64 `json:"window_zero_bound_cuts_gap,omitempty"`
+	WindowZeroBoundCutsOutput uint64 `json:"window_zero_bound_cuts_output,omitempty"`
+	WindowZeroBoundCutsState  uint64 `json:"window_zero_bound_cuts_state,omitempty"`
+	// WindowOutsideClamped and SliceOthersClamped are one when the window
+	// bound's or the slice limit's take-off ever came to more than the Slot
+	// held (slot_window_accounting_clamped_slots_total), zero otherwise.
+	WindowOutsideClamped uint64 `json:"window_outside_clamped,omitempty"`
+	SliceOthersClamped   uint64 `json:"slice_others_clamped,omitempty"`
 }
+
+// WindowAccountingClamps are the words for the window accounting a Slot found
+// taking off more than it held: window_outside (the window bound,
+// windowOutside) and slice_others (the slice limit, sliceOthers).
+var WindowAccountingClamps = [2]string{"window_outside", "slice_others"}
+
+// WindowZeroBoundReasons are the words for the retained phase holding the
+// most outside a window cut while the window bound was zero, in the order of
+// execution.SlotBudgetUsage.WindowZeroBoundCuts: input (the series' inputs,
+// the reads ahead), gap (the gap facts), output (the results and summary
+// outside the window), state (the State held outside the window).
+var WindowZeroBoundReasons = [4]string{"input", "gap", "output", "state"}
 
 // SlotTimingFacts is where one Slot's wall clock went, in milliseconds, on its
 // completion row.
@@ -277,12 +301,26 @@ type SlotBudgetUsageFacts struct {
 //
 // From the completion on the phases partition the Slot, and Unattributed is
 // what none of them claims (see execution.SlotTiming).
+//
+// apply_millis is in the partition only for a Slot applied whole. A Slot cut
+// into windows writes them on its apply goroutine beside its own phases:
+// apply_millis is how long that goroutine was busy, and runs beside the
+// partition; apply_wait_millis is the Slot's own goroutine waiting on it and
+// land_millis taking its landed windows back, both in the partition; and
+// apply_overlap_millis is apply_millis less apply_wait_millis, the writes
+// the Slot did not wait for. Readings from before the window pipeline: their
+// apply_millis compares with apply_millis plus land_millis for what the
+// writes cost, and with apply_wait_millis plus land_millis for the time they
+// took on the Slot's path.
 type SlotTimingFacts struct {
 	Slot         uint64 `json:"slot_millis"`
 	Input        uint64 `json:"input_millis"`
 	Preflight    uint64 `json:"preflight_millis"`
 	Evaluate     uint64 `json:"evaluate_millis"`
 	Apply        uint64 `json:"apply_millis"`
+	ApplyWait    uint64 `json:"apply_wait_millis"`
+	Land         uint64 `json:"land_millis"`
+	ApplyOverlap uint64 `json:"apply_overlap_millis"`
 	RecordIDs    uint64 `json:"record_ids_millis"`
 	Cut          uint64 `json:"cut_millis"`
 	Merge        uint64 `json:"merge_millis"`

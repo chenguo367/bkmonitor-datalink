@@ -16,11 +16,19 @@ import (
 )
 
 // SlotBeginResults is every word a Slot attempt's BeginSlot is counted under
-// (slot_begin_total): its status, in lower case.
+// (slot_begin_total): its status, in lower case, and SlotBeginDeferred.
 var SlotBeginResults = []string{
 	SlotBeginResult(ProgressCommitted), SlotBeginResult(ProgressConflict), SlotBeginResult(ProgressStaleOwner),
-	SlotBeginResult(ProgressRetryableIO), SlotBeginResult(ProgressContentMoved),
+	SlotBeginResult(ProgressRetryableIO), SlotBeginResult(ProgressContentMoved), SlotBeginDeferred,
 }
+
+// SlotBeginDeferred is an attempt that put its BeginSlot off and sent its
+// commit in its place, so never began its Slot (014 ⑩ F5): an empty round.
+// One that put it off and then wrote, or left without writing its Slot
+// down, is counted by the BeginSlot it made then, and an empty round whose
+// commit the record refused by that status, as a BeginSlot at its start:
+// the words still sum to the attempts.
+const SlotBeginDeferred = "deferred"
 
 // SlotBeginResult is the word a BeginSlot that returned status is counted
 // under.

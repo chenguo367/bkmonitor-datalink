@@ -17,6 +17,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -359,13 +360,17 @@ func TestSlotExecutionCoordinatorOrdersRequiredSideEffects(t *testing.T) {
 		// dropped before being judged", and nothing told the two apart.
 		observability.StageNoDataDecided,
 		observability.StageQueryCompleted,
-		observability.StageSideEffectAdmission,
+		// A Plan's step admitted by its activation alone; the fence is
+		// checked before the step's first write whose script does not run
+		// it (014 ⑩ F1), the events below.
+		observability.StagePlanActivationChecked,
 		// One compare per mutation. The Plan's write-reuse counts are no
 		// longer a compare of their own: they are reported with the series
 		// classes at the attempt's census (frozen_state_renewed below).
 		observability.StageMutationCompared,
-		observability.StageSideEffectAdmission,
+		observability.StagePlanActivationChecked,
 		observability.StageStateAdmission,
+		observability.StageSideEffectAdmission,
 		observability.StageEventACKed,
 		observability.StageStateApplied,
 		observability.StageGapGuardCommitted,
@@ -477,8 +482,8 @@ func TestSlotExecutionCoordinatorDoesNotCommitNormalProgressAfterActivationChang
 		result.ReasonCode != execution.ReasonCode(contract.ReasonConfigDrift) {
 		t.Fatalf("Execute() result=%+v error=%v", result, err)
 	}
-	assertTrace(t, fixture.trace, append(append([]string(nil), fullTrace[:11]...),
-		"sequence", "admission_progress", "gap_load", "gap_before"))
+	assertTrace(t, fixture.trace, append(append([]string(nil), fullTrace[:12]...),
+		"sequence", "activation_progress", "gap_load", "fence", "gap_before"))
 	if !isZeroProgressCommit(fixture.ports.lastProgress) {
 		t.Fatalf("activation change committed Progress: %+v", fixture.ports.lastProgress)
 	}
@@ -745,7 +750,7 @@ func TestSlotExecutionCoordinatorPersistsDegradedGapBeforeEvents(t *testing.T) {
 		t.Fatalf("Execute() result=%+v error=%v", result, err)
 	}
 	assertTrace(t, fixture.trace, []string{
-		"query", "gap_load", "sequence", "admission_initial", "gap_before", "activation_progress", "progress_commit",
+		"query", "gap_load", "sequence", "admission_initial", "fence", "gap_before", "activation_progress", "progress_commit",
 	})
 	if fixture.ports.lastProgress.Completion.Kind != execution.CompletionPartialGap {
 		t.Fatalf("completion=%q, want=%q", fixture.ports.lastProgress.Completion.Kind, execution.CompletionPartialGap)
@@ -860,7 +865,7 @@ func TestSlotExecutionCoordinatorPreservesStateTerminalAsPlanCompletion(t *testi
 		t.Fatalf("Execute() result=%+v error=%v", result, err)
 	}
 	assertTrace(t, fixture.trace, []string{
-		"query", "gap_load", "state_load", "evaluate", "sequence", "admission_initial", "gap_before", "activation_progress", "progress_commit",
+		"query", "gap_load", "state_load", "evaluate", "sequence", "admission_initial", "fence", "gap_before", "activation_progress", "progress_commit",
 	})
 	if fixture.ports.lastProgress.Completion.Kind != execution.CompletionTerminal {
 		t.Fatalf("completion=%q", fixture.ports.lastProgress.Completion.Kind)
@@ -940,7 +945,7 @@ func TestSlotExecutionCoordinatorIsolatesDeterministicStateAdmission(t *testing.
 			}
 			assertTrace(t, fixture.trace, []string{
 				"query", "gap_load", "state_load", "evaluate", "evaluate", "sequence", "admission_initial",
-				"admission_event", "state_admission", "event_ack", "state_apply", "gap_after",
+				"admission_event", "state_admission", "fence", "event_ack", "state_apply", "gap_after",
 				"activation_progress", "progress_commit",
 			})
 			if fixture.ports.eventCount != 1 || fixture.ports.lastProgress.Completion.Kind != execution.CompletionTerminal {
@@ -1013,7 +1018,7 @@ func TestSlotExecutionCoordinatorRejectsDeterministicStateApplyAsContractViolati
 	}
 	assertTrace(t, fixture.trace, []string{
 		"query", "gap_load", "state_load", "evaluate", "sequence", "admission_initial",
-		"admission_event", "state_admission", "event_ack", "state_apply",
+		"admission_event", "state_admission", "fence", "event_ack", "state_apply",
 	})
 	if !isZeroProgressCommit(fixture.ports.lastProgress) {
 		t.Fatalf("contract violation must not commit Progress: %+v", fixture.ports.lastProgress)
@@ -1086,7 +1091,7 @@ func TestSlotExecutionCoordinatorCompletesSiblingSeriesButKeepsSlotRetryPending(
 	}
 	assertTrace(t, fixture.trace, []string{
 		"query", "gap_load", "state_load", "evaluate", "evaluate", "sequence", "admission_initial",
-		"admission_event", "state_admission", "event_ack", "state_apply", "gap_after",
+		"admission_event", "state_admission", "fence", "event_ack", "state_apply", "gap_after",
 	})
 	if fixture.ports.eventCount != 1 || !isZeroProgressCommit(fixture.ports.lastProgress) {
 		t.Fatalf("sibling evidence events=%d progress=%+v", fixture.ports.eventCount, fixture.ports.lastProgress)
@@ -1123,7 +1128,7 @@ func TestSlotExecutionCoordinatorObserverPanicIsFailOpen(t *testing.T) {
 	}
 	assertTrace(t, fixture.trace, []string{
 		"query", "gap_load", "state_load", "evaluate", "sequence", "admission_initial",
-		"admission_event", "state_admission", "event_ack", "state_apply", "gap_after", "activation_progress", "progress_commit",
+		"admission_event", "state_admission", "fence", "event_ack", "state_apply", "gap_after", "activation_progress", "progress_commit",
 	})
 }
 
@@ -1172,7 +1177,7 @@ func TestSlotExecutionCoordinatorAcceptsUnorderedStoreReceipts(t *testing.T) {
 	}
 	assertTrace(t, fixture.trace, []string{
 		"query", "gap_load", "state_load", "evaluate", "evaluate", "sequence", "admission_initial",
-		"admission_event", "state_admission", "event_ack", "state_apply", "gap_after", "activation_progress", "progress_commit",
+		"admission_event", "state_admission", "fence", "event_ack", "state_apply", "gap_after", "activation_progress", "progress_commit",
 	})
 	if len(fixture.ports.lastSequenceScope.StateKeys) != 2 || len(fixture.ports.lastSequenceScope.GapKeys) != 1 {
 		t.Fatalf("sequencing scope=%+v", fixture.ports.lastSequenceScope)
@@ -1192,10 +1197,11 @@ func TestSlotExecutionCoordinatorFailsClosedBeforeLaterSideEffects(t *testing.T)
 		{stage: "admission_initial", want: fullTrace[:6]},
 		{stage: "admission_event", want: fullTrace[:7]},
 		{stage: "state_admission", want: fullTrace[:8]},
-		{stage: "state_apply", want: fullTrace[:10]},
-		{stage: "gap_after", want: fullTrace[:11]},
-		{stage: "activation_progress", want: fullTrace[:12]},
-		{stage: "progress_commit", want: fullTrace[:13]},
+		{stage: "fence", want: fullTrace[:9]},
+		{stage: "state_apply", want: fullTrace[:11]},
+		{stage: "gap_after", want: fullTrace[:12]},
+		{stage: "activation_progress", want: fullTrace[:13]},
+		{stage: "progress_commit", want: fullTrace[:14]},
 	}
 	for _, test := range tests {
 		t.Run(test.stage, func(t *testing.T) {
@@ -1222,7 +1228,7 @@ func TestSlotExecutionCoordinatorKeepsEventACKUnknownRetryable(t *testing.T) {
 		result.ReasonCode != execution.ReasonCode(contract.ReasonOutputACKUnknown) {
 		t.Fatalf("Execute() result=%+v error=%v", result, err)
 	}
-	assertTrace(t, fixture.trace, fullTrace[:9])
+	assertTrace(t, fixture.trace, fullTrace[:10])
 	// The ACK failure is the last thing that happened to this Plan, rather
 	// than the last line of the Slot: the Slot still reports its series census
 	// on the way out, which writes nothing. What the test is actually about --
@@ -1246,7 +1252,7 @@ func TestSlotExecutionCoordinatorKeepsEventACKUnknownRetryable(t *testing.T) {
 
 var fullTrace = []string{
 	"query", "gap_load", "state_load", "evaluate", "sequence", "admission_initial",
-	"admission_event", "state_admission", "event_ack", "state_apply", "gap_after", "activation_progress", "progress_commit",
+	"admission_event", "state_admission", "fence", "event_ack", "state_apply", "gap_after", "activation_progress", "progress_commit",
 }
 
 type fixture struct {
@@ -1420,6 +1426,11 @@ type recordingPorts struct {
 	// a Slot evaluates a batch's series side by side and reads the next
 	// batch's State beside them.
 	traceMu, callMu sync.Mutex
+	// openAlertsMu guards what the open alert copy was told.
+	openAlertsMu sync.Mutex
+	// sequencesNow is the Sequences running now, and sequencesMost the most
+	// that ever ran at once: a Slot holds one at a time.
+	sequencesNow, sequencesMost atomic.Int64
 	// refuseGapStage refuses one of the Slot's two gap applies ("gap_before"
 	// or "gap_after"), so a case can tell which of them a refusal came from;
 	// refuseGapStatus is the status it answers with, CONFLICT when empty.
@@ -1461,6 +1472,8 @@ type recordingPorts struct {
 	beginStatus    execution.ProgressCommitStatus
 	lastBegin      execution.ProgressBeginRequest
 	admissionCalls int
+	// fenceChecks is the owner fence checks before unfenced writes.
+	fenceChecks    int
 	contractDrift  bool
 	alreadyApplied bool
 	// stateApplyAlreadyApplied makes every state write report that an earlier
@@ -1810,6 +1823,10 @@ func (ports *recordingPorts) Sequence(
 	if err := ports.fail("sequence"); err != nil {
 		return err
 	}
+	now := ports.sequencesNow.Add(1)
+	defer ports.sequencesNow.Add(-1)
+	for most := ports.sequencesMost.Load(); now > most && !ports.sequencesMost.CompareAndSwap(most, now); most = ports.sequencesMost.Load() {
+	}
 	return run(ctx)
 }
 
@@ -2067,10 +2084,18 @@ func (ports *recordingPorts) Check(context.Context, execution.SideEffectAdmissio
 	return execution.SideEffectAdmissionResult{Admitted: true}, ports.fail(stage)
 }
 
-// CheckActivation is the admission before Progress, which reads no fence.
+// CheckActivation is an admission without the fence (014 ⑩ F1): a Plan's
+// step, named as Check names its admissions, and the admission before
+// Progress, once the activation has been read again for it.
 func (ports *recordingPorts) CheckActivation(context.Context, execution.SideEffectAdmissionRequest) (execution.SideEffectAdmissionResult, error) {
 	ports.admissionCalls++
-	stage := "activation_progress"
+	stage := "admission_initial"
+	if ports.admissionCalls > 1 {
+		stage = "admission_event"
+	}
+	if ports.progressActivationChecked {
+		stage = "activation_progress"
+	}
 	ports.record(stage)
 	if ports.admissionRejectAt == ports.admissionCalls {
 		return execution.SideEffectAdmissionResult{
@@ -2078,6 +2103,14 @@ func (ports *recordingPorts) CheckActivation(context.Context, execution.SideEffe
 		}, nil
 	}
 	return execution.SideEffectAdmissionResult{Admitted: true}, ports.fail(stage)
+}
+
+// CheckOwnerFence is the fence checked before a write whose script does not
+// run it (014 ⑩ F1).
+func (ports *recordingPorts) CheckOwnerFence(context.Context, execution.FrozenExecutionContractRef, execution.OwnerFence) error {
+	ports.fenceChecks++
+	ports.record("fence")
+	return ports.fail("fence")
 }
 
 func (ports *recordingPorts) ApplyGap(_ context.Context, request execution.GapGuardApplyRequest) (execution.GapGuardApplyResult, error) {
@@ -2134,14 +2167,24 @@ func (ports *recordingPorts) Contains(tenantID, strategyID, fingerprint string) 
 	return ports.openAlerts[tenantID+"/"+strategyID+"/"+fingerprint]
 }
 
+// The copy is told of a Slot's Plans as its series are evaluated and of what
+// was acknowledged as its windows are written, which a Slot cut into windows
+// does on two goroutines (014 next9 4): the production copy locks, and so do
+// these.
 func (ports *recordingPorts) TrackPlans(_ execution.QueryGroupIdentity, plans []execution.PlanIdentity) {
+	last := ports.lastTrace()
+	ports.openAlertsMu.Lock()
+	defer ports.openAlertsMu.Unlock()
 	ports.trackedPlans = append(ports.trackedPlans, plans...)
-	ports.openAlertCalls = append(ports.openAlertCalls, "track after "+ports.lastTrace())
+	ports.openAlertCalls = append(ports.openAlertCalls, "track after "+last)
 }
 
 func (ports *recordingPorts) Acknowledged(events []contract.TriggerEventV1) {
+	last := ports.lastTrace()
+	ports.openAlertsMu.Lock()
+	defer ports.openAlertsMu.Unlock()
 	ports.acknowledged = append(ports.acknowledged, events...)
-	ports.openAlertCalls = append(ports.openAlertCalls, "ack after "+ports.lastTrace())
+	ports.openAlertCalls = append(ports.openAlertCalls, "ack after "+last)
 }
 
 func (ports *recordingPorts) lastTrace() string {
@@ -2732,6 +2775,10 @@ func publicMethodNames(value reflect.Type) []string {
 
 // ReleaseSlotWitnesses keeps no witnesses to let go of.
 func (*recordingPorts) ReleaseSlotWitnesses(execution.SlotIdentity) {}
+
+// ReleaseRuntimeWitnesses holds nothing to let go of: a test double, in no production wiring.
+func (*recordingPorts) ReleaseRuntimeWitnesses(execution.SlotIdentity, []execution.StateKeyIdentity) {
+}
 
 // RenewFrozenRuntime records what the Slot asked about and answers with what
 // the test set, so a test can put a renewal failure or a vanished key in front

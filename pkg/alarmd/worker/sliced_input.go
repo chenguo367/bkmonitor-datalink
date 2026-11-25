@@ -128,7 +128,7 @@ type sliceReading struct {
 	landed, landedSlices map[execution.PlanIdentity]uint64
 	// sliceSeries is the series of each Plan the slice being read holds,
 	// counted when its series are prepared: a window cut halfway through the
-	// slice lets go of the series it wrote (dropWindowInputs), and what is
+	// slice lets go of the series it wrote (letGoWindowInputs), and what is
 	// left at the slice's end is not what it held.
 	sliceSeries map[execution.PlanIdentity]uint64
 	// unseenSlices and unseenSeries are the slices, and their series, a Plan
@@ -306,30 +306,61 @@ func (stream *streamedExecution) readInSlices() bool {
 	return stream.slicing() && stream.slices.tree != nil
 }
 
-// wholeSliceLimit is sliceLimit with nothing else of the Slot held: half the
-// share, the most a slice may retain, for judging a slice's size apart from
-// any one Slot's moment (sizedDecay).
+// wholeSliceLimit is sliceLimit with nothing else of the Slot held: half of
+// the Slot's half of the share, the most a slice may retain, for judging a
+// slice's size apart from any one Slot's moment (sizedDecay).
 func (coordinator *SlotExecutionCoordinator) wholeSliceLimit() uint64 {
 	share := coordinator.qgShareBytes()
 	if share == 0 {
 		return ^uint64(0)
 	}
-	return share / 2
+	return share / 2 / 2
 }
 
 // sliceLimit is what the slice being read may hold of the input phase: half
-// of what its share leaves beside everything else the Slot holds, the other
-// half for the windows that write it.
+// of what the Slot's side's half of the share leaves beside everything else
+// the Slot's side holds, the other half for the window that is filled from
+// it (014 next9 4). The other half of the share is the apply side's - the
+// window being written, what it gives back as it lands, the frames its
+// writes keep (applyPipe.judgeHeldLocked) - and none of it is counted here,
+// as the window bound counts none of it (windowOutside): a slice read while
+// the last window of the slice before is written has the limit it has with
+// that window landed, and is cut where it would be.
 func (stream *streamedExecution) sliceLimit() uint64 {
 	share := stream.coordinator.qgShareBytes()
 	if share == 0 {
 		return ^uint64(0)
 	}
-	others := stream.retainedTotal() - min(stream.retainedTotal(), stream.slices.input)
-	if others >= share {
-		return 0
+	return boundLess(share/2, stream.sliceOthers()) / 2
+}
+
+// sliceOthers is what the Slot's side holds beside the slice being read:
+// not the slice's input, nor what the windows in flight give back as they
+// land, nor what the apply side holds.
+func (stream *streamedExecution) sliceOthers() uint64 {
+	total := stream.retainedTotal()
+	inside := stream.slices.input + stream.applyHeld()
+	for phase := range retainPhaseCount {
+		inside += stream.inflightRelease(phase)
 	}
-	return (share - others) / 2
+	if inside > total {
+		stream.windows.clamped[1] = true
+	}
+	return total - min(inside, total)
+}
+
+// serialSliceLimit is the slice's limit as a Slot applied window by window
+// without a window in flight has it: half of what the whole share leaves
+// beside what the Slot holds. A series alone past sliceLimit is judged by it
+// once the windows in flight have landed (admitSliceInput), so no series a
+// Slot written window after window took is refused for the pipeline.
+func (stream *streamedExecution) serialSliceLimit() uint64 {
+	share := stream.coordinator.qgShareBytes()
+	if share == 0 {
+		return ^uint64(0)
+	}
+	others := stream.retainedTotal() - min(stream.retainedTotal(), stream.slices.input)
+	return boundLess(share, others) / 2
 }
 
 // admitSliceInput judges one series batch of retained bytes against the
@@ -358,6 +389,17 @@ func (stream *streamedExecution) admitSliceInput(ctx context.Context, batch exec
 		if _, err := stream.sliceDimensions(); err != nil {
 			reading.unsliceable = true
 			reading.unsupported, _ = execution.InputSliceUnsupportedOf(err)
+			return nil
+		}
+	}
+	if reading.largest > limit {
+		// A series alone past the Slot's half: judged again as a Slot with no
+		// window in flight judges it, once the windows in flight have landed
+		// - rare, a series near a quarter of its Query Group's share.
+		if err := stream.drainApply(ctx); err != nil {
+			return err
+		}
+		if limit = stream.serialSliceLimit(); reading.input+retained <= limit {
 			return nil
 		}
 	}
@@ -482,7 +524,9 @@ func (stream *streamedExecution) abandonSlice() inputslice.Sample {
 }
 
 // resetSliceStream clears the per-slice streamed state: the next slice's
-// series arrive into empty maps, Begin having run once for the Slot.
+// series arrive into empty maps, Begin having run once for the Slot. A window
+// of the slice before still written let go of its series' bindings as it was
+// cut (letGoWindowInputs).
 func (stream *streamedExecution) resetSliceStream() {
 	stream.streamed = make(map[streamedInputKey]streamedInput)
 	stream.shared = sharedBindings{}
@@ -1027,6 +1071,10 @@ func (stream *streamedExecution) landSlice(ctx context.Context) error {
 	if stream.windows.single {
 		return errors.New("alarmd worker: a Slot read in slices could not begin its windows")
 	}
+	// The slice's last window may still be written as the next slice is read:
+	// the next slice's limit counts only what the Slot's side holds
+	// (sliceLimit), and the prepared series are the window's, let go of as it
+	// lands (windowTask.series).
 	stream.windows.prepared, stream.windows.reached, stream.windows.dropped = nil, 0, 0
 	return nil
 }
@@ -1040,6 +1088,14 @@ func (stream *streamedExecution) landSlice(ctx context.Context) error {
 // slices it wrote before as first-seen - the ones that held series of it; a
 // slice that held none wrote nothing of it - and their series are counted on
 // the completion row.
+//
+// A head with no first-seen candidate - the common one - writes only what is
+// the apply side's, from statements worked out here from the slice's
+// bindings: it is handed to the apply goroutine as a task of its own, after
+// the previous slice's last window and before this slice's first, and
+// nothing waits for it. One with candidates reads the slice's prepared series
+// and State on the Slot's goroutine beside what is the apply side's, and runs
+// here once the apply goroutine is idle (drainApply).
 func (coordinator *SlotExecutionCoordinator) applySliceHead(ctx context.Context, stream *streamedExecution) error {
 	windows := &stream.windows
 	if !windows.started || windows.apply == nil {
@@ -1050,6 +1106,16 @@ func (coordinator *SlotExecutionCoordinator) applySliceHead(ctx context.Context,
 		return err
 	}
 	apply := windows.apply
+	// forced is read as the head left it: judgeForced splits it into new
+	// sets and leaves it as it was.
+	if len(firstSeenCandidates(apply.forced, stream.gaps)) == 0 {
+		return stream.handOver(ctx, applyTask{run: func(applyCtx context.Context) error {
+			return coordinator.writeSliceHead(applyCtx, stream, opens)
+		}})
+	}
+	if err := stream.drainApply(ctx); err != nil {
+		return err
+	}
 	return coordinator.ports.Sequencer.Sequence(ctx, sequencingScope(stream.header, nil, stream.gapItems), func(sequenceCtx context.Context) error {
 		defer stream.enter(slotPhaseCut)()
 		if candidates := firstSeenCandidates(apply.forced, stream.gaps); len(candidates) != 0 {
@@ -1073,40 +1139,64 @@ func (coordinator *SlotExecutionCoordinator) applySliceHead(ctx context.Context,
 				apply.judgeForced(after)
 			}
 		}
-		for _, due := range sortedDuePlans(stream.header.DuePlans) {
-			if apply.changed(due) {
-				apply.withheldNoData[due.Identity] = struct{}{}
-				continue
-			}
-			open, found := opens[due.Identity]
-			if !found {
-				continue
-			}
-			if previous, written := windows.headStatements[due.Identity]; written {
-				grown, grows, err := growOpenStatement(previous, open)
-				if err != nil {
-					return err
-				}
-				if !grows {
-					continue
-				}
-				open = grown
-			} else if err := coordinator.admit(sequenceCtx, stream.request, due); err != nil {
-				return err
-			}
-			statement := execution.PlanEvaluationResult{Plan: due.Identity, GuardBeforeEvents: []execution.PlanGapMutation{open}}
-			if _, err := apply.planGapsBefore(sequenceCtx, due, &statement); err != nil {
-				return err
-			}
-			if windows.headOpened == nil {
-				windows.headOpened = make(map[execution.PlanIdentity]struct{})
-				windows.headStatements = make(map[execution.PlanIdentity]execution.PlanGapMutation)
-			}
-			windows.headOpened[due.Identity] = struct{}{}
-			windows.headStatements[due.Identity] = open
-		}
-		return nil
+		return coordinator.sliceHeadStatements(sequenceCtx, stream, opens)
 	})
+}
+
+// writeSliceHead is a slice's head with no first-seen candidate, on the apply
+// goroutine: its own Sequence, its statements grown into each Plan's marker.
+func (coordinator *SlotExecutionCoordinator) writeSliceHead(
+	ctx context.Context, stream *streamedExecution, opens map[execution.PlanIdentity]execution.PlanGapMutation,
+) error {
+	return coordinator.ports.Sequencer.Sequence(ctx, sequencingScope(stream.header, nil, stream.gapItems), func(sequenceCtx context.Context) error {
+		return coordinator.sliceHeadStatements(sequenceCtx, stream, opens)
+	})
+}
+
+// sliceHeadStatements writes a slice's open statements, each Plan's grown
+// from the one its marker took, inside the head's Sequence: what is the apply
+// side's - the activations' verdicts, the markers, the withheld no-data.
+func (coordinator *SlotExecutionCoordinator) sliceHeadStatements(
+	sequenceCtx context.Context, stream *streamedExecution, opens map[execution.PlanIdentity]execution.PlanGapMutation,
+) error {
+	windows := &stream.windows
+	apply := windows.apply
+	for _, due := range sortedDuePlans(stream.header.DuePlans) {
+		if apply.changed(due) {
+			apply.withheldNoData[due.Identity] = struct{}{}
+			continue
+		}
+		open, found := opens[due.Identity]
+		if !found {
+			continue
+		}
+		if previous, written := windows.headStatements[due.Identity]; written {
+			grown, grows, err := growOpenStatement(previous, open)
+			if err != nil {
+				return err
+			}
+			if !grows {
+				continue
+			}
+			open = grown
+			// Admitted with the first slice's head; its growth is a step of
+			// its own, the fence checked again before it (014 ⑩ F1).
+			fenceStep(sequenceCtx)
+		} else if err := coordinator.admit(sequenceCtx, stream.request, due); err != nil {
+			return err
+		}
+		statement := execution.PlanEvaluationResult{Plan: due.Identity, GuardBeforeEvents: []execution.PlanGapMutation{open}}
+		if _, err := apply.planGapsBefore(sequenceCtx, due, &statement); err != nil {
+			return err
+		}
+		if windows.headOpened == nil {
+			windows.headOpened = make(map[execution.PlanIdentity]struct{})
+			windows.headStatements = make(map[execution.PlanIdentity]execution.PlanGapMutation)
+		}
+		windows.headOpened[due.Identity] = struct{}{}
+		windows.headStatements[due.Identity] = open
+	}
+	return nil
 }
 
 // growOpenStatement is the statement that grows the marker an earlier
@@ -1190,7 +1280,7 @@ func (coordinator *SlotExecutionCoordinator) sliceReadingFor(ctx context.Context
 	if request.QueryCooldownProbe {
 		return reading
 	}
-	share := coordinator.qgShareBytes()
+	limit := coordinator.wholeSliceLimit()
 	last := coordinator.slicedInput.lastInput(request.Contract.Slot.QueryGroup)
 	reading.unknownSize = last.series == 0 && last.bytes == 0
 	reading.deferred = last.deferred
@@ -1198,7 +1288,8 @@ func (coordinator *SlotExecutionCoordinator) sliceReadingFor(ctx context.Context
 	if len(dimensions) == 0 {
 		return reading
 	}
-	// As many slices as the last read's input over half the share, its
+	// As many slices as the last read's input over a slice's limit with
+	// nothing else of the Slot held (wholeSliceLimit), its
 	// series over a slice's (sliceSeries), or - a read that ran out of
 	// time - its time over the target, whichever asks for most: a Query
 	// Group within its share may still be too large to read in one request.
@@ -1212,8 +1303,8 @@ func (coordinator *SlotExecutionCoordinator) sliceReadingFor(ctx context.Context
 		return reading
 	}
 	leaves := max(slicesBySeries(last.series), slicesByTime(last.timedOutMillis), last.slices)
-	if share > 0 && last.bytes > 0 {
-		leaves = max(leaves, int((last.bytes+share/2-1)/(share/2)))
+	if limit < ^uint64(0) && last.bytes > 0 {
+		leaves = max(leaves, int((last.bytes+limit-1)/limit))
 	}
 	// The starting slices are cut on the dimension a read chose. A Query
 	// Group no read delivered a series of - its read whole the provider
@@ -1579,11 +1670,17 @@ func (coordinator *SlotExecutionCoordinator) rememberSlotInput(request execution
 
 // InputSliceRefusal names why a Slot that has to be read in slices cannot be,
 // when err says so: the store, the query or a dimension it cannot be sliced
-// on (INPUT_SLICE_UNSUPPORTED), or values no slice can hold
+// on (INPUT_SLICE_UNSUPPORTED), a split the tree has no leaves left for
+// (INPUT_SLICE_LEAVES_EXHAUSTED: the Slot's size against the slice limit,
+// not its values), or values no slice can hold
 // (INPUT_SLICE_VALUE_CONCENTRATED).
 func InputSliceRefusal(err error) (string, bool) {
 	if _, unsupported := execution.InputSliceUnsupportedOf(err); unsupported {
 		return contract.ReasonInputSliceUnsupported, true
+	}
+	var concentrated *inputslice.ValueConcentratedError
+	if errors.As(err, &concentrated) && concentrated.Reason == inputslice.ReasonMaxLeaves {
+		return contract.ReasonInputSliceLeavesExhausted, true
 	}
 	if errors.Is(err, inputslice.ErrValueConcentrated) {
 		return contract.ReasonInputSliceValueConcentrated, true
@@ -1695,7 +1792,7 @@ func (stream *streamedExecution) nameUnsliceableRefusal(err error) error {
 }
 
 // finalSliceRefusal is err, a Slot whose slices no split separates
-// (INPUT_SLICE_VALUE_CONCENTRATED) or whose slice the store will not take
+// (INPUT_SLICE_VALUE_CONCENTRATED, INPUT_SLICE_LEAVES_EXHAUSTED) or whose slice the store will not take
 // (INPUT_SLICE_QUERY_TOO_LONG), as the deterministic refusal the scheduler
 // finalizes a Slot on, the way it does one past its share: the same window
 // read again splits the same way and is refused the same way, and every

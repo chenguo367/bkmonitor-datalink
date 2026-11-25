@@ -596,6 +596,10 @@ func TestTheCensusIsZeroWhenNoPlanDetectsNoData(t *testing.T) {
 // ReleaseSlotWitnesses keeps no witnesses to let go of.
 func (failingStatePort) ReleaseSlotWitnesses(execution.SlotIdentity) {}
 
+// ReleaseRuntimeWitnesses holds nothing to let go of: a test double, in no production wiring.
+func (failingStatePort) ReleaseRuntimeWitnesses(execution.SlotIdentity, []execution.StateKeyIdentity) {
+}
+
 func (failingStatePort) RenewFrozenRuntime(
 	_ context.Context, request execution.FrozenStateRenewalRequest,
 ) (execution.FrozenStateRenewalResult, error) {

@@ -100,7 +100,7 @@ func (coordinator *SlotExecutionCoordinator) observeChunk(
 	legacyRecordIDs int,
 	extensions ...*observability.GapExtensionFacts,
 ) {
-	coordinator.emitObservation(ctx, observability.Observation{
+	observation := observability.Observation{
 		Component: observability.ComponentState, Stage: stage, Result: result,
 		Operation:  observability.Operation(operation),
 		ReasonCode: reason, Duration: time.Since(chunkStarted), DurationKnown: true, Counts: counts, Err: err,
@@ -110,7 +110,8 @@ func (coordinator *SlotExecutionCoordinator) observeChunk(
 			ElapsedMillis: time.Since(applyStarted).Milliseconds(), RefusalRules: refusalRules,
 			RefusalText: refusalText, LegacyRecordIDs: legacyRecordIDs,
 		},
-	})
+	}
+	coordinator.emitObservation(ctx, observation)
 }
 
 func stateIdentities(mutations []execution.StateMutation) []execution.StateKeyIdentity {

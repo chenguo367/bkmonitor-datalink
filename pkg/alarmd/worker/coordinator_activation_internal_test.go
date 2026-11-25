@@ -133,6 +133,10 @@ func (ports *activationSiblingPorts) CheckActivation(ctx context.Context, reques
 	return ports.Check(ctx, request)
 }
 
+func (*activationSiblingPorts) CheckOwnerFence(context.Context, execution.FrozenExecutionContractRef, execution.OwnerFence) error {
+	return nil
+}
+
 func (ports *activationSiblingPorts) LoadGapsInto(ctx context.Context, request execution.GapLoadRequest, accept func(execution.GapGuardSnapshot) error) error {
 	result, err := ports.LoadGaps(ctx, request)
 	if err != nil {
@@ -206,6 +210,10 @@ func (ports *activationSiblingPorts) CommitProgress(context.Context, execution.P
 
 // ReleaseSlotWitnesses keeps no witnesses to let go of.
 func (*activationSiblingPorts) ReleaseSlotWitnesses(execution.SlotIdentity) {}
+
+// ReleaseRuntimeWitnesses holds nothing to let go of: a test double, in no production wiring.
+func (*activationSiblingPorts) ReleaseRuntimeWitnesses(execution.SlotIdentity, []execution.StateKeyIdentity) {
+}
 
 func (ports *activationSiblingPorts) RenewFrozenRuntime(
 	_ context.Context, request execution.FrozenStateRenewalRequest,

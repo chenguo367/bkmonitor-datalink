@@ -2133,7 +2133,7 @@ Duration of the committed executor call, excluding SlotSource preparation and ea
 
 Labels: `result`
 
-Slot attempts' BeginSlot calls that returned a status, by it: committed (the Slot is begun), conflict (the record is not at this Slot), stale_owner and content_moved (the fence refused the write), retryable_io (the store did not answer). A BeginSlot that failed outright is counted by its slot_completed line only.
+Slot attempts' BeginSlot calls that returned a status, by it: committed (the Slot is begun), conflict (the record is not at this Slot), stale_owner and content_moved (the fence refused the write), retryable_io (the store did not answer); deferred, an attempt that put its BeginSlot off and sent its commit in its place - an empty round - while one that put it off and then wrote, or left without writing its Slot down, is counted by the BeginSlot it made then, and an empty round whose commit the record refused by that status, as a BeginSlot at its start; the results sum to the attempts. A BeginSlot that failed outright is counted by its slot_completed line only.
 
 ## alarmd_slot_completed_reasons_total
 
@@ -2151,6 +2151,12 @@ Labels: `reason`
 
 Slots of Query Groups this process holds that were sent to replay before their normal read started, by reason, counted once per Slot: readiness_late, the Slot's readiness - its settling wait and read hold - landed so near its query deadline that less time was left than its query takes (the group's own reading, the previous owner's as the group's read-hold record keeps it, or the configured floor), so a normal read would have been cut off at the deadline with no data; replay reads it late but whole under a deadline of its own. A Slot due before a takeover is counted under replay_takeover_slots_total{outcome="diverted"} instead. The group's own reading is its last whole first reads, a Slot sent here among them: its replay's whole read is timed as the normal round in its place, when it took no longer than that round's whole budget, readiness to the query deadline its read is cut at, the live one - longer, no normal round could read it, and the degraded pool, which only a normal round decides, judges the group instead of every round being sent here. Read with progress_completion_causes_total{cause="PRIMARY_INPUT_UNAVAILABLE",reason="QUERY_TIMEOUT"}: the rounds counted here are the ones that no longer appear there.
 
+## alarmd_slot_execute_slow_total
+
+Labels: `operation`
+
+Slot attempts whose execution took half their Query Group's period or longer - no less than 5 s, no more than 30 s, and 30 s where the period is not known (a Slot no dispatch started, a Query Group before its first round) - by operation, every one counted, a retry's and a replay's as a normal round's. Each has a slot_execute_slow line, WARN, SLOT_EXECUTE_SLOW, at most one a Query Group an hour (the rest in its suppressed_logs): which Query Group and round, the duration against the threshold, the Slot's phases, its queries' waits, bodies and permit waits, its input slices and their seams, and its dispatch's wait for an execution slot. Its slot_completed line is unchanged. Every cell exists from the start.
+
 ## alarmd_slot_gaps_total
 
 Labels: `kind`, `cause`
@@ -2161,7 +2167,7 @@ Slots given up without a query, by the kind their completion committed under (GA
 
 Labels: `reason`
 
-Slot attempts that began their Slot (slot_begin_total{result="committed"}) and returned without writing it down, once each, by why: QUERY_NOT_READY, SNAPSHOT_RETRY; a result by its reason or kind (activation_read_failed, activation_changed, output_retry_pending, segment_write_failed - a round that left members' State unwritten whose stable segments' write did not land, retried whole - retry_pending, incomplete, no_result: a panic); an error by what it is (finalization_failed, owner_refused, query_permit_failed, cancelled, deadline_exceeded, declined, capacity_refused, store_conflict, segment_read_failed - a Slot with a segment skip word whose segments did not read, its retry reading them as stored) or else the step it failed in (query_, complete_, apply_, output_, progress_commit_, query_free_failed); other, none of these.
+Slot attempts that began or deferred their Slot (slot_begin_total{result="committed"} and {result="deferred"}) and returned without writing it down, once each, by why: QUERY_NOT_READY, SNAPSHOT_RETRY; a result by its reason or kind (activation_read_failed, activation_changed, output_retry_pending, segment_write_failed - a round that left members' State unwritten whose stable segments' write did not land, retried whole - retry_pending, incomplete, no_result: a panic); an error by what it is (finalization_failed, owner_refused - its fence stale, its content moved, or its Query Group no longer desired for it, which a write's own script reports as a stale fence, so its reason reads OWNERSHIP_STALE_FENCE where a check before it read OWNERSHIP_NOT_DESIRED - query_permit_failed, cancelled, deadline_exceeded, declined, capacity_refused, store_conflict, segment_read_failed - a Slot with a segment skip word whose segments did not read, its retry reading them as stored) or else the step it failed in (query_, complete_, apply_, output_, progress_commit_, query_free_failed); other, none of these.
 
 ## alarmd_slot_operation_duration_seconds
 
@@ -2184,6 +2190,18 @@ How long a Slot's data had already been readable when an execution arrived to re
 Labels: `wait`
 
 Blocking waits inside one Slot attempt, by which wait. progress_begin is the fenced Progress write that opens the Slot; finalization is deciding whether the Slot needs a query, which reads the frozen Plan and the Segment's content objects; object_share is waiting on another goroutine's in-flight read of the same catalog object, which has no deadline of its own and reports no error however long it takes. An attempt that sits between slot_started and slot_completed with nothing in between is in one of these.
+
+## alarmd_slot_window_accounting_clamped_slots_total
+
+Labels: `reason`
+
+Slots applied window by window in which what the window accounting takes off what the Slot holds came to more than the Slot held, by where: window_outside (the window bound takes off the window being filled, what the windows in flight give back as they land and what the apply side holds) and slice_others (the slice limit takes off the slice being read and the same in-flight parts). Should be zero. An increase means a window's give-back was counted twice: the take-off was clamped to what the Slot held, and the window bound or the slice limit was larger than its half of the Query Group share - shown otherwise only as a merge or an input the share refused. Counted from completed Slots, once per Slot and reason. Every reason exists from the start.
+
+## alarmd_slot_window_zero_bound_cuts_total
+
+Labels: `reason`
+
+Windows cut while the window bound was zero: what the Slot holds outside the window being filled had reached half its Query Group share (the bound is share/2 less that), so each series merged was cut into a window of its own. reason is the retained phase holding the most of what is outside: input (the series' inputs and the reads ahead), gap (the gap facts), output and state (the results, summary and State outside the window). Any increase means a Query Group ran one series per window: its output is correct but each series pays its own Sequence and fence check, so the Slot is slow; read it beside the group's share and slot_operation_duration_seconds. input points at slices too large or reads ahead holding too much, state or output at a share too small. Counted from completed Slots. Every reason exists from the start.
 
 ## alarmd_source_change_signal_age_seconds
 
@@ -2549,11 +2567,23 @@ Runtime State mutations refused STATE_VERSION_CONFLICT, by where that was decide
 
 ## alarmd_state_witness_bytes
 
-The runtime witness cache's estimated heap, a fixed 320 B per witness for its map entry plus the digests it alone keeps alive, each rounded to its allocation. No budget charges the cache. It is bounded at 2^18 witnesses; a Slot's witnesses leave as each of its attempts ends, and a Query Group's when this worker releases its lease, so between rounds it reads zero. Read it against the resident heap term in the sizing table. It is an estimate from the layout, not a measurement, and leaves out the Plan identity every series of a Plan shares.
+The runtime witness cache's estimated heap, a fixed 320 B per witness for its map entry plus the digests it alone keeps alive, each rounded to its allocation. No budget charges the cache. It is bounded at 2^18 witnesses; a Slot's witnesses leave as each window that read their keys lands, the rest as its attempt ends, and a Query Group's when this worker releases its lease, so between rounds it reads zero. Read it against the resident heap term in the sizing table. It is an estimate from the layout, not a measurement, and leaves out the Plan identity every series of a Plan shares.
 
 ## alarmd_state_witness_items
 
-Preflight witnesses held in the runtime witness cache, kept from a Slot's load of Runtime State to its apply so the write compares without reading the value again. No budget charges the cache. It is bounded at 2^18 witnesses and 4096 Query Groups, the least recently filled Query Group evicted first; a Slot's witnesses leave as each of its attempts ends, those its writes did not take with them, and a Query Group's when this worker releases its lease - so between rounds it reads zero, and above zero only while an attempt runs. Read with state_witness_bytes against the resident heap term in the sizing table.
+Preflight witnesses held in the runtime witness cache, kept from a Slot's load of Runtime State to its apply so the write compares without reading the value again. No budget charges the cache. It is bounded at 2^18 witnesses and 4096 Query Groups, the least recently filled Query Group evicted first; a Slot's witnesses leave as its writes take them, the rest as the window that read their keys lands or, left after the last, as the attempt ends (state_witness_released_total), and a Query Group's when this worker releases its lease - so between rounds it reads zero, and above zero only while an attempt runs: a window's worth, not a round's. Read with state_witness_bytes against the resident heap term in the sizing table.
+
+## alarmd_state_witness_released_bytes_total
+
+Labels: `outcome`
+
+The estimated heap of the witnesses state_witness_released_total counts, by the same outcome, as state_witness_bytes counts a witness: window_landed counted by window as each lands, attempt_ended apart as each attempt ends.
+
+## alarmd_state_witness_released_total
+
+Labels: `outcome`
+
+Preflight witnesses the runtime witness cache let go of without a write taking them, by outcome. window_landed is counted by window as each window of a Slot written in windows lands: the keys it read that none of its writes took - members its round left unwritten, a Plan held back or replaced, a mutation admission refused, a series found already applied or superseded - let go of then rather than kept to the attempt's end beside the share the Slot's slices are cut by. attempt_ended is counted apart, as an attempt ends: what is left then - its last window's keys, a window the attempt ended before it landed, a Slot not written in windows. A witness a write takes is in neither; one a released lease or the cache's bound drops is in neither. Read with state_witness_released_bytes_total.
 
 ## alarmd_state_write_reuse_total
 

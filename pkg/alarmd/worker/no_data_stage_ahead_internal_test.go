@@ -62,7 +62,7 @@ func TestAFirstWriteIsStagedAsItsWindowsLand(t *testing.T) {
 	stream := rosterStream(t, due, store.rosterStore, 7)
 	stream.coordinator.ports.NoData = store
 	ctx := context.Background()
-	// As the windows land them (dropWindowInputs).
+	// As the windows are cut (letGoWindowInputs).
 	present := stream.windows.presentSet(due)
 	for _, host := range hosts {
 		if key, fresh := present.Add(host); fresh {

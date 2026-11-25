@@ -12,9 +12,11 @@ package worker_test
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sort"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -176,5 +178,99 @@ func TestASlotOfSeveralWindowsAndThreeAbsenceWindowsWritesItsMemoryOnce(t *testi
 	}
 	if store.maxFields > segment || store.whole != 0 {
 		t.Fatalf("a read carried %d groups (segment %d) and %d reads were whole", store.maxFields, segment, store.whole)
+	}
+}
+
+// askedCloses answers no manual close, keeping the fingerprints it was asked
+// for.
+type askedCloses struct {
+	mu    sync.Mutex
+	asked []string
+}
+
+func (closes *askedCloses) ReadNoDataManualCloses(_ context.Context, _, _ string, fingerprints []string) (map[string]int64, error) {
+	closes.mu.Lock()
+	defer closes.mu.Unlock()
+	closes.asked = append(closes.asked, fingerprints...)
+	return nil, nil
+}
+
+// slowState takes 20 ms over each State apply.
+type slowState struct{ execution.StateStore }
+
+func (state slowState) ApplyRuntime(ctx context.Context, request execution.StateApplyRequest) (execution.StateApplyResult, error) {
+	time.Sleep(20 * time.Millisecond) // fixed-wait: an absence window written while the round reads on, the subject of the case
+	return state.StateStore.ApplyRuntime(ctx, request)
+}
+
+// absenceRun is what one Slot of twenty-four absent hosts said and wrote.
+type absenceRun struct {
+	asked             []string
+	events, memories  int
+	reads, stateCalls int
+}
+
+func runAbsentHosts(t *testing.T) absenceRun {
+	t.Helper()
+	// A Plan of a frozen strategy snapshot with an output identity: its
+	// alerts carry the fingerprint a manual close is read by.
+	header := supplementHeaderShaped(t, &contract.NoDataConfigV1{Continuous: 1, Level: 2, AggDimension: []string{"host"}},
+		func(plan *contract.EvaluationPlanV2) {
+			plan.StrategyRef.SnapshotRevision, plan.StrategyIR.StrategyRef.SnapshotRevision = 1, 1
+			plan.OutputIdentity = &contract.MonitorOutputIdentity{DimensionFields: []string{"host"}}
+		})
+	evaluation := int64(header.Contract.Slot.EvaluationTime)
+	const hosts, segment = 24, 8
+	store := &segmentedNoDataStore{present: evaluation - 60}
+	for index := range hosts {
+		key := fmt.Sprintf("host=h%02d,%s=true", index, contract.NoDataDimensionTag)
+		// Each host has been absent since five rounds back: its alert is
+		// one a user could have closed.
+		store.groups = append(store.groups, execution.NoDataGroupMemory{GroupKey: key, LastSeen: evaluation - 600,
+			FirstAbsent: evaluation - 300})
+	}
+	sort.Slice(store.groups, func(left, right int) bool { return store.groups[left].GroupKey < store.groups[right].GroupKey })
+	ports, evaluator, _ := workerG4Coordinator(t)
+	ports.gapMissing = true
+	closes := &askedCloses{}
+	coordinator, err := worker.NewSlotExecutionCoordinator(worker.Ports{OpenAlerts: ports,
+		Finalization: ports, Activation: ports, Query: ports, Sequencer: ports, Evaluator: evaluator,
+		Admission: ports, GapGuard: ports, NoData: store, NoDataManualCloses: closes, Hosts: worker.SharedHostBusiness,
+		Events: ports, State: slowState{ports}, Progress: ports, Observer: &noDataObservations{},
+	}, worker.ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 64 << 20, MaxStateMutations: 5, MaxEvents: 5, MaxGapMutations: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker.SetNoDataSegmentGroups(coordinator, segment)
+	batches, completion := supplementRead(t, header, map[execution.SeriesIdentityDigest]string{hotSeries: "80"})
+	ports.executeOverride = streamExecution(header, batches, completion)
+	request := workerSlotRequest(header.Contract)
+	request.DuePlanTargets.DuePlanSetDigest = header.Contract.DuePlanSetDigest
+	result, err := coordinator.Execute(context.Background(), request)
+	if err != nil || !result.Completed {
+		t.Fatalf("Slot result %+v error %v", result, err)
+	}
+	sort.Strings(closes.asked)
+	return absenceRun{asked: closes.asked, events: noDataEventCount(ports.acknowledged), memories: len(store.applied),
+		reads: store.reads, stateCalls: ports.stateApplyCalls}
+}
+
+// A no-data round's absence windows are written while the round reads its
+// next segment and notes its absences' starts (014 next9 4, C8): each window
+// checks its absences' manual closes against its own copy of their starts,
+// taken as it was cut, and the Slot asks for the same closes, says the same
+// absences and writes its memory once, as it does with each window landed
+// before the next is filled. Run under the race detector, as a window reading
+// the starts the round goes on writing is found.
+func TestAnAbsenceWindowChecksItsClosesWhileTheRoundReadsOn(t *testing.T) {
+	pipelined := runAbsentHosts(t)
+	worker.SetApplySeriallyForTest(t)
+	serial := runAbsentHosts(t)
+	if len(pipelined.asked) != 24 || pipelined.stateCalls < 2 {
+		t.Fatalf("fixture: %d closes asked for in %d State writes, want every absence checked in windows", len(pipelined.asked),
+			pipelined.stateCalls)
+	}
+	if !reflect.DeepEqual(pipelined, serial) {
+		t.Fatalf("pipelined %+v, serial %+v", pipelined, serial)
 	}
 }

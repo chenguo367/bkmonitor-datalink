@@ -98,7 +98,8 @@ type SlotSkipShareFacts struct {
 	LimitBytes     uint64
 	Refusals       uint32
 	// Reason is the refusal's own code when it was not the share's -
-	// INPUT_SLICE_VALUE_CONCENTRATED or INPUT_SLICE_QUERY_TOO_LONG - and
+	// INPUT_SLICE_VALUE_CONCENTRATED, INPUT_SLICE_LEAVES_EXHAUSTED or
+	// INPUT_SLICE_QUERY_TOO_LONG - and
 	// Detail why; both empty for the share's.
 	Reason, Detail string
 }

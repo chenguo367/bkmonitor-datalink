@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"unsafe"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -277,16 +278,63 @@ func levelFingerprints(mutation execution.StateMutation, levels []execution.Runt
 // carried an id the derivation could not rebuild, which is how the deployment
 // learns how much such state it holds and which objects hold it.
 func encodeRuntimePackedCounted(mutation execution.StateMutation, revision uint64) ([]byte, int, error) {
+	encoded, _, legacy, err := encodeRuntimePackedParts(mutation, revision)
+	return encoded, legacy, err
+}
+
+// packedParts is what a frame was framed from: its header as encoded, its
+// frame schema, and where its points start in its bytes. Kept beside the
+// frame by the store that framed it (execution.EncodedStateFrame.Parts), it
+// is what a value written is taken into the State cache compact from
+// (compactOfHeader), its header not parsed back out of the bytes just framed
+// (014 next9 1, the third step). The header's strings are the mutation's
+// own; what it holds beside them is the struct, its Levels and its legacy
+// ids (RetainedBytes).
+type packedParts struct {
+	header   packedHeader
+	schema   byte
+	pointsAt int
+}
+
+var (
+	packedPartsSize          = int(unsafe.Sizeof(packedParts{}))
+	packedLevelSize          = int(unsafe.Sizeof(packedLevel{}))
+	packedLegacyRecordIDSize = int(unsafe.Sizeof(packedLegacyRecordID{}))
+)
+
+// RetainedBytes is what parts hold of the heap beside the frame's bytes and
+// the mutation's strings: each allocation at its size class.
+func (parts *packedParts) RetainedBytes() uint64 {
+	if parts == nil {
+		return 0
+	}
+	return uint64(sizeClass(packedPartsSize) + sizeClass(cap(parts.header.Levels)*packedLevelSize) +
+		sizeClass(cap(parts.header.LegacyRecordIDs)*packedLegacyRecordIDSize))
+}
+
+// partsOf is the parts a frame carries when this store framed them, nil
+// otherwise - a frame from elsewhere, or parts that do not fit its bytes.
+func partsOf(frame *execution.EncodedStateFrame) *packedParts {
+	parts, _ := frame.Parts.(*packedParts)
+	if parts == nil || parts.pointsAt < 0 || parts.pointsAt > len(frame.Bytes) {
+		return nil
+	}
+	return parts
+}
+
+// encodeRuntimePackedParts is encodeRuntimePackedCounted with the parts the
+// frame was framed from.
+func encodeRuntimePackedParts(mutation execution.StateMutation, revision uint64) ([]byte, *packedParts, int, error) {
 	levels := append([]execution.RuntimeLevelStateMutation(nil), mutation.Levels...)
 	sort.Slice(levels, func(i, j int) bool { return levels[i].LevelID < levels[j].LevelID })
 	for index := 1; index < len(levels); index++ {
 		if levels[index].LevelID == levels[index-1].LevelID {
-			return nil, 0, packedRefusal(PackedRuleDuplicateLevel, "Level %d appears twice", levels[index].LevelID)
+			return nil, nil, 0, packedRefusal(PackedRuleDuplicateLevel, "Level %d appears twice", levels[index].LevelID)
 		}
 	}
 	fingerprints, err := levelFingerprints(mutation, levels)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, 0, err
 	}
 	last := int64(0)
 	for _, level := range levels {
@@ -378,7 +426,7 @@ func encodeRuntimePackedCounted(mutation execution.StateMutation, revision uint6
 		previous = point.SourceTime
 		return nil
 	}); err != nil {
-		return nil, 0, err
+		return nil, nil, 0, err
 	}
 
 	// The header is built after the points, because only encoding them says
@@ -394,7 +442,7 @@ func encodeRuntimePackedCounted(mutation execution.StateMutation, revision uint6
 	}
 	headerBytes, err := json.Marshal(header)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, 0, err
 	}
 	// Only a record that needs the table is written at the newer schema, so a
 	// build that knows only the older one goes on reading every record that
@@ -408,7 +456,8 @@ func encodeRuntimePackedCounted(mutation execution.StateMutation, revision uint6
 	buffer = append(buffer, schema, packedFrameCodecNone)
 	buffer = appendUvarint(buffer, uint64(len(headerBytes)))
 	buffer = append(buffer, headerBytes...)
-	return append(buffer, points...), len(legacy), nil
+	pointsAt := len(buffer)
+	return append(buffer, points...), &packedParts{header: header, schema: schema, pointsAt: pointsAt}, len(legacy), nil
 }
 
 // packedFrame reports whether these bytes are a framed record, by their first

@@ -110,3 +110,50 @@ func TestAReplayShortOfTimeSlowerThanItsNormalRoundLeavesNoReading(t *testing.T)
 		t.Fatalf("the group's reading is %v, want none", got)
 	}
 }
+
+// A Slot read in slices that takes its round past its normal round's budget
+// takes its reading back from a ring already full - a group's ring is full
+// once it has read sixteen rounds, which is most groups - and the next reading
+// takes that place: no other reading of the group is written over for it, and
+// every place is still read. Before, the place was cleared and the next
+// reading wrote over the oldest real one, the ring one reading short for
+// fifteen more.
+func TestAReadingTakenBackFromAFullRingLeavesItsPlaceToTheNextReading(t *testing.T) {
+	f := newFixture(t)
+	start := f.clock.now().Truncate(time.Minute)
+	for round := range readingsKept {
+		took := time.Duration(1+round%5) * time.Second
+		switch round {
+		case 1:
+			took = 8 * time.Second
+		case readingsKept - 1:
+			took = 9 * time.Second
+		}
+		f.clock.set(start.Add(time.Duration(round) * time.Minute))
+		wholeFirstRead(t, f, start.Unix()+int64(round)*60, took)
+	}
+	state := f.engine.groups["qg"]
+	if state.firstReads.count != readingsKept {
+		t.Fatalf("fixture: %d readings, want the ring full", state.firstReads.count)
+	}
+
+	replay := start.Add(readingsKept * time.Minute)
+	f.clock.set(replay)
+	readFor(t, f, shortReplay(f, replay.Unix(), sliceOf("a*"), 20*time.Second, time.Minute), 15*time.Second)
+	readFor(t, f, shortReplay(f, replay.Unix(), sliceOf("b*"), 20*time.Second, time.Minute), 10*time.Second)
+	if got, ok := f.engine.QueryDuration("qg"); !ok || got != 9*time.Second {
+		t.Fatalf("the round past its budget taken back: the reading is %v %v, want the longest left, the last normal round's 9 s", got, ok)
+	}
+
+	next := replay.Add(time.Minute)
+	f.clock.set(next)
+	wholeFirstRead(t, f, next.Unix(), 2*time.Second)
+	kept := false
+	for index := range state.firstReads.count {
+		kept = kept || state.firstReads.values[index] == 8*time.Second
+	}
+	if !kept || state.firstReads.count != readingsKept {
+		t.Fatalf("the next reading wrote over another (round 1's 8 s kept: %t, %d readings): the ring holds %v", kept,
+			state.firstReads.count, state.firstReads.values)
+	}
+}

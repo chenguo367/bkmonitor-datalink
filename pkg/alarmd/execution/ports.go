@@ -52,6 +52,12 @@ type SideEffectAdmitter interface {
 	// its own script -- the Progress commit -- so the fence is read once, at
 	// the write, rather than once before it and again inside it.
 	CheckActivation(context.Context, SideEffectAdmissionRequest) (SideEffectAdmissionResult, error)
+	// CheckOwnerFence is Check without the activation: the owner fence
+	// alone. It is for a write whose own script does not run the fence - a
+	// gap statement, an event, the no-data memory and its ends - checked
+	// just before it, the activation having been read where the step was
+	// admitted (CheckActivation).
+	CheckOwnerFence(context.Context, FrozenExecutionContractRef, OwnerFence) error
 }
 
 type GapGuardStore interface {
@@ -161,6 +167,13 @@ type StateStore interface {
 	// RenewFrozenRuntime is: a store that lacked it would hold a round's worth
 	// between rounds, and nothing would say so.
 	ReleaseSlotWitnesses(SlotIdentity)
+	// ReleaseRuntimeWitnesses lets go of what the Slot's preflights kept of
+	// the keys a window read, once the window has landed: its writes took
+	// theirs, and nothing of the attempt takes the rest. Required for the
+	// same reason: a store that lacked it would hold every key the Slot
+	// leaves unwritten to the attempt's end, beside the share the Slot is
+	// cut by (014 next9, the skip-on cell of ④ §7 item 4).
+	ReleaseRuntimeWitnesses(SlotIdentity, []StateKeyIdentity)
 }
 
 type ProgressStore interface {

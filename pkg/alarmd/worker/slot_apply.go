@@ -855,7 +855,13 @@ func (apply *slotApply) complete(
 	// A round that left members unwritten waits for its segments: their
 	// write not landing fails the Slot, retryable, and the next attempt
 	// writes every member whole (014 B3 §9.4).
-	if coordinator.foldSegmentShadow(ctx, request, apply.shadow, header.DuePlans, apply.withheldNoData) {
+	// A write the fence refused is the owner's refusal, not a failed write
+	// (014 ⑩ F1): owner_refused, no backoff.
+	failed, refused := coordinator.foldSegmentShadow(ctx, request, apply.shadow, header.DuePlans, apply.withheldNoData)
+	if refused != nil {
+		return execution.SlotExecutionResult{}, refused
+	}
+	if failed {
 		return execution.SlotExecutionResult{Completed: false, Result: observability.ResultRetrying,
 			ReasonCode: execution.ReasonCode(contract.ReasonSegmentWriteFailed)}, nil
 	}

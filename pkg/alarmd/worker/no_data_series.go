@@ -383,7 +383,7 @@ func (coordinator *SlotExecutionCoordinator) applyNoDataMemory(
 	if len(mutations) == 0 {
 		return nil
 	}
-	defer retainedOwnerFrom(ctx).enter(slotPhaseNoDataWrite)()
+	defer enterOwnerPhase(ctx, slotPhaseNoDataWrite)()
 	held, mutations, refused, err := coordinator.holdNoDataFirstWrites(ctx, request, mutations)
 	if err != nil {
 		return err
@@ -409,6 +409,15 @@ func (coordinator *SlotExecutionCoordinator) applyNoDataMemory(
 	if err != nil {
 		return err
 	}
+	// The memory's scripts take it by its header, not by owner fence: a step
+	// of its own, the fence checked just before it (014 ⑩ F1), and the Slot
+	// begun.
+	fenceStep(ctx)
+	cleared, notCleared := coordinator.beforeWrite(ctx, true)
+	if notCleared != nil {
+		return notCleared
+	}
+	ctx = cleared
 	if err := execution.EnterCommit(ctx, execution.SlotStageState); err != nil {
 		return err
 	}

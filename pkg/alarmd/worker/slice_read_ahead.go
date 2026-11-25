@@ -331,10 +331,12 @@ func (stream *streamedExecution) readAheadWaitEnded(at time.Time) (time.Duration
 	return max(at.Sub(stream.readAheadWaitingSince), 0), true
 }
 
-// fitsShare reports whether bytes more fit the stream's share beside all it
-// holds, its reads ahead included, read from the read's goroutine
-// (retainedNow). Reads ahead judging at once may each pass with one batch:
-// the Slot's own reservation past the share then has them yield.
+// fitsShare reports whether bytes more fit the Slot's side of its share -
+// half of it, the other half the windows its apply goroutine writes (014
+// next9 4) - beside all the Slot's side holds, its reads ahead included, read
+// from the read's goroutine (retainedNow). Reads ahead judging at once may
+// each pass with one batch: the Slot's own reservation past the share then
+// has them yield.
 func (ahead *sliceReadAhead) fitsShare(bytes uint64) bool {
 	share := ahead.coordinator.qgShareBytes()
 	if share == 0 || ahead.stream == nil {
@@ -344,7 +346,12 @@ func (ahead *sliceReadAhead) fitsShare(bytes uint64) bool {
 	for phase := range ahead.stream.retainedNow {
 		held += ahead.stream.retainedNow[phase].Load()
 	}
-	return held+bytes <= share
+	// The Slot's side of the share: what the windows in flight give back as
+	// they land is the apply side's half, as the slice limit counts it
+	// (sliceLimit), and so is what the apply side holds, which retainedNow
+	// does not carry.
+	held -= min(ahead.stream.inflightHeld.Load(), held)
+	return held+bytes <= share/2
 }
 
 // ConsumeSeries keeps the batch, its bytes taken as the stream would charge

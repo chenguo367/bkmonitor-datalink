@@ -104,6 +104,7 @@ var reasonSourcesV2 = map[string]ReasonSourceV2{
 	ReasonQGBudgetShareExceeded:       ReasonSourceMet,
 	ReasonInputSliceUnsupported:       ReasonSourceMet,
 	ReasonInputSliceValueConcentrated: ReasonSourceMet,
+	ReasonInputSliceLeavesExhausted:   ReasonSourceMet,
 	ReasonInputSliceQueryTooLong:      ReasonSourceMet,
 	ReasonReadAheadContextEnded:       ReasonSourceMet,
 	ReasonResourceHardStop:            ReasonSourceMet,

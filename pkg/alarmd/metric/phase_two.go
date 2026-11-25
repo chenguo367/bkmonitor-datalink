@@ -110,6 +110,8 @@ type phaseTwoMetrics struct {
 	sliceReadAhead                 *prometheus.CounterVec
 	seriesNotEvaluated             *prometheus.CounterVec
 	sliceReadAheadYields           *prometheus.CounterVec
+	windowZeroBoundCuts            *prometheus.CounterVec
+	windowAccountingClamped        *prometheus.CounterVec
 	sliceReadAheadWaits            *prometheus.CounterVec
 	sliceReadAheadWaitSeconds      prometheus.Counter
 	sliceReadAheadWaitingSeconds   prometheus.Counter
@@ -1034,6 +1036,31 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"Counted from completed Slots, whose rows carry what the yielded reads held " +
 			"(read_ahead_yielded_bytes), the farthest from the slice being read (read_ahead_yield_distance_max) " +
 			"and the longest any read ahead waited for room (read_ahead_wait_millis_max)."}, []string{"phase"})
+	metrics.windowZeroBoundCuts = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem,
+		Name: "slot_window_zero_bound_cuts_total", Help: "Windows cut while the window bound was zero: what the Slot " +
+			"holds outside the window being filled had reached half its Query Group share (the bound is share/2 less " +
+			"that), so each series merged was cut into a window of its own. reason is the retained phase holding the " +
+			"most of what is outside: input (the series' inputs and the reads ahead), gap (the gap facts), output and " +
+			"state (the results, summary and State outside the window). Any increase means a Query Group ran one " +
+			"series per window: its output is correct but each series pays its own Sequence and fence check, so the " +
+			"Slot is slow; read it beside the group's share and slot_operation_duration_seconds. input points at slices " +
+			"too large or reads ahead holding too much, state or output at a share too small. Counted from completed " +
+			"Slots. Every reason exists from the start."}, []string{"reason"})
+	for _, reason := range observability.WindowZeroBoundReasons {
+		metrics.windowZeroBoundCuts.WithLabelValues(reason)
+	}
+	metrics.windowAccountingClamped = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem,
+		Name: "slot_window_accounting_clamped_slots_total", Help: "Slots applied window by window in which what the " +
+			"window accounting takes off what the Slot holds came to more than the Slot held, by where: window_outside " +
+			"(the window bound takes off the window being filled, what the windows in flight give back as they land and " +
+			"what the apply side holds) and slice_others (the slice limit takes off the slice being read and the same " +
+			"in-flight parts). Should be zero. An increase means a window's give-back was counted twice: the take-off " +
+			"was clamped to what the Slot held, and the window bound or the slice limit was larger than its half of the " +
+			"Query Group share - shown otherwise only as a merge or an input the share refused. Counted from completed " +
+			"Slots, once per Slot and reason. Every reason exists from the start."}, []string{"reason"})
+	for _, reason := range observability.WindowAccountingClamps {
+		metrics.windowAccountingClamped.WithLabelValues(reason)
+	}
 	metrics.sliceReadAheadWaits = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem,
 		Name: "worker_slice_read_ahead_waits_total", Help: "Waits of the slices read ahead for room - a read that has " +
 			"an answer's bytes and finds its limit, the pool or the share full waits, keeping what it took and reading " +
@@ -2424,7 +2451,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.queryAdmission, m.queryDownstreamDistress,
 		m.noDataSlotPlans, m.noDataAbsences, m.noDataManualCloseDropped, m.noDataManualCloseReadFailures, m.targetPlanResolutions, m.targetSelectorResolutions, m.targetExcludedAbsentMembers, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.inPlaceWaits, m.inPlaceHeldInputBytes, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetRedis,
-		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.retainedShareApproaching, m.inputSlices, m.slicedSlots, m.firstSeenUnseen, m.sliceReadAhead, m.seriesNotEvaluated, m.sliceReadAheadYields, m.sliceReadAheadWaits, m.sliceReadAheadWaitSeconds, m.sliceReadAheadWaitingSeconds, m.inputSliceTimeouts, m.inputSliceShapes, m.noDataStagesAhead, m.noDataStageAheadDiffers, m.noDataGroupsStagedAhead, m.schedulePruneSkipped, m.scheduleCutoverDuration,
+		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.retainedShareApproaching, m.inputSlices, m.slicedSlots, m.firstSeenUnseen, m.sliceReadAhead, m.seriesNotEvaluated, m.sliceReadAheadYields, m.windowZeroBoundCuts, m.windowAccountingClamped, m.sliceReadAheadWaits, m.sliceReadAheadWaitSeconds, m.sliceReadAheadWaitingSeconds, m.inputSliceTimeouts, m.inputSliceShapes, m.noDataStagesAhead, m.noDataStageAheadDiffers, m.noDataGroupsStagedAhead, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
 		m.scheduleCutoverQueryGroups, m.scheduleCutoverReadHoldLinks, m.fleetOverdueEpisodes, m.fleetRestoreUnread, m.scheduleCutoverTimelinesRead, m.scheduleCutoverFirstDuration,
 		m.scheduleCutoverFirstTimelines, m.replayExpiries, m.replayTakeovers, m.slotDiversions, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
@@ -3717,6 +3744,15 @@ func (m phaseTwoMetrics) observeSlicing(usage *observability.SlotBudgetUsageFact
 	}
 	for phase, count := range [...]uint64{usage.ReadAheadYieldsNormalInput, usage.ReadAheadYieldsNormalOutput, usage.ReadAheadYieldsNormalGap, usage.ReadAheadYieldsNormalNoData, usage.ReadAheadYieldsSlotOutput, usage.ReadAheadYieldsFrames, usage.ReadAheadYieldsWindowBound, usage.ReadAheadYieldsQueryFree, usage.ReadAheadYieldsOther} {
 		m.sliceReadAheadYields.WithLabelValues(observability.SliceReadAheadYieldPhases[phase]).Add(float64(count))
+	}
+	for reason, count := range [...]uint64{usage.WindowZeroBoundCutsInput, usage.WindowZeroBoundCutsGap,
+		usage.WindowZeroBoundCutsOutput, usage.WindowZeroBoundCutsState} {
+		m.windowZeroBoundCuts.WithLabelValues(observability.WindowZeroBoundReasons[reason]).Add(float64(count))
+	}
+	for reason, clamped := range [...]uint64{usage.WindowOutsideClamped, usage.SliceOthersClamped} {
+		if clamped > 0 {
+			m.windowAccountingClamped.WithLabelValues(observability.WindowAccountingClamps[reason]).Inc()
+		}
 	}
 	m.inputSliceTimeouts.WithLabelValues(observability.InputSliceTimeoutSplitSucceeded).Add(float64(usage.InputSliceTimeouts))
 	for outcome, count := range [...]uint64{usage.InputSliceShapeStarted, usage.InputSliceShapeKept, usage.InputSliceShapeMerged, usage.InputSliceShapeVoidedRevision, usage.InputSliceShapeVoidedDimensions, usage.InputSliceShapeVoidedMaxLeaves, usage.InputSliceShapeRefusedNotALeaf, usage.InputSliceShapeRefusedNotAPartition, usage.InputSliceShapeRefusedMaxLeaves, usage.InputSliceShapeEvictedIdle, usage.InputSliceShapeRefusedCondition, usage.InputSliceShapeRefusedSingleValue, usage.InputSliceShapeRefusedSplitError, usage.InputSliceShapeMergeRefused, usage.InputSliceStartDiscarded, usage.InputSliceShapeSizedKept} {

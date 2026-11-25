@@ -145,7 +145,12 @@ func newFailoverHarness(t *testing.T) *failoverHarness {
 	h.ports, _, h.coordinator = workerG4CoordinatorWith(t, observer, nil, func(ports *worker.Ports) {
 		h.resolve = &failoverResolve{next: ports.Finalization}
 		ports.Finalization = h.resolve
-		ports.State, ports.GapGuard, ports.Progress, ports.Admission = h.state, h.state, h.progress, admitter
+		// A Progress store that begins every Slot at its start: the failover
+		// is put after a Slot's BeginSlot, its State written over it. A
+		// BeginSlot put off to the first write (014 ⑩ F5) would meet the
+		// failover itself and write nothing, which is not what these cases
+		// are about.
+		ports.State, ports.GapGuard, ports.Progress, ports.Admission = h.state, h.state, beginningProgress{h.progress}, admitter
 	})
 	return h
 }

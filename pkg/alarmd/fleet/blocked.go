@@ -215,6 +215,7 @@ var failureFacets = map[string]facets{
 	"QG_BUDGET_SHARE_EXCEEDED":       {StageEvaluate, ClassCapacity, DependencyNone},
 	"INPUT_SLICE_UNSUPPORTED":        {StageEvaluate, ClassCapacity, DependencyNone},
 	"INPUT_SLICE_VALUE_CONCENTRATED": {StageEvaluate, ClassCapacity, DependencyNone},
+	"INPUT_SLICE_LEAVES_EXHAUSTED":   {StageEvaluate, ClassCapacity, DependencyNone},
 	"INPUT_SLICE_QUERY_TOO_LONG":     {StageEvaluate, ClassCapacity, DependencyNone},
 	// A supplement planned a query its kept read did not hold: the query
 	// stage, as this deployment's own contract between plan and read.

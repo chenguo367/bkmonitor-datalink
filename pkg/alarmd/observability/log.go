@@ -574,19 +574,25 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	// predates this and is nested, so its members are readable on a row and
 	// not selectable by one.
 	if f := observation.SlotTiming; f != nil {
+		attributes = appendSlotTiming(attributes, f)
+	}
+	if f := observation.SlotExecuteSlow; f != nil {
+		// Flat, as the phases are on slot_completed and under their names, so
+		// a reader filters the slow ones the way it filters the rest.
 		attributes = append(attributes,
-			slog.Uint64("slot_millis", f.Slot),
-			slog.Uint64("input_millis", f.Input),
-			slog.Uint64("preflight_millis", f.Preflight),
-			slog.Uint64("evaluate_millis", f.Evaluate),
-			slog.Uint64("apply_millis", f.Apply),
-			slog.Uint64("record_ids_millis", f.RecordIDs),
-			slog.Uint64("cut_millis", f.Cut),
-			slog.Uint64("merge_millis", f.Merge),
-			slog.Uint64("series_millis", f.Series),
-			slog.Uint64("no_data_read_millis", f.NoDataRead),
-			slog.Uint64("no_data_write_millis", f.NoDataWrite),
-			slog.Uint64("unattributed_millis", f.Unattributed))
+			slog.Int64("period_seconds", f.PeriodSeconds),
+			slog.Int64("threshold_ms", f.ThresholdMillis),
+			slog.Float64("execution_slot_wait_ms", f.ExecutionSlotWaitMillis),
+			slog.Int64("query_permit_wait_ms", f.QueryPermitWaitMillis),
+			slog.Int64("query_permit_wait_ms_max", f.QueryPermitWaitMillisMax),
+			slog.Uint64("query_wait_millis", f.QueryWaitMillis),
+			slog.Uint64("query_body_millis", f.QueryBodyMillis),
+			slog.Uint64("query_wait_millis_max", f.QueryWaitMillisMax),
+			slog.Uint64("query_body_millis_max", f.QueryBodyMillisMax),
+			slog.Uint64("input_slices", f.InputSlices),
+			slog.Uint64("input_slice_tail_millis", f.InputSliceTailMillis),
+			slog.Uint64("input_slice_tail_millis_max", f.InputSliceTailMillisMax))
+		attributes = appendSlotTiming(attributes, &f.Timing)
 	}
 	if observation.CapacityBudget != "" {
 		attributes = append(attributes, slog.String("capacity_budget", string(observation.CapacityBudget)))
@@ -1406,6 +1412,27 @@ func isURLTerminatorByte(char byte) bool {
 	default:
 		return false
 	}
+}
+
+// appendSlotTiming is a Slot's phases, flat under their names: on its
+// slot_completed line and on its slot_execute_slow line alike.
+func appendSlotTiming(attributes []slog.Attr, f *SlotTimingFacts) []slog.Attr {
+	return append(attributes,
+		slog.Uint64("slot_millis", f.Slot),
+		slog.Uint64("input_millis", f.Input),
+		slog.Uint64("preflight_millis", f.Preflight),
+		slog.Uint64("evaluate_millis", f.Evaluate),
+		slog.Uint64("apply_millis", f.Apply),
+		slog.Uint64("apply_wait_millis", f.ApplyWait),
+		slog.Uint64("land_millis", f.Land),
+		slog.Uint64("apply_overlap_millis", f.ApplyOverlap),
+		slog.Uint64("record_ids_millis", f.RecordIDs),
+		slog.Uint64("cut_millis", f.Cut),
+		slog.Uint64("merge_millis", f.Merge),
+		slog.Uint64("series_millis", f.Series),
+		slog.Uint64("no_data_read_millis", f.NoDataRead),
+		slog.Uint64("no_data_write_millis", f.NoDataWrite),
+		slog.Uint64("unattributed_millis", f.Unattributed))
 }
 
 func appendObservationCounts(attributes []slog.Attr, counts Counts) []slog.Attr {

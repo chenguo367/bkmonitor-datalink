@@ -807,6 +807,11 @@ func (store *g3aCrashStateStore) ReleaseSlotWitnesses(slot execution.SlotIdentit
 	store.delegate.ReleaseSlotWitnesses(slot)
 }
 
+// ReleaseRuntimeWitnesses is the wrapped store's.
+func (store *g3aCrashStateStore) ReleaseRuntimeWitnesses(slot execution.SlotIdentity, keys []execution.StateKeyIdentity) {
+	store.delegate.ReleaseRuntimeWitnesses(slot, keys)
+}
+
 func (store *g3aCrashStateStore) RenewFrozenRuntime(
 	_ context.Context, request execution.FrozenStateRenewalRequest,
 ) (execution.FrozenStateRenewalResult, error) {

@@ -39,6 +39,14 @@ func (coordinator *SlotExecutionCoordinator) countSlotBegin(status execution.Pro
 	}
 }
 
+// countSlotBeginDeferred counts an attempt that put its BeginSlot off and
+// made none (execution.SlotBeginDeferred).
+func (coordinator *SlotExecutionCoordinator) countSlotBeginDeferred() {
+	if counter := coordinator.ports.SlotCounts; counter != nil {
+		counter.RecordSlotBegin(execution.SlotBeginDeferred)
+	}
+}
+
 // countNotCommitted counts an attempt that began its Slot, once, as it
 // returns: nothing when its Progress commit went through, and otherwise the
 // reason it returned on (notCommittedReason). mode is the finalization the

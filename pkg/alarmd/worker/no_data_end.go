@@ -191,12 +191,15 @@ func (stream *streamedExecution) noDataEndRound() noDataEndRound {
 // (withheld) is left as it was.
 func (coordinator *SlotExecutionCoordinator) applyNoDataEnds(ctx context.Context, request execution.SlotExecutionRequest,
 	header execution.InternalExecutionHeader, summary *slotEvaluationSummary, withheld map[execution.PlanIdentity]struct{}) error {
-	defer retainedOwnerFrom(ctx).enter(slotPhaseNoDataWrite)()
+	defer enterOwnerPhase(ctx, slotPhaseNoDataWrite)()
 	round := noDataEndsFrom(ctx)
 	index := coordinator.ports.NoDataEnds
 	if len(round) == 0 || index == nil || coordinator.ports.OpenAlerts == nil {
 		return nil
 	}
+	// The ends' index and the recovery events they send are a step of their
+	// own: the fence checked before the first of them (014 ⑩ F1).
+	fenceStep(ctx)
 	plans := make([]execution.PlanIdentity, 0, len(round))
 	for plan := range round {
 		plans = append(plans, plan)
@@ -413,6 +416,13 @@ func (coordinator *SlotExecutionCoordinator) applyPlanNoDataEnds(ctx context.Con
 		}
 	}
 	if len(decision.ends) > 0 {
+		// Before the recovery events, whose send reports a failure rather
+		// than raising it: a refused owner sends none and returns.
+		cleared, notCleared := coordinator.beforeWrite(ctx, true)
+		if notCleared != nil {
+			return notCleared
+		}
+		ctx = cleared
 		sent, held, failed := coordinator.sendNoDataEnds(ctx, request, executionID, judgedAt, due, decision.ends)
 		write.Deletes = append(append(write.Deletes, sent...), held...)
 		if len(sent) > 0 {
@@ -431,6 +441,13 @@ func (coordinator *SlotExecutionCoordinator) applyPlanNoDataEnds(ctx context.Con
 	if len(write.Puts) == 0 && len(write.Deletes) == 0 {
 		return nil
 	}
+	// The index's write takes no owner fence: checked before it, in this
+	// step, the Slot begun. Raised, unlike the write's own failure.
+	cleared, notCleared := coordinator.beforeWrite(ctx, true)
+	if notCleared != nil {
+		return notCleared
+	}
+	ctx = cleared
 	if err := execution.EnterCommit(ctx, execution.SlotStageState); err != nil {
 		return err
 	}

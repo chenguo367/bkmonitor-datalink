@@ -204,6 +204,16 @@ func (store *ExecutionStore) ReleaseSlotWitnesses(slot execution.SlotIdentity) {
 	store.witnesses.release(slot)
 }
 
+// ReleaseRuntimeWitnesses lets go of the preflight witnesses of keys, read
+// by slot's attempt in a window that has landed: the ones its writes took
+// are gone, and nothing of the attempt takes the rest - the members its
+// round left unwritten, the Plans it held back or replaced, the mutations
+// admission refused, the series found already applied or superseded
+// (runtimeWitnessCache.releaseLanded).
+func (store *ExecutionStore) ReleaseRuntimeWitnesses(slot execution.SlotIdentity, keys []execution.StateKeyIdentity) {
+	store.witnesses.releaseLanded(slot, keys)
+}
+
 // RuntimeWitnessStats reports the witness cache's items and estimated bytes.
 func (store *ExecutionStore) RuntimeWitnessStats() RuntimeWitnessStats {
 	return store.witnesses.stats()
@@ -475,7 +485,7 @@ func (store *ExecutionStore) AdmitRuntime(_ context.Context, request execution.S
 		}
 		// Sized in the representation the write stores. The revision only
 		// widens one varint in the header, so any revision measures the same.
-		encoded, refusal, legacyIDs := store.encodeForWrite(mutation, mutation.ExpectedBlobRevision+1)
+		encoded, parts, refusal, legacyIDs := store.encodeForWrite(mutation, mutation.ExpectedBlobRevision+1)
 		if refusal.reason != "" {
 			item.Status, item.ReasonCode = execution.StateAdmissionDeterministicInvalid, execution.ReasonCode(refusal.reason)
 			item.RefusalRule, item.RefusalText = refusal.rule, refusal.text
@@ -485,7 +495,7 @@ func (store *ExecutionStore) AdmitRuntime(_ context.Context, request execution.S
 			// revision is still the one the mutation expects; handed back so
 			// a caller that holds it spares the write the same encode.
 			item.Frame = &execution.EncodedStateFrame{MutationDigest: mutation.MutationDigest,
-				Revision: mutation.ExpectedBlobRevision + 1, Bytes: encoded, LegacyRecordIDs: legacyIDs}
+				Revision: mutation.ExpectedBlobRevision + 1, Bytes: encoded, LegacyRecordIDs: legacyIDs, Parts: parts}
 		}
 		result.Items[index] = item
 	}
@@ -496,12 +506,13 @@ func (store *ExecutionStore) AdmitRuntime(_ context.Context, request execution.S
 // encoded, when it was encoded from this mutation for this revision, and a
 // fresh encode otherwise. The two are the same bytes where the first is used
 // -- one encoder, one mutation, one revision -- so which one is written is a
-// matter of cost only.
+// matter of cost only. The parts it was framed from come with it: the
+// admission's when it kept them, nil when it did not.
 func (store *ExecutionStore) frameForWrite(
 	request execution.StateApplyRequest, index int, mutation execution.StateMutation, revision uint64, checked bool,
-) ([]byte, writeRefusal, int) {
+) ([]byte, *packedParts, writeRefusal, int) {
 	if frame := admittedFrame(request, index, mutation); frame != nil && frame.Revision == revision {
-		return frame.Bytes, writeRefusal{}, frame.LegacyRecordIDs
+		return frame.Bytes, partsOf(frame), writeRefusal{}, frame.LegacyRecordIDs
 	}
 	return store.encodeChecked(mutation, revision, checked)
 }

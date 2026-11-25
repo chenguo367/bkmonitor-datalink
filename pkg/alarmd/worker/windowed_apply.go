@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"sort"
 	"sync/atomic"
@@ -76,7 +77,7 @@ import (
 // The window being filled is what the Slot holds of its series: every State
 // result in stream.evaluated, every view in stream.state.Items. Once a window
 // lands - its output acknowledged and its State applied, or its Plan withheld
-// - it lets them go (releaseWindow), with the inputs of its series, and gives
+// - it lets them go (takeWindow, landWindow), with the inputs of its series, and gives
 // their bytes back; what is read of the Slot as a whole after that is in the
 // summary (slotEvaluationSummary) and in the few derived facts kept here.
 type slotWindows struct {
@@ -129,7 +130,7 @@ type slotWindows struct {
 	// phase for its record id buffers: the window's own share of the Slot.
 	// stateBytes is the state phase's part of it, the views, which go back
 	// whole; the output phase gives back all it holds but what the Plan
-	// results and the summary keep (releaseWindow).
+	// results and the summary keep (takeWindow).
 	bytes, stateBytes uint64
 	// recordIDs is the record id buffers the window's series were read
 	// through (materializeRecordIDs), by Dataset: the last prepared position
@@ -155,11 +156,10 @@ type slotWindows struct {
 	// not written, and their tail writes the budget's open statement.
 	replaced map[execution.PlanIdentity]struct{}
 	// largestSeries is the most input one series was charged while the
-	// Slot's records arrived, and ceiling the latest its windows may move its
-	// deadline to, fixed at the completion (fixWindowCeiling); zero when the
-	// execution has no deadline to move.
+	// Slot's records arrived. The latest its windows may move its deadline to
+	// is the stream's windowCeiling, fixed at the completion
+	// (fixWindowCeiling).
 	largestSeries uint64
-	ceiling       time.Time
 	// perWindow is s_min, the fewest series a window holds, fixed with the
 	// ceiling; ceilingWindows is how many windows the ceiling allows, and
 	// raisedWindows how many of them a no-data round's synthetic series
@@ -175,9 +175,29 @@ type slotWindows struct {
 	// resumed is, by Plan, the series this attempt found already written at
 	// this Slot and did not evaluate again (resumedSeriesResult).
 	resumed map[execution.PlanIdentity]int
-	landing planLanding
-	decided map[execution.PlanIdentity]struct{}
-	count   int
+	// readBeside is the keys of the window being filled read for a series
+	// merged without its view joining the window's - found already applied
+	// (mergeResumedSeries) or a later Slot's (skipSupersededSeries) - which
+	// stream.stateItems does not hold: the window lets go of their witnesses
+	// as it lands, with its items' (landWindow). releasing is the buffer the
+	// keys are handed to the store in.
+	readBeside []execution.StateKeyIdentity
+	releasing  []execution.StateKeyIdentity
+	landing    planLanding
+	decided    map[execution.PlanIdentity]struct{}
+	count      int
+	// pipe is the Slot's apply goroutine, started at the first window handed
+	// to it (windowed_pipeline.go); nil before.
+	pipe *applyPipe
+	// zeroBoundCuts is the windows cut while the window bound was zero, by
+	// the retained phase holding the most outside the window
+	// (observability.WindowZeroBoundReasons).
+	zeroBoundCuts [4]uint64
+	// clamped is whether what the window bound (windowOutside) or the slice
+	// limit (sliceOthers) takes off what the Slot holds ever came to more
+	// than it holds, in that order (observability.WindowAccountingClamps):
+	// never, unless a window's give-back is counted twice.
+	clamped [2]bool
 }
 
 // beginEvaluating notes the Plan the next result is for. The Plan before it
@@ -219,18 +239,28 @@ func (stream *streamedExecution) windowReleasable() uint64 {
 }
 
 // windowBoundPercent, between 1 and 99, bounds windows at that percent of
-// the share instead of all of it. Zero, as every build but the measurement's
-// leaves it, is the whole share: only the alarmd_measure build has a setter
-// (window_bound_measure.go), for the reading of how the collector paces when
-// the windows leave the soft limit room.
+// the share instead of half of it. Zero, as every build but the measurement's
+// leaves it, is half the share (windowBound): only the alarmd_measure build
+// has a setter (window_bound_measure.go), for the reading of how the
+// collector paces when the windows leave the soft limit room.
 var windowBoundPercent atomic.Uint32
 
-// windowBound is the most the window being filled may hold: the Slot's
+// windowBound is the most the window being filled may hold: half the Slot's
 // share of the pool, less what the Slot holds outside the window - the
 // inputs of the series no window has landed yet, the gap facts, the no-data
 // memory, the per-key structures and the summary, which grow across windows
 // and stay to the Slot's end. The windows landed before are not in it: they
 // gave their bytes back when they landed.
+//
+// Half, because a Slot holds two windows at once: one being written while
+// the next is filled (014 next9 4, the window pipeline). The share is halved
+// before what is outside is taken from it - S/2 - O, not (S - O)/2: the
+// window written was cut at no more than S/2 less what was outside then,
+// and stops growing; the one filled is held to S/2 less what is outside now;
+// together with what is outside now they come to no more than S less what
+// was outside at the cut, whichever way the outside moved since. Halving
+// after taking it off would let a read ahead that came in since put the Slot
+// past its share.
 //
 // A Slot that never fills a window never asks: its window is the Slot, the
 // bound is the share less what it holds outside its results, and the merge
@@ -240,32 +270,98 @@ func (stream *streamedExecution) windowBound() uint64 {
 	if share == 0 {
 		return math.MaxUint64
 	}
+	share /= 2
 	if percent := windowBoundPercent.Load(); percent > 0 && percent < 100 {
-		share = share / 100 * uint64(percent)
+		share = stream.coordinator.qgShareBytes() / 100 * uint64(percent)
 	}
-	outside := stream.retainedTotal() - min(stream.windowReleasable(), stream.retainedTotal())
+	return boundLess(share, stream.windowOutside())
+}
+
+// windowOutside is what the Slot holds outside the window being filled, as
+// the window bound reads it: not the window itself (windowReleasable), nor
+// what the windows handed and not landed will give back when they land - each
+// was cut within its own half of the share, its inputs, views and witnesses
+// among what was outside it then, and grows no more - nor what the apply side
+// holds for writing them, which it judges against the share on its own
+// (applyPipe.judgeHeldLocked). So the window filled is cut where it would be
+// were the windows before it landed as they were cut, however far the apply
+// goroutine has got (n8-window-pipeline 3.5: the share holds the same way).
+// A window in flight gives back the witness of every key it was cut with,
+// written or not (takeWindow reckons witnesses by the keys read, landWindow
+// lets go of them in the store): a key one leaves unwritten - a member its
+// round leaves, a Plan held back or replaced, a mutation admission refused,
+// a key the preflight found already applied or superseded (not a mutation
+// at all) - no longer stays with the Slot after it lands, so what the Slot
+// holds outside its windows does not grow by the keys its rounds leave.
+func (stream *streamedExecution) windowOutside() uint64 {
+	total := stream.retainedTotal()
+	inside := stream.windowReleasable() + stream.applyHeld()
+	for phase := range retainPhaseCount {
+		inside += stream.inflightRelease(phase)
+	}
+	if inside > total {
+		stream.windows.clamped[0] = true
+	}
+	return total - min(inside, total)
+}
+
+// retainPhaseWitness reads, in inflightRelease, the part of the state phase
+// the windows in flight give back for the keys they write.
+const retainPhaseWitness = retainPhaseCount
+
+// inflightRelease is what the windows handed and not landed will give back of
+// phase when they land, as they were cut; for retainPhaseWitness, the
+// witnesses among their state.
+func (stream *streamedExecution) inflightRelease(phase retainPhase) uint64 {
+	if pipe := stream.windows.pipe; pipe != nil {
+		return pipe.inflightRelease[phase]
+	}
+	return 0
+}
+
+func boundLess(share, outside uint64) uint64 {
 	if outside >= share {
 		return 0
 	}
 	return share - outside
 }
 
+// inflightEffects is the State and event counts of the windows handed to
+// the apply goroutine and not yet landed: still the Slot's, in hand.
+func (stream *streamedExecution) inflightEffects() effectCounts {
+	if pipe := stream.windows.pipe; pipe != nil {
+		return pipe.inflightEffects
+	}
+	return effectCounts{}
+}
+
+// windowCap is the most State mutations or events one window holds of a
+// per-Slot cap: half of it, at least one. A Slot holds two windows at once -
+// one written, one filled - and the cap bounds the two together: each is cut
+// at its own half, whatever the other's progress, so where a window is cut
+// does not depend on how far the window before it is written. A merge past
+// the cap with a window in flight waits for it to land (mergeMeasured).
+func windowCap(slotCap uint64) uint64 {
+	return max(slotCap/2, 1)
+}
+
 // windowBeforeMerge applies the window being filled when the evaluated
-// series next would overfill it: past the per-Slot State mutation or event
-// cap, or past the window's bytes bound - what the window holds and what the
+// series next would overfill it: past its half of the per-Slot State
+// mutation or event cap (windowCap), or past the window's bytes bound - what the window holds and what the
 // merge would reserve (measured) together above windowBound, which is the
 // merge the share would refuse. The series then starts the next window. A
 // window holding no State and no event is not applied for it: a series that
 // alone does not fit is refused by name, as it always was.
 func (stream *streamedExecution) windowBeforeMerge(ctx context.Context, next execution.EvaluationResult, measured mergeBytes) error {
 	windows := &stream.windows
-	if stream.supplement != nil || windows.single || stream.effects.states+stream.effects.events == 0 {
+	own := stream.effects.minus(stream.inflightEffects())
+	if stream.supplement != nil || windows.single || own.states+own.events == 0 {
 		return nil
 	}
 	delta := addedEffectCounts(stream.evaluated, next)
 	budget := stream.coordinator.slotBudget()
-	full := stream.effects.states+delta.states > budget.MaxStateMutations ||
-		stream.effects.events+delta.events > budget.MaxEvents
+	full := own.states+delta.states > windowCap(budget.MaxStateMutations) ||
+		own.events+delta.events > windowCap(budget.MaxEvents)
 	if !full && stream.windowReleasable() > 0 {
 		// A series that alone would not fit the window the read ahead leaves
 		// it is judged again once the read ahead has yielded. No refusal was
@@ -280,11 +376,39 @@ func (stream *streamedExecution) windowBeforeMerge(ctx context.Context, next exe
 	if !full {
 		return nil
 	}
+	if stream.windowBound() == 0 {
+		windows.zeroBoundCuts[stream.zeroBoundReason()]++
+	}
 	return stream.cutWindow(ctx)
 }
 
-// cutWindow applies the window being filled, every series before
-// windows.reached, running the head first if no window has been applied.
+// zeroBoundReason is the retained phase holding the most of what the Slot
+// holds outside the window being filled, as the window bound reads it
+// (windowOutside): the input with the reads ahead; the gap facts; the output
+// and the State less the window's own share of them (windows.bytes,
+// windows.stateBytes), the windows in flight and what the apply side holds.
+func (stream *streamedExecution) zeroBoundReason() int {
+	windows := &stream.windows
+	byPhase := stream.retainedByPhase
+	less := func(held, inside uint64) uint64 { return held - min(inside, held) }
+	outside := [4]uint64{
+		less(byPhase[retainPhaseInput]+stream.aheadBytes.Load(), stream.inflightRelease(retainPhaseInput)),
+		byPhase[retainPhaseGap],
+		less(byPhase[retainPhaseOutput], less(windows.bytes, windows.stateBytes)+stream.inflightRelease(retainPhaseOutput)),
+		less(byPhase[retainPhaseState], windows.stateBytes+stream.inflightRelease(retainPhaseState)),
+	}
+	most := 0
+	for reason := range outside {
+		if outside[reason] > outside[most] {
+			most = reason
+		}
+	}
+	return most
+}
+
+// cutWindow cuts the window being filled, every series before
+// windows.reached, and hands it to the apply goroutine to be written,
+// running the head first if no window has been cut.
 func (stream *streamedExecution) cutWindow(ctx context.Context) error {
 	defer stream.enter(slotPhaseCut)()
 	windows := &stream.windows
@@ -298,7 +422,16 @@ func (stream *streamedExecution) cutWindow(ctx context.Context) error {
 			return nil
 		}
 	}
-	return stream.coordinator.applyWindow(ctx, stream, false)
+	// A safe point: the windows landed give their bytes back before this one
+	// is taken off (takeWindow reads what the output phase holds).
+	if err := stream.takeLandings(ctx); err != nil {
+		return err
+	}
+	task, err := stream.takeWindow(ctx, false)
+	if err != nil {
+		return err
+	}
+	return stream.handOver(ctx, applyTask{window: task})
 }
 
 // headOpenStatements is the open statement each due Plan writes this Slot,
@@ -493,36 +626,32 @@ func (stream *streamedExecution) windowParts(views []execution.RuntimeStateView)
 	return ordered, nil
 }
 
-// applyWindow writes the window being filled, as its own Sequence of the
+// writeWindow writes a window cut from the Slot, as its own Sequence of the
 // window's State keys: Plan by Plan, admission, the events written and
 // acknowledged, then the State. Frozen series are renewed from this window's
 // own views and results (P1): a key this window read and does not write.
 // Reading them off views kept from earlier windows against this window's
 // results would renew a key an earlier window wrote, and the Slot would
-// write it twice.
-func (coordinator *SlotExecutionCoordinator) applyWindow(ctx context.Context, stream *streamedExecution, final bool) error {
-	defer stream.enter(slotPhaseApply)()
+// write it twice. It reads only what the window took with it and what the
+// apply side keeps (slotApply, blocked, landing, decided); what the Slot gives
+// back for the window is landWindow's.
+func (coordinator *SlotExecutionCoordinator) writeWindow(ctx context.Context, stream *streamedExecution, task *windowTask) windowLanding {
 	windows := &stream.windows
 	apply := windows.apply
-	views := stream.state.Items
-	items := stream.stateItems
 	written := apply.written
-	parts, err := stream.windowParts(views)
-	if err != nil {
-		return err
-	}
-	if len(parts) > 0 {
-		windowState := execution.StatePreflightResult{Items: views}
+	landing := windowLanding{task: task}
+	if len(task.parts) > 0 {
+		windowState := execution.StatePreflightResult{Items: task.views}
 		stateIndex := indexStatePreflight(windowState)
-		windowCtx := withPlanLanding(withNoDataAbsenceStarts(ctx, stream.noDataAbsenceStarts), &windows.landing)
-		err = coordinator.ports.Sequencer.Sequence(windowCtx, sequencingScope(stream.header, items, nil), func(sequenceCtx context.Context) error {
+		windowCtx := withPlanLanding(withNoDataAbsenceStarts(ctx, task.absenceStarts), &windows.landing)
+		landing.err = coordinator.ports.Sequencer.Sequence(windowCtx, sequencingScope(stream.header, task.items, nil), func(sequenceCtx context.Context) error {
 			// From open: the window before left the commit (windowBoundary),
 			// and a watchdog that claimed the Slot since stops it here,
 			// before anything of this window is written.
 			if err := execution.EnterCommit(sequenceCtx, execution.SlotStageOutput); err != nil {
 				return err
 			}
-			for _, part := range parts {
+			for _, part := range task.parts {
 				plan := part.due.Identity
 				if apply.changed(part.due) {
 					continue
@@ -547,26 +676,12 @@ func (coordinator *SlotExecutionCoordinator) applyWindow(ctx context.Context, st
 			return nil
 		})
 	}
-	// The window has landed, or its Plans are withheld, or the attempt ends
-	// on err: either way nothing reads its results, views or inputs again.
-	releaseErr := stream.releaseWindow(ctx, final, apply.written-written)
-	// The window's State and event counts go back to the pool once it is
-	// applied: the per-Slot caps bound one window, not the Slot. The gap
-	// count stays, because the gap statements are the head's and the tail's.
-	stream.coordinator.releaseEffects(effectCounts{states: stream.effects.states, events: stream.effects.events})
-	stream.effectsSpent.states += stream.effects.states
-	stream.effectsSpent.events += stream.effects.events
-	stream.effects.states, stream.effects.events = 0, 0
-	windows.count++
-	stream.decideLanding(ctx, final)
-	if err != nil {
-		return err
+	landing.written = apply.written - written
+	stream.decideLanding(ctx, task)
+	if landing.err == nil {
+		stream.windowBoundary(ctx)
 	}
-	if releaseErr != nil {
-		return releaseErr
-	}
-	stream.windowBoundary(ctx)
-	return nil
+	return landing
 }
 
 // windowStepBound (T_w) is how long one window of a Slot applied window by
@@ -614,15 +729,15 @@ func (stream *streamedExecution) fixWindowCeiling(ctx context.Context, series in
 	}
 	budget := stream.coordinator.slotBudget()
 	if limit := budget.MaxStateMutations; limit > 0 {
-		perWindow = min(perWindow, limit)
+		perWindow = min(perWindow, windowCap(limit))
 	}
 	if limit := budget.MaxEvents; limit > 0 {
-		perWindow = min(perWindow, limit/stream.eventsPerSeries())
+		perWindow = min(perWindow, windowCap(limit)/stream.eventsPerSeries())
 	}
 	perWindow = max(perWindow, 1)
 	windows := (uint64(series) + perWindow - 1) / perWindow
 	stream.windows.perWindow, stream.windows.ceilingWindows = perWindow, windows
-	stream.windows.ceiling = deadline.Add(time.Duration(windows*stream.sliceCeilingFactor()) * windowStepBound)
+	stream.windowCeiling.Store(deadline.Add(time.Duration(windows*stream.sliceCeilingFactor()) * windowStepBound).UnixMilli())
 }
 
 // raiseSliceCeiling moves a Slot read in slices' ceiling as it reads them:
@@ -633,7 +748,7 @@ func (stream *streamedExecution) raiseSliceCeiling(ctx context.Context) {
 	if deadline.IsZero() || stream.windows.ceilingWindows == 0 {
 		return
 	}
-	stream.windows.ceiling = deadline.Add(time.Duration(stream.windows.ceilingWindows*stream.sliceCeilingFactor()) * windowStepBound)
+	stream.windowCeiling.Store(deadline.Add(time.Duration(stream.windows.ceilingWindows*stream.sliceCeilingFactor()) * windowStepBound).UnixMilli())
 }
 
 // eventsPerSeries is the most events one prepared series can send in this
@@ -666,11 +781,12 @@ func (stream *streamedExecution) eventsPerSeries() uint64 {
 // series a group, and a memory holds at most its Plan's max_groups groups.
 func (stream *streamedExecution) raiseWindowCeiling(synthetic int) {
 	windows := &stream.windows
-	if windows.ceiling.IsZero() || synthetic == 0 || windows.perWindow == 0 {
+	ceiling := stream.windowCeiling.Load()
+	if ceiling == 0 || synthetic == 0 || windows.perWindow == 0 {
 		return
 	}
 	more := (uint64(synthetic) + windows.perWindow - 1) / windows.perWindow
-	windows.ceiling = windows.ceiling.Add(time.Duration(more) * windowStepBound)
+	stream.windowCeiling.Store(time.UnixMilli(ceiling).Add(time.Duration(more) * windowStepBound).UnixMilli())
 	windows.ceilingWindows += more
 	windows.raisedWindows += more
 }
@@ -689,7 +805,8 @@ func (stream *streamedExecution) raiseWindowCeiling(synthetic int) {
 // execution.ErrExecutionDeclined. A Slot past its ceiling is not moved: it
 // stays as late as it is, and the next tick between two windows claims it.
 func (stream *streamedExecution) windowBoundary(ctx context.Context) {
-	if ceiling := stream.windows.ceiling; !ceiling.IsZero() {
+	if millis := stream.windowCeiling.Load(); millis != 0 {
+		ceiling := time.UnixMilli(millis)
 		now := stream.coordinator.now()
 		target := now.Add(windowStepBound)
 		if ceiling.Before(target) {
@@ -708,43 +825,110 @@ func (stream *streamedExecution) windowBoundary(ctx context.Context) {
 // value as a group's map keeps them, unexported there, so restated here, plus
 // the 64-character series digest it alone keeps alive), and the key's entry
 // in the Slot's repeat check (slotStateKeys) or, for a Slot applied whole, in
-// the stateItems its one Sequence is scoped by. The witness goes when an apply
-// consumes it, which releaseWindow gives back per key a window wrote; a key
-// renewed or left unwritten keeps it to the Slot's end, as the store does.
-var loadedKeyHeldBytes = stateWitnessHeldBytes +
+// the stateItems its one Sequence is scoped by. The witness goes when the
+// window that read the key lands, whether its apply consumed it or the key
+// was left unwritten, renewed or not (landWindow, which lets go of the
+// store's too); the rest stays to the Slot's end, and with it the line its
+// mutation's compare says while its window is in flight, held on the apply
+// goroutine as its duration (deferredDurationHeldBytes).
+var loadedKeyHeldBytes = stateWitnessHeldBytes + deferredDurationHeldBytes +
 	(uint64(unsafe.Sizeof(execution.StateKeyIdentity{})+unsafe.Sizeof(""))+1)*8/7
 
 const stateWitnessHeldBytes = 320 + 64
 
-// releaseWindow lets go of what a landed window held and gives its bytes
-// back, phase by phase (decision-020 batch 8, 2.2 step 4, 2.6):
+// windowTask is a window cut from the Slot to be written: what the window
+// takes with it, taken off the Slot as it is cut (takeWindow) so nothing the
+// Slot fills after the cut is in it, and what the Slot gives back for it once
+// it has landed (landWindow), worked out at the cut.
+type windowTask struct {
+	final bool
+	parts []windowPart
+	// views and items are the window's State views and the State keys its
+	// Sequence is scoped by; readBeside the keys it read beside them
+	// (slotWindows.readBeside).
+	views      []execution.RuntimeStateView
+	items      []execution.StatePreflightItem
+	readBeside []execution.StateKeyIdentity
+	// absenceStarts is the window's own copy of the absence starts of the
+	// no-data series it holds, for the output's manual-close check: the
+	// Slot's map goes on being written as later series are said.
+	absenceStarts noDataAbsenceStarts
+	// passed and resumed are the Slot's as the window was cut, which is what
+	// a window written as it is cut read (decideLanding).
+	passed  map[execution.PlanIdentity]struct{}
+	resumed map[execution.PlanIdentity]int
+	// stateBytes and outputBytes are what the window gives back of the state
+	// and output phases when it lands, and effects its State and event
+	// counts, which the per-Slot caps and the pool hold until then.
+	stateBytes, outputBytes uint64
+	effects                 effectCounts
+	// release is what the window will give back when it lands, by phase, as
+	// it is cut: its views and the witnesses of every key it read, its
+	// results, its series' inputs. Until it lands the window bound counts it
+	// as the window's, not outside the window filled next (windowOutside):
+	// the next window is then cut where it would be with this one landed.
+	release [retainPhaseCount]uint64
+	// series is the window's prepared series, a part of the slice the
+	// evaluation walks, let go of as the window is cut (letGoWindowInputs).
+	series []preparedSeries
+}
+
+// keysRead is how many State keys the window read: one a view, one a series
+// read beside them.
+func (task *windowTask) keysRead() int { return len(task.items) + len(task.readBeside) }
+
+// keysReadInto appends every State key the window read to keys.
+func (task *windowTask) keysReadInto(keys []execution.StateKeyIdentity) []execution.StateKeyIdentity {
+	for _, item := range task.items {
+		keys = append(keys, item.Identity)
+	}
+	return append(keys, task.readBeside...)
+}
+
+// windowLanding is a window written: how many State keys it wrote, and the
+// error it stopped on.
+type windowLanding struct {
+	task    *windowTask
+	written int
+	err     error
+}
+
+// takeWindow cuts the window being filled off the Slot (decision-020 batch 8,
+// 2.2 step 4, 2.6; 014 next9 4):
 //
 //   - State: its views, from stream.state.Items and stream.stateItems, and
-//     their charge (windows.stateBytes); the witnesses its writes consumed,
-//     one per key written. Whether a Plan saw anything written before the
-//     Slot is kept first (noteSeenViews), for unseenPlans in the tail.
+//     their charge (windows.stateBytes), given back when it lands with the
+//     witnesses of every key it read, one per key: the ones its writes
+//     consumed and the ones it lets go of unwritten. Whether a Plan saw
+//     anything written before the Slot is kept now (noteSeenViews), for
+//     unseenPlans in a slice's head and the tail.
 //   - Output: each Plan's State results - mutations and events with their
 //     message-less identities - Level outcomes and no-data end updates. The
 //     summary holds what is read of them after this; what stays is each Plan
 //     result's own fields - disposition, reason, gap statements, coverage -
-//     which the tail writes and decides from. The phase keeps what those and
-//     the summary are counted at and gives back the rest.
-//   - Input: the bindings of every prepared series before reached (all of
-//     them on the last window), from stream.streamed and prepared, with their
-//     host overlays (dropWindowInputs); and the record id buffers those
-//     series were read through (dropWindowRecordIDs).
+//     which the tail writes and decides from. What the phase gives back is
+//     what it holds now less what those and the summary are counted at,
+//     worked out now: the next window's results are retained under the same
+//     phase as they merge.
+//   - Input: the prepared series before reached (all of them on the last
+//     window): their bindings, holds and host overlays go now, their groups
+//     join the present sets, their bytes are given back as the window lands
+//     (letGoWindowInputs); and the record id buffers those series were read
+//     through (dropWindowRecordIDs).
 //
-// Effect counts went back already, by applyWindow.
-func (stream *streamedExecution) releaseWindow(ctx context.Context, final bool, written int) error {
+// Its State and event counts stay held until it lands (landWindow).
+func (stream *streamedExecution) takeWindow(ctx context.Context, final bool) (*windowTask, error) {
 	windows := &stream.windows
-	stream.noteSeenViews(stream.state.Items)
-	stream.state.Items, stream.stateItems = nil, nil
-	stream.unretain(retainPhaseState, windows.stateBytes)
-	if written > 0 {
-		consumed := min(uint64(written)*stateWitnessHeldBytes, stream.keysHeld)
-		stream.keysHeld -= consumed
-		stream.unretain(retainPhaseState, consumed)
+	views := stream.state.Items
+	parts, err := stream.windowParts(views)
+	if err != nil {
+		return nil, err
 	}
+	task := &windowTask{final: final, parts: parts, views: views, items: stream.stateItems, readBeside: windows.readBeside,
+		absenceStarts: stream.windowAbsenceStarts(parts), passed: maps.Clone(windows.passed), resumed: maps.Clone(windows.resumed),
+		stateBytes: windows.stateBytes, effects: stream.effects.minus(stream.inflightEffects())}
+	stream.noteSeenViews(views)
+	stream.state.Items, stream.stateItems, windows.readBeside = nil, nil, nil
 	var kept uint64
 	for index := range stream.evaluated.Plans {
 		plan := &stream.evaluated.Plans[index]
@@ -752,23 +936,111 @@ func (stream *streamedExecution) releaseWindow(ctx context.Context, final bool, 
 		// Counted as newEffectBytes counts a Plan result's first series.
 		kept += 2 * retainedObjectBytes(*plan)
 	}
-	if held, keep := stream.retainedByPhase[retainPhaseOutput], kept+stream.summaryHeld; held > keep {
-		stream.unretain(retainPhaseOutput, held-keep)
+	// Less the output of a window still in flight: it gives its own back as
+	// it lands.
+	if held, keep := stream.retainedByPhase[retainPhaseOutput], kept+stream.summaryHeld+stream.inflightRelease(retainPhaseOutput); held > keep {
+		task.outputBytes = held - keep
 	}
-	if note := windowSizesForMeasurement.Load(); note != nil {
-		through := windows.reached
-		if final {
-			through = len(windows.prepared)
-		}
-		(*note)(windows.bytes, through-windows.dropped)
-	}
-	windows.bytes, windows.stateBytes = 0, 0
 	through := windows.reached
 	if final {
 		through = len(windows.prepared)
 	}
+	if note := windowSizesForMeasurement.Load(); note != nil {
+		(*note)(windows.bytes, through-windows.dropped)
+	}
+	windows.bytes, windows.stateBytes = 0, 0
 	stream.dropWindowRecordIDs(through, final)
-	return stream.dropWindowInputs(ctx, through)
+	if through = min(through, len(windows.prepared)); through > windows.dropped {
+		task.series = windows.prepared[windows.dropped:through]
+		windows.dropped = through
+	}
+	inputs, err := stream.letGoWindowInputs(ctx, task.series)
+	if err != nil {
+		return nil, err
+	}
+	read := uint64(task.keysRead())
+	task.release[retainPhaseState] = task.stateBytes + min(read*stateWitnessHeldBytes, stream.keysHeld-min(stream.inflightRelease(retainPhaseWitness), stream.keysHeld))
+	task.release[retainPhaseOutput] = task.outputBytes
+	task.release[retainPhaseInput] = inputs
+	return task, nil
+}
+
+// windowAbsenceStarts is the absence starts of the no-data series the
+// window's results hold, by Plan: what the manual-close check reads of them
+// for the window's events.
+func (stream *streamedExecution) windowAbsenceStarts(parts []windowPart) noDataAbsenceStarts {
+	var own noDataAbsenceStarts
+	for _, part := range parts {
+		plan := part.due.Identity
+		starts := stream.noDataAbsenceStarts[plan]
+		if len(starts) == 0 {
+			continue
+		}
+		for _, result := range part.results {
+			for _, event := range result.Events {
+				start, found := starts[event.RecordRef.DimensionIdentityDigest]
+				if !found {
+					continue
+				}
+				if own == nil {
+					own = make(noDataAbsenceStarts)
+				}
+				if own[plan] == nil {
+					own[plan] = make(map[string]int64)
+				}
+				own[plan][event.RecordRef.DimensionIdentityDigest] = start
+			}
+		}
+	}
+	return own
+}
+
+// landWindow gives back what a window held once it is written, or once its
+// Plans are withheld, or the attempt ends on its error: either way nothing
+// reads its results, views or inputs again. Its State and event counts go
+// back to the pool: the per-Slot caps bound the windows in hand, not the
+// Slot. The gap count stays, because the gap statements are the head's and
+// the tail's.
+func (stream *streamedExecution) landWindow(ctx context.Context, landing windowLanding) error {
+	task := landing.task
+	if note := windowLandedForTest.Load(); note != nil {
+		before := stream.retainedByPhase
+		defer func() {
+			var given [retainPhaseCount]uint64
+			for phase := range given {
+				given[phase] = before[phase] - stream.retainedByPhase[phase]
+			}
+			(*note)(given)
+		}()
+	}
+	stream.unretain(retainPhaseState, task.stateBytes)
+	// Every key the window read gives its witness back as it lands: the ones
+	// its writes took, and the rest - the members its round left unwritten,
+	// a Plan held back or replaced, a mutation admission refused, a series
+	// found already applied or superseded - let go of in the store now, as
+	// nothing of the attempt takes them: a window writes only its own
+	// results, and a key is read in one window of an attempt. Kept to the
+	// attempt's end, they were what the Slot holds beside its slices
+	// growing as it read, and the slice limit falling with it (014 next9,
+	// ④ §7 item 4).
+	if keys := task.keysReadInto(stream.windows.releasing[:0]); len(keys) > 0 {
+		stream.coordinator.ports.State.ReleaseRuntimeWitnesses(stream.request.Contract.Slot, keys)
+		consumed := min(uint64(len(keys))*stateWitnessHeldBytes, stream.keysHeld)
+		stream.keysHeld -= consumed
+		stream.unretain(retainPhaseState, consumed)
+		// The buffer is kept for the next window, not the keys' strings.
+		clear(keys)
+		stream.windows.releasing = keys[:0]
+	}
+	stream.unretain(retainPhaseOutput, task.outputBytes)
+	stream.unretainInput(task.release[retainPhaseInput])
+	stream.coordinator.releaseEffects(task.effects)
+	stream.effectsSpent.states += task.effects.states
+	stream.effectsSpent.events += task.effects.events
+	stream.effects.states -= task.effects.states
+	stream.effects.events -= task.effects.events
+	stream.windows.count++
+	return landing.err
 }
 
 // noteSeenViews keeps, for each due Plan, whether the views show anything of
@@ -818,9 +1090,12 @@ func (stream *streamedExecution) holdInput(series execution.SeriesIdentityDigest
 	return hold
 }
 
-// dropWindowInputs lets go of the inputs of the prepared series from dropped
-// up to through, every one merged into a window that landed, and gives back
-// what they were charged: a series' batches once none of its streamed
+// letGoWindowInputs lets go of the inputs of a window's prepared series,
+// every one merged into it, as the window is cut - on the Slot's goroutine,
+// while what they were read through is still the Slot's: the next slice's
+// read replaces the streamed bindings, and its completion what a series'
+// dimensions are read from. It returns what they were charged, for the window
+// to give back as it lands (landWindow): a series' batches once none of its streamed
 // bindings is held - one series digest can feed several Plans, and a binding
 // no Plan's series consumes stays to the Slot's end. Named outputs stay to the Slot's end (the
 // events' detection snapshots read them), as do the completion-only
@@ -829,19 +1104,20 @@ func (stream *streamedExecution) holdInput(series execution.SeriesIdentityDigest
 // A no-data Plan's series are judged present after every Plan's own, from
 // the groups their PRIMARY dimensions project onto: each group's key is kept
 // in the Plan's present set (presentKeyHeldBytes), charged in place of the
-// inputs it came from.
-func (stream *streamedExecution) dropWindowInputs(ctx context.Context, through int) error {
-	windows := &stream.windows
-	through = min(through, len(windows.prepared))
-	if through <= windows.dropped {
-		return nil
+// inputs it came from. A series is in the present set from the cut on, as it
+// leaves the prepared series: one of the two always holds it
+// (presentSetFor).
+func (stream *streamedExecution) letGoWindowInputs(ctx context.Context, series []preparedSeries) (uint64, error) {
+	if len(series) == 0 {
+		return 0, nil
 	}
+	windows := &stream.windows
 	windows.streamedPeak = max(windows.streamedPeak, len(stream.streamed))
 	var released, kept uint64
-	for index := windows.dropped; index < through; index++ {
-		entry := windows.prepared[index]
+	for index := range series {
+		entry := series[index]
 		if entry.due.CompiledPlan != nil && entry.due.CompiledPlan.NoData() != nil {
-			for _, dimensions := range stream.seriesDimensionsFor(windows.prepared[index:index+1], entry.due.Identity) {
+			for _, dimensions := range stream.seriesDimensionsFor(series[index:index+1], entry.due.Identity) {
 				if key, fresh := windows.presentSet(*entry.due).Add(dimensions); fresh {
 					kept += presentKeyHeldBytes(key)
 					stream.stageAhead(ctx, *entry.due, key)
@@ -849,15 +1125,13 @@ func (stream *streamedExecution) dropWindowInputs(ctx context.Context, through i
 			}
 		}
 		released += stream.dropSeriesInputs(entry.due.Identity, entry.identity)
-		windows.prepared[index] = preparedSeries{}
+		series[index] = preparedSeries{}
 	}
-	windows.dropped = through
 	stream.compactStreamed()
 	if released >= kept {
-		stream.unretainInput(released - kept)
-		return nil
+		return released - kept, nil
 	}
-	return stream.reserveRetainedInput(ctx, kept-released)
+	return 0, stream.reserveRetainedInput(ctx, kept-released)
 }
 
 // dropSeriesInputs takes one prepared series' streamed bindings out of
@@ -907,23 +1181,53 @@ func (stream *streamedExecution) compactStreamed() {
 	stream.streamed, windows.streamedPeak = rebuilt, len(rebuilt)
 }
 
-// finishWindowedSlot applies the last window and runs the tail.
+// finishWindowedSlot hands the last window to the apply goroutine and, once
+// every window has landed, the tail as its last task; it returns once the
+// apply goroutine has ended (joinApply), on every path: a Plan that turned out
+// to need protecting converges in a Sequence of its own after it, and the
+// Slot's usage and timing are read after it.
+//
+// The tail reads what the Slot's goroutine keeps - the evaluated Plans, the
+// summary, the census, the no-data staging - and is handed over only once
+// every landing is taken: the Slot's goroutine then only waits on it.
 func (coordinator *SlotExecutionCoordinator) finishWindowedSlot(ctx context.Context, stream *streamedExecution) (execution.SlotExecutionResult, error) {
-	if err := coordinator.applyWindow(ctx, stream, true); err != nil {
+	defer stream.joinApply(ctx)
+	if err := stream.takeLandings(ctx); err != nil {
 		return execution.SlotExecutionResult{}, err
 	}
-	ctx = withUnseenPlans(withNoDataEnds(withNoDataAbsenceStarts(ctx, stream.noDataAbsenceStarts), stream.noDataEndRound()), stream.unseenPlans())
+	last, err := stream.takeWindow(ctx, true)
+	if err != nil {
+		return execution.SlotExecutionResult{}, err
+	}
+	if err := stream.handOver(ctx, applyTask{window: last}); err != nil {
+		return execution.SlotExecutionResult{}, err
+	}
+	if err := stream.drainApply(ctx); err != nil {
+		return execution.SlotExecutionResult{}, err
+	}
+	// Read on the Slot's goroutine, which keeps them.
+	starts, ends, unseen := stream.noDataAbsenceStarts, stream.noDataEndRound(), stream.unseenPlans()
 	var result execution.SlotExecutionResult
-	err := coordinator.ports.Sequencer.Sequence(ctx, sequencingScope(stream.header, nil, stream.gapItems), func(sequenceCtx context.Context) error {
-		// From open, as each window: the last one left the commit.
-		if err := execution.EnterCommit(sequenceCtx, execution.SlotStageState); err != nil {
-			return err
-		}
-		var tailErr error
-		result, tailErr = stream.windows.apply.windowedTail(sequenceCtx, stream)
-		return tailErr
-	})
-	return result, err
+	tail := func(applyCtx context.Context) error {
+		applyCtx = withUnseenPlans(withNoDataEnds(withNoDataAbsenceStarts(applyCtx, starts), ends), unseen)
+		return coordinator.ports.Sequencer.Sequence(applyCtx, sequencingScope(stream.header, nil, stream.gapItems), func(sequenceCtx context.Context) error {
+			// From open, as each window: the last one left the commit.
+			if err := execution.EnterCommit(sequenceCtx, execution.SlotStageState); err != nil {
+				return err
+			}
+			var tailErr error
+			result, tailErr = stream.windows.apply.windowedTail(sequenceCtx, stream)
+			return tailErr
+		})
+	}
+	if err := stream.handOver(ctx, applyTask{run: tail}); err != nil {
+		return execution.SlotExecutionResult{}, err
+	}
+	if err := stream.drainApply(ctx); err != nil {
+		return execution.SlotExecutionResult{}, err
+	}
+	stream.joinApply(ctx)
+	return result, nil
 }
 
 // windowedTail writes what follows the last window: each Plan's clear, or
@@ -1037,7 +1341,15 @@ func (apply *slotApply) tailStatements(ctx context.Context, due execution.DuePla
 // The released counts are the window's, so the replacement gaps are counted
 // against an empty window; the retained bytes stay until the stream releases
 // everything.
+//
+// It runs once the apply goroutine is idle (drainApply): it writes what the
+// apply side reads - which Plans are replaced, whose no-data is withheld -
+// and the windows already handed were cut before the cap was passed, and are
+// written as they always were. From here replaced is only read.
 func (stream *streamedExecution) completeWindowsBeyondSlotBudget(ctx context.Context) error {
+	if err := stream.drainApply(ctx); err != nil {
+		return err
+	}
 	stream.coordinator.releaseEffects(stream.effects)
 	stream.effectsSpent.states += stream.effects.states
 	stream.effectsSpent.events += stream.effects.events
@@ -1086,15 +1398,16 @@ func (stream *streamedExecution) completeWindowsBeyondSlotBudget(ctx context.Con
 // the keys of its later windows have not been sent, and counting what landed
 // so far would vouch for them. A no-data Plan's synthetic series come after
 // every Plan's own, so it is decided with the last window.
-func (stream *streamedExecution) decideLanding(ctx context.Context, final bool) {
+func (stream *streamedExecution) decideLanding(ctx context.Context, task *windowTask) {
 	windows := &stream.windows
+	final := task.final
 	recorder := appliedPlansFrom(ctx)
 	for _, due := range stream.header.DuePlans {
 		plan := due.Identity
 		if _, decided := windows.decided[plan]; decided {
 			continue
 		}
-		_, passed := windows.passed[plan]
+		_, passed := task.passed[plan]
 		noData := due.CompiledPlan != nil && due.CompiledPlan.NoData() != nil
 		if !final && (!passed || noData) {
 			continue
@@ -1103,7 +1416,7 @@ func (stream *streamedExecution) decideLanding(ctx context.Context, final bool) 
 			windows.decided = make(map[execution.PlanIdentity]struct{})
 		}
 		windows.decided[plan] = struct{}{}
-		resumed := windows.resumed[plan]
+		resumed := task.resumed[plan]
 		landed, expected := windows.landing.landed[plan]+resumed, windows.landing.expected[plan]+resumed
 		if expected == 0 {
 			continue

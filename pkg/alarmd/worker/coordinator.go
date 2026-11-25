@@ -327,6 +327,13 @@ func NewSlotExecutionCoordinator(ports Ports, budget ProvisionalBudget) (*SlotEx
 		budget.MaxEvents == 0 || budget.MaxGapMutations == 0 {
 		return nil, errors.New("alarmd worker: positive process provisional budgets are required")
 	}
+	if watchedPorts != nil {
+		ports = watchedPorts(ports)
+	}
+	// What a Slot's apply goroutine says is said by the Slot's goroutine as it
+	// takes the task's landing (windowed_pipeline.go): the observer is only
+	// ever called from the Slot's goroutine, as before the window pipeline.
+	ports.Observer = deferringObserver{next: ports.Observer}
 	coordinator := &SlotExecutionCoordinator{ports: ports, budget: budget}
 	coordinator.reservations.highSince = coordinator.now()
 	if borrower := ports.RetainedBorrower; borrower != nil {
@@ -475,9 +482,14 @@ type admittedState struct {
 var frameHeaderBytes = uint64(unsafe.Sizeof(execution.EncodedStateFrame{}))
 
 // frameRetainedBytes is what one kept frame holds of the retained budget:
-// the encoded record as allocated, and the frame around it.
+// the encoded record as allocated, the frame around it, and what the store
+// kept beside them of what it framed the record from (Parts).
 func frameRetainedBytes(frame *execution.EncodedStateFrame) uint64 {
-	return uint64(cap(frame.Bytes)) + frameHeaderBytes
+	held := uint64(cap(frame.Bytes)) + frameHeaderBytes
+	if frame.Parts != nil {
+		held += frame.Parts.RetainedBytes()
+	}
+	return held
 }
 
 // heldFrames is one Plan's admitted frames kept for its write, reserved
@@ -492,10 +504,10 @@ func frameRetainedBytes(frame *execution.EncodedStateFrame) uint64 {
 // not counted either.
 type heldFrames struct {
 	coordinator *SlotExecutionCoordinator
-	// owner is the Slot whose share the frames count against; its own
-	// holder entry carries them, so the frames register as a holder of their
-	// own only without one.
-	owner *streamedExecution
+	// owner is the Slot whose share the frames count against - its stream,
+	// or on its apply goroutine its apply pipe; its own holder entry carries
+	// them, so the frames register as a holder of their own only without one.
+	owner retainedOwner
 	bytes uint64
 	// slot and operation name whose frames these are, and since when they are
 	// held, for the retained-holder reading; bytesNow is bytes for it, and
@@ -611,41 +623,72 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	// what this attempt reports to the scheduler, which is about the Slot.
 	defer func() { coordinator.recordExecutionEvidence(ctx, request, applied) }()
 	ctx = withSlotTrace(ctx, request)
+	// Before every write of the attempt: what each needs before it is sent
+	// (slot_writes.go).
+	ctx, writes := withSlotWrites(ctx, coordinator, request)
 	if request.ExpiredRange != nil {
 		return coordinator.executeExpiredRange(ctx, request)
 	}
-	beginStarted := time.Now()
-	begin, err := coordinator.ports.Progress.BeginSlot(ctx, execution.ProgressBeginRequest{
+	beginRequest := execution.ProgressBeginRequest{
 		Identity:   execution.ProgressIdentity{QueryGroup: request.Contract.Slot.QueryGroup},
 		OwnerFence: request.OwnerFence, Projection: request.UnfinishedProjection(), ContentScope: request.ContentScope,
-	})
-	// Timed whichever way it went. A BeginSlot that fails says so; one that
-	// simply took twenty seconds used to say nothing at all, and an attempt
-	// stuck here is indistinguishable from one stuck anywhere else between
-	// slot_started and slot_completed.
-	observability.ObserveSlotWait(ctx, coordinator.ports.Observer, observability.SlotWaitProgressBegin,
-		observability.Operation(request.Operation), beginStarted, time.Now)
-	if err != nil {
-		return coordinator.progressBeginFailure(ctx, request, beginStarted, err), nil
 	}
-	coordinator.countSlotBegin(begin.Status)
-	if err := begin.Validate(); err != nil {
-		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: invalid Progress BeginSlot result: %w", err)
-	}
-	if begin.Status != execution.ProgressCommitted {
-		if refused := progressBeginRefused(begin.Status); refused != nil {
-			return execution.SlotExecutionResult{}, refused
+	if deferrer, ok := coordinator.ports.Progress.(progressBeginDeferrer); ok && deferrer.BeginDeferrable(beginRequest) {
+		// Begun at the attempt's first write, if it makes one, or on its
+		// way out, if it leaves without writing its Slot down (014 ⑩ F5).
+		// One that did not begin the Slot then returns as it would have
+		// here, whatever the step it was made in made of its error; one
+		// whose commit stood in for it is counted deferred.
+		writes.deferBegin(beginRequest)
+		defer func() {
+			if notBegun := writes.notBegun(); notBegun != nil {
+				executeResult, executeErr = notBegun.result, notBegun.err
+				return
+			}
+			if writes.standsIn() {
+				coordinator.countSlotBeginDeferred()
+			}
+		}()
+	} else {
+		beginStarted := time.Now()
+		begin, err := coordinator.ports.Progress.BeginSlot(ctx, beginRequest)
+		// Timed whichever way it went. A BeginSlot that fails says so; one that
+		// simply took twenty seconds used to say nothing at all, and an attempt
+		// stuck here is indistinguishable from one stuck anywhere else between
+		// slot_started and slot_completed.
+		observability.ObserveSlotWait(ctx, coordinator.ports.Observer, observability.SlotWaitProgressBegin,
+			observability.Operation(request.Operation), beginStarted, time.Now)
+		if err != nil {
+			return coordinator.progressBeginFailure(ctx, request, beginStarted, err), nil
 		}
-		reason := begin.ReasonCode
-		if reason == "" {
-			reason = execution.ReasonCode(contract.ReasonProgressBeginRejected)
+		coordinator.countSlotBegin(begin.Status)
+		if err := begin.Validate(); err != nil {
+			return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: invalid Progress BeginSlot result: %w", err)
 		}
-		return activationRetry(reason), nil
+		if begin.Status != execution.ProgressCommitted {
+			if refused := progressBeginRefused(begin.Status); refused != nil {
+				return execution.SlotExecutionResult{}, refused
+			}
+			reason := begin.ReasonCode
+			if reason == "" {
+				reason = execution.ReasonCode(contract.ReasonProgressBeginRejected)
+			}
+			return activationRetry(reason), nil
+		}
 	}
-	// The Slot is begun: from here every return that did not write it down
-	// is counted once, by the reason it returned on.
+	// The Slot is begun, or its BeginSlot put off: from here every return
+	// that did not write it down is counted once, by the reason it returned
+	// on - but for one whose put-off BeginSlot did not begin it, which is
+	// counted by that BeginSlot as at the start. One that still owes its
+	// BeginSlot makes it first: the Slot it leaves to the next attempt is
+	// the one a BeginSlot at its start left.
 	var finalizationMode execution.FinalizationMode
-	defer func() { coordinator.countNotCommitted(applied, finalizationMode, executeResult, executeErr) }()
+	defer func() {
+		writes.beginOnExit(ctx, executeErr, applied.wasCommitted())
+		if writes.notBegun() == nil {
+			coordinator.countNotCommitted(applied, finalizationMode, executeResult, executeErr)
+		}
+	}()
 	finalizationStarted := time.Now()
 	finalization, err := coordinator.ports.Finalization.ResolveFinalization(ctx, request)
 	// This step reads the frozen Plan, and so the Segment's content objects.
@@ -691,6 +734,13 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	var completion execution.QueryExecutionCompletion
 	completionCtx, cancelCompletion := ctx, context.CancelFunc(func() {})
 	defer func() { cancelCompletion() }()
+	// Registered after every release above, so it runs first, on every
+	// return: the Slot's apply goroutine ends, and every window it was
+	// writing lands, before the census is settled and what the Slot holds is
+	// given back, and before the completion's context is cancelled
+	// (windowed_pipeline.go).
+	defer stream.joinApply(ctx)
+	stream.applyCtx = completionCtx
 	read := false
 	for {
 		var leaf inputslice.Leaf
@@ -798,6 +848,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 		if !read {
 			execution.MarkQueryReturned(ctx, time.Now())
 			completionCtx, cancelCompletion = shortPeriodCompletionContext(ctx, request.Operation, stream.header)
+			stream.applyCtx = completionCtx
 			read = true
 		}
 		if err := completionCtx.Err(); err != nil {
@@ -873,7 +924,13 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	}
 
 	var result execution.SlotExecutionResult
-	leaveApply := stream.enter(slotPhaseApply)
+	// A Slot cut into windows writes its last window and its tail on its
+	// apply goroutine, and only waits for them here.
+	applyPhase := slotPhaseApply
+	if stream.windows.started {
+		applyPhase = slotPhaseApplyWait
+	}
+	leaveApply := stream.enter(applyPhase)
 	if stream.windows.started {
 		// Cut into windows while it was evaluated: the earlier windows and
 		// the head are written, the last window and the tail are left.
@@ -953,12 +1010,17 @@ func (stream *streamedExecution) timing() execution.SlotTiming {
 	if !stream.clockSince.IsZero() {
 		stream.chargeClock()
 	}
+	busy := stream.applyBusy()
+	wait := time.Duration(stream.spentByPhase[slotPhaseApplyWait])
 	return execution.SlotTiming{
 		Slot:         stream.slotMillis(),
 		Input:        stream.spentMillis(slotPhaseInput),
 		Preflight:    stream.spentMillis(slotPhasePreflight),
 		Evaluate:     stream.spentMillis(slotPhaseEvaluate),
-		Apply:        stream.spentMillis(slotPhaseApply),
+		Apply:        uint64((time.Duration(stream.spentByPhase[slotPhaseApply]) + busy).Milliseconds()),
+		ApplyWait:    stream.spentMillis(slotPhaseApplyWait),
+		Land:         stream.spentMillis(slotPhaseLand),
+		ApplyOverlap: uint64(max(busy-wait, 0).Milliseconds()),
 		RecordIDs:    stream.spentMillis(slotPhaseRecordIDs),
 		Cut:          stream.spentMillis(slotPhaseCut),
 		Merge:        stream.spentMillis(slotPhaseMerge),
@@ -1035,6 +1097,9 @@ func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 		RetainedShareBytes: stream.coordinator.qgShareBytes(),
 		Windows:            uint64(stream.windows.count), WindowCeilingWindows: stream.windows.ceilingWindows,
 		WindowCeilingRaisedWindows: stream.windows.raisedWindows,
+		WindowZeroBoundCutsInput:   stream.windows.zeroBoundCuts[0], WindowZeroBoundCutsGap: stream.windows.zeroBoundCuts[1],
+		WindowZeroBoundCutsOutput: stream.windows.zeroBoundCuts[2], WindowZeroBoundCutsState: stream.windows.zeroBoundCuts[3],
+		WindowOutsideClamped: oneIf(stream.windows.clamped[0]), SliceOthersClamped: oneIf(stream.windows.clamped[1]),
 	}
 }
 
@@ -1777,6 +1842,15 @@ func (coordinator *SlotExecutionCoordinator) applyGapChunks(
 	accept func(execution.GapGuardApplyItemResult) error,
 	extensionMaps ...map[execution.PlanGapIdentity]*observability.GapExtensionFacts,
 ) error {
+	// A gap statement's script takes it by contract, not by owner fence: the
+	// fence is checked before it, in its step, and the Slot begun.
+	if len(items) > 0 {
+		cleared, notCleared := coordinator.beforeWrite(ctx, true)
+		if notCleared != nil {
+			return notCleared
+		}
+		ctx = cleared
+	}
 	started := time.Now()
 	var totals applyTotals
 	return forEachChunk(ctx, len(items), coordinator.applyChunkItems(coordinator.budget.MaxGapMutations), func(chunk applyChunk) error {
@@ -1999,13 +2073,28 @@ func (coordinator *SlotExecutionCoordinator) commitProgress(
 		return coordinator.commitExpiredRange(ctx, request, completion, completionCause)
 	}
 	started := time.Now()
+	// A round that put its BeginSlot off and wrote nothing commits without
+	// it (014 ⑩ F5): no unfinished projection to hold the record to, since
+	// none was written. Its writes are over, so no write can begin it now.
+	writes := slotWritesFrom(ctx)
+	if notBegun := writes.notBegun(); notBegun != nil {
+		return execution.SlotExecutionResult{}, notBegun
+	}
+	unbegun := writes.unbegun()
+	projection := request.UnfinishedProjection()
+	if unbegun {
+		projection = execution.UnfinishedSlotProjection{}
+	}
 	progressRequest := execution.ProgressCommitRequest{
 		Identity:   execution.ProgressIdentity{QueryGroup: request.Contract.Slot.QueryGroup},
 		OwnerFence: request.OwnerFence, ExpectedNextSlot: request.ExpectedNextSlot, Completion: completion,
-		Projection: request.UnfinishedProjection(), ContentScope: request.ContentScope,
+		Projection: projection, ContentScope: request.ContentScope,
 	}
 	if err := progressRequest.Validate(); err != nil {
 		return execution.SlotExecutionResult{}, inSlotStep(execution.SlotNotCommittedProgressCommitFailed, fmt.Errorf("alarmd worker: invalid progress commit: %w", err))
+	}
+	if unbegun {
+		writes.commitStandsIn()
 	}
 	progress, err := coordinator.ports.Progress.CommitProgress(ctx, progressRequest)
 	if err == nil {
@@ -2022,6 +2111,24 @@ func (coordinator *SlotExecutionCoordinator) commitProgress(
 			reason = execution.ReasonCode(refusal)
 		}
 		coordinator.observe(ctx, observability.ComponentProgress, observability.StageProgressCommitted, request.Operation, started, "", reason, err)
+		if unbegun {
+			// Nothing of the round was written, so it is counted and
+			// returns as its BeginSlot would have at its start: refused by
+			// the fence, the attempt's ownership rejection, not an
+			// execution that ran and failed; the record not at its Slot, a
+			// retry by that name.
+			if refused := progressBeginRefused(progress.Status); refused != nil {
+				writes.commitRefusedUnbegun(progress.Status, execution.SlotExecutionResult{}, refused)
+				return execution.SlotExecutionResult{}, refused
+			}
+			if progress.Status == execution.ProgressConflict {
+				if reason == "" {
+					reason = execution.ReasonCode(contract.ReasonProgressBeginRejected)
+				}
+				writes.commitRefusedUnbegun(progress.Status, activationRetry(reason), nil)
+				return activationRetry(reason), nil
+			}
+		}
 		return execution.SlotExecutionResult{}, inSlotStep(execution.SlotNotCommittedProgressCommitFailed, fmt.Errorf("alarmd worker: %w", err))
 	}
 	// The Slot is written down. Whatever this attempt applied is now recorded
@@ -2090,9 +2197,29 @@ func (coordinator *SlotExecutionCoordinator) admitPlan(
 	epoch execution.StateApplyEpoch,
 ) error {
 	started := time.Now()
-	result, err := coordinator.ports.Admission.Check(ctx, execution.SideEffectAdmissionRequest{
+	admission := execution.SideEffectAdmissionRequest{
 		Contract: request.Contract, Plan: plan, StateApplyEpoch: epoch, OwnerFence: request.OwnerFence,
-	})
+	}
+	if slotWritesFrom(ctx) != nil {
+		// The Plan's activation alone, and a step begun: the fence is
+		// checked before the step's first write whose script does not run
+		// it, when it has one (014 ⑩ F1, slot_writes.go).
+		fenceStep(ctx)
+		result, err := coordinator.ports.Admission.CheckActivation(ctx, admission)
+		if err == nil {
+			if validateErr := result.Validate(); validateErr != nil {
+				err = validateErr
+			} else if !result.Admitted {
+				err = fmt.Errorf("admission denied: %s", result.ReasonCode)
+			}
+		}
+		coordinator.observe(ctx, observability.ComponentState, observability.StagePlanActivationChecked, request.Operation, started, "", result.ReasonCode, err)
+		if err != nil {
+			return fmt.Errorf("alarmd worker: side-effect admission: %w", err)
+		}
+		return nil
+	}
+	result, err := coordinator.ports.Admission.Check(ctx, admission)
 	if err == nil {
 		if validateErr := result.Validate(); validateErr != nil {
 			err = validateErr
@@ -2187,6 +2314,13 @@ func (coordinator *SlotExecutionCoordinator) writeEvents(
 	if len(events) == 0 && len(withoutMessage) == 0 {
 		return nil
 	}
+	// The broker knows no owner fence: it is checked before the batch, in
+	// its step, and the Slot begun.
+	cleared, notCleared := coordinator.beforeWrite(ctx, true)
+	if notCleared != nil {
+		return notCleared
+	}
+	ctx = cleared
 	if err := execution.EnterCommit(ctx, execution.SlotStageOutput); err != nil {
 		return err
 	}
@@ -2557,6 +2691,13 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 	started := time.Now()
 	fenced, ok := coordinator.ports.State.(execution.FencedStateStore)
 	useFence := ok && fence.Validate(contractRef) == nil
+	// The Slot begun first; and a store that cannot take the fence in its
+	// script has it checked before, as an unfenced write does.
+	cleared, notCleared := coordinator.beforeWrite(ctx, !useFence)
+	if notCleared != nil {
+		return nil, notCleared
+	}
+	ctx = cleared
 	deterministic := make(map[execution.StateKeyIdentity]execution.ReasonCode)
 	var totals applyTotals
 	var alreadyApplied observability.StateAlreadyAppliedFacts
@@ -2786,6 +2927,19 @@ func (coordinator *SlotExecutionCoordinator) observe(
 	reason observability.ReasonCode,
 	err error,
 ) {
+	if deferred := deferredObservationsFrom(ctx); deferred != nil && err == nil {
+		// On a Slot's apply goroutine: held as its duration (addPlain), the
+		// defaults emitObservation gives filled in now.
+		if result == "" {
+			result = observability.ResultSuccess
+		}
+		if reason == "" {
+			reason = observability.ReasonNone
+		}
+		deferred.addPlain(ctx, plainObservation{component: component, stage: stage, operation: observability.Operation(operation),
+			result: result, reason: reason}, time.Since(started))
+		return
+	}
 	coordinator.observeWithCounts(ctx, component, stage, operation, started, result, reason, observability.Counts{}, err)
 }
 
@@ -3352,4 +3506,12 @@ func gapExtensionFacts(marker execution.GapGuardSnapshot, mutation execution.Pla
 			Kind: string(scope.Kind), Status: string(execution.GapStatusGapped), Reason: string(scope.ReasonCode), Required: scope.RequiredFullSlots})
 	}
 	return facts
+}
+
+// oneIf is one for true, zero for false: a Slot's flag on its completion row.
+func oneIf(set bool) uint64 {
+	if set {
+		return 1
+	}
+	return 0
 }

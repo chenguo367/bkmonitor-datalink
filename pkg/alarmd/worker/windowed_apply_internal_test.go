@@ -56,6 +56,9 @@ func (ports *windowedPorts) ApplyRuntime(ctx context.Context, request execution.
 // ReleaseSlotWitnesses keeps no witnesses to let go of.
 func (*windowedPorts) ReleaseSlotWitnesses(execution.SlotIdentity) {}
 
+// ReleaseRuntimeWitnesses holds nothing to let go of: a test double, in no production wiring.
+func (*windowedPorts) ReleaseRuntimeWitnesses(execution.SlotIdentity, []execution.StateKeyIdentity) {}
+
 func (ports *windowedPorts) RenewFrozenRuntime(ctx context.Context, request execution.FrozenStateRenewalRequest) (execution.FrozenStateRenewalResult, error) {
 	for _, item := range request.Items {
 		ports.trace = append(ports.trace, "renew:"+string(item.Identity.SeriesIdentityDigest))
@@ -76,6 +79,11 @@ type windowedFixture struct {
 
 func newWindowedFixture(t *testing.T) *windowedFixture {
 	t.Helper()
+	// These cases drive the Slot's windows step by step and read it between
+	// them: each window lands before the next step (applySerially). The
+	// pipeline's own cases run it as production does.
+	serial := applySerially.Swap(true)
+	t.Cleanup(func() { applySerially.Store(serial) })
 	contractRef := execution.FrozenExecutionContractRef{
 		Slot:             execution.SlotIdentity{QueryGroup: "query-group", EvaluationTime: 1_788_000_000},
 		SnapshotRevision: "snapshot-v1", QueryRevision: "query-v1", ScheduleRevision: "schedule-v1",
@@ -111,6 +119,9 @@ func newWindowedFixture(t *testing.T) *windowedFixture {
 		evaluated: execution.EvaluationResult{Contract: contractRef, Result: observability.ResultSuccess, ReasonCode: observability.ReasonNone,
 			Plans: []execution.PlanEvaluationResult{{Plan: plan, Disposition: execution.PlanDecided}}},
 	}
+	// A case that cuts windows without running the Slot to its end leaves its
+	// apply goroutine to be joined here, as every return of Execute joins it.
+	t.Cleanup(func() { stream.joinApply(context.Background()) })
 	return &windowedFixture{stream: stream, ports: ports, due: due, version: version}
 }
 

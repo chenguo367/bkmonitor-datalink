@@ -63,11 +63,18 @@ type shadowRig struct {
 	provider    *shadowProvider
 	frozen      *shadowFrozen
 	coordinator *worker.SlotExecutionCoordinator
-	source      *access.Source
-	base        execution.SlotExecutionRequest
-	readAt      time.Time
-	readMu      sync.Mutex
-	observed    *shadowObserved
+	// wiring and budget are what the coordinator was made with, owners
+	// the ownership store its Query Group is leased in and address its
+	// Redis: for a rig that wires a port otherwise (fence_fixed_cost_e2e_test.go).
+	wiring   worker.Ports
+	budget   worker.ProvisionalBudget
+	owners   *ownership.RedisStore
+	address  string
+	source   *access.Source
+	base     execution.SlotExecutionRequest
+	readAt   time.Time
+	readMu   sync.Mutex
+	observed *shadowObserved
 }
 
 // shadowReplay is how a replay was judged: its distance and its age past its
@@ -469,7 +476,8 @@ func newShadowRigPlanned(t *testing.T, hosts, padding int, cacheBudget int64, fa
 	// No gap marker: the fake's default holds every round WARMING, which no
 	// Plan of a live Query Group stays.
 	rig.ports = &recordingPorts{trace: &trace, ready: true, gapMissing: true}
-	rig.coordinator, err = worker.NewSlotExecutionCoordinator(worker.Ports{OpenAlerts: rig.ports, Finalization: rig.ports,
+	rig.owners, rig.address = owners, address
+	rig.wiring = worker.Ports{OpenAlerts: rig.ports, Finalization: rig.ports,
 		Activation: rig.ports, Query: source, Sequencer: rig.ports, Evaluator: evaluator, Admission: rig.ports,
 		GapGuard: rig.ports, NoData: worker.SharedNoDataStore, Hosts: worker.SharedHostBusiness,
 		Events: rig.ports, State: store, Progress: rig.ports, Observer: rig.observed,
@@ -479,8 +487,9 @@ func newShadowRigPlanned(t *testing.T, hosts, padding int, cacheBudget int64, fa
 		InstalledControlEpoch: func() (uint64, bool) {
 			word := rig.skipWord.Load()
 			return word, word != 0
-		}},
-		worker.ProvisionalBudget{MaxSeries: 400, MaxRetainedBytes: slicedPool, MaxStateMutations: 400, MaxEvents: 400, MaxGapMutations: 10})
+		}}
+	rig.budget = worker.ProvisionalBudget{MaxSeries: 400, MaxRetainedBytes: slicedPool, MaxStateMutations: 400, MaxEvents: 400, MaxGapMutations: 10}
+	rig.coordinator, err = worker.NewSlotExecutionCoordinator(rig.wiring, rig.budget)
 	if err != nil {
 		t.Fatal(err)
 	}

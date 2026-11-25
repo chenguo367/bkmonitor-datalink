@@ -1889,7 +1889,7 @@ func (measured windowMeasureResult) line(shape windowMeasureShape) string {
 		"windows=%d ceiling_windows=%d raised_windows=%d usage_series=%d state_mutations=%d events=%d "+
 		"write_batches=%d events_written=%d record_ids_kept_runs=%d record_ids_outside_window=%d "+
 		"witness_items=%.0f witness_bytes=%.0f redis=[%s] "+
-		"apply_ms=%d record_ids_ms=%d cut_ms=%d merge_ms=%d series_ms=%d no_data_read_ms=%d no_data_write_ms=%d "+
+		"apply_ms=%d apply_wait_ms=%d land_ms=%d apply_overlap_ms=%d record_ids_ms=%d cut_ms=%d merge_ms=%d series_ms=%d no_data_read_ms=%d no_data_write_ms=%d "+
 		"unattributed_ms=%d input_slices=%d input_slices_discarded=%d input_slice_cut_on=%s input_slices_deferred=%d first_seen_unseen_slices=%d first_seen_unseen_series=%d "+
 		"redis_wall_by_caller=[%s] memory_at_held_peak=[%s] memory_after=[%s] gc_cycles=%d uq_answer_bytes=%d "+
 		"redis_bytes_sent=%.0f redis_bytes_received=%.0f redis_used_memory_before=%d redis_used_memory_after=%d "+
@@ -1907,7 +1907,8 @@ func (measured windowMeasureResult) line(shape windowMeasureShape) string {
 		usage.Series, usage.StateMutations, usage.Events, measured.batches, measured.events,
 		measured.keptRuns, measured.outside, measured.witnessItems, measured.witnessBytes,
 		windowMeasureCommandLine(measured.commands),
-		measured.timing.Apply, measured.timing.RecordIDs, measured.timing.Cut, measured.timing.Merge, measured.timing.Series,
+		measured.timing.Apply, measured.timing.ApplyWait, measured.timing.Land, measured.timing.ApplyOverlap,
+		measured.timing.RecordIDs, measured.timing.Cut, measured.timing.Merge, measured.timing.Series,
 		measured.timing.NoDataRead, measured.timing.NoDataWrite, measured.timing.Unattributed,
 		usage.InputSlices, usage.InputSlicesDiscarded, usage.InputSliceCutOn, usage.InputSlicesDeferred, usage.FirstSeenUnseenSlices, usage.FirstSeenUnseenSeries,
 		windowMeasureSecondsLine(measured.redisCallers),

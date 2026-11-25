@@ -14,7 +14,7 @@ package worker
 import "time"
 
 // SetWindowBoundPercentForMeasurement bounds every window at percent of the
-// share, 1 to 99, or at the whole share for 0, and returns what it was. It
+// share, 1 to 99, or at half the share for 0, and returns what it was. It
 // is only in the alarmd_measure build: a measurement reads with it how the
 // collector paces when the windows leave the soft limit room, and no
 // configuration reaches it.

@@ -26,15 +26,31 @@ import (
 type dispatchSlotWait struct {
 	wait   time.Duration
 	cohort string
-	taken  atomic.Bool
+	// interval is the Query Group's shortest due interval, in seconds, its
+	// queue place was given under: the period its Slot's execution is
+	// judged slow against (observability.SlowSlotExecution).
+	interval int64
+	taken    atomic.Bool
 }
 
 type dispatchSlotWaitKey struct{}
 
 // withDispatchSlotWait is ctx carrying one dispatch's wait for an execution
-// slot and the cohort its queue place was given under.
-func withDispatchSlotWait(ctx context.Context, wait time.Duration, cohort string) context.Context {
-	return context.WithValue(ctx, dispatchSlotWaitKey{}, &dispatchSlotWait{wait: max(wait, 0), cohort: cohort})
+// slot, and the cohort and interval its queue place was given under.
+func withDispatchSlotWait(ctx context.Context, wait time.Duration, cohort string, interval int64) context.Context {
+	return context.WithValue(ctx, dispatchSlotWaitKey{}, &dispatchSlotWait{wait: max(wait, 0), cohort: cohort,
+		interval: max(interval, 0)})
+}
+
+// dispatchPeriod is the period, in seconds, of the Query Group the dispatch
+// under ctx started: its shortest due interval when queued; zero for a Slot
+// no dispatch started, or a Query Group before its first round.
+func dispatchPeriod(ctx context.Context) int64 {
+	carried, _ := ctx.Value(dispatchSlotWaitKey{}).(*dispatchSlotWait)
+	if carried == nil {
+		return 0
+	}
+	return carried.interval
 }
 
 // takeDispatchSlotWait is the wait for the Slot starting under ctx: the

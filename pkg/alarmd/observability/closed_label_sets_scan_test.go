@@ -2322,6 +2322,7 @@ var closedLabelSetUnresolved = map[string]string{
 	"reason|worker/query_failure.go|observeQueryFailure|diagnostic.QueryFailure()":                                                                                   "PENDING B3",
 	"reason|worker/resume_applied_series.go|resumedSeriesResult|guard.ReasonCode":                                                                                    "PENDING B6",
 	"reason|worker/slot_apply.go|applyPlanState|reason":                                                                                                              "PENDING B1",
+	"reason|worker/slot_writes.go|beginLocked|begin.ReasonCode":                                                                                                      "PENDING B6",
 	"reason|worker/stream_session.go|gapMutationForReasons|reasons[scope]":                                                                                           "PENDING B1",
 	"reason|worker/stream_session.go|observeCompletionOnlyProbe|binding.ReasonCode":                                                                                  "PENDING B6",
 	"reason|worker/stream_session.go|physicalFailureReason|execution.AttributeUnavailable(facts, execution.ReasonCode(contract.ReasonQueryUnavailable))":             "PENDING B6",

@@ -271,8 +271,8 @@ func TestAPlanWhoseWriteIsNotMadeIsStoppedAtTheSecondSlot(t *testing.T) {
 			t.Fatalf("round %d left a member of a Plan whose write cannot be made", round)
 		}
 		shadow.observe(rig.due, series.view, series.write, series.class, false)
-		if rig.coordinator.foldSegmentShadow(context.Background(), request, shadow, []execution.DuePlan{rig.due}, nil) {
-			t.Fatalf("round %d failed its Slot", round)
+		if failed, refused := rig.coordinator.foldSegmentShadow(context.Background(), request, shadow, []execution.DuePlan{rig.due}, nil); failed || refused != nil {
+			t.Fatalf("round %d failed its Slot (refused %v)", round, refused)
 		}
 		rig.at += 60
 	}

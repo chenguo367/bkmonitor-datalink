@@ -307,9 +307,14 @@ const (
 	// distribution, not the Slot's size, is what refuses); or the slice's
 	// conditions made the query longer than the store takes
 	// (QUERY_TOO_LONG). Each refuses the Slot every round until the strategy
-	// changes.
+	// changes. LEAVES_EXHAUSTED is a split the tree has no leaves left for
+	// (inputslice.MaxLeaves): the values may be spread well enough, but the
+	// Slot needs more slices than one Slot is read in - its size against the
+	// slice limit, not the values, is what refuses, and the reading is that
+	// limit and what the Slot holds beside its slices.
 	ReasonInputSliceUnsupported       = "INPUT_SLICE_UNSUPPORTED"
 	ReasonInputSliceValueConcentrated = "INPUT_SLICE_VALUE_CONCENTRATED"
+	ReasonInputSliceLeavesExhausted   = "INPUT_SLICE_LEAVES_EXHAUSTED"
 	ReasonInputSliceQueryTooLong      = "INPUT_SLICE_QUERY_TOO_LONG"
 	// ReasonReadAheadContextEnded names a Slot that took on a slice read
 	// ahead whose read then ended with its context ended: its series were

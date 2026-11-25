@@ -84,6 +84,27 @@ func (admitter *Admitter) CheckActivation(
 	return admitter.activationOf(ctx, request)
 }
 
+// CheckOwnerFence answers Check's fence half alone, the store confirming the
+// owner fence on its own clock, and reads no activation: for a write whose
+// own script does not run the fence (014 ⑩ F1), checked just before it,
+// the activation having been read where the step was admitted.
+func (admitter *Admitter) CheckOwnerFence(
+	ctx context.Context,
+	contractRef execution.FrozenExecutionContractRef,
+	fence execution.OwnerFence,
+) error {
+	if admitter == nil {
+		return errors.New("alarmd ownership: initialized admitter is required")
+	}
+	if err := contractRef.Validate(); err != nil {
+		return err
+	}
+	if err := fence.Validate(contractRef); err != nil {
+		return err
+	}
+	return admitter.fences.CheckFence(ctx, fence)
+}
+
 func (admitter *Admitter) activationOf(
 	ctx context.Context,
 	request execution.SideEffectAdmissionRequest,

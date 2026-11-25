@@ -62,6 +62,10 @@ func TestShortCompletionDownstreamCancellationPreservesACKStateProgressOrder(t *
 // ReleaseSlotWitnesses keeps no witnesses to let go of.
 func (*completionCancelPorts) ReleaseSlotWitnesses(execution.SlotIdentity) {}
 
+// ReleaseRuntimeWitnesses holds nothing to let go of: a test double, in no production wiring.
+func (*completionCancelPorts) ReleaseRuntimeWitnesses(execution.SlotIdentity, []execution.StateKeyIdentity) {
+}
+
 func (p *completionCancelPorts) RenewFrozenRuntime(
 	_ context.Context, request execution.FrozenStateRenewalRequest,
 ) (execution.FrozenStateRenewalResult, error) {

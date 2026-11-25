@@ -62,10 +62,12 @@ func (stream *streamedExecution) mergeResumedSeries(ctx context.Context, entry c
 	if err != nil {
 		return err
 	}
-	// Its key was loaded, and its witness is held as any loaded key's is.
+	// Its key was loaded, and its witness is held as any loaded key's is,
+	// to the landing of the window it is merged into.
 	if err := stream.mergeMeasured(ctx, resumed, stream.measureMerge(resumed, 0, loadedKeyHeldBytes)); err != nil {
 		return err
 	}
+	stream.windows.readBeside = append(stream.windows.readBeside, entry.item.Identity)
 	stream.noteResumed(due.Identity)
 	if gapSuperseded {
 		stream.noteSupersededGap(ctx, due.GapIdentity())
@@ -188,7 +190,7 @@ func (stream *streamedExecution) evaluateSideBySide(ctx context.Context, jobs []
 	// (BenchmarkSideBySideFanOut), a series' evaluation about 139 on the
 	// slowest node measured (decision-020 throughput design 3.1), so even a
 	// batch of two gains from a second core.
-	if recovered := sideBySide(len(jobs), runtime.GOMAXPROCS(0), func(index int) { evaluate(jobs[index]) }); recovered != nil {
+	if recovered := stream.evaluatePool().sideBySide(len(jobs), func(index int) { evaluate(jobs[index]) }); recovered != nil {
 		// A panic in an evaluation is raised again on the Slot's goroutine,
 		// as an evaluation's panic always was: the process ends, and the
 		// value prints the evaluation's stack.
@@ -267,11 +269,57 @@ func (recovered *sideBySidePanic) Error() string {
 	return fmt.Sprintf("%v\n\ngoroutine of the side-by-side evaluation:\n%s", recovered.value, recovered.stack)
 }
 
-// sideBySide runs do for every index below n on up to workers goroutines, or
-// on this one for a single worker, and returns the first panic one raised -
-// a *sideBySidePanic with the stack it was raised on - after which no index
-// is started. It returns once every do has returned.
+// evaluatePool is the goroutines a Slot evaluates its series side by side on
+// (014 next9 4): GOMAXPROCS of them for the whole Slot, started at its first
+// batch and ended with it (releaseProvisional), in place of as many started
+// for each batch. One stream of series uses them as each batch did; the pool
+// is what several streams of one Slot would share.
+type evaluatePool struct {
+	workers int
+	jobs    chan func()
+	ended   sync.Once
+}
+
+// evaluatePool is the Slot's pool, started on first use.
+func (stream *streamedExecution) evaluatePool() *evaluatePool {
+	if stream.evaluating == nil {
+		pool := &evaluatePool{workers: runtime.GOMAXPROCS(0), jobs: make(chan func())}
+		if pool.workers > 1 {
+			for range pool.workers {
+				go func() {
+					for job := range pool.jobs {
+						job()
+					}
+				}()
+			}
+		}
+		stream.evaluating = pool
+	}
+	return stream.evaluating
+}
+
+// end lets the pool's goroutines go once the Slot no longer evaluates.
+func (pool *evaluatePool) end() {
+	if pool != nil {
+		pool.ended.Do(func() { close(pool.jobs) })
+	}
+}
+
+// sideBySide runs do for every index below n on up to the pool's workers, or
+// on this goroutine for a single worker, and returns the first panic one
+// raised - a *sideBySidePanic with the stack it was raised on - after which
+// no index is started. It returns once every do has returned.
+func (pool *evaluatePool) sideBySide(n int, do func(index int)) *any {
+	return sideBySideOn(n, pool.workers, func(run func()) { pool.jobs <- run }, do)
+}
+
+// sideBySide runs do for every index below n on up to workers goroutines of
+// its own, as evaluatePool.sideBySide does on the pool's.
 func sideBySide(n, workers int, do func(index int)) *any {
+	return sideBySideOn(n, workers, func(run func()) { go run() }, do)
+}
+
+func sideBySideOn(n, workers int, start func(func()), do func(index int)) *any {
 	workers = min(workers, n)
 	if workers <= 1 {
 		for index := range n {
@@ -284,7 +332,7 @@ func sideBySide(n, workers int, do func(index int)) *any {
 	var panicked atomic.Pointer[any]
 	for range workers {
 		wait.Add(1)
-		go func() {
+		start(func() {
 			defer wait.Done()
 			defer func() {
 				if recovered := recover(); recovered != nil {
@@ -295,7 +343,7 @@ func sideBySide(n, workers int, do func(index int)) *any {
 			for index := next.Add(1) - 1; index < int64(n) && panicked.Load() == nil; index = next.Add(1) - 1 {
 				do(int(index))
 			}
-		}()
+		})
 	}
 	wait.Wait()
 	return panicked.Load()

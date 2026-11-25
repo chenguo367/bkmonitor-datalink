@@ -26,7 +26,7 @@ func TestSlotExecutionCoordinatorFinalizesSnapshotUnavailableWithoutQuery(t *tes
 	}
 	assertTrace(t, fixture.trace, []string{
 		"finalization", "activation", "sequence", "query_free_admission_guard", "query_free_gap_load",
-		"query_free_gap_apply", "activation", "query_free_admission_progress", "progress_commit",
+		"fence", "query_free_gap_apply", "activation", "query_free_admission_progress", "progress_commit",
 	})
 	if len(fixture.ports.mutations) != 1 {
 		t.Fatalf("gap mutations=%d, want=1", len(fixture.ports.mutations))
@@ -938,6 +938,15 @@ func (ports *queryFreePorts) Check(
 		}, nil
 	}
 	return execution.SideEffectAdmissionResult{Admitted: true}, nil
+}
+
+// CheckActivation is the query-free path's admissions without the fence
+// (014 ⑩ F1), held to the same facts as Check.
+func (ports *queryFreePorts) CheckActivation(
+	ctx context.Context,
+	request execution.SideEffectAdmissionRequest,
+) (execution.SideEffectAdmissionResult, error) {
+	return ports.Check(ctx, request)
 }
 
 func (ports *queryFreePorts) LoadGapsInto(ctx context.Context, request execution.GapLoadRequest, accept func(execution.GapGuardSnapshot) error) error {

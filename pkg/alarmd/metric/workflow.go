@@ -20,6 +20,7 @@ type workflowMetrics struct {
 	permitWait             *prometheus.HistogramVec
 	slotWaits              *prometheus.CounterVec
 	slotWaitSeconds        *prometheus.CounterVec
+	slotExecuteSlow        *prometheus.CounterVec
 }
 
 // slotReasonWords are the words a Slot's end is counted under beside the
@@ -128,6 +129,17 @@ func newWorkflowMetrics() workflowMetrics {
 				"the waits it is the mean wait; it is time taken out of those Slots' windows, since a window runs " +
 				"from the moment its data is readable."},
 			[]string{"operation", "cohort"}),
+		slotExecuteSlow: prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem,
+			Name: "slot_execute_slow_total",
+			Help: "Slot attempts whose execution took half their Query Group's period or longer - no less than 5 s, " +
+				"no more than 30 s, and 30 s where the period is not known (a Slot no dispatch started, a Query Group " +
+				"before its first round) - by operation, every one counted, a retry's and a replay's as a normal " +
+				"round's. Each has a slot_execute_slow line, WARN, SLOT_EXECUTE_SLOW, at most one a Query Group an " +
+				"hour (the rest in its suppressed_logs): which Query Group and round, the duration against the " +
+				"threshold, the Slot's phases, its queries' waits, bodies and permit waits, its input slices and " +
+				"their seams, and its dispatch's wait for an execution slot. Its slot_completed line is unchanged. " +
+				"Every cell exists from the start."},
+			[]string{"operation"}),
 	}
 	// Every cell from the start, so a word that never happens reads zero.
 	for _, kind := range slices.Concat(observability.QueryFreeCompletionKinds, []string{"other"}) {
@@ -145,10 +157,14 @@ func newWorkflowMetrics() workflowMetrics {
 			metrics.slotWaitSeconds.WithLabelValues(string(operation), cohort)
 		}
 	}
+	for _, operation := range observability.SlotExecuteSlowOperations {
+		metrics.slotExecuteSlow.WithLabelValues(string(operation))
+	}
 	return metrics
 }
 func (m workflowMetrics) collectors() []prometheus.Collector {
-	return []prometheus.Collector{m.run, m.execute, m.progress, m.progressCauses, m.slotReasons, m.active, m.ready, m.delayed, m.permitWait, m.ranges, m.expiredSlots, m.abandonedSlots, m.shareRefusalGaps, m.slotGaps, m.slotWaits, m.slotWaitSeconds}
+	return []prometheus.Collector{m.run, m.execute, m.progress, m.progressCauses, m.slotReasons, m.active, m.ready, m.delayed, m.permitWait, m.ranges, m.expiredSlots, m.abandonedSlots, m.shareRefusalGaps, m.slotGaps, m.slotWaits, m.slotWaitSeconds,
+		m.slotExecuteSlow}
 }
 func (m workflowMetrics) observe(o observability.Observation) {
 	switch {
@@ -204,6 +220,8 @@ func (m workflowMetrics) observe(o observability.Observation) {
 			m.slotWaits.WithLabelValues(operation, "true", cohort).Inc()
 			m.slotWaitSeconds.WithLabelValues(operation, cohort).Add(slotWait.WaitMillis / 1000)
 		}
+	case o.Component == observability.ComponentScheduler && o.Stage == observability.StageSlotExecuteSlow:
+		m.slotExecuteSlow.WithLabelValues(string(observability.NormalizeExecutionSlotWaitOperation(o.Operation))).Inc()
 	case o.Component == observability.ComponentScheduler && o.Stage == observability.StageRunnerReturned:
 		if observability.ValidRunOutcome(o.RunOutcome) {
 			m.run.WithLabelValues(o.RunOutcome).Inc()

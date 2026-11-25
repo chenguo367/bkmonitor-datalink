@@ -167,6 +167,10 @@ func (*convergeObservingPorts) CheckActivation(context.Context, execution.SideEf
 	return execution.SideEffectAdmissionResult{Admitted: true}, nil
 }
 
+func (*convergeObservingPorts) CheckOwnerFence(context.Context, execution.FrozenExecutionContractRef, execution.OwnerFence) error {
+	return nil
+}
+
 func (*convergeObservingPorts) LoadGapsInto(context.Context, execution.GapLoadRequest, func(execution.GapGuardSnapshot) error) error {
 	return nil
 }
@@ -209,6 +213,10 @@ func (*convergeObservingPorts) CommitProgress(context.Context, execution.Progres
 
 // ReleaseSlotWitnesses keeps no witnesses to let go of.
 func (*convergeObservingPorts) ReleaseSlotWitnesses(execution.SlotIdentity) {}
+
+// ReleaseRuntimeWitnesses holds nothing to let go of: a test double, in no production wiring.
+func (*convergeObservingPorts) ReleaseRuntimeWitnesses(execution.SlotIdentity, []execution.StateKeyIdentity) {
+}
 
 func (*convergeObservingPorts) RenewFrozenRuntime(
 	_ context.Context, request execution.FrozenStateRenewalRequest,

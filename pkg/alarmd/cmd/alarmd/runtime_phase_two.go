@@ -966,6 +966,9 @@ type phaseTwoQueuePlace struct {
 	deadline time.Time
 	sequence uint64
 	cohort   string
+	// interval is the shortest due interval the cohort is of, in seconds:
+	// the period the Slot's execution is judged slow against.
+	interval int64
 }
 
 type phaseTwoScheduledResult struct {
@@ -1717,7 +1720,7 @@ func (dispatcher *phaseTwoRunnerDispatcher) executeScheduled(ctx context.Context
 	dispatcher.changeExecuting(1)
 	result := phaseTwoScheduledResult{scheduled: scheduled}
 	runCtx := dispatcher.bundle.dependencies.TargetFlow.Context(ctx, string(scheduled.queryGroup))
-	runCtx = withDispatchSlotWait(runCtx, scheduled.slotWait, scheduled.place.cohort)
+	runCtx = withDispatchSlotWait(runCtx, scheduled.slotWait, scheduled.place.cohort, scheduled.place.interval)
 	if observability.TargetFlowEnabled(runCtx) {
 		runCtx = observability.ContextWithTraceFields(runCtx, observability.TraceFields{QueryGroupKey: string(scheduled.queryGroup)})
 		observability.EmitTargetFlow(runCtx, "runner_dispatch", observability.TraceFields{},
@@ -2554,9 +2557,10 @@ func (dispatcher *phaseTwoRunnerDispatcher) queueEntry(scheduled phaseTwoSchedul
 	deadline := scheduled.lifecycle.runner.NextDeadline()
 	if scheduled.place.sequence == 0 || !deadline.Equal(scheduled.place.deadline) {
 		dispatcher.queueSequence++
+		interval := scheduled.lifecycle.runner.DueBound().IntervalSeconds
 		scheduled.place = phaseTwoQueuePlace{
 			deadline: deadline, sequence: dispatcher.queueSequence,
-			cohort: scheduler.ShortPeriodCohortForInterval(scheduled.lifecycle.runner.DueBound().IntervalSeconds),
+			cohort: scheduler.ShortPeriodCohortForInterval(interval), interval: interval,
 		}
 	}
 	entry := phaseTwoQueuedRunner{

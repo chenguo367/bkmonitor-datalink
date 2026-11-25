@@ -103,6 +103,10 @@ func (admitEverything) CheckActivation(context.Context, execution.SideEffectAdmi
 	return execution.SideEffectAdmissionResult{Admitted: true, ReasonCode: observability.ReasonNone}, nil
 }
 
+func (admitEverything) CheckOwnerFence(context.Context, execution.FrozenExecutionContractRef, execution.OwnerFence) error {
+	return nil
+}
+
 // sixtyHourRound is one round of a sixty-hour Plan: its request and the
 // header its gap load is built from.
 func sixtyHourRound(t *testing.T, due execution.DuePlan, evaluationTime execution.EvaluationTime) (execution.SlotExecutionRequest, execution.InternalExecutionHeader) {

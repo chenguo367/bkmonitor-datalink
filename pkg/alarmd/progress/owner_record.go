@@ -151,6 +151,42 @@ func (store *Store) serveNext(queryGroup execution.QueryGroupIdentity, fence exe
 	return record.raw, record.missing, true
 }
 
+// BeginDeferrable reports whether request's BeginSlot may wait for the
+// Slot's first write (014 ⑩ F5), the round committed without it when it
+// writes nothing: only when the BeginSlot would do no more than write the
+// Slot's unfinished projection onto a record already at it, judged from
+// the owner's record without a read. That is, the owner's record is kept
+// under request's fence - the record BeginSlot would start from, so
+// deciding costs no GET - and it is a record, of this Query Group, whose
+// NextSlot is request's Slot and that holds no unfinished Slot and no
+// unfinished range. An unfinished Slot is an earlier attempt's evidence:
+// a round committed over it without beginning would erase it, unread, so
+// its attempt begins as before and BeginSlot judges it. Anything else -
+// no record kept, a record under another fence, no record at all, one
+// that does not decode - is a BeginSlot now.
+func (store *Store) BeginDeferrable(request execution.ProgressBeginRequest) bool {
+	if store == nil {
+		return false
+	}
+	store.owned.mu.Lock()
+	record := store.owned.records[request.Identity.QueryGroup]
+	var raw []byte
+	kept := record != nil && record.fence == request.OwnerFence && !record.missing
+	if kept {
+		raw = record.raw
+	}
+	store.owned.mu.Unlock()
+	if !kept {
+		return false
+	}
+	current, err := decode(raw)
+	if err != nil {
+		return false
+	}
+	return current.Identity == request.Identity && current.UnfinishedSlot == nil && current.UnfinishedRange == nil &&
+		current.NextSlot == request.Projection.Contract.Slot.EvaluationTime
+}
+
 // writeBase is the record a fenced write by caller starts from: the
 // owner's record when it is kept under the write's fence, the key read now
 // otherwise. cached says which, so the write knows whether a conflict may be

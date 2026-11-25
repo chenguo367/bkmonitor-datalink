@@ -23,6 +23,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/segment"
 )
 
@@ -592,8 +593,8 @@ func storedSegmentPlan(key segment.PlanKey, due segmentDue, stored segment.Store
 
 // segmentsOf is the segments the Slot running under ctx read, nil for none.
 func segmentsOf(ctx context.Context) *segmentSlot {
-	if stream := retainedOwnerFrom(ctx); stream != nil {
-		return stream.segments
+	if owner := retainedOwnerFrom(ctx); owner != nil {
+		return owner.slotSegments()
 	}
 	return nil
 }
@@ -1113,19 +1114,36 @@ func compareMadeRead(view execution.RuntimeStateView, mutation execution.StateMu
 // refused, failed, of unknown result, or never made. The Slot is noted, and
 // its next attempt writes every member whole; a round that left none only
 // counts a failed write, its State all written.
+//
+// A write the fence refused - the owner stale, the content moved - is the
+// owner's refusal, returned as ownership's (ErrStaleFence,
+// ErrContentScopeMoved) whatever the round left: the next attempt, if
+// there is one, is not this owner's (014 ⑩ F1). So is a write the
+// attempt's put-off BeginSlot stopped (slotNotBegun).
 func (coordinator *SlotExecutionCoordinator) foldSegmentShadow(ctx context.Context, request execution.SlotExecutionRequest,
-	round *segmentShadowRound, due []execution.DuePlan, withheld map[execution.PlanIdentity]struct{}) bool {
+	round *segmentShadowRound, due []execution.DuePlan, withheld map[execution.PlanIdentity]struct{}) (bool, error) {
 	if round == nil {
-		return false
+		return false, nil
 	}
 	round.slot.folded.Store(true)
 	facts, folded := foldSegmentShadowRound(round, due, withheld, coordinator.segmentJoinAdmission(ctx))
-	writes, fallbacks := settleSegmentShadow(ctx, round.slot.store, request, folded, &facts, coordinator.now)
+	store := guardedSegmentWrites{Store: round.slot.store, coordinator: coordinator}
+	writes, fallbacks := settleSegmentShadow(ctx, store, request, folded, &facts, coordinator.now)
 	coordinator.reportSegmentFallbacks(ctx, request, fallbacks)
 	landed := map[segment.PlanKey]bool{}
+	var refused error
 	if len(writes) > 0 {
-		written, err := round.slot.store.WriteSegments(ctx, segment.WriteRequest{Contract: request.Contract,
+		written, err := store.WriteSegments(ctx, segment.WriteRequest{Contract: request.Contract,
 			Fence: execution.StateApplyFence{Fence: request.OwnerFence, ContentScope: request.ContentScope}, Plans: writes})
+		var notBegun *slotNotBegun
+		if errors.As(err, &notBegun) {
+			refused = err
+		}
+		for _, result := range written.Plans {
+			if err == nil && refused == nil {
+				refused = segmentWriteRefusal(result)
+			}
+		}
 		// A departing member's key found gone reads MISSING_WARMING when it
 		// comes back: counted with the renewals' own (missing).
 		for _, gone := range written.DepartedGone {
@@ -1167,7 +1185,49 @@ func (coordinator *SlotExecutionCoordinator) foldSegmentShadow(ctx context.Conte
 			ReasonCode: observability.ReasonNone, SegmentShadow: &facts,
 		})
 	}
-	return failed
+	if refused == nil {
+		// A renewal the put-off BeginSlot stopped, with no write after it.
+		if notBegun := slotWritesFrom(ctx).notBegun(); notBegun != nil {
+			refused = notBegun
+		}
+	}
+	return failed, refused
+}
+
+// segmentWriteRefusal is ownership's error for a segment write the fence
+// refused, nil for any other result.
+func segmentWriteRefusal(result string) error {
+	switch result {
+	case segment.WriteStaleOwner:
+		return fmt.Errorf("alarmd worker: segment write refused: %w", ownership.ErrStaleFence)
+	case segment.WriteContentMoved:
+		return fmt.Errorf("alarmd worker: segment write refused: %w", ownership.ErrContentScopeMoved)
+	}
+	return nil
+}
+
+// guardedSegmentWrites is a Slot's segment store whose writes and renewals
+// each first have what a write needs (beforeWrite): the Slot begun, when
+// its BeginSlot was put off. Their scripts run the fence.
+type guardedSegmentWrites struct {
+	segment.Store
+	coordinator *SlotExecutionCoordinator
+}
+
+func (store guardedSegmentWrites) WriteSegments(ctx context.Context, request segment.WriteRequest) (segment.WriteResult, error) {
+	cleared, notCleared := store.coordinator.beforeWrite(ctx, false)
+	if notCleared != nil {
+		return segment.WriteResult{}, notCleared
+	}
+	return store.Store.WriteSegments(cleared, request)
+}
+
+func (store guardedSegmentWrites) RenewSegments(ctx context.Context, request segment.RenewRequest) (segment.RenewResult, error) {
+	cleared, notCleared := store.coordinator.beforeWrite(ctx, false)
+	if notCleared != nil {
+		return segment.RenewResult{}, notCleared
+	}
+	return store.Store.RenewSegments(cleared, request)
 }
 
 // segmentWriteFailures is the Query Groups whose Slot's round left members
@@ -1209,17 +1269,12 @@ func (failures *segmentWriteFailures) forget(queryGroup execution.QueryGroupIden
 // Slot read were reserved (readSegments): quietly, the Slot going on whatever
 // the pool says. Nil, every join admitted, for a Slot that holds nothing.
 func (coordinator *SlotExecutionCoordinator) segmentJoinAdmission(ctx context.Context) func(int) bool {
-	stream := retainedOwnerFrom(ctx)
-	if stream == nil {
+	owner := retainedOwnerFrom(ctx)
+	if owner == nil {
 		return nil
 	}
 	return func(joins int) bool {
-		bytes := uint64(joins) * segment.BookMemberBytes
-		if err := coordinator.acquireProvisional(0, bytes, stream, "segment_book"); err != nil {
-			return false
-		}
-		stream.retainBytes(retainPhaseState, bytes)
-		return true
+		return coordinator.holdRetained(owner, uint64(joins)*segment.BookMemberBytes, "segment_book") == nil
 	}
 }
 

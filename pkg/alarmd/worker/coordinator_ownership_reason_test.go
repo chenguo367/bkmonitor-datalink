@@ -27,8 +27,9 @@ func reasonOf(observations *[]observability.Observation, stage observability.Sta
 	return ""
 }
 
-// The store's refusal of the side-effect admission is named on the admission
-// line by the store's own word. It was internal_unknown: the admission result
+// The store's refusal of the side-effect admission - the owner fence checked
+// before a write whose script does not run it (014 ⑩ F1) - is named on the
+// admission line by the store's own word. It was internal_unknown: the admission result
 // carries no reason for an error, and the four typed refusals could only be
 // told apart by reading the error text off a rate-limited log line.
 func TestTheAdmissionLineNamesTheStoresRefusal(t *testing.T) {
@@ -45,7 +46,7 @@ func TestTheAdmissionLineNamesTheStoresRefusal(t *testing.T) {
 			observer := observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
 				observations = append(observations, observability.NormalizeObservation(observation))
 			})
-			fixture := buildFixture(t, true, "admission_initial", observer, &observations)
+			fixture := buildFixture(t, true, "fence", observer, &observations)
 			fixture.ports.failErr = test.refusal
 			_, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
 			if !errors.Is(err, test.refusal) {
@@ -62,7 +63,7 @@ func TestTheAdmissionLineNamesTheStoresRefusal(t *testing.T) {
 	observer := observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
 		observations = append(observations, observability.NormalizeObservation(observation))
 	})
-	fixture := buildFixture(t, true, "admission_initial", observer, &observations)
+	fixture := buildFixture(t, true, "fence", observer, &observations)
 	if _, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal)); err == nil {
 		t.Fatal("injected admission failure did not fail the Slot")
 	}

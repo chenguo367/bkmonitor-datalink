@@ -3398,6 +3398,18 @@ type EncodedStateFrame struct {
 	Revision        uint64
 	Bytes           []byte
 	LegacyRecordIDs int
+	// Parts is what the store framed Bytes from, kept for its own use when
+	// it writes them; nil when it kept none. Opaque here: a holder of the
+	// frame charges what they hold beside Bytes (RetainedBytes).
+	Parts EncodedStateParts
+}
+
+// EncodedStateParts is a store's own account of what it framed a frame
+// from.
+type EncodedStateParts interface {
+	// RetainedBytes is what the parts hold of the heap beside the frame's
+	// bytes.
+	RetainedBytes() uint64
 }
 
 type StateAdmissionStatus string
@@ -4881,16 +4893,37 @@ func applyVersionFacts(version ApplyVersion) observability.ApplyVersionFacts {
 // calls. Preflight is the State reads, the first-seen pre-pass's included;
 // Evaluate the evaluator; RecordIDs the record ids the windows derive; Series
 // one series' work around its evaluation; Merge folding its result into the
-// Slot's; Cut a window's head while the Slot is evaluated; Apply the writes -
-// the windows' events, State and gaps and the tail, the waits for their
-// Sequences included; NoDataRead a no-data round's reading of its memory and
-// its judgement; NoDataWrite the memory and its ends written.
+// Slot's; Cut a window's head while the Slot is evaluated; NoDataRead a
+// no-data round's reading of its memory and its judgement; NoDataWrite the
+// memory and its ends written on the Slot's own goroutine.
+//
+// Apply is the writes - the windows' events, State and gaps and the tail,
+// the waits for their Sequences included - and is not in the partition for a
+// Slot cut into windows (014 next9 4, the window pipeline): there they run on
+// the Slot's apply goroutine beside the Slot's own phases, and Apply is how
+// long that goroutine was busy, the tail's no-data memory writes among them.
+// The Slot's goroutine's share of it is ApplyWait, its time waiting on the
+// apply goroutine - to take a window, to drain, for the last window and the
+// tail - and Land, its time taking landed windows back (what they held given
+// back, their inputs let go). Both are phases of the partition: the phases
+// with ApplyWait and Land add up to Slot with Unattributed. ApplyOverlap is
+// Apply less ApplyWait, the writes the Slot's goroutine did not wait for:
+// what the pipeline took off the Slot's time. A Slot applied whole writes on
+// its own goroutine: Apply is in the partition there, and ApplyWait, Land and
+// ApplyOverlap are zero.
+//
+// Readings from before the pipeline: their Apply is today's Apply plus Land
+// for what the writes cost, and today's ApplyWait plus Land for the time they
+// took on the Slot's path.
 type SlotTiming struct {
 	Slot         uint64
 	Input        uint64
 	Preflight    uint64
 	Evaluate     uint64
 	Apply        uint64
+	ApplyWait    uint64
+	Land         uint64
+	ApplyOverlap uint64
 	RecordIDs    uint64
 	Cut          uint64
 	Merge        uint64
@@ -5077,6 +5110,22 @@ type SlotBudgetUsage struct {
 	Windows                    uint64
 	WindowCeilingWindows       uint64
 	WindowCeilingRaisedWindows uint64
+	// WindowZeroBoundCuts* are the windows cut while the window bound was
+	// zero, by the retained phase holding the most of what the Slot held
+	// outside the window (observability.WindowZeroBoundReasons): each series
+	// merged then was a window of its own.
+	WindowZeroBoundCutsInput  uint64
+	WindowZeroBoundCutsGap    uint64
+	WindowZeroBoundCutsOutput uint64
+	WindowZeroBoundCutsState  uint64
+	// WindowOutsideClamped and SliceOthersClamped are one when what the
+	// window bound or the slice limit takes off what the Slot holds - the
+	// window being filled or the slice read, what the windows in flight give
+	// back, what the apply side holds - ever came to more than the Slot held,
+	// zero otherwise: zero unless a window's give-back is counted twice, the
+	// bound or the limit then larger than it should be.
+	WindowOutsideClamped uint64
+	SliceOthersClamped   uint64
 }
 
 // PrimaryBindingAttribution is the reason and the scope a completion names

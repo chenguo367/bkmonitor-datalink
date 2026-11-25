@@ -26,7 +26,7 @@ import (
 // 2.7, plan 5.1-4 and 5.1-8), after every present window has landed:
 //
 //  1. The present set: every series of the Plan projected onto its group,
-//     kept as the windows landed (dropWindowInputs) and the rest added now,
+//     kept as the windows were cut (letGoWindowInputs) and the rest added now,
 //     one key and a few bits a group (nodata.PresentSet). A series a retry
 //     resumed is a prepared series like any other and is in it.
 //  2. The header was read with the Slot's no-data load (ReadNoDataHeaders);

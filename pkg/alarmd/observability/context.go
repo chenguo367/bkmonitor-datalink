@@ -110,6 +110,11 @@ type BudgetCapture struct {
 	// failedRequest and failedPlanned are RecordFailedQuery's.
 	failedRequest *QueryRequestFacts
 	failedPlanned *QueryPlannedFacts
+	// permitWait and permitWaitMax are the attempt's waits for query
+	// permits and recovery channels, summed and the longest
+	// (MarkPermitWait): the waits are parallel, so the sum is not time
+	// taken out of the attempt.
+	permitWait, permitWaitMax time.Duration
 }
 
 // Record keeps facts when they bind the round tighter than what is kept: the
@@ -153,6 +158,29 @@ func (capture *BudgetCapture) MarkStarted(at time.Time) {
 	if capture.facts != nil {
 		capture.facts.QueryStartedAtUnixMilli = capture.startedAt
 	}
+}
+
+// MarkPermitWait adds one wait for a query permit or the recovery channels
+// to the attempt's, as the scheduler timed it for query_permit_wait.
+func (capture *BudgetCapture) MarkPermitWait(wait time.Duration) {
+	if capture == nil || wait < 0 {
+		return
+	}
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	capture.permitWait += wait
+	capture.permitWaitMax = max(capture.permitWaitMax, wait)
+}
+
+// PermitWaits is the attempt's waits for query permits and recovery
+// channels so far: summed, and the longest.
+func (capture *BudgetCapture) PermitWaits() (total, longest time.Duration) {
+	if capture == nil {
+		return 0, 0
+	}
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	return capture.permitWait, capture.permitWaitMax
 }
 
 // Facts is the binding consumer's budget recorded so far, or nil.

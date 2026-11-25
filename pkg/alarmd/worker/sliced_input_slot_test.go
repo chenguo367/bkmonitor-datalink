@@ -42,10 +42,14 @@ import (
 // slicer's own counters alone.
 
 // slicedPool is the retained-byte pool of the sliced fixtures: a share of
-// three quarters of it, 768 KiB, and a slice limit of at most half that.
-const slicedPool = 1 << 20
+// three quarters of it, 1.5 MiB, half of it the Slot's side and half its
+// windows in flight (014 next9 4), and a slice limit of at most half the
+// Slot's side, 384 KiB.
+const slicedPool = 2 << 20
 
 const slicedShare = slicedPool / 4 * 3
+
+const slicedLimit = slicedShare / 2 / 2
 
 // slicedSeries is one series of the sliced fixture: its value on the
 // dimension the Slot is sliced on, and the padding, in a dimension outside
@@ -494,8 +498,8 @@ func TestASlotPastHalfItsShareIsReadInSlicesEachSeriesWrittenOnce(t *testing.T) 
 	reads := make([][]string, 0, len(landed))
 	for _, call := range landed {
 		reads = append(reads, call.delivered)
-		if call.padding > slicedShare/2 {
-			t.Fatalf("a landed slice held %d bytes of padding alone, past the slice limit %d", call.padding, slicedShare/2)
+		if call.padding > slicedLimit {
+			t.Fatalf("a landed slice held %d bytes of padding alone, past the slice limit %d", call.padding, slicedLimit)
 		}
 		if call.slice.IsZero() {
 			t.Fatal("a landed read was the whole Query Group, which does not fit")
@@ -630,7 +634,7 @@ func TestAnUnsliceableSlotIsReadWholeAndJudgedByItsShare(t *testing.T) {
 			}
 		})
 		t.Run(test.name+"/past_share", func(t *testing.T) {
-			fixture := newSlicedFixture(t, slicedHosts(24, 40<<10), test.facts, 200)
+			fixture := newSlicedFixture(t, slicedHosts(48, 40<<10), test.facts, 200)
 			result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
 			if err == nil || result.Completed {
 				t.Fatalf("Execute() result=%+v err=%v, want the Slot refused by its share", result, err)
@@ -681,7 +685,7 @@ func TestASlotCombiningSeriesAcrossTheSliceIsNotSliced(t *testing.T) {
 		facts *execution.QueryPlanFacts
 	}{{"clause_topk", clauseTopK}, {"merge_topk", merged("topk(1, a)")}} {
 		t.Run(test.name, func(t *testing.T) {
-			fixture := newSlicedFixture(t, slicedHosts(24, 40<<10), test.facts, 200)
+			fixture := newSlicedFixture(t, slicedHosts(48, 40<<10), test.facts, 200)
 			result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
 			why, _ := execution.InputSliceUnsupportedOf(err)
 			if err == nil || result.Completed || why != execution.InputSliceReasonCrossSeries || len(fixture.source.calls) != 1 {
@@ -732,11 +736,11 @@ func TestASlotBetweenHalfItsShareAndItsShareIsStillReadInSlices(t *testing.T) {
 	landed := fixture.source.landed()
 	if len(landed) < 2 {
 		t.Fatalf("landed %d reads of %d bytes of padding, want more than one slice past half the share %d",
-			len(landed), 14*(40<<10), slicedShare/2)
+			len(landed), 14*(40<<10), slicedLimit)
 	}
 	for _, call := range landed {
-		if call.padding > slicedShare/2 {
-			t.Fatalf("a landed slice held %d bytes of padding alone, past the slice limit %d", call.padding, slicedShare/2)
+		if call.padding > slicedLimit {
+			t.Fatalf("a landed slice held %d bytes of padding alone, past the slice limit %d", call.padding, slicedLimit)
 		}
 	}
 	if len(fixture.state.saved) != len(series) {
@@ -747,9 +751,12 @@ func TestASlotBetweenHalfItsShareAndItsShareIsStillReadInSlices(t *testing.T) {
 // One series larger than the slice limit cannot be helped by a split: the
 // Slot is refused by its share where the slice passes its limit, not split
 // until K_max and named for its values. A sliceable Slot of small series
-// beside it is not (the positive case above).
+// beside it is not (the positive case above). Larger than the limit a Slot
+// with no window in flight has, half of what the whole share leaves: a series
+// past only the Slot's side's half is taken in once the windows in flight
+// have landed (014 next9 4).
 func TestASeriesLargerThanTheSliceLimitIsRefusedByTheShare(t *testing.T) {
-	series := append(slicedHosts(4, 8<<10), slicedSeries{host: "host-huge", padding: 500 << 10})
+	series := append(slicedHosts(4, 8<<10), slicedSeries{host: "host-huge", padding: 800 << 10})
 	fixture := newSlicedFixture(t, series, sliceableFacts(), 200)
 	result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
 	if err == nil || result.Completed {
@@ -1191,7 +1198,7 @@ func TestFirstSeenIsJudgedPerSliceAndAPlanFoundSeenWarmsUpFromThatSlice(t *testi
 
 // The same, every window three State mutations at most: every slice of six
 // series and more is cut into windows halfway through, and the windows it
-// wrote let go of their series before the slice ends (dropWindowInputs).
+// wrote let go of their series before the slice ends (letGoWindowInputs).
 // The slices written as first-seen and their series are counted whole all
 // the same: a slice's series are counted as they are prepared, not by what
 // is left of them at its end (what is left depended on whether a
@@ -1314,7 +1321,7 @@ func TestTheNextSlotOfAQueryGroupStartsWithTheSlicesItsLastReadNeeded(t *testing
 	for _, one := range series {
 		padding += one.padding
 	}
-	least := (padding + slicedShare/2 - 1) / (slicedShare / 2)
+	least := (padding + slicedLimit - 1) / slicedLimit
 	if calls[0].slice.IsZero() || result.Usage.InputSlicesDiscarded != 1 || result.Usage.InputSliceStartDiscarded != 1 ||
 		len(calls) != len(fixture.source.landed())+1 {
 		t.Fatalf("next Slot read %d times, %d discarded, first read whole=%v: want it sliced from its first read, the rest let go",

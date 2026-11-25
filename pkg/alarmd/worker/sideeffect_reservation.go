@@ -10,6 +10,13 @@ import (
 
 type effectCounts struct{ states, events, gaps uint64 }
 
+// minus is the State and event counts of counts that are not other's: a
+// window's own, the windows in flight taken off what the Slot holds. The gap
+// count is the head's and the tail's, never a window's, and is not in it.
+func (counts effectCounts) minus(other effectCounts) effectCounts {
+	return effectCounts{states: counts.states - min(other.states, counts.states), events: counts.events - min(other.events, counts.events)}
+}
+
 func checkEffectCounts(count effectCounts, budget ProvisionalBudget) error {
 	for _, check := range []struct {
 		count, limit uint64
@@ -110,6 +117,9 @@ func (stream *streamedExecution) mergeMeasured(ctx context.Context, next executi
 	if stream.evaluated.Contract != (execution.FrozenExecutionContractRef{}) && stream.evaluated.Contract != next.Contract {
 		return errors.New("alarmd worker: series evaluations changed frozen contract")
 	}
+	if err := stream.takeLandings(ctx); err != nil {
+		return err
+	}
 	delta := addedEffectCounts(stream.evaluated, next)
 	count := effectCounts{stream.effects.states + delta.states, stream.effects.events + delta.events, stream.effects.gaps + delta.gaps}
 	// The Slot's own output is checked against the per-Slot caps before the
@@ -117,7 +127,18 @@ func (stream *streamedExecution) mergeMeasured(ctx context.Context, next executi
 	// process, so that rejection is deterministic and carries the Slot's own
 	// facts instead of the shared usage.
 	slotBudget := stream.coordinator.slotBudget()
-	if err := checkEffectCounts(count, slotBudget); err != nil {
+	err := checkEffectCounts(count, slotBudget)
+	if err != nil && stream.inflightEffects() != (effectCounts{}) {
+		// The counts are the windows in hand: one written, one filled. With
+		// a window still being written, the cap is judged again once it has
+		// landed and given its counts back.
+		if drainErr := stream.drainApply(ctx); drainErr != nil {
+			return drainErr
+		}
+		count = effectCounts{stream.effects.states + delta.states, stream.effects.events + delta.events, stream.effects.gaps + delta.gaps}
+		err = checkEffectCounts(count, slotBudget)
+	}
+	if err != nil {
 		var exceeded *provisionalBudgetExceededError
 		if errors.As(err, &exceeded) {
 			err = stream.slotBudgetRejection(exceeded.budget, count, delta, slotBudget)

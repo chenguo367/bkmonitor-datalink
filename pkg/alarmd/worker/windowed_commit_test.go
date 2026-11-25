@@ -73,7 +73,7 @@ func hookedWindowedSlot(t *testing.T) (*recordingPorts, *persistedRetryState, *h
 		Hosts: worker.SharedHostBusiness, Events: ports, State: &appliedState{persistedRetryState: state, applied: applied},
 		Progress: ports, ExecutionEvidence: newMemoryEvidenceStore(),
 		Observer: observability.ObserverFunc(func(context.Context, observability.Observation) {})},
-		worker.ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxStateMutations: 2, MaxEvents: 100, MaxGapMutations: 10})
+		worker.ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxStateMutations: 4, MaxEvents: 100, MaxGapMutations: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,6 +95,10 @@ func markedContext(deadline time.Time) (context.Context, *execution.StageMarker)
 // landed window's series without sending them again, sends the rest once,
 // and writes the tail and Progress.
 func TestADeclineBetweenTwoWindowsWritesNothingMoreAndTheNextAttemptFinishesTheSlot(t *testing.T) {
+	// Between two windows: the first landed before the next is filled, so the
+	// judgement falls between them (014 next9 4: a window written while the
+	// next is filled leaves no such moment the case can pick).
+	worker.SetApplySeriallyForTest(t)
 	ports, state, evaluator, coordinator := hookedWindowedSlot(t)
 	ctx, marker := markedContext(time.Now())
 	claimed := false
@@ -147,6 +151,8 @@ func TestAProgressingWindowedSlotIsNotDeclinedAndAStuckWindowIs(t *testing.T) {
 		{"stuck", windowBound + watchdogGrace + time.Second, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			// Judged between two windows, as the case above.
+			worker.SetApplySeriallyForTest(t)
 			_, _, evaluator, coordinator := hookedWindowedSlot(t)
 			// Past its own deadline by more than the grace: claimed at the
 			// first tick if the boundary had not moved the deadline.
@@ -269,7 +275,7 @@ func watchedWindowedSlot(t *testing.T, marker *execution.StageMarker) (*recordin
 		Hosts: worker.SharedHostBusiness, Events: &watchedEvents{recordingPorts: ports, watch: watch}, State: state, Progress: ports,
 		ExecutionEvidence: newMemoryEvidenceStore(),
 		Observer:          observability.ObserverFunc(func(context.Context, observability.Observation) {})},
-		worker.ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxStateMutations: 2, MaxEvents: 100, MaxGapMutations: 10})
+		worker.ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxStateMutations: 4, MaxEvents: 100, MaxGapMutations: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,6 +302,9 @@ func TestAWindowStaysInsideItsCommitFromItsEventsUntilItsStateApplyReturns(t *te
 		ports, state, evaluator, coordinator := watchedWindowedSlot(t, marker)
 		claimedBetween := false
 		if last {
+			// Judged between two windows: the first landed before the next is
+			// filled (applySerially), as in the decline case.
+			worker.SetApplySeriallyForTest(t)
 			evaluator.hook = func() {
 				_, _, claimedBetween = marker.Decline(time.Now().Add(24*time.Hour), watchdogGrace)
 			}
@@ -313,8 +322,8 @@ func TestAWindowStaysInsideItsCommitFromItsEventsUntilItsStateApplyReturns(t *te
 				t.Fatalf("after the first window's apply returned: claimed=%v err=%v, want it claimed and the attempt declined",
 					claimedBetween, err)
 			}
-			if want := []string{execution.SlotStageState}; !reflect.DeepEqual(state.stages, want) {
-				t.Fatalf("stages inside the State applies = %v, want %v", state.stages, want)
+			if len(state.stages) != 1 || !stateOrEvaluate(state.stages[0]) {
+				t.Fatalf("stages inside the State applies = %v, want the one window's", state.stages)
 			}
 			continue
 		}
@@ -324,9 +333,17 @@ func TestAWindowStaysInsideItsCommitFromItsEventsUntilItsStateApplyReturns(t *te
 		if len(ports.eventBatches) != 3 {
 			t.Fatalf("attempt %d: %d event batches, want one per window", attempt, len(ports.eventBatches))
 		}
-		want := []string{execution.SlotStageState, execution.SlotStageState, execution.SlotStageState}
-		if !reflect.DeepEqual(state.stages, want) {
-			t.Fatalf("attempt %d: stages inside the State applies = %v, want %v", attempt, state.stages, want)
+		if len(state.stages) != 3 || !stateOrEvaluate(state.stages[0]) || !stateOrEvaluate(state.stages[1]) ||
+			!stateOrEvaluate(state.stages[2]) {
+			t.Fatalf("attempt %d: stages inside the State applies = %v, want three windows'", attempt, state.stages)
 		}
 	}
+}
+
+// stateOrEvaluate is the stage a window's State apply reports: its own, or
+// the evaluation the Slot's goroutine went on to while the window is written
+// on its apply goroutine - the stage is the last one marked, and only the
+// commit, never the stage, is what the watchdog judges (014 next9 4, C9).
+func stateOrEvaluate(stage string) bool {
+	return stage == execution.SlotStageState || stage == execution.SlotStageEvaluate
 }

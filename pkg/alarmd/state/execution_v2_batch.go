@@ -120,10 +120,22 @@ func runtimeWitnessBytes(identity execution.StateKeyIdentity, witness runtimeWit
 	return bytes
 }
 
-// RuntimeWitnessStats is the witness cache as its gauges read it.
+// RuntimeWitnessStats is the witness cache as its gauges read it, and the
+// witnesses it let go of unconsumed since the process started, by when.
 type RuntimeWitnessStats struct {
 	Items int
 	Bytes int64
+	// Landed is the witnesses a window let go of as it landed - its keys no
+	// write of it took (ReleaseRuntimeWitnesses) - and Ended those an attempt
+	// left when it ended (ReleaseSlotWitnesses).
+	Landed, Ended RuntimeWitnessRelease
+}
+
+// RuntimeWitnessRelease is witnesses let go of without an apply taking
+// them: how many, and their bytes as the cache counted them.
+type RuntimeWitnessRelease struct {
+	Items uint64
+	Bytes uint64
 }
 
 // runtimeWitnessCache keeps preflight witnesses per query group for the Slot
@@ -136,6 +148,9 @@ type runtimeWitnessCache struct {
 	total    int
 	bytes    int64
 	sequence uint64
+	// landed and ended count the witnesses let go of unconsumed
+	// (RuntimeWitnessStats).
+	landed, ended RuntimeWitnessRelease
 }
 
 func newRuntimeWitnessCache() *runtimeWitnessCache {
@@ -180,6 +195,26 @@ func (cache *runtimeWitnessCache) markCached(slot execution.SlotIdentity, identi
 func (cache *runtimeWitnessCache) take(slot execution.SlotIdentity, identity execution.StateKeyIdentity) (runtimeWitness, bool) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
+	return cache.takeLocked(slot, identity)
+}
+
+// releaseLanded lets go of the witnesses of keys, slot's, a window read and
+// has landed: the ones its writes took are gone already, and no write of
+// the attempt takes the others - a window writes only its own keys, and a
+// key is read in one window of an attempt (worker landWindow). Each it
+// finds is counted as landed.
+func (cache *runtimeWitnessCache) releaseLanded(slot execution.SlotIdentity, keys []execution.StateKeyIdentity) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	for _, identity := range keys {
+		if witness, found := cache.takeLocked(slot, identity); found {
+			cache.landed.Items++
+			cache.landed.Bytes += uint64(runtimeWitnessBytes(identity, witness))
+		}
+	}
+}
+
+func (cache *runtimeWitnessCache) takeLocked(slot execution.SlotIdentity, identity execution.StateKeyIdentity) (runtimeWitness, bool) {
 	group := cache.groups[slot.QueryGroup]
 	if group == nil || group.slot != slot {
 		return runtimeWitness{}, false
@@ -221,9 +256,12 @@ func (cache *runtimeWitnessCache) forget(queryGroup execution.QueryGroupIdentity
 // release drops the witnesses slot's preflights left once its attempt is
 // done applying: a member its round left unwritten took none of its own, and
 // would keep it until the Query Group's next Slot - the group being filled is
-// never evicted, so a large Query Group kept a round's worth. A group of any
-// other Slot is left alone: a later one's, or the earlier Slot a supplement
-// read under.
+// never evicted, so a large Query Group kept a round's worth. A Slot written
+// in windows has let go of each landed window's already (releaseLanded):
+// what is left is the last window's, or a window's the attempt ended
+// before it landed. A group of any other Slot is left alone: a later
+// one's, or the earlier Slot a supplement read under. Each dropped is
+// counted as ended.
 func (cache *runtimeWitnessCache) release(slot execution.SlotIdentity) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
@@ -231,6 +269,8 @@ func (cache *runtimeWitnessCache) release(slot execution.SlotIdentity) {
 	if group == nil || group.slot != slot {
 		return
 	}
+	cache.ended.Items += uint64(len(group.items))
+	cache.ended.Bytes += uint64(max(group.bytes, 0))
 	cache.dropLocked(group)
 	delete(cache.groups, slot.QueryGroup)
 }
@@ -238,7 +278,7 @@ func (cache *runtimeWitnessCache) release(slot execution.SlotIdentity) {
 func (cache *runtimeWitnessCache) stats() RuntimeWitnessStats {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	return RuntimeWitnessStats{Items: cache.total, Bytes: cache.bytes}
+	return RuntimeWitnessStats{Items: cache.total, Bytes: cache.bytes, Landed: cache.landed, Ended: cache.ended}
 }
 
 // dropLocked takes a group's items and bytes off the totals; the caller
@@ -587,7 +627,7 @@ func (store *ExecutionStore) applyRuntime(
 	written := make(map[string]struct{}, len(request.Items))
 	// staged is each pipelined write, for the State cache to keep once its
 	// outcome is known; a key written any other way is dropped from it.
-	staged := make(map[int]stateCacheEntry, len(request.Items))
+	staged := make(map[int]stagedWrite, len(request.Items))
 	unknown := func() {
 		// A request any part of which ended in doubt: a write of it may have
 		// landed, so none of its keys is served from the cache (rule 2).
@@ -664,7 +704,7 @@ func (store *ExecutionStore) applyRuntime(
 			result.Items[index] = classified
 			continue
 		}
-		encoded, refusal, legacyIDs := store.frameForWrite(request, index, mutation, witness.framedRevision+1, !framed)
+		encoded, parts, refusal, legacyIDs := store.frameForWrite(request, index, mutation, witness.framedRevision+1, !framed)
 		if refusal.reason != "" {
 			item.Status, item.ReasonCode = execution.StateApplyDeterministicInvalid, execution.ReasonCode(refusal.reason)
 			item.RefusalRule = refusal.rule
@@ -675,13 +715,14 @@ func (store *ExecutionStore) applyRuntime(
 		write := FencedWrite{Key: keys[index], ExpectedMissing: witness.framedMissing, ExpectedDigest: witness.framedDigest,
 			Value: encoded, TTL: ttl}
 		if guard != nil {
-			staged[index] = stateCacheEntry{key: keys[index], group: request.Contract.Slot.QueryGroup, identity: mutation.Identity, raw: encoded,
+			staged[index] = stagedWrite{parts: parts, entry: stateCacheEntry{key: keys[index], group: request.Contract.Slot.QueryGroup,
+				identity: mutation.Identity, raw: encoded,
 				digest: ExpectedValueDigest(encoded), applyVersion: mutation.ApplyVersion,
 				fence: execution.OwnerFence{QueryGroup: request.Contract.Slot.QueryGroup, OwnerID: guard.OwnerID,
 					OwnerEpoch: guard.OwnerEpoch, LeaseToken: guard.LeaseToken},
 				epoch: mutation.ApplyVersion.StateApplyEpoch, segmentStart: request.Contract.ScheduleSegmentStart,
 				slot: request.Contract.Slot.EvaluationTime, usableUntil: store.options.Now().Add(ttl - store.options.StateCacheReplayAge),
-				planInterval: longestEvaluationInterval(request.Retention)}
+				planInterval: longestEvaluationInterval(request.Retention)}}
 		}
 		if err := pipeline.add(ctx, batchBackend, target.Name, index, write, witness.framedRevision, witness.cached); err != nil {
 			unknown()
@@ -723,7 +764,7 @@ func (store *ExecutionStore) applyRuntimeSequential(
 	if classified, proceed := classifyWitnessedMutation(witness, mutation); !proceed {
 		return classified
 	}
-	encoded, refusal, legacyIDs := store.encodeChecked(mutation, witness.framedRevision+1, checked)
+	encoded, _, refusal, legacyIDs := store.encodeChecked(mutation, witness.framedRevision+1, checked)
 	if refusal.reason != "" {
 		item.Status, item.ReasonCode = execution.StateApplyDeterministicInvalid, execution.ReasonCode(refusal.reason)
 		item.RefusalRule = refusal.rule
@@ -750,10 +791,11 @@ type writeRefusal struct {
 // encodeChecked is encodeForWrite of a mutation whose content was checked
 // whole (checked), or is checked whole now: a write that encodes a mutation
 // the admission framed encodes its content as it stands.
-func (store *ExecutionStore) encodeChecked(mutation execution.StateMutation, revision uint64, checked bool) ([]byte, writeRefusal, int) {
+func (store *ExecutionStore) encodeChecked(mutation execution.StateMutation, revision uint64,
+	checked bool) ([]byte, *packedParts, writeRefusal, int) {
 	if !checked {
 		if err := mutation.ValidateDigest(); err != nil {
-			return nil, writeRefusal{reason: contract.ReasonStateCorrupt, rule: PackedRuleMutationDigestMismatch}, 0
+			return nil, nil, writeRefusal{reason: contract.ReasonStateCorrupt, rule: PackedRuleMutationDigestMismatch}, 0
 		}
 	}
 	return store.encodeForWrite(mutation, revision)
@@ -762,23 +804,25 @@ func (store *ExecutionStore) encodeChecked(mutation execution.StateMutation, rev
 // encodeForWrite frames the record every write stores, naming the refusal
 // when it cannot: a record that disagrees with the framed contract is
 // STATE_CORRUPT - the producer sent something no representation can hold -
-// and one that frames but does not fit is the budget.
-func (store *ExecutionStore) encodeForWrite(mutation execution.StateMutation, revision uint64) ([]byte, writeRefusal, int) {
-	encoded, legacy, err := encodeRuntimePackedCounted(mutation, revision)
+// and one that frames but does not fit is the budget. The parts it framed
+// the record from come with it (packedParts).
+func (store *ExecutionStore) encodeForWrite(mutation execution.StateMutation,
+	revision uint64) ([]byte, *packedParts, writeRefusal, int) {
+	encoded, parts, legacy, err := encodeRuntimePackedParts(mutation, revision)
 	switch {
 	case errors.Is(err, ErrPackedContract):
 		// The rule travels with the reason. Eight rules share STATE_CORRUPT,
 		// and which one refused is the difference between a producer that
 		// stopped deriving record ids and one that sent two fingerprints for
 		// a Level - different code, different fix.
-		return nil, writeRefusal{contract.ReasonStateCorrupt, PackedRefusalRule(err), err.Error()}, 0
+		return nil, nil, writeRefusal{contract.ReasonStateCorrupt, PackedRefusalRule(err), err.Error()}, 0
 	case err != nil:
-		return nil, writeRefusal{contract.ReasonStateBudgetExceeded, RuntimeRuleValueNotEncodable, err.Error()}, 0
+		return nil, nil, writeRefusal{contract.ReasonStateBudgetExceeded, RuntimeRuleValueNotEncodable, err.Error()}, 0
 	case len(encoded) > store.options.MaxValueBytes:
-		return nil, writeRefusal{contract.ReasonStateBudgetExceeded, RuntimeRuleValueOverLimit,
+		return nil, nil, writeRefusal{contract.ReasonStateBudgetExceeded, RuntimeRuleValueOverLimit,
 			fmt.Sprintf("record encodes to %d bytes, over the value limit of %d bytes", len(encoded), store.options.MaxValueBytes)}, 0
 	}
-	return encoded, writeRefusal{}, legacy
+	return encoded, parts, writeRefusal{}, legacy
 }
 
 // runtimeValueSizeGroups bounds how many Query Groups the store remembers a
@@ -1360,13 +1404,21 @@ func (pipeline *runtimeApplyPipeline) restore(ctx context.Context, batch runtime
 	}
 }
 
+// stagedWrite is what a pipelined write stages for the State cache: the
+// entry the key's value would be kept as, and the parts its encoder framed
+// the value from, nil when the write has none (014 next9 1).
+type stagedWrite struct {
+	entry stateCacheEntry
+	parts *packedParts
+}
+
 // keepWritten brings the State cache up to what one request left: an
 // applied pipelined write is kept as the key's bytes, and any other outcome
 // takes the key out - a conflict, an already-applied or stale refusal, a
 // sequential write, whose bytes were not staged. A write in doubt takes out
 // every key of the request.
 func (store *ExecutionStore) keepWritten(group execution.QueryGroupIdentity, keys []string, result execution.StateApplyResult,
-	staged map[int]stateCacheEntry) {
+	staged map[int]stagedWrite) {
 	if store.cache == nil {
 		return
 	}
@@ -1382,8 +1434,8 @@ func (store *ExecutionStore) keepWritten(group execution.QueryGroupIdentity, key
 		if keys[index] == "" {
 			continue
 		}
-		if entry, ok := staged[index]; ok && item.Status == execution.StateApplied {
-			store.cache.applied(entry)
+		if write, ok := staged[index]; ok && item.Status == execution.StateApplied {
+			store.cache.applied(write.entry, write.parts)
 			continue
 		}
 		store.cache.dropState(keys[index], group, item.Identity, StateCacheDepartConflict)

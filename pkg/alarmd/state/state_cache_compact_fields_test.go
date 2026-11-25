@@ -118,7 +118,7 @@ func TestEveryFieldAFrameCarriesIsHeldByItsCompactMember(t *testing.T) {
 	if !bytes.Equal(framedOf(t, header, points), base) {
 		t.Fatal("fixture: the header framed again is not the encoder's frame")
 	}
-	held := func(name string, raw []byte) {
+	held := func(name string, header packedHeader, raw []byte) {
 		t.Helper()
 		checked, why := compactOf(identity, raw)
 		if why == StateCacheCompactRebuiltBytes || why == StateCacheCompactRebuiltView {
@@ -132,11 +132,20 @@ func TestEveryFieldAFrameCarriesIsHeldByItsCompactMember(t *testing.T) {
 		case checked == nil && why != StateCacheCompactUnreadable && parsedWhy != why:
 			t.Errorf("%s: the check declines it as %s, taken in unchecked as %q", name, why, parsedWhy)
 		}
+		// The header the frame was framed from builds the member its bytes
+		// parse to, or declines it as they do (the third step).
+		fromHeader, headerWhy := compactOfHeader(identity, header, packedFrameSchemaV1, points, sha1.Sum(raw))
+		switch {
+		case parsed != nil && !reflect.DeepEqual(fromHeader, parsed):
+			t.Errorf("%s: taken in from its header as %+v (%q), its bytes parse to %+v", name, fromHeader, headerWhy, parsed)
+		case parsed == nil && headerWhy != parsedWhy:
+			t.Errorf("%s: its bytes parse to no member (%s), its header to %+v (%q)", name, parsedWhy, fromHeader, headerWhy)
+		}
 	}
 	if checked, why := compactOf(identity, base); checked == nil {
 		t.Fatalf("fixture: the encoder's frame is not kept compact (%s)", why)
 	}
-	held("the encoder's frame", base)
+	held("the encoder's frame", header, base)
 	leaves := 0
 	headerLeaves(reflect.ValueOf(&header).Elem(), "header", func(string, reflect.Value) { leaves++ })
 	for leaf := 0; leaf < leaves; leaf++ {
@@ -152,7 +161,7 @@ func TestEveryFieldAFrameCarriesIsHeldByItsCompactMember(t *testing.T) {
 			}
 			at++
 		})
-		held(name, framedOf(t, varied, points))
+		held(name, varied, framedOf(t, varied, points))
 	}
 	if leaves < 20 {
 		t.Fatalf("fixture: %d fields walked; want every field of the header and of its Level", leaves)
@@ -215,7 +224,7 @@ func writtenEntry(t *testing.T, s slot, index int, now time.Time) stateCacheEntr
 func TestAValueTakenInUncheckedAsADefectIsFoundIsKeptAsItsBytes(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	cache := newStateCache(1<<20, time.Minute, func() time.Time { return now })
-	cache.applied(writtenEntry(t, second, 0, now))
+	cache.applied(writtenEntry(t, second, 0, now), nil)
 	if stats := cache.stats(); stats.Entries[StateCacheEntryCompact] != 1 {
 		t.Fatalf("fixture: the first value written left %v, want it compact", stats.Entries)
 	}
@@ -228,7 +237,7 @@ func TestAValueTakenInUncheckedAsADefectIsFoundIsKeptAsItsBytes(t *testing.T) {
 	if entry.key == "" {
 		t.Fatal("fixture: every value written is one the rule picks")
 	}
-	member, checked := cache.writtenCompact(entry)
+	member, checked := cache.writtenCompact(entry, nil)
 	if member == nil || checked {
 		t.Fatalf("fixture: a value of a template held, not picked, was made %v, checked %v; want a member unchecked", member, checked)
 	}

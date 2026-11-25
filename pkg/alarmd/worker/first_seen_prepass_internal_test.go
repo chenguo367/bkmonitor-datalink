@@ -68,8 +68,9 @@ func (ports *prepassPorts) LoadRuntime(_ context.Context, request execution.Stat
 }
 
 // newPrepassFixture is the windowed fixture with a Slot cap of two State
-// mutations, so every two series make a window and the preflight reads two
-// keys a batch, and series series streamed and prepared.
+// mutations, so every series makes a window - a window holds half the cap -
+// and the preflight reads two keys a batch, and series series streamed and
+// prepared.
 func newPrepassFixture(t *testing.T, series int) (*windowedFixture, *prepassPorts) {
 	t.Helper()
 	fixture := newWindowedFixture(t)
@@ -157,8 +158,8 @@ func TestABrandNewPlanOfManyWindowsIsJudgedFirstSeenAndWrittenInWindows(t *testi
 	if guards := fixture.ports.guards; len(guards) != 0 {
 		t.Fatalf("statements before the tail = %+v, want none: the first-seen marker is the tail's", guards)
 	}
-	if stream.windows.count != 3 || len(fixture.ports.stateApplied) != series {
-		t.Fatalf("windows=%d State written=%d, want 3 windows writing all %d series", stream.windows.count,
+	if stream.windows.count != series || len(fixture.ports.stateApplied) != series {
+		t.Fatalf("windows=%d State written=%d, want a window a series writing all %d", stream.windows.count,
 			len(fixture.ports.stateApplied), series)
 	}
 	if _, unseen := stream.unseenPlans()[fixture.due.Key()]; !unseen {

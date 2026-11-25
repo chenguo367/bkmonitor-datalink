@@ -225,8 +225,8 @@ func TestEverySlotCompletedReasonIsACellFromTheStart(t *testing.T) {
 			t.Errorf("scrape lacks %s", line)
 		}
 	}
-	if len(want) != 131 || len(slotReasonCells()) != len(want) {
-		t.Fatalf("slot_completed reason cells = %d (built %d), want 131: three words and the catalogue's 128",
+	if len(want) != 132 || len(slotReasonCells()) != len(want) {
+		t.Fatalf("slot_completed reason cells = %d (built %d), want 132: three words and the catalogue's 129",
 			len(want), len(slotReasonCells()))
 	}
 }
@@ -700,6 +700,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("worker_slice_read_ahead_total"):                len(observability.SliceReadAheadOutcomes),
 		fqName("worker_series_not_evaluated_total"):            len(observability.SeriesNotEvaluatedFamilies),
 		fqName("worker_slice_read_ahead_yields_total"):         len(observability.SliceReadAheadYieldPhases),
+		fqName("slot_window_zero_bound_cuts_total"):            len(observability.WindowZeroBoundReasons),
+		fqName("slot_window_accounting_clamped_slots_total"):   len(observability.WindowAccountingClamps),
 		fqName("worker_input_slice_timeouts_total"):            len(observability.InputSliceTimeoutOutcomes),
 		fqName("worker_input_slice_shapes_total"):              len(observability.InputSliceShapeOutcomes),
 		fqName("worker_no_data_stage_ahead_total"):             len(observability.NoDataStageAheadOutcomes),
@@ -871,6 +873,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		// operation and cohort.
 		fqName("scheduler_execution_slot_waits_total"):        len(observability.ExecutionSlotWaitOperations) * 2 * len(dispatchTurnawayCohorts),
 		fqName("scheduler_execution_slot_wait_seconds_total"): len(observability.ExecutionSlotWaitOperations) * len(dispatchTurnawayCohorts),
+		// Every operation a slow attempt is counted under.
+		fqName("slot_execute_slow_total"): len(observability.SlotExecuteSlowOperations),
 		// Two fixed results each, and the two are separate metrics on purpose:
 		// rotations and object-turns are different populations counted at
 		// different rates, and one metric holding both invites a ratio between
@@ -1108,6 +1112,9 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("state_redis_read_keys_total")] = len(state.StateReadPurposes)
 	bounds[fqName("state_witness_items")] = 1
 	bounds[fqName("state_witness_bytes")] = 1
+	// window_landed and attempt_ended.
+	bounds[fqName("state_witness_released_total")] = 2
+	bounds[fqName("state_witness_released_bytes_total")] = 2
 	bounds[fqName("container_memory_cgroup_info")] = 1
 	bounds[fqName("container_memory_v1_bytes")] = 5
 	// cmd/alarmd noDataCloseOutcomes: eight words.

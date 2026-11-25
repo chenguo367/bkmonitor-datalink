@@ -27,7 +27,7 @@ func TestTheWindowDeadlineStopsAtItsCeilingAndTheSlotIsThenDeclined(t *testing.T
 	const grace = time.Minute
 	fixture := newWindowedFixture(t)
 	stream, coordinator := fixture.stream, fixture.stream.coordinator
-	coordinator.budget.MaxStateMutations = 2
+	coordinator.budget.MaxStateMutations = 4
 	const series = 5
 	for index := range series {
 		fixture.streamInput(t, fmt.Sprintf("series-%02d", index), 100)
@@ -39,10 +39,11 @@ func TestTheWindowDeadlineStopsAtItsCeilingAndTheSlotIsThenDeclined(t *testing.T
 	ctx := execution.WithStageMarker(context.Background(), marker)
 
 	stream.fixWindowCeiling(ctx, series)
-	// s_min is the State cap, two: the bytes allow far more. ceil(5 / 2) = 3.
+	// s_min is a window's half of the State cap, two: the bytes allow far
+	// more. ceil(5 / 2) = 3.
 	const windows = 3
-	if want := deadline.Add(windows * windowStepBound); !stream.windows.ceiling.Equal(want) {
-		t.Fatalf("ceiling = %v, want %v", stream.windows.ceiling, want)
+	if want := deadline.Add(windows * windowStepBound); !time.UnixMilli(stream.windowCeiling.Load()).Equal(want) {
+		t.Fatalf("ceiling = %v, want %v", time.UnixMilli(stream.windowCeiling.Load()), want)
 	}
 
 	now := deadline
@@ -60,8 +61,8 @@ func TestTheWindowDeadlineStopsAtItsCeilingAndTheSlotIsThenDeclined(t *testing.T
 			}
 			continue
 		}
-		if got := marker.Deadline(); !got.Equal(stream.windows.ceiling) {
-			t.Fatalf("past the ceiling the deadline is %v, want it held at the ceiling %v", got, stream.windows.ceiling)
+		if got := marker.Deadline(); !got.Equal(time.UnixMilli(stream.windowCeiling.Load())) {
+			t.Fatalf("past the ceiling the deadline is %v, want it held at the ceiling %v", got, time.UnixMilli(stream.windowCeiling.Load()))
 		}
 		if _, _, claimed := marker.Decline(now.Add(grace), grace); !claimed {
 			t.Fatal("a Slot past its ceiling was not claimed at the next tick")

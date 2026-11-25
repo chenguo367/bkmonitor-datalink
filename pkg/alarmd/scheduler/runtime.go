@@ -1029,6 +1029,13 @@ func (runner *Runner) runOneTracked(
 	}
 	sourceFacts = facts
 	if err != nil {
+		// The source's own fenced write - the read hold's freeze - refused
+		// by the fence is the owner's refusal, as the check above would
+		// have had it: not a source failure, no backoff (014 ⑩ F1).
+		if _, refused := ownership.RefusalReason(err); refused {
+			decision = "ownership_rejected"
+			return execution.SlotExecutionResult{}, false, err
+		}
 		if isViewNotExecutable(err) {
 			decision, *refusal = "view_not_executable", err
 			return runner.refuseViewNotExecutable(err), true, nil

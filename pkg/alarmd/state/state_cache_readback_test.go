@@ -394,7 +394,7 @@ func TestAGroupPutOutByARoundOfBytesComesBackOnceItsCompactRoundFits(t *testing.
 			t.Fatal(err)
 		}
 		reader.store.cache.applied(stateCacheEntry{key: key, group: group, identity: seriesIdentity(index), raw: make([]byte, 1000),
-			fence: second.fence, epoch: 1, segmentStart: 60, slot: second.at, usableUntil: reader.now.Add(time.Hour)})
+			fence: second.fence, epoch: 1, segmentStart: 60, slot: second.at, usableUntil: reader.now.Add(time.Hour)}, nil)
 	}
 	if left := reader.store.StateCacheStats().Departures[StateCacheDepartYielded]; left != 1 {
 		t.Fatalf("the round of bytes left %d departures, want the group put out once", left)

@@ -3079,6 +3079,9 @@ type Observation struct {
 	RangeGate          *RangeGateFacts
 	SlotWait           *SlotWaitFacts
 	SeriesNotEvaluated *SeriesNotEvaluatedFacts
+	// SlotExecuteSlow is where a slow Slot attempt's time went
+	// (StageSlotExecuteSlow).
+	SlotExecuteSlow *SlotExecuteSlowFacts
 	// ExecutionSlotWait is what a Slot's dispatch waited for an execution
 	// slot (StageSlotStarted); nil for a Slot started without a dispatch.
 	ExecutionSlotWait *ExecutionSlotWaitFacts
@@ -4200,7 +4203,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentScheduler, StageRangeDistanceExpired},
 	{ComponentScheduler, StageSlotSkipped},
 	{ComponentScheduler, StageRangeGateDecided},
-	{ComponentScheduler, StageSlotWait},
+	{ComponentScheduler, StageSlotWait}, {ComponentScheduler, StageSlotExecuteSlow},
 	{ComponentScheduler, StageSeriesNotEvaluated},
 	{ComponentState, StageSegmentRenewalFallback},
 	{ComponentAccess, StageQueryCompleted},
@@ -4494,10 +4497,12 @@ var SchedulerDecisionReasons = func() []ReasonCode {
 // (CursorRefusals), which said retrying with none; and a slow wait inside a
 // Slot attempt, which said degraded with none; and an execution declined as
 // hung, which said failed with none; a completed Slot that bound series it
-// never took up; and a Plan's page that went half its lifetime unrenewed.
+// never took up; a Plan's page that went half its lifetime unrenewed; and a
+// Slot attempt whose execution ran past half its period.
 var SlotPathReasons = func() []ReasonCode {
-	reasons := make([]ReasonCode, 0, len(RunOutcomes)+len(CursorRefusals)+4)
-	reasons = append(reasons, ReasonSlotWaitSlow, ReasonExecutionHung, ReasonSeriesNotEvaluated, ReasonSegmentRenewalFallback)
+	reasons := make([]ReasonCode, 0, len(RunOutcomes)+len(CursorRefusals)+5)
+	reasons = append(reasons, ReasonSlotWaitSlow, ReasonExecutionHung, ReasonSeriesNotEvaluated,
+		ReasonSegmentRenewalFallback, ReasonSlotExecuteSlow)
 	for _, outcome := range RunOutcomes {
 		reasons = append(reasons, ReasonCode(outcome))
 	}

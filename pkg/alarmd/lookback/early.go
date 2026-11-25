@@ -128,17 +128,21 @@ func (readings *durations) add(at time.Time, value time.Duration) {
 	readings.count = min(readings.count+1, readingsKept)
 }
 
-// dropLatest takes back the latest reading add put in: the ring shrinks by it
-// while it is not full, and once full the place keeps no reading - no value,
-// no time - until the next add takes it.
+// dropLatest takes back the latest reading add put in, and its place is the
+// next add's. While the ring is not full it is one reading shorter. Once full
+// the place keeps no reading - no value, no time, which longestSince skips -
+// and the count stays: the ring's places are read by index, all of them once
+// it is full. The reading the take-back's add wrote over is gone either way;
+// the next add writes over no other.
 func (readings *durations) dropLatest() {
 	if readings.count == 0 {
 		return
 	}
 	latest := (readings.next + readingsKept - 1) % readingsKept
 	readings.values[latest], readings.at[latest] = 0, time.Time{}
+	readings.next = latest
 	if readings.count < readingsKept {
-		readings.next, readings.count = latest, readings.count-1
+		readings.count--
 	}
 }
 

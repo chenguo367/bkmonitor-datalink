@@ -42,17 +42,25 @@ func newSlotProgressMetrics() slotProgressMetrics {
 			Subsystem: metricSubsystem, Name: "slot_begin_total",
 			Help: "Slot attempts' BeginSlot calls that returned a status, by it: committed (the Slot is begun), " +
 				"conflict (the record is not at this Slot), stale_owner and content_moved (the fence refused the " +
-				"write), retryable_io (the store did not answer). A BeginSlot that failed outright is counted by " +
-				"its slot_completed line only.",
+				"write), retryable_io (the store did not answer); deferred, an attempt that put its BeginSlot off " +
+				"and sent its commit in its place - an empty round - while one that put it off and then wrote, or " +
+				"left without writing its Slot down, is counted by the BeginSlot it made then, and an empty round " +
+				"whose commit the record refused by that status, as a BeginSlot at its start; the results sum to " +
+				"the attempts. A " +
+				"BeginSlot that failed outright is counted by its slot_completed line only.",
 		}, []string{"result"}),
 		notCommitted: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: metricSubsystem, Name: "slot_not_committed_total",
-			Help: "Slot attempts that began their Slot (slot_begin_total{result=\"committed\"}) and returned without " +
+			Help: "Slot attempts that began or deferred their Slot (slot_begin_total{result=\"committed\"} and " +
+				"{result=\"deferred\"}) and returned without " +
 				"writing it down, once each, by why: QUERY_NOT_READY, SNAPSHOT_RETRY; a result by its reason or kind " +
 				"(activation_read_failed, activation_changed, output_retry_pending, segment_write_failed - a round " +
 				"that left members' State unwritten whose stable segments' write did not land, retried whole - " +
 				"retry_pending, incomplete, " +
-				"no_result: a panic); an error by what it is (finalization_failed, owner_refused, query_permit_failed, cancelled, " +
+				"no_result: a panic); an error by what it is (finalization_failed, owner_refused - its fence stale, its " +
+				"content moved, or its Query Group no longer desired for it, which a write's own script reports as " +
+				"a stale fence, so its reason reads OWNERSHIP_STALE_FENCE where a check before it read " +
+				"OWNERSHIP_NOT_DESIRED - query_permit_failed, cancelled, " +
 				"deadline_exceeded, declined, capacity_refused, store_conflict, segment_read_failed - a Slot with a " +
 				"segment skip word whose segments did not read, its retry reading them as stored) or else the step it failed in " +
 				"(query_, complete_, apply_, output_, progress_commit_, query_free_failed); other, none of these.",

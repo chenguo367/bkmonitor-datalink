@@ -3084,6 +3084,16 @@ type observedProductionSlotExecutor struct {
 	// traces decides whether the Slot is exported and holds its span; nil
 	// exports nothing.
 	traces *tracing.Exporter
+	// now is the clock the attempt's execution is timed by; nil is
+	// time.Now.
+	now func() time.Time
+}
+
+func (executor observedProductionSlotExecutor) clock() time.Time {
+	if executor.now != nil {
+		return executor.now()
+	}
+	return time.Now()
 }
 
 func (executor observedProductionSlotExecutor) Execute(
@@ -3091,17 +3101,19 @@ func (executor observedProductionSlotExecutor) Execute(
 	request execution.SlotExecutionRequest,
 ) (execution.SlotExecutionResult, error) {
 	trace := frozenSlotTrace(request.Contract, request.OwnerFence)
+	// What the dispatch that started this Slot waited for an execution slot,
+	// counted on its start where the operation is known, and said again on
+	// its slow line when it has one.
+	slotWait := takeDispatchSlotWait(ctx)
 	// The operation rides on the start as it does on the completion, so a
 	// reader that leaves supplements out can leave out both ends.
 	observeRuntime(ctx, executor.observer, observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageSlotStarted,
 		Operation: observability.Operation(request.Operation),
 		Result:    observability.ResultStarted, Trace: trace,
-		// What the dispatch that started this Slot waited for an execution
-		// slot, counted here where the operation is known.
-		ExecutionSlotWait: takeDispatchSlotWait(ctx),
+		ExecutionSlotWait: slotWait,
 	})
-	started := time.Now()
+	started := executor.clock()
 	// The Slot's span, when the export samples it; its queries and their
 	// retries read the decision from ctx.
 	ctx, slotSpan := executor.traces.StartSlot(ctx, string(request.Contract.Slot.QueryGroup), int64(request.Contract.Slot.EvaluationTime))
@@ -3234,6 +3246,7 @@ func (executor observedProductionSlotExecutor) Execute(
 		observedResult = observability.ResultSuccess
 	}
 	slotSpan.End(string(observedResult), string(reason), observedResult == observability.ResultFailed)
+	elapsed := executor.clock().Sub(started)
 	observeRuntime(ctx, executor.observer, observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageSlotCompleted,
 		Operation: observability.Operation(request.Operation), ShortPeriodCompletion: shortCompletion,
@@ -3259,7 +3272,7 @@ func (executor observedProductionSlotExecutor) Execute(
 		ReadinessDeferral:    readiness,
 		ExecuteOutcome:       executeReturnOutcome(result, err),
 		Result:               observedResult, ReasonCode: reason,
-		Duration: time.Since(started), DurationKnown: true, Trace: trace, Err: observedErr,
+		Duration: elapsed, DurationKnown: true, Trace: trace, Err: observedErr,
 		SlotBudgetUsage: slotBudgetUsageFacts(result.Usage),
 		SlotTiming:      slotTimingFacts(result.Timing),
 		InPlaceWait:     inPlaceWaitFacts(result.InPlaceWait),
@@ -3274,7 +3287,35 @@ func (executor observedProductionSlotExecutor) Execute(
 		RequestTargets: result.QueryUnavailableTargets,
 	})
 	observability.EmitTargetFlow(ctx, "execution_outcome", trace, observability.TargetFlowFacts{ExecutionOutcomeKnown: true, Attempted: true, Completed: result.Completed, Completion: string(result.CompletionKind)})
+	// An attempt that executed past half its period, beside its completion,
+	// which it leaves as it is: every operation's, a retry's and a replay's
+	// as a normal round's.
+	observability.ObserveSlotExecution(ctx, executor.observer, observability.Operation(request.Operation), trace, elapsed,
+		slotExecuteSlowFacts(dispatchPeriod(ctx), result, slotWait, budget))
 	return result, err
+}
+
+// slotExecuteSlowFacts is where an attempt's time went, for its slow line:
+// its period, its phases, its queries' waits and bodies, its input slices
+// and their seams, its dispatch's wait for an execution slot and its
+// queries' waits for permits.
+func slotExecuteSlowFacts(period int64, result execution.SlotExecutionResult,
+	slotWait *observability.ExecutionSlotWaitFacts, budget *observability.BudgetCapture) observability.SlotExecuteSlowFacts {
+	usage := result.Usage
+	facts := observability.SlotExecuteSlowFacts{PeriodSeconds: period,
+		QueryWaitMillis: usage.QueryWaitMillis, QueryBodyMillis: usage.QueryBodyMillis,
+		QueryWaitMillisMax: usage.QueryWaitMillisMax, QueryBodyMillisMax: usage.QueryBodyMillisMax,
+		InputSlices: usage.InputSlices, InputSliceTailMillis: usage.InputSliceTailMillis,
+		InputSliceTailMillisMax: usage.InputSliceTailMillisMax}
+	if timing := slotTimingFacts(result.Timing); timing != nil {
+		facts.Timing = *timing
+	}
+	if slotWait != nil {
+		facts.ExecutionSlotWaitMillis = slotWait.WaitMillis
+	}
+	total, longest := budget.PermitWaits()
+	facts.QueryPermitWaitMillis, facts.QueryPermitWaitMillisMax = total.Milliseconds(), longest.Milliseconds()
+	return facts
 }
 
 // lostRound says a round's completion is one that lost it or failed it: it
@@ -3728,6 +3769,9 @@ func slotBudgetUsageFacts(usage execution.SlotBudgetUsage) *observability.SlotBu
 		RetainedShareBytes: usage.RetainedShareBytes,
 		Windows:            usage.Windows, WindowCeilingWindows: usage.WindowCeilingWindows,
 		WindowCeilingRaisedWindows: usage.WindowCeilingRaisedWindows,
+		WindowZeroBoundCutsInput:   usage.WindowZeroBoundCutsInput, WindowZeroBoundCutsGap: usage.WindowZeroBoundCutsGap,
+		WindowZeroBoundCutsOutput: usage.WindowZeroBoundCutsOutput, WindowZeroBoundCutsState: usage.WindowZeroBoundCutsState,
+		WindowOutsideClamped: usage.WindowOutsideClamped, SliceOthersClamped: usage.SliceOthersClamped,
 	}
 }
 
@@ -3735,7 +3779,8 @@ func slotBudgetUsageFacts(usage execution.SlotBudgetUsage) *observability.SlotBu
 func slotTimingFacts(timing execution.SlotTiming) *observability.SlotTimingFacts {
 	return &observability.SlotTimingFacts{
 		Slot: timing.Slot, Input: timing.Input, Preflight: timing.Preflight, Evaluate: timing.Evaluate,
-		Apply: timing.Apply, RecordIDs: timing.RecordIDs, Cut: timing.Cut, Merge: timing.Merge, Series: timing.Series,
+		Apply: timing.Apply, ApplyWait: timing.ApplyWait, Land: timing.Land, ApplyOverlap: timing.ApplyOverlap,
+		RecordIDs: timing.RecordIDs, Cut: timing.Cut, Merge: timing.Merge, Series: timing.Series,
 		NoDataRead: timing.NoDataRead, NoDataWrite: timing.NoDataWrite, Unattributed: timing.Unattributed,
 	}
 }

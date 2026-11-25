@@ -44,6 +44,13 @@ func supplementHeader(t *testing.T) execution.InternalExecutionHeader {
 // as given.
 func supplementHeaderWith(t *testing.T, noData *contract.NoDataConfigV1) execution.InternalExecutionHeader {
 	t.Helper()
+	return supplementHeaderShaped(t, noData, nil)
+}
+
+// supplementHeaderShaped is supplementHeaderWith, its Plan shaped by shape
+// before it is compiled.
+func supplementHeaderShaped(t *testing.T, noData *contract.NoDataConfigV1, shape func(*contract.EvaluationPlanV2)) execution.InternalExecutionHeader {
+	t.Helper()
 	compiler, err := strategy.NewCompiler(strategy.NewDefaultAlgorithmCompilerRegistry(), strategy.Limits{
 		MaxPlanBytes: 64 << 10, MaxLevelsPerPlan: 16, MaxAlgorithmsPerLevel: 8, MaxGroupsPerAlgorithm: 16,
 		MaxConditionsPerAlgorithm: 64, MaxASTNodesPerLevel: 256, MaxTriggerWindowSize: 4096,
@@ -72,6 +79,9 @@ func supplementHeaderWith(t *testing.T, noData *contract.NoDataConfigV1) executi
 				RecoveryPlan: contract.TypedPlanV1{Type: "CONTINUOUS_TRIGGER_MISS", Version: 1,
 					Config: json.RawMessage(`{"enabled":false,"consecutive_windows":0}`)},
 			}}}}
+	if shape != nil {
+		shape(&plan)
+	}
 	compiled, err := compiler.Compile(context.Background(), strategy.CompileRequest{Plan: plan,
 		DatasetContract: contract.DatasetContractV2{SchemaDigest: strings.Repeat("1", 64),
 			NormalizationDigest: strings.Repeat("2", 64), IdentityFields: []string{"host"},

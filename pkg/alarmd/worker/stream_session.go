@@ -56,7 +56,7 @@ type streamedExecution struct {
 	// inputHolds is, by series, what the batches of that series were charged
 	// to the input phase and how many streamed bindings still point at them,
 	// so a window that lets its series' bindings go gives their bytes back
-	// once nothing of the Slot reads them (dropWindowInputs).
+	// once nothing of the Slot reads them (letGoWindowInputs).
 	inputHolds map[execution.SeriesIdentityDigest]*seriesInputHold
 	// planSeries is, by Plan, the series the stream bound, until the
 	// completion: it is read for the evaluation's order there and only
@@ -250,6 +250,26 @@ type streamedExecution struct {
 	// windows is this Slot's windowed apply (windowed_apply.go); its zero
 	// value is a Slot that has not been cut.
 	windows slotWindows
+	// windowCeiling is the latest the Slot's windows may move its deadline
+	// to, in Unix milliseconds, zero for none (fixWindowCeiling): written on
+	// the Slot's goroutine, read by the apply goroutine as each window lands
+	// (windowBoundary).
+	windowCeiling atomic.Int64
+	// applyCtx is the Slot's completion context, which its apply goroutine
+	// runs on (applyPipeline): set as the completion's context is.
+	applyCtx context.Context
+	// applyHeldBytes is what the Slot's apply side holds of its share - the
+	// frames kept for its writes, no-data first writes, segment joins - under
+	// the state phase, written by the apply goroutine; inflightHeld is what
+	// the windows handed to it and not landed give back as they land
+	// (windowTask.release), written by the Slot's goroutine. Both read from
+	// any goroutine: the reads ahead judge the Slot's side of the share apart
+	// from them (sliceReadAhead.fitsShare).
+	applyHeldBytes atomic.Uint64
+	inflightHeld   atomic.Uint64
+	// evaluating is the goroutines the Slot evaluates its series on
+	// (evaluatePool), nil before its first batch.
+	evaluating *evaluatePool
 	// namedOutputs is the tables of named outputs the Slot's queries aligned,
 	// by physical query, kept from the completion for the detection
 	// snapshots of their Plans' events. Nil for a Slot whose queries asked
@@ -312,6 +332,14 @@ const (
 	slotPhaseNoDataRead
 	// slotPhaseNoDataWrite is writing the no-data memory and its ends.
 	slotPhaseNoDataWrite
+	// slotPhaseApplyWait is the Slot's goroutine waiting on its apply
+	// goroutine (windowed_pipeline.go): for it to take a window, to drain, or
+	// for the last window and the tail. The apply goroutine's own time is not
+	// a phase of the Slot's: it runs beside them (applyBusy).
+	slotPhaseApplyWait
+	// slotPhaseLand is taking a landed window back on the Slot's goroutine:
+	// what it held given back, its inputs let go (landWindow).
+	slotPhaseLand
 	// slotPhaseOther is every moment after the completion no phase above
 	// claims: the Slot's unattributed time.
 	slotPhaseOther
@@ -514,12 +542,14 @@ type retainedOwnerKey struct{}
 // read, which every State read under ctx is extended by
 // (segment.WithSource): the Slot's preflight, a cache hit, the first-seen
 // and no-data pre-reads, a carried generation, the write path's conflict
-// decode.
+// decode. On the Slot's apply goroutine the owner is its apply pipe
+// (applyPipeline), whose holds are counted apart from the stream's.
 func withRetainedOwner(ctx context.Context, stream *streamedExecution) context.Context {
-	if stream != nil {
-		ctx = segment.WithSource(ctx, streamSegments{stream: stream})
+	if stream == nil {
+		return context.WithValue(ctx, retainedOwnerKey{}, nil)
 	}
-	return context.WithValue(ctx, retainedOwnerKey{}, stream)
+	ctx = segment.WithSource(ctx, streamSegments{stream: stream})
+	return context.WithValue(ctx, retainedOwnerKey{}, retainedOwner(stream))
 }
 
 // streamSegments answers the State store from the segments the stream's
@@ -530,30 +560,38 @@ func (source streamSegments) Coverage(identity execution.StateKeyIdentity) (segm
 	return source.stream.segments.Coverage(identity)
 }
 
-func retainedOwnerFrom(ctx context.Context) *streamedExecution {
-	stream, _ := ctx.Value(retainedOwnerKey{}).(*streamedExecution)
-	return stream
+func retainedOwnerFrom(ctx context.Context) retainedOwner {
+	owner, _ := ctx.Value(retainedOwnerKey{}).(retainedOwner)
+	return owner
 }
 
 // holdRetained reserves bytes the owner holds outside its phases' own
 // bookkeeping - kept frames, first-write segments - judged against its share
 // and the pool, and counted in its State phase so its total is all it holds.
 // Without an owner that has begun, the pool alone judges them.
-func (coordinator *SlotExecutionCoordinator) holdRetained(owner *streamedExecution, bytes uint64, phase string) error {
+func (coordinator *SlotExecutionCoordinator) holdRetained(owner retainedOwner, bytes uint64, phase string) error {
 	if bytes == 0 {
 		return nil
 	}
 	for {
 		coordinator.reservations.mu.Lock()
-		err := coordinator.judgeRetainedLocked(owner, bytes, phase)
+		var err error
+		if owner != nil {
+			err = owner.judgeHeldLocked(bytes, phase)
+		} else {
+			err = coordinator.judgeRetainedLocked(nil, bytes, phase)
+		}
 		if err == nil {
 			coordinator.reservations.retainedBytes += bytes
 			coordinator.noteRetainedHighLocked()
+			if owner != nil {
+				owner.keepHeldLocked(bytes)
+			}
 		}
 		coordinator.reservations.mu.Unlock()
-		if err == nil || !owner.yieldReadAhead(phase) {
+		if err == nil || owner == nil || !owner.yieldHeld(phase) {
 			if err == nil && owner != nil {
-				owner.retainBytes(retainPhaseState, bytes)
+				owner.keepHeld(bytes)
 			}
 			return err
 		}
@@ -561,25 +599,26 @@ func (coordinator *SlotExecutionCoordinator) holdRetained(owner *streamedExecuti
 }
 
 // letGoRetained gives back what holdRetained reserved.
-func (coordinator *SlotExecutionCoordinator) letGoRetained(owner *streamedExecution, bytes uint64) {
+func (coordinator *SlotExecutionCoordinator) letGoRetained(owner retainedOwner, bytes uint64) {
 	if bytes == 0 {
 		return
 	}
 	if owner != nil {
 		// From the owner's State phase and the pool together; a stream
 		// already released has given the pool its bytes back.
-		owner.unretain(retainPhaseState, bytes)
+		owner.letGoHeld(bytes)
 		return
 	}
 	coordinator.releaseProvisional(0, bytes)
 }
 
-// retainedTotal is what this execution holds across all phases.
+// retainedTotal is what this execution holds across all phases, its apply
+// side's holds included (applyHeld).
 func (stream *streamedExecution) retainedTotal() uint64 {
 	if stream == nil {
 		return 0
 	}
-	total := stream.aheadBytes.Load()
+	total := stream.aheadBytes.Load() + stream.applyHeld()
 	for _, retained := range stream.retainedByPhase {
 		total += retained
 	}
@@ -897,6 +936,7 @@ func (stream *streamedExecution) releaseProvisional() {
 	stream.coordinator.releaseEffects(stream.effects)
 	stream.effects, stream.effectsSpent = effectCounts{}, effectCounts{}
 	stream.dropAllRecordIDs()
+	stream.evaluating.end()
 	stream.windows = slotWindows{}
 	stream.coordinator.releaseProvisional(stream.series, stream.retainedTotal())
 	stream.namedOutputs = nil
@@ -2646,6 +2686,11 @@ func (stream *streamedExecution) mergeEvaluatedSeries(
 	items []execution.StatePreflightItem,
 ) error {
 	defer stream.enter(slotPhaseMerge)()
+	// A safe point: windows landed since give their bytes back before the
+	// window check reads what the Slot holds (windowed_pipeline.go).
+	if err := stream.takeLandings(ctx); err != nil {
+		return err
+	}
 	measured := stream.measureMerge(evaluated, retained, uint64(len(views))*loadedKeyHeldBytes)
 	stream.windows.reached = position
 	if err := stream.windowBeforeMerge(ctx, evaluated, measured); err != nil {

@@ -93,3 +93,30 @@ func TestTheSupersededProjectionCountHasACellForEveryFieldAndNoOther(t *testing.
 		t.Fatalf("all fields = %v, want 2: a field outside the list counted", got)
 	}
 }
+
+// A Slot whose window accounting clamped is counted once under the reason its
+// row names, each reason from its own field: window_outside from
+// window_outside_clamped, slice_others from slice_others_clamped. A Slot that
+// clamped nothing counts nothing.
+func TestAClampedWindowAccountingIsCountedOnceASlotUnderItsReason(t *testing.T) {
+	recorder := NewRecorder(BuildInfo{Version: "0.7.9999", Commit: "0123456789abcdef", SchemaVersion: "v3"})
+	complete := func(usage *observability.SlotBudgetUsageFacts) {
+		recorder.Observe(context.Background(), observability.Observation{
+			Component: observability.ComponentScheduler, Stage: observability.StageSlotCompleted,
+			Result: observability.ResultSuccess, SlotBudgetUsage: usage,
+		})
+	}
+	count := func(reason string) float64 {
+		return redisCounterSum(t, recorder, "alarmd_slot_window_accounting_clamped_slots_total", map[string]string{"reason": reason})
+	}
+	complete(&observability.SlotBudgetUsageFacts{})
+	complete(&observability.SlotBudgetUsageFacts{WindowOutsideClamped: 1})
+	complete(&observability.SlotBudgetUsageFacts{SliceOthersClamped: 1})
+	complete(&observability.SlotBudgetUsageFacts{SliceOthersClamped: 1})
+	if got := count("window_outside"); got != 1 {
+		t.Fatalf("window_outside = %v, want the one Slot that clamped there", got)
+	}
+	if got := count("slice_others"); got != 2 {
+		t.Fatalf("slice_others = %v, want the two Slots that clamped there", got)
+	}
+}

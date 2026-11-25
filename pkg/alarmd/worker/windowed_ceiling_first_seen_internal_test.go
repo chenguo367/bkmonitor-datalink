@@ -65,7 +65,8 @@ func TestAFirstSeenPlanCutByTheBudgetAfterTwoWindowsWritesOneStatementAtItsVersi
 	gaps := &versionedGaps{windowedPorts: fixture.ports}
 	stream := fixture.stream
 	stream.coordinator.ports.GapGuard = gaps
-	for position := range 5 {
+	// A window a series: two windows landed before the third series merges.
+	for position := range 3 {
 		fixture.mergeNew(t, position)
 	}
 	if _, first := stream.windows.apply.firstSeen[fixture.due.Key()]; !first || stream.windows.count != 2 {
@@ -153,14 +154,14 @@ func TestAFirstSeenPlanWhoseSlotNeverReachedItsTailWarmsUpOnTheNextSlot(t *testi
 	}
 }
 
-// 4b: a window's event bound is the event cap over the most events one series
-// can send in the Slot, one per PRIMARY record it holds - three here - and
-// not the cap itself: six events hold two series, so five series need three
-// windows.
+// 4b: a window's event bound is its half of the event cap over the most events
+// one series can send in the Slot, one per PRIMARY record it holds - three
+// here - and not the cap itself: a window's six of the twelve hold two
+// series, so five series need three windows.
 func TestAWindowHoldsTheEventCapOverTheMostRecordsOneSeriesHolds(t *testing.T) {
 	fixture := newWindowedFixture(t)
 	stream, coordinator := fixture.stream, fixture.stream.coordinator
-	coordinator.budget.MaxStateMutations, coordinator.budget.MaxEvents = 100, 6
+	coordinator.budget.MaxStateMutations, coordinator.budget.MaxEvents = 100, 12
 	records := make([]contract.CanonicalRecordV2, 3)
 	for index := range records {
 		records[index] = contract.CanonicalRecordV2{RecordID: fmt.Sprintf("record-%d", index), SourceTime: int64(60 * index)}

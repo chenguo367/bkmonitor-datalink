@@ -98,8 +98,10 @@ var warnCursorRefusals = makeReasonSet([]ReasonCode{
 // up: a wait inside it that outlasted a settling wait, written at WARN as
 // reason_not_reported before it had a word and keeping it; and a completed
 // Slot that bound series to a Plan and never took them up, a defect of this
-// deployment's own; and a Plan's page renewals did not keep alive.
-var warnSlotPathReasons = makeReasonSet([]ReasonCode{ReasonSlotWaitSlow, ReasonSeriesNotEvaluated, ReasonSegmentRenewalFallback})
+// deployment's own; a Plan's page renewals did not keep alive; and a Slot
+// attempt whose execution ran past half its period.
+var warnSlotPathReasons = makeReasonSet([]ReasonCode{ReasonSlotWaitSlow, ReasonSeriesNotEvaluated,
+	ReasonSegmentRenewalFallback, ReasonSlotExecuteSlow})
 
 // warnDecisionReasons are the scheduler decisions that say it could not
 // decide or could not do what it decided; the others are a replay or range

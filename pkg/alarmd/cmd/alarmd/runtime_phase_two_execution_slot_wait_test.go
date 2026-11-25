@@ -211,7 +211,7 @@ func TestASlotThatFindsAnExecutionSlotFreeIsCountedAsNotHavingWaited(t *testing.
 // the round ran on the slot the dispatch already held, and a Slot no
 // dispatch started carries no wait at all.
 func TestADispatchsWaitGoesToTheFirstSlotItStarts(t *testing.T) {
-	ctx := withDispatchSlotWait(context.Background(), 2*time.Second, "60s")
+	ctx := withDispatchSlotWait(context.Background(), 2*time.Second, "60s", 60)
 	first, second := takeDispatchSlotWait(ctx), takeDispatchSlotWait(ctx)
 	if first == nil || first.WaitMillis != 2000 || first.Cohort != "60s" {
 		t.Fatalf("first Slot's wait = %+v, want 2000 ms under 60s", first)

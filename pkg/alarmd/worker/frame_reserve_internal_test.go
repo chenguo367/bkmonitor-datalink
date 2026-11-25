@@ -49,8 +49,9 @@ func (store *admitFramesStore) AdmitRuntime(ctx context.Context, request executi
 
 // framesFixture admits in chunks of two against a retained budget.
 func framesFixture(budget uint64) (chunkFixture, *admitFramesStore) {
-	fixture := newChunkFixture(&chunkStore{}, 2)
-	store := &admitFramesStore{chunkStore: fixture.coordinator.ports.State.(*chunkStore), coordinator: fixture.coordinator}
+	chunks := &chunkStore{}
+	fixture := newChunkFixture(chunks, 2)
+	store := &admitFramesStore{chunkStore: chunks, coordinator: fixture.coordinator}
 	fixture.coordinator.ports.State = store
 	fixture.coordinator.budget.MaxRetainedBytes = budget
 	return fixture, store

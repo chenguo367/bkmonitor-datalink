@@ -33,6 +33,9 @@ type recoveryChannelWaiter struct {
 func (coordinator *FlightCoordinator) AcquireQueryPermit(ctx context.Context, slot execution.SlotIdentity, operation execution.Operation, deadline time.Time) (_ *QueryPermit, err error) {
 	started := time.Now()
 	defer func() {
+		waited := time.Since(started)
+		// The attempt's own share, for its slow line (slot_execute_slow).
+		observability.BudgetCaptureFromContext(ctx).MarkPermitWait(waited)
 		if coordinator == nil || coordinator.observer == nil {
 			return
 		}
@@ -40,7 +43,7 @@ func (coordinator *FlightCoordinator) AcquireQueryPermit(ctx context.Context, sl
 		result, reason := permitWaitOutcome(err)
 		coordinator.observer.Observe(ctx, observability.Observation{
 			Component: observability.ComponentScheduler, Stage: observability.StageQueryPermitWait, Result: result, ReasonCode: reason,
-			Duration: time.Since(started), DurationKnown: true, PermitWait: &observability.PermitWaitFacts{Recovery: operation != execution.OperationNormal},
+			Duration: waited, DurationKnown: true, PermitWait: &observability.PermitWaitFacts{Recovery: operation != execution.OperationNormal},
 		})
 	}()
 	if operation == execution.OperationNormal {
@@ -63,6 +66,9 @@ func (coordinator *FlightCoordinator) AcquireQueryPermit(ctx context.Context, sl
 func (coordinator *FlightCoordinator) AcquireRecoveryChannels(ctx context.Context, slot execution.SlotIdentity, operation execution.Operation, deadline time.Time, maximum int, beforeWait ...func()) (_ *RecoveryChannels, err error) {
 	started := time.Now()
 	defer func() {
+		waited := time.Since(started)
+		// The attempt's own share, for its slow line (slot_execute_slow).
+		observability.BudgetCaptureFromContext(ctx).MarkPermitWait(waited)
 		if coordinator == nil || coordinator.observer == nil {
 			return
 		}
@@ -70,7 +76,7 @@ func (coordinator *FlightCoordinator) AcquireRecoveryChannels(ctx context.Contex
 		result, reason := permitWaitOutcome(err)
 		coordinator.observer.Observe(ctx, observability.Observation{
 			Component: observability.ComponentScheduler, Stage: observability.StageQueryPermitWait, Result: result, ReasonCode: reason,
-			Duration: time.Since(started), DurationKnown: true, PermitWait: &observability.PermitWaitFacts{Recovery: true},
+			Duration: waited, DurationKnown: true, PermitWait: &observability.PermitWaitFacts{Recovery: true},
 		})
 	}()
 	return coordinator.acquireRecoveryChannels(ctx, slot, operation, deadline, maximum, beforeWait...)
@@ -210,6 +216,9 @@ func (channels *RecoveryChannels) AcquireQueryPermit(ctx context.Context, slot e
 	coordinator := channels.coordinator
 	started := time.Now()
 	defer func() {
+		waited := time.Since(started)
+		// The attempt's own share, for its slow line (slot_execute_slow).
+		observability.BudgetCaptureFromContext(ctx).MarkPermitWait(waited)
 		if coordinator == nil || coordinator.observer == nil {
 			return
 		}
@@ -217,7 +226,7 @@ func (channels *RecoveryChannels) AcquireQueryPermit(ctx context.Context, slot e
 		result, reason := permitWaitOutcome(err)
 		coordinator.observer.Observe(ctx, observability.Observation{
 			Component: observability.ComponentScheduler, Stage: observability.StageQueryPermitWait, Result: result, ReasonCode: reason,
-			Duration: time.Since(started), DurationKnown: true, PermitWait: &observability.PermitWaitFacts{Recovery: operation != execution.OperationNormal},
+			Duration: waited, DurationKnown: true, PermitWait: &observability.PermitWaitFacts{Recovery: operation != execution.OperationNormal},
 		})
 	}()
 	return channels.acquireQueryPermit(ctx, slot, operation, deadline)

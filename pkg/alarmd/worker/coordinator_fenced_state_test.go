@@ -88,7 +88,7 @@ func TestSlotExecutionCoordinatorStaleFenceAtStateApplyStopsPlanBeforeProgress(t
 		t.Fatalf("Execute() result=%+v error=%v, want ErrStaleFence", result, err)
 	}
 	// Admission, event ACK and the fenced apply ran; nothing after the apply.
-	assertTrace(t, fixture.trace, fullTrace[:10])
+	assertTrace(t, fixture.trace, fullTrace[:11])
 	if len(fenced.fences) != 1 {
 		t.Fatalf("fenced apply calls = %d", len(fenced.fences))
 	}
