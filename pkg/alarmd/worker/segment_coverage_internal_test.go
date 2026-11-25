@@ -210,24 +210,24 @@ func TestTheRoundLeavesOnlyAnOpenMemberWithNoExceptionWhoseMadeReadMatches(t *te
 		at = state.position + 60
 	}
 	series := steady(t, member, at)
-	if !fresh().leaves(shadowDue, series.view, series.write, series.class, false) {
+	if !fresh().leaves(shadowDue, segment.FamilyReal, series.view, series.write, series.class, false) {
 		t.Fatal("an open member, steady on the grid, whose made read matches is not left")
 	}
-	if fresh().leaves(shadowDue, series.view, series.write, series.class, true) {
+	if fresh().leaves(shadowDue, segment.FamilyReal, series.view, series.write, series.class, true) {
 		t.Error("a member that sent events is left")
 	}
 	mismatched := steady(t, member, at)
 	mismatched.write.Points[0].RecordID += "-other"
-	if fresh().leaves(shadowDue, mismatched.view, mismatched.write, mismatched.class, false) {
+	if fresh().leaves(shadowDue, segment.FamilyReal, mismatched.view, mismatched.write, mismatched.class, false) {
 		t.Error("a member whose made read does not match is left")
 	}
 	retried := fresh()
 	retried.retried(shadowDue)
-	if retried.leaves(shadowDue, series.view, series.write, series.class, false) {
+	if retried.leaves(shadowDue, segment.FamilyReal, series.view, series.write, series.class, false) {
 		t.Error("a member of a retried round is left")
 	}
 	back := steady(t, departed, at)
-	if fresh().leaves(shadowDue, back.view, back.write, back.class, false) {
+	if fresh().leaves(shadowDue, segment.FamilyReal, back.view, back.write, back.class, false) {
 		t.Error("a member back after it departed is left")
 	}
 	// The Plan's write decides on the same facts before admission (014 n8
@@ -297,11 +297,13 @@ func TestAPlansMembersDecidedTogetherBuildTheRoundItWouldStartOnce(t *testing.T)
 		return testing.AllocsPerRun(50, func() {
 			for _, write := range writes[:members] {
 				facts := written[write.Identity]
-				round.decideLeave(nil, shadowDue, facts.view, write, facts.class, facts.eventsSent)
+				round.decideLeave(nil, shadowDue, segment.FamilyReal, facts.view, write, facts.class, facts.eventsSent)
 			}
 		})
 	}
-	building := testing.AllocsPerRun(50, func() { round.peekPlanRound(shadowDue, writes[0].Identity, writes[0].RetentionPoints) })
+	building := testing.AllocsPerRun(50, func() {
+		round.peekPlanRound(shadowDue, segment.FamilyReal, writes[0].Identity, writes[0].RetentionPoints)
+	})
 	if building < 2 {
 		t.Fatalf("building the Plan's round allocates %v times: the case is not the one it is about", building)
 	}
@@ -337,7 +339,7 @@ func TestADepartingMemberIsRenewedOnlyAfterARoundThatSkippedAndAGoneKeyIsCounted
 		request := shadowRequest(execution.OperationNormal, store.at+60)
 		round := newSegmentShadowRound(request, shadowSlot(t, store, request, shadowDue))
 		present := steady(t, other, mark.Position+60)
-		round.observe(shadowDue, present.view, present.write, present.class, false)
+		round.observe(shadowDue, segment.FamilyReal, present.view, present.write, present.class, false)
 		observer := &shadowObservations{}
 		coordinator := &SlotExecutionCoordinator{ports: Ports{Now: time.Now, Observer: observer}}
 		coordinator.foldSegmentShadow(context.Background(), request, round, []execution.DuePlan{shadowDue}, nil)
@@ -411,22 +413,22 @@ func TestTheSampledRoundAndAFallbackPageWriteTheirMembersWhole(t *testing.T) {
 		return newSegmentShadowRound(request, slot)
 	}
 	series := steady(t, member, 1440)
-	if !fresh().leaves(shadowDue, series.view, series.write, series.class, false) {
+	if !fresh().leaves(shadowDue, segment.FamilyReal, series.view, series.write, series.class, false) {
 		t.Fatal("the member is not left in an ordinary round")
 	}
 	control := fresh()
-	control.planRound(shadowDue, series.write.Identity, series.write.RetentionPoints).sample = true
-	if control.leaves(shadowDue, series.view, series.write, series.class, false) {
+	control.planRound(shadowDue, segment.FamilyReal, series.write.Identity, series.write.RetentionPoints).sample = true
+	if control.leaves(shadowDue, segment.FamilyReal, series.view, series.write, series.class, false) {
 		t.Error("a member is left in its piece's sampled round")
 	}
 	fallback := fresh()
 	for _, state := range fallback.slot.plans {
 		state.fallback = map[int]bool{0: true}
 	}
-	if fallback.leaves(shadowDue, series.view, series.write, series.class, false) {
+	if fallback.leaves(shadowDue, segment.FamilyReal, series.view, series.write, series.class, false) {
 		t.Fatal("a member on a page gone half its lifetime unrenewed is left")
 	}
-	fallback.observe(shadowDue, series.view, series.write, series.class, false)
+	fallback.observe(shadowDue, segment.FamilyReal, series.view, series.write, series.class, false)
 	key := segment.PlanKey{Plan: shadowDue.Identity, Generation: shadowDue.StateGeneration}
 	coordinator := &SlotExecutionCoordinator{ports: Ports{Now: time.Now, Observer: &shadowObservations{}}}
 	coordinator.foldSegmentShadow(context.Background(), request, fallback, []execution.DuePlan{shadowDue}, nil)
@@ -520,8 +522,8 @@ func TestAPlansRoundSaysWhatItDidWithItsMembersWritesAndASampledRoundIsCounted(t
 			slot.skip = tc.follows
 			round := newSegmentShadowRound(request, slot)
 			series := steady(t, member, tc.at)
-			if !round.leaves(shadowDue, series.view, series.write, series.class, false) {
-				round.observe(shadowDue, series.view, series.write, series.class, false)
+			if !round.leaves(shadowDue, segment.FamilyReal, series.view, series.write, series.class, false) {
+				round.observe(shadowDue, segment.FamilyReal, series.view, series.write, series.class, false)
 			}
 			observer := &shadowObservations{}
 			coordinator := &SlotExecutionCoordinator{ports: Ports{Now: time.Now, Observer: observer}}
@@ -536,7 +538,7 @@ func TestAPlansRoundSaysWhatItDidWithItsMembersWritesAndASampledRoundIsCounted(t
 				if facts == nil {
 					continue
 				}
-				samples += facts.Samples[observability.SegmentPeriodMinute]
+				samples += facts.Samples[observability.SegmentSampleKey{PeriodClass: observability.SegmentPeriodMinute}]
 				for cell, count := range facts.Outcomes {
 					if cell.Round == tc.round {
 						inRound += count
@@ -584,9 +586,9 @@ func TestARefusedSegmentWriteAfterARoundLeftAMemberIsNotedUntilTheQueryGroupGoes
 			t.Fatal("no segments read")
 		}
 		round := newSegmentShadowRound(request, slot)
-		left := round.leaves(shadowDue, series.view, series.write, series.class, false)
+		left := round.leaves(shadowDue, segment.FamilyReal, series.view, series.write, series.class, false)
 		if !left {
-			round.observe(shadowDue, series.view, series.write, series.class, false)
+			round.observe(shadowDue, segment.FamilyReal, series.view, series.write, series.class, false)
 		}
 		return round, left
 	}

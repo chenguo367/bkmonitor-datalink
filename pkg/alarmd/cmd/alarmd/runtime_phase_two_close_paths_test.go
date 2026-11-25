@@ -120,7 +120,7 @@ func startClosePathsFixtureWith(t *testing.T, install func(*closePathsFixture)) 
 	life.open("alarmd-worker-0", uqServer.Client())
 	// The Worker's executable view carries the Query Group, which the
 	// inactive close reads its Plans under.
-	if err := settleExecutableView(ctx, life.bundle, 10*time.Second); err != nil {
+	if err := settleExecutableView(t, ctx, life.bundle, settleBound); err != nil {
 		t.Fatal(err)
 	}
 
@@ -226,7 +226,7 @@ func (fixture *closePathsFixture) publish(revision int, dimensions []string, noD
 				settleExecutableViewBestEffort(ctx, fixture.life.bundle, 10*time.Second)
 				return facts
 			}
-			if err := settleExecutableView(ctx, fixture.life.bundle, 10*time.Second); err != nil {
+			if err := settleExecutableView(t, ctx, fixture.life.bundle, settleBound); err != nil {
 				t.Fatal(err)
 			}
 			return facts

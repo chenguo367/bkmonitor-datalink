@@ -131,7 +131,7 @@ func TestACutAnswerFromTheQueryServiceReachesTheNoDataOutcome(t *testing.T) {
 		outcomes, cuts = map[string]int{}, 0
 		mu.Unlock()
 		clock.Store(base + int64(index)*period + 1)
-		if err := runScheduledOnceSettled(ctx, bundle); err != nil {
+		if err := runScheduledOnceSettled(t, ctx, bundle); err != nil {
 			t.Fatalf("round %d: %v", index, err)
 		}
 		mu.Lock()

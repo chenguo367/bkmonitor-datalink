@@ -276,7 +276,7 @@ func (worker *workerOfTwo) slotEndings(queryGroup execution.QueryGroupIdentity) 
 func (fixture *twoWorkerFixture) runUntilEnded(worker *workerOfTwo, queryGroup execution.QueryGroupIdentity, slot execution.EvaluationTime) string {
 	fixture.t.Helper()
 	ctx := context.Background()
-	runner := settledRunner(worker.bundle, queryGroup)
+	runner := settledRunner(fixture.t, worker.bundle, queryGroup)
 	if runner == nil {
 		fixture.t.Fatalf("%s holds no runner of %s; it holds %v", worker.id, queryGroup, worker.holds())
 	}
@@ -404,7 +404,7 @@ func TestAStrategyBackOnItsWorkerIsNotServedWhatItCachedBeforeAnotherWorkerHeldI
 	away := fixture.edit(map[int64][]byte{1001: sharedGroupStrategy(t, 1001, 1725000600, aggregatedByMax), 1003: unedited()[1003]},
 		"the query edit", func() bool {
 			for queryGroup := range b.holds() {
-				if settledRunner(b.bundle, queryGroup) != nil {
+				if settledRunner(t, b.bundle, queryGroup) != nil {
 					moved = queryGroup
 				}
 			}
@@ -425,7 +425,7 @@ func TestAStrategyBackOnItsWorkerIsNotServedWhatItCachedBeforeAnotherWorkerHeldI
 	fixture.runUntilEnded(a, old, onB+120)
 
 	back := fixture.edit(unedited(), "the move back", func() bool {
-		return a.holds()[old] && settledRunner(a.bundle, old) != nil
+		return a.holds()[old] && settledRunner(t, a.bundle, old) != nil
 	})
 	if b.holds()[old] || a.holds()[moved] {
 		t.Fatalf("placement did not hold: worker-a holds %v, worker-b %v", a.holds(), b.holds())
@@ -507,7 +507,7 @@ func TestAStrategyBackOnItsWorkerWithinTwoIntervalsIsRefusedByItsActivation(t *t
 	fixture.edit(map[int64][]byte{1001: sharedGroupStrategy(t, 1001, 1725000600, aggregatedByMax), 1003: unedited()[1003]},
 		"the query edit", func() bool {
 			for queryGroup := range b.holds() {
-				if settledRunner(b.bundle, queryGroup) != nil {
+				if settledRunner(t, b.bundle, queryGroup) != nil {
 					moved = queryGroup
 				}
 			}
@@ -517,7 +517,7 @@ func TestAStrategyBackOnItsWorkerWithinTwoIntervalsIsRefusedByItsActivation(t *t
 	// no Slot of the strategy in between.
 	fixture.clock.Store(fixture.now().UnixMilli() + 2000)
 	back := fixture.edit(unedited(), "the move back", func() bool {
-		return a.holds()[old] && settledRunner(a.bundle, old) != nil
+		return a.holds()[old] && settledRunner(t, a.bundle, old) != nil
 	})
 	if b.holds()[old] || a.holds()[moved] {
 		t.Fatalf("placement did not hold: worker-a holds %v, worker-b %v", a.holds(), b.holds())

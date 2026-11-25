@@ -85,9 +85,9 @@ func (rig *degradedRig) round() (bool, string) {
 	}
 	round := newSegmentShadowRound(request, slot)
 	series := steady(rig.t, rig.member, rig.at)
-	left := round.leaves(rig.due, series.view, series.write, series.class, false)
+	left := round.leaves(rig.due, segment.FamilyReal, series.view, series.write, series.class, false)
 	if !left {
-		round.observe(rig.due, series.view, series.write, series.class, false)
+		round.observe(rig.due, segment.FamilyReal, series.view, series.write, series.class, false)
 	}
 	rig.coordinator.foldSegmentShadow(context.Background(), request, round, []execution.DuePlan{rig.due}, nil)
 	return left, rig.store.written[rig.key].SkipMode
@@ -267,10 +267,10 @@ func TestAPlanWhoseWriteIsNotMadeIsStoppedAtTheSecondSlot(t *testing.T) {
 		}
 		shadow := newSegmentShadowRound(request, slot)
 		series := steady(t, rig.member, rig.at)
-		if shadow.leaves(rig.due, series.view, series.write, series.class, false) {
+		if shadow.leaves(rig.due, segment.FamilyReal, series.view, series.write, series.class, false) {
 			t.Fatalf("round %d left a member of a Plan whose write cannot be made", round)
 		}
-		shadow.observe(rig.due, series.view, series.write, series.class, false)
+		shadow.observe(rig.due, segment.FamilyReal, series.view, series.write, series.class, false)
 		if failed, refused := rig.coordinator.foldSegmentShadow(context.Background(), request, shadow, []execution.DuePlan{rig.due}, nil); failed || refused != nil {
 			t.Fatalf("round %d failed its Slot (refused %v)", round, refused)
 		}

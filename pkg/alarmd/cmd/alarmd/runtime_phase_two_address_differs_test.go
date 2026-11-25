@@ -130,7 +130,7 @@ func TestADifferingAddressIsCountedThroughTheProductionBundle(t *testing.T) {
 	if len(bundle.queryGroups) != 1 {
 		t.Fatalf("Query Groups = %v, want one", bundle.queryGroups)
 	}
-	runner := settledRunner(bundle, bundle.queryGroups[0])
+	runner := settledRunner(t, bundle, bundle.queryGroups[0])
 	clock.Store((base+30)*1000 + 60*1000)
 	if _, _, err := runner.RunOne(ctx); err != nil {
 		t.Fatalf("RunOne: %v", err)

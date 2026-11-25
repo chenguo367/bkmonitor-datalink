@@ -324,7 +324,7 @@ func TestAQueryEditReadsTheStateTheOldGroupWrote(t *testing.T) {
 	if fixture.queryGroup == old {
 		t.Fatal("the query edit did not move the Plan to a new Query Group")
 	}
-	fixture.runner = settledRunner(fixture.bundle, fixture.queryGroup)
+	fixture.runner = settledRunner(t, fixture.bundle, fixture.queryGroup)
 	first := execution.EvaluationTime(fixture.base + 60)
 	if ended := runSlot(t, fixture, fixture.queryGroup, fixture.runner, first); ended != fullEnding {
 		t.Fatalf("the new group's first Slot ended %q, want FULL: not warmed up", ended)

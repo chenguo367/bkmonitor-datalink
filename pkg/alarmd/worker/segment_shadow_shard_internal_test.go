@@ -37,7 +37,7 @@ func TestEachPieceOfASplitStrategyReadsItsOwnSegments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	firstKey, secondKey := shadowKey(first, first.StateGeneration), shadowKey(second, second.StateGeneration)
+	firstKey, secondKey := shadowKey(first, first.StateGeneration, segment.FamilyReal), shadowKey(second, second.StateGeneration, segment.FamilyReal)
 	store.marks[firstKey], store.pages[firstKey] = raw, map[int][]byte{0: page}
 	lifetime := segment.Lifetime{Interval: time.Minute}
 	slot := loadSegmentSlot(context.Background(), store, request, []segmentDue{{due: first, retention: 5, lifetime: lifetime},
@@ -51,11 +51,11 @@ func TestEachPieceOfASplitStrategyReadsItsOwnSegments(t *testing.T) {
 	if read := slot.plans[secondKey]; read == nil || read.hadMark || !read.fresh || read.key != secondKey {
 		t.Fatalf("the other piece read %+v, want it fresh, not at its sibling's mark", read)
 	}
-	if unsplit := shadowKey(shadowDue, shadowDue.StateGeneration); unsplit != (segment.PlanKey{Plan: shadowDue.Identity, Generation: shadowDue.StateGeneration}) {
+	if unsplit := shadowKey(shadowDue, shadowDue.StateGeneration, segment.FamilyReal); unsplit != (segment.PlanKey{Plan: shadowDue.Identity, Generation: shadowDue.StateGeneration}) {
 		t.Fatalf("a Plan not split keyed %+v", unsplit)
 	}
-	if segmentPlanName(firstKey) == segmentPlanName(secondKey) || segmentPlanName(shadowKey(shadowDue, "g")) != "tenant/2/9/g" {
+	if segmentPlanName(firstKey) == segmentPlanName(secondKey) || segmentPlanName(shadowKey(shadowDue, "g", segment.FamilyReal)) != "tenant/2/9/g" {
 		t.Fatalf("pages staggered by %q and %q, and %q for a Plan not split", segmentPlanName(firstKey), segmentPlanName(secondKey),
-			segmentPlanName(shadowKey(shadowDue, "g")))
+			segmentPlanName(shadowKey(shadowDue, "g", segment.FamilyReal)))
 	}
 }

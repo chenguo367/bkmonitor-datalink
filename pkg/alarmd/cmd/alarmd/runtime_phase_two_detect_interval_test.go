@@ -126,7 +126,7 @@ func TestRuntimeAConfiguredAndAnUnconfiguredStrategyRunInOnePublication(t *testi
 	// stage 3). The fixture runs one Query Group's runner at a time, so the
 	// Slots between two reads are that runner's.
 	mark := len(fixture.observed())
-	slots := runFullSlots(t, fixture, settledRunner(fixture.bundle, stepped), stepped, 4)
+	slots := runFullSlots(t, fixture, settledRunner(t, fixture.bundle, stepped), stepped, 4)
 	for index := 1; index < len(slots); index++ {
 		if slots[index]-slots[index-1] != 15 {
 			t.Fatalf("FULL Slots %v, want them fifteen seconds apart", slots)

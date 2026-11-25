@@ -54,6 +54,9 @@ type shadowRig struct {
 	// skipWord, when set, is the segment skip word each Slot is dispatched
 	// with and the epoch of the view the worker holds: the Slots skip.
 	skipWord atomic.Uint64
+	// skipNoDataWord, when set, is the no-data family's word each Slot is
+	// dispatched with beside skipWord (014 next9 ⑥).
+	skipNoDataWord atomic.Uint64
 	// attempt, when set, is the attempt number each Slot is dispatched as.
 	attempt atomic.Uint32
 	// replay, when set, dispatches each Slot as a replay at its distance and
@@ -141,6 +144,9 @@ type shadowObserved struct {
 	// Plans' rounds, by skip mode.
 	notSkipped map[string]int64
 	rounds     map[string]int64
+	// families is the shadow's cells by family (014 next9 ⑥), each named
+	// family/kind/word[/round]: outcome, member, sample and round.
+	families map[string]int64
 	// admissionKeys is the mutations the State admission was asked about,
 	// by its observations; written the census's written.
 	admissionKeys int64
@@ -201,11 +207,19 @@ func (observed *shadowObserved) Observe(ctx context.Context, observation observa
 	}
 	observed.mu.Lock()
 	defer observed.mu.Unlock()
+	if observed.families == nil {
+		observed.families = map[string]int64{}
+	}
 	for key, count := range facts.Outcomes {
 		observed.outcomes[key.Outcome] += count
+		observed.families[fmt.Sprint(observability.SegmentFamilyLabel(key.Family), "/outcome/", key.Outcome, "/", key.Round)] += count
 	}
 	for key, count := range facts.Members {
 		observed.members[key.Event] += count
+		observed.families[fmt.Sprint(observability.SegmentFamilyLabel(key.Family), "/member/", key.Event)] += count
+	}
+	for key, count := range facts.Samples {
+		observed.families[fmt.Sprint(observability.SegmentFamilyLabel(key.Family), "/sample")] += count
 	}
 	for result, count := range facts.Renewals {
 		if observed.renewals == nil {
@@ -224,7 +238,22 @@ func (observed *shadowObserved) Observe(ctx context.Context, observation observa
 			observed.rounds = map[string]int64{}
 		}
 		observed.rounds[key.Mode] += count
+		observed.families[fmt.Sprint(observability.SegmentFamilyLabel(key.Family), "/round/", key.Mode)] += count
 	}
+}
+
+// family is the shadow's cells of the family whose names start with prefix
+// (family/kind/word...), summed.
+func (observed *shadowObserved) family(family, prefix string) int64 {
+	observed.mu.Lock()
+	defer observed.mu.Unlock()
+	var total int64
+	for name, count := range observed.families {
+		if strings.HasPrefix(name, family+"/"+prefix) {
+			total += count
+		}
+	}
+	return total
 }
 
 // matchLedger is the rig's matches so far, the members it left unwritten,
@@ -540,10 +569,16 @@ func (rig *shadowRig) storedMark(at execution.EvaluationTime) segment.Mark {
 // Slot at at: its open and closed members.
 func (rig *shadowRig) storedMembers(at execution.EvaluationTime) (open, closed int) {
 	rig.t.Helper()
+	return rig.storedMembersOf(at, segment.FamilyReal)
+}
+
+// storedMembersOf is storedMembers of the family's book.
+func (rig *shadowRig) storedMembersOf(at execution.EvaluationTime, family segment.Family) (open, closed int) {
+	rig.t.Helper()
 	contract := rig.base.Contract
 	contract.Slot.EvaluationTime = at
 	read, err := rig.redis.ReadSegments(context.Background(), segment.ReadRequest{Contract: contract,
-		Plans: []segment.ReadPlan{{Key: segment.PlanKey{Plan: planIdentity(), Generation: "state-v1"}}}})
+		Plans: []segment.ReadPlan{{Key: segment.PlanKey{Plan: planIdentity(), Generation: "state-v1", Family: family}}}})
 	if err != nil {
 		rig.t.Fatal(err)
 	}
@@ -596,6 +631,7 @@ func (rig *shadowRig) execute(evaluation execution.EvaluationTime, absent []stri
 	request.ExpectedNextSlot = evaluation
 	request.DuePlanTargets = execution.FrozenDuePlanTargets{DuePlanSetDigest: digest, Plans: []execution.PlanKey{due.Key()}}
 	request.SegmentSkip = rig.skipWord.Load()
+	request.SegmentSkipNoData = rig.skipNoDataWord.Load()
 	if attempt := rig.attempt.Load(); attempt > 0 {
 		request.AttemptNo = attempt
 	}
@@ -977,12 +1013,13 @@ func TestARetryMeetingItsEarlierAttemptsLateWriteKeepsTheRoundsMembers(t *testin
 	}
 }
 
-// A no-data series is no member of a page (014 B3 3.7): the Plan's no-data
+// A no-data series is a member of its Plan's no-data family's page (014
+// next9 ⑥), no longer kept off by name (014 B3 3.7): the Plan's no-data
 // detection says a NORMAL for its present whole-item group every round -
 // steady, normal and quiet, its RECOVERY held at the open-alert gate on the
-// consumer's standard protocol - and it stays off the shadow's books while
-// the Plan's real series join and match beside it.
-func TestANoDataSeriesStaysOffTheShadowsBooksBesideThePlansRealSeries(t *testing.T) {
+// consumer's standard protocol - and it joins and matches in a book of its
+// own while the Plan's real series join and match in theirs beside it.
+func TestANoDataSeriesJoinsItsOwnFamilysBookBesideThePlansRealSeries(t *testing.T) {
 	const hosts = 3
 	rig := newShadowRigWith(t, hosts, 0, `{"enabled":true,"consecutive_windows":1}`, 1,
 		&contract.NoDataConfigV1{Continuous: 1, Level: 2}, 0)
@@ -1002,12 +1039,20 @@ func TestANoDataSeriesStaysOffTheShadowsBooksBesideThePlansRealSeries(t *testing
 	if classes[fmt.Sprint(observability.StateSeriesNoData, "/", observability.StateSeriesClassStableNormal)] == 0 {
 		t.Fatal("no no-data series was written steady and normal: the case does not have the series it guards against")
 	}
-	if open != hosts || members[observability.SegmentShadowJoined] != hosts {
-		t.Fatalf("stored %d open members, joined %d: want the %d real hosts on the page and no no-data series", open,
-			members[observability.SegmentShadowJoined], hosts)
+	if open != hosts || rig.observed.family(observability.SegmentFamilyReal, "member/"+string(observability.SegmentShadowJoined)) != hosts {
+		t.Fatalf("stored %d open real members, joined %v: want the %d real hosts on the real family's page", open, members, hosts)
 	}
-	if outcomes[observability.SegmentShadowMatch] == 0 {
-		t.Fatalf("outcomes %v: the real series beside the no-data one did not match", outcomes)
+	if open, _ := rig.storedMembersOf(at, segment.FamilyNoData); open != 1 ||
+		rig.observed.family(observability.SegmentFamilyNoData, "member/"+string(observability.SegmentShadowJoined)) != 1 {
+		t.Fatalf("stored %d open no-data members, joined %v: want the whole-item group on the no-data family's page", open, members)
+	}
+	for _, family := range observability.AllSegmentFamilies() {
+		if rig.observed.family(family, "outcome/"+string(observability.SegmentShadowMatch)) == 0 {
+			t.Fatalf("outcomes %v: the %s family did not match", outcomes, family)
+		}
+	}
+	if mismatches := rig.observed.family(observability.SegmentFamilyNoData, "outcome/mismatch"); mismatches != 0 {
+		t.Fatalf("the no-data family compared %d mismatches", mismatches)
 	}
 }
 

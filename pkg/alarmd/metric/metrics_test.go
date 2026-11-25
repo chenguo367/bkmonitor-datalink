@@ -696,6 +696,9 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("state_retained_share_approaching_slots_total"): 1,
 		fqName("worker_input_slices_total"):                    2,
 		fqName("worker_sliced_slots_total"):                    1,
+		fqName("slot_apply_wait_seconds_total"):                1,
+		fqName("slot_land_seconds_total"):                      1,
+		fqName("slot_apply_overlap_seconds_total"):             1,
 		fqName("worker_first_seen_unseen_total"):               2,
 		fqName("worker_slice_read_ahead_total"):                len(observability.SliceReadAheadOutcomes),
 		fqName("worker_series_not_evaluated_total"):            len(observability.SeriesNotEvaluatedFamilies),
@@ -936,8 +939,10 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("object_catalog_written_bytes_total"): 2,
 		// One series per rollout position, all four always emitted so the
 		// graph survives a cutover instead of a series vanishing at it.
-		fqName("canonical_encoding_calls_total"):          2,
+		fqName("canonical_encoding_calls_total"):          3,
 		fqName("canonical_encoding_records_shadow_total"): 2,
+		fqName("canonical_encoder_divergences_total"):     4,
+		fqName("canonical_encoder_checked_total"):         4,
 		// Unlabelled: one count each.
 		fqName("dataset_record_ids_kept_runs_total"):              1,
 		fqName("dataset_record_ids_derived_outside_window_total"): 1,
@@ -1065,20 +1070,21 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("slot_begin_total")] = len(execution.SlotBeginResults)
 	bounds[fqName("slot_not_committed_total")] = len(execution.SlotNotCommittedReasons)
 	bounds[fqName("progress_projection_superseded_total")] = len(progress.SupersededProjectionFields)
-	// The segment shadow: every outcome and event by every period class, the
-	// outcomes in each round.
+	// The segment shadow: every outcome and event by every period class and
+	// family, the outcomes in each round.
+	families := len(observability.AllSegmentFamilies())
 	bounds[fqName("state_segment_shadow_total")] = len(observability.AllSegmentShadowOutcomes()) * len(observability.AllSegmentPeriodClasses()) *
-		len(observability.AllSegmentShadowRounds())
-	bounds[fqName("state_segment_sample_total")] = len(observability.AllSegmentPeriodClasses())
+		len(observability.AllSegmentShadowRounds()) * families
+	bounds[fqName("state_segment_sample_total")] = len(observability.AllSegmentPeriodClasses()) * families
 	bounds[fqName("state_segment_degraded_total")] = len(observability.AllSegmentDegradations())
 	bounds[fqName("state_segment_carry_total")] = len(observability.AllSegmentCarries())
-	bounds[fqName("state_segment_shadow_members_total")] = len(observability.AllSegmentShadowEvents()) * len(observability.AllSegmentPeriodClasses())
+	bounds[fqName("state_segment_shadow_members_total")] = len(observability.AllSegmentShadowEvents()) * len(observability.AllSegmentPeriodClasses()) * families
 	bounds[fqName("state_segment_shadow_page_writes_total")] = len(observability.AllSegmentPeriodClasses())
 	bounds[fqName("state_segment_shadow_page_bytes_total")] = len(observability.AllSegmentPeriodClasses())
 	// A match written all the same by every gate, and the Plans' rounds by
 	// every skip mode, each by every period class.
 	bounds[fqName("state_segment_match_not_skipped_total")] = len(observability.AllSegmentNotSkippedGates()) * len(observability.AllSegmentPeriodClasses())
-	bounds[fqName("state_segment_rounds_total")] = len(segment.SkipModes()) * len(observability.AllSegmentPeriodClasses())
+	bounds[fqName("state_segment_rounds_total")] = len(segment.SkipModes()) * len(observability.AllSegmentPeriodClasses()) * families
 	// The page cache's plans, pages and bytes.
 	bounds[fqName("worker_segment_shadow_memory")] = 3
 	bounds[fqName("state_segment_shadow_skipped_total")] = len(observability.AllSegmentShadowSkips())

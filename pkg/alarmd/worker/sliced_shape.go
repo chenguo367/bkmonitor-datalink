@@ -13,6 +13,7 @@ import (
 	"errors"
 	"slices"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/inputslice"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -29,7 +30,9 @@ import (
 // though there had been none. A Slot read in a shape is not cut further
 // before it is read for the Query Group's size (slicesBySeries, its bytes):
 // a Query Group grown since is caught by its slices split for their size as
-// they stream, and by a slice split for its time once a round.
+// they stream, and by a slice split for its time once a round. A shape whose
+// Slot was refused for its leaves is dropped too, by the refusal
+// (voidRefusedShape).
 func (coordinator *SlotExecutionCoordinator) shapeTree(request execution.SlotExecutionRequest, last slicedReading, reading *sliceReading) *inputslice.Tree {
 	if last.shape.IsZero() {
 		return nil
@@ -244,6 +247,52 @@ func (trees *sliceTrees) dropShape(group execution.QueryGroupIdentity) {
 	}
 }
 
+// voidRefusedShape drops the shape a Slot started in once the Slot is
+// refused INPUT_SLICE_LEAVES_EXHAUSTED: a slice of it let go and split past
+// the leaves a tree may have (inputslice.MaxLeaves), its shape near the
+// leaves a Slot may start in. The refusal is final and leaves the memory as
+// it was - the Slot never reaches rememberSlotInput - so the next Slot would
+// start in the same leaves, let the same slice go and be refused again, every
+// round, until the process ends. Dropped, the next Slot starts in slices
+// counted, as one whose shape grew past a starting tree's leaves does, and is
+// split from there. The refused Slot reports no usage: the drop is counted
+// voided_max_leaves by the next Slot to complete, as evicted_idle is
+// (takeVoided). A Slot not started in a shape, or refused otherwise, drops
+// nothing.
+func (coordinator *SlotExecutionCoordinator) voidRefusedShape(group execution.QueryGroupIdentity, reading *sliceReading, err error) {
+	if reading == nil || !reading.shape.started {
+		return
+	}
+	if word, _ := InputSliceRefusal(err); word != contract.ReasonInputSliceLeavesExhausted {
+		return
+	}
+	coordinator.slicedInput.voidShape(group)
+}
+
+// voidShape takes a Query Group's shape out of the memory as dropShape does,
+// and counts it for the next Slot to complete (takeVoided).
+func (trees *sliceTrees) voidShape(group execution.QueryGroupIdentity) {
+	trees.mu.Lock()
+	defer trees.mu.Unlock()
+	reading, ok := trees.input[group]
+	if !ok || reading.shape.IsZero() {
+		return
+	}
+	reading.shape, reading.shapeQuickRounds, reading.shapeSizedRounds = inputslice.Shape{}, 0, 0
+	trees.input[group] = reading
+	trees.voided++
+}
+
+// takeVoided is the shapes refused Slots dropped not yet counted, now
+// counted, as takeEvicted counts the Query Groups dropped as idle.
+func (trees *sliceTrees) takeVoided() uint64 {
+	trees.mu.Lock()
+	defer trees.mu.Unlock()
+	voided := trees.voided
+	trees.voided = 0
+	return voided
+}
+
 // sliceShapeOutcomes is this Slot's shape usage as the counts of
 // observability.InputSliceShapeOutcomes, in that order.
 func (stream *streamedExecution) sliceShapeOutcomes() [len(observability.InputSliceShapeOutcomes)]uint64 {
@@ -253,9 +302,14 @@ func (stream *streamedExecution) sliceShapeOutcomes() [len(observability.InputSl
 	}
 	usage := stream.slices.shape
 	for index, outcome := range observability.InputSliceShapeOutcomes {
-		if outcome == observability.InputSliceShapeEvictedIdle {
+		switch outcome {
+		case observability.InputSliceShapeEvictedIdle:
 			counts[index] = stream.coordinator.slicedInput.takeEvicted()
 			continue
+		case observability.InputSliceShapeVoidedMaxLeaves:
+			// The shapes of Slots refused for their leaves (voidRefusedShape),
+			// beside this Slot's own.
+			counts[index] = stream.coordinator.slicedInput.takeVoided()
 		}
 		switch {
 		case outcome == observability.InputSliceShapeStarted && usage.started,
@@ -265,7 +319,7 @@ func (stream *streamedExecution) sliceShapeOutcomes() [len(observability.InputSl
 			outcome == observability.InputSliceShapeSizedSplit && stream.slices.startDiscarded,
 			outcome == observability.InputSliceShapeSizedKept && stream.slices.sizedKept,
 			outcome == usage.dropped:
-			counts[index] = 1
+			counts[index]++
 		}
 	}
 	return counts

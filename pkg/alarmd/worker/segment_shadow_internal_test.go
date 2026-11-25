@@ -331,7 +331,7 @@ func runShadowForAs(t *testing.T, store *memorySegments, due execution.DuePlan, 
 	request := shadowRequest(operation, at)
 	round := newSegmentShadowRound(request, shadowSlot(t, store, request, due))
 	for _, series := range written {
-		round.observe(due, series.view, series.write, series.class, series.eventsSent)
+		round.observe(due, segment.FamilyReal, series.view, series.write, series.class, series.eventsSent)
 	}
 	notLanded := map[execution.PlanIdentity]struct{}{}
 	if withheld {
@@ -532,13 +532,13 @@ func TestARetryStartsOverAndAWithheldOrReplayedRoundChangesNothing(t *testing.T)
 	round := newSegmentShadowRound(request, shadowSlot(t, shadow, request, shadowDue))
 	round.retried(shadowDue)
 	written := steady(t, shadowSeries(1), 1260)
-	round.observe(shadowDue, written.view, written.write, written.class, false)
+	round.observe(shadowDue, segment.FamilyReal, written.view, written.write, written.class, false)
 	facts := foldShadow(t, shadow, round, request, shadowDue, nil)
 	if member(facts, observability.SegmentShadowReset) != 2 {
 		t.Fatalf("a retry: %+v, want the Plan reset with its two members", facts)
 	}
 	// It is a round, under the mode it ran: one, comparing nothing, no gate.
-	planRound := round.plans[shadowKey(shadowDue, shadowDue.StateGeneration)]
+	planRound := round.plans[shadowKey(shadowDue, shadowDue.StateGeneration, segment.FamilyReal)]
 	mode := round.skipMode(planRound)
 	if len(facts.Rounds) != 1 || facts.Rounds[observability.SegmentRoundKey{Mode: mode, PeriodClass: planRound.class}] != 1 ||
 		len(facts.NotSkipped) != 0 || outcome(facts, observability.SegmentShadowMatch) != 0 {

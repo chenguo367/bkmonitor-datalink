@@ -78,13 +78,13 @@ func TestAMembersCoverageSaysWhetherItsRoundLeavesItsWriteOut(t *testing.T) {
 	}
 	// The Plan's piece in its sampled round has its cached values checked,
 	// and not in any other round.
-	if slot := build(nil); slot.sampled(shadowDue, "g1") {
+	if slot := build(nil); slot.sampled(shadowDue, "g1", segment.FamilyReal) {
 		t.Fatal("a round that is not the Plan's sampled round checks its cached values")
 	}
-	if slot := build(func(slot *segmentSlot, _ *segmentShadowPlan) { slot.at = sampledAt }); !slot.sampled(shadowDue, "g1") {
+	if slot := build(func(slot *segmentSlot, _ *segmentShadowPlan) { slot.at = sampledAt }); !slot.sampled(shadowDue, "g1", segment.FamilyReal) {
 		t.Fatal("the Plan's sampled round does not check its cached values")
 	}
-	if (*segmentSlot)(nil).sampled(shadowDue, "g1") {
+	if (*segmentSlot)(nil).sampled(shadowDue, "g1", segment.FamilyReal) {
 		t.Fatal("a Slot that read no segments checks its cached values")
 	}
 	// What a Slot's coverage says is what its round is told: under the word

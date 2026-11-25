@@ -39,7 +39,7 @@ func movedPlanFixture(t *testing.T, edit func(first map[string]any)) (*cutoverSt
 		t.Fatal("edit did not move the Plan to a new Query Group")
 	}
 	f.queryGroup = next
-	f.runner = settledRunner(f.bundle, next)
+	f.runner = settledRunner(t, f.bundle, next)
 	_ = runOneSlotFull(t, f)
 	return f, old, next
 }

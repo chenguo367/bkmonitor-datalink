@@ -251,6 +251,19 @@ func runPhaseTwoApplicationWithDependencies(
 			slog.String("domain", divergence.Domain), slog.String("served", divergence.Served),
 			slog.String("established", divergence.Established))
 	})
+	// A direct encoder of the canonical form that differed from it (014
+	// next9 ⑤): counted on canonical_encoder_divergences_total, said here
+	// once an encoder a process, and the encoder off since. No input's value
+	// is on the line: the encoder, the Go type, what was compared, the first
+	// byte that differs and the field path there - none for a digest
+	// (compared=digest), which differs as a whole; the parts' own lines name
+	// the field.
+	contract.SetCanonicalEncoderDivergenceReporter(func(divergence contract.CanonicalEncoderDivergence) {
+		logger.WarnEvent("canonical_encoder", "encoder_differed", 1,
+			slog.String("encoder", divergence.Encoder), slog.String("type", divergence.Type),
+			slog.String("compared", divergence.Compared), slog.Int("offset", divergence.Offset),
+			slog.String("path", divergence.Path))
+	})
 
 	// The distribution routes answer 503 without a usable release; this line
 	// is where an operator reading the Pod finds out which of the two it is.
@@ -3236,7 +3249,8 @@ func phaseTwoWorkerRegistration(
 		Applied:                 applied, Load: load,
 		// The control contracts this binary takes part in. The leader
 		// starts a contract only when every ready worker declares it.
-		Capabilities: []string{ownership.CapabilityContentScope, ownership.CapabilityShardAware, ownership.CapabilitySegmentSkip},
+		Capabilities: []string{ownership.CapabilityContentScope, ownership.CapabilityShardAware, ownership.CapabilitySegmentSkip,
+			ownership.CapabilitySegmentSkipNoData},
 		// Where this process serves the view stream and what a Worker must
 		// present to it (decision-016); empty for a process without one.
 		Endpoint: stream.Endpoint, StreamToken: stream.Token,

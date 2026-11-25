@@ -29,11 +29,26 @@ import (
 // target its State is routed to. Their kinds are their own, so no State, gap
 // or no-data key shares a name with them; a page's number is its suffix, zero
 // padded to the width executionKey keeps, so page 1 and page 10 are two
-// names.
+// names. The no-data family's (014 next9 ⑥) are kinds of their own too: a
+// real family's names are the ones they always were.
 const (
-	segmentMarkKind = "segment-mark"
-	segmentPageKind = "segment-page"
+	segmentMarkKind       = "segment-mark"
+	segmentPageKind       = "segment-page"
+	segmentNoDataMarkKind = "segment-nodata-mark"
+	segmentNoDataPageKind = "segment-nodata-page"
 )
+
+// segmentKinds is the family's mark and page kinds; an unknown family names
+// none.
+func segmentKinds(family segment.Family) (mark, page string, err error) {
+	switch family {
+	case segment.FamilyReal:
+		return segmentMarkKind, segmentPageKind, nil
+	case segment.FamilyNoData:
+		return segmentNoDataMarkKind, segmentNoDataPageKind, nil
+	}
+	return "", "", identityError("a segment family is real or no_data")
+}
 
 // SegmentMarkKeyV1 names a Plan's segment mark. A piece of a split strategy
 // has its own, by the rule the gap marker and the no-data memory keep
@@ -43,7 +58,11 @@ func SegmentMarkKeyV1(prefix string, key segment.PlanKey) (string, error) {
 	if err := validatePlanIdentity(prefix, key.Plan, key.Generation); err != nil {
 		return "", err
 	}
-	kind, suffix, err := shardedKind(segmentMarkKind, key.Shard)
+	markKind, _, err := segmentKinds(key.Family)
+	if err != nil {
+		return "", err
+	}
+	kind, suffix, err := shardedKind(markKind, key.Shard)
 	if err != nil {
 		return "", err
 	}
@@ -62,17 +81,26 @@ func SegmentPageKeyV1(prefix string, key segment.PlanKey, page int) (string, err
 		return "", identityError("a page number is not negative")
 	}
 	number := fmt.Sprintf("%032d", page)
-	kind, suffix, err := shardedKind(segmentPageKind, key.Shard)
+	_, pageKind, err := segmentKinds(key.Family)
+	if err != nil {
+		return "", err
+	}
+	kind, suffix, err := shardedKind(pageKind, key.Shard)
 	if err != nil {
 		return "", err
 	}
 	return executionKey(prefix, kind, key.Plan, key.Generation, suffix) + ":" + number, nil
 }
 
-// isSegmentMarkKey is whether a key is a mark's, a piece's or not, by its
-// kind.
+// isSegmentMarkKey is whether a key is a mark's, a piece's or not, of
+// either family, by its kind.
 func isSegmentMarkKey(key string) bool {
-	return strings.Contains(key, ":"+segmentMarkKind+":") || strings.Contains(key, ":"+segmentMarkKind+"-shard:")
+	for _, kind := range []string{segmentMarkKind, segmentNoDataMarkKind} {
+		if strings.Contains(key, ":"+kind+":") || strings.Contains(key, ":"+kind+"-shard:") {
+			return true
+		}
+	}
+	return false
 }
 
 // segmentStats are the segments' counts, kept beside the cache so a store

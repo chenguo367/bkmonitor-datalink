@@ -271,7 +271,7 @@ func (h *poolProbeHarness) isANormalRoundsBudget(remaining time.Duration) bool {
 func (h *poolProbeHarness) round(minute int64) ([]poolRequest, []observability.QueryCooldownFacts) {
 	h.t.Helper()
 	h.backend.clock.Store(upToTheSecondMillis((h.base+minute*60)*1000 + h.readWait().Milliseconds() + 500))
-	if err := runScheduledOnceSettled(h.ctx, h.bundle); err != nil {
+	if err := runScheduledOnceSettled(h.t, h.ctx, h.bundle); err != nil {
 		h.t.Fatalf("minute %d: %v", minute, err)
 	}
 	h.mu.Lock()
@@ -311,7 +311,7 @@ func (h *poolProbeHarness) passCounting(at int64) ([]poolRequest, []observabilit
 	// The source answers a Slot due by the second its read falls in.
 	at = upToTheSecondMillis(at)
 	h.backend.clock.Store(at)
-	if err := runScheduledOnceSettled(h.ctx, h.bundle); err != nil {
+	if err := runScheduledOnceSettled(h.t, h.ctx, h.bundle); err != nil {
 		h.t.Fatalf("pass at base+%d ms: %v", at-h.base*1000, err)
 	}
 	h.mu.Lock()

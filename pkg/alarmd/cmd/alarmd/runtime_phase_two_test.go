@@ -363,7 +363,7 @@ func TestPhaseTwoWorkerBundleTransitionsReadyAndDrainingAroundOwnedRunner(t *tes
 	if got := owner.registrationStates(); !equalReadiness(got, []ownership.AssignmentReadiness{ownership.WorkerStarting, ownership.WorkerReady}) {
 		t.Fatalf("registration states = %v, want STARTING then READY", got)
 	}
-	if err := runScheduledOnceSettled(context.Background(), bundle); err != nil {
+	if err := runScheduledOnceSettled(t, context.Background(), bundle); err != nil {
 		t.Fatalf("runScheduledOnce() error = %v", err)
 	}
 	if runner.runCount() != 1 {
@@ -382,7 +382,7 @@ func TestPhaseTwoWorkerBundleTransitionsReadyAndDrainingAroundOwnedRunner(t *tes
 	if runner.releaseCount() != 1 || control.closeCalls != 1 || owner.closeCalls != 1 {
 		t.Fatalf("shutdown release/close = %d/%d/%d, want 1/1/1", runner.releaseCount(), control.closeCalls, owner.closeCalls)
 	}
-	if err := runScheduledOnceSettled(context.Background(), bundle); !errors.Is(err, errPhaseTwoWorkerDraining) {
+	if err := runScheduledOnceSettled(t, context.Background(), bundle); !errors.Is(err, errPhaseTwoWorkerDraining) {
 		t.Fatalf("runScheduledOnce(after drain) error = %v, want draining rejection", err)
 	}
 	if runner.runCount() != 1 {
@@ -412,7 +412,7 @@ func TestPhaseTwoWorkerBundleRunsOwnedQueryGroupsConcurrentlyOncePerTick(t *test
 	}()
 
 	done := make(chan error, 1)
-	go func() { done <- runScheduledOnceSettled(context.Background(), bundle) }()
+	go func() { done <- runScheduledOnceSettled(t, context.Background(), bundle) }()
 	waitSignal(t, first.runStarted, "first concurrent Query Group")
 	waitSignal(t, second.runStarted, "second concurrent Query Group")
 	close(first.runRelease)
@@ -463,7 +463,7 @@ func TestPhaseTwoWorkerBundleBoundsRunnerFanoutIndependentlyOfQueryPermits(t *te
 	}()
 
 	done := make(chan error, 1)
-	go func() { done <- runScheduledOnceSettled(context.Background(), bundle) }()
+	go func() { done <- runScheduledOnceSettled(t, context.Background(), bundle) }()
 	wantFanout := 2 // Initial execution profile remains two, independent of one query permit.
 	for index := 0; index < wantFanout; index++ {
 		select {
@@ -527,7 +527,7 @@ func TestPhaseTwoWorkerBundleRunsRetiredBacklogWhenCapacityIsReleased(t *testing
 		runners:      runners,
 	}
 	done := make(chan error, 1)
-	go func() { done <- runScheduledOnceSettled(context.Background(), bundle) }()
+	go func() { done <- runScheduledOnceSettled(t, context.Background(), bundle) }()
 
 	firstTwo := make(map[execution.QueryGroupIdentity]struct{}, 2)
 	for len(firstTwo) < 2 {
@@ -664,7 +664,7 @@ func TestPhaseTwoWorkerBundleRetriesReadyQueryGroupBeforeFullSweepCompletes(t *t
 		}}
 	}
 	done := make(chan error, 1)
-	go func() { done <- runScheduledOnceSettled(context.Background(), bundle) }()
+	go func() { done <- runScheduledOnceSettled(t, context.Background(), bundle) }()
 	waitSignal(t, blockingStarted, "blocking Query Group")
 
 	retriedBeforeSweepCompleted := false
@@ -1118,7 +1118,7 @@ func TestPhaseTwoWorkerBundleSchedulerCancellationStopsAdmissionAndDrainsInfligh
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- runScheduledOnceSettled(ctx, bundle) }()
+	go func() { done <- runScheduledOnceSettled(t, ctx, bundle) }()
 	waitSignal(t, started, "first inflight Query Group")
 	waitSignal(t, started, "second inflight Query Group")
 	cancel()
@@ -1171,7 +1171,7 @@ func TestPhaseTwoWorkerBundleDispatcherDropsReplacedLifecycleBeforeDispatch(t *t
 		},
 	}
 	done := make(chan error, 1)
-	go func() { done <- runScheduledOnceSettled(context.Background(), bundle) }()
+	go func() { done <- runScheduledOnceSettled(t, context.Background(), bundle) }()
 	waitSignal(t, blockingStarted, "blocking Query Group")
 	bundle.mu.Lock()
 	bundle.setRunnerLocked("query-group-z-replaced", newLifecycle)
@@ -1187,7 +1187,7 @@ func TestPhaseTwoWorkerBundleDispatcherDropsReplacedLifecycleBeforeDispatch(t *t
 	bundle.mu.Lock()
 	bundle.removeRunnerLocked("query-group-a-blocking", lookback.ForgottenMoved)
 	bundle.mu.Unlock()
-	if err := runScheduledOnceSettled(context.Background(), bundle); err != nil {
+	if err := runScheduledOnceSettled(t, context.Background(), bundle); err != nil {
 		t.Fatalf("runScheduledOnce(current replacement) error = %v", err)
 	}
 	if got := newCalls.Load(); got != newCallsBeforeNextTick+1 {
@@ -1442,7 +1442,7 @@ func TestPhaseTwoWorkerBundleKeepsHealthyQueryGroupAcrossSnapshotUnavailableRefr
 	if snapshot := health.HealthSnapshot(); snapshot.State != observability.HealthDegraded || !snapshot.Ready {
 		t.Fatalf("refresh unavailable health=%+v, want ready degraded", snapshot)
 	}
-	if err := runScheduledOnceSettled(context.Background(), bundle); err != nil || runner.runCount() != 1 {
+	if err := runScheduledOnceSettled(t, context.Background(), bundle); err != nil || runner.runCount() != 1 {
 		t.Fatalf("healthy runner after unavailable refresh calls/error=%d/%v, want 1/nil", runner.runCount(), err)
 	}
 	if err := bundle.refreshAndReconcile(context.Background(), true); err != nil {
@@ -1472,7 +1472,7 @@ func TestPhaseTwoWorkerBundleFollowerLoadsControlFactsAndRunsItsAssignment(t *te
 	if owner.publishAssignmentCount() != 0 {
 		t.Fatalf("follower published %d Assignment batches", owner.publishAssignmentCount())
 	}
-	if err := runScheduledOnceSettled(context.Background(), bundle); err != nil {
+	if err := runScheduledOnceSettled(t, context.Background(), bundle); err != nil {
 		t.Fatalf("runScheduledOnce() error = %v", err)
 	}
 	if runner.runCount() != 1 {
@@ -1503,7 +1503,7 @@ func TestPhaseTwoWorkerBundleLeaseFailureIsLocalToQueryGroup(t *testing.T) {
 	close(lost.leaseRelease)
 	waitSignal(t, lost.leaseFinished, "stale lease failure")
 	waitForHealthState(t, health, observability.HealthNotReady)
-	if err := runScheduledOnceSettled(context.Background(), bundle); err != nil {
+	if err := runScheduledOnceSettled(t, context.Background(), bundle); err != nil {
 		t.Fatalf("runScheduledOnce(after local lease loss) error = %v", err)
 	}
 	if lost.runCount() != 0 || healthy.runCount() != 1 {
@@ -1527,7 +1527,7 @@ func TestPhaseTwoWorkerBundleStaleRunnerDoesNotStopSiblingQueryGroup(t *testing.
 	if err := bundle.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	if err := runScheduledOnceSettled(context.Background(), bundle); err != nil {
+	if err := runScheduledOnceSettled(t, context.Background(), bundle); err != nil {
 		t.Fatalf("runScheduledOnce(stale sibling) error = %v", err)
 	}
 	if stale.runCount() != 1 || healthy.runCount() != 1 {
@@ -1554,7 +1554,7 @@ func TestPhaseTwoWorkerBundleSlotOwnershipChangeStopsOnlyInvalidQueryGroup(t *te
 	if err := bundle.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	if err := runScheduledOnceSettled(context.Background(), bundle); err != nil {
+	if err := runScheduledOnceSettled(t, context.Background(), bundle); err != nil {
 		t.Fatalf("runScheduledOnce(ownership changed sibling) error = %v", err)
 	}
 	if changed.runCount() != 1 || healthy.runCount() != 1 {
@@ -1593,7 +1593,7 @@ func TestPhaseTwoWorkerBundleProgressConflictDoesNotStopSiblingOrWorker(t *testi
 	if err := bundle.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	if err := runScheduledOnceSettled(context.Background(), bundle); err != nil {
+	if err := runScheduledOnceSettled(t, context.Background(), bundle); err != nil {
 		t.Fatalf("runScheduledOnce(local Query Group failure) error = %v", err)
 	}
 	if failed.runCount() != 1 || healthy.runCount() != 1 {
@@ -1655,7 +1655,7 @@ func TestPhaseTwoWorkerBundleQueryFreeGapConflictDoesNotStopSiblingOrWorker(t *t
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = bundle.Shutdown(context.Background()) })
-	if err := runScheduledOnceSettled(context.Background(), bundle); err != nil {
+	if err := runScheduledOnceSettled(t, context.Background(), bundle); err != nil {
 		t.Fatalf("runScheduledOnce() error=%v", err)
 	}
 	if failed.runCount() != 1 || healthy.runCount() != 1 || failed.releaseCount() != 0 {
@@ -1702,7 +1702,7 @@ func TestPhaseTwoWorkerBundleMissingFrozenQueryFactsDoesNotStopThresholdSiblingO
 	if err := bundle.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := runScheduledOnceSettled(context.Background(), bundle); err != nil {
+	if err := runScheduledOnceSettled(t, context.Background(), bundle); err != nil {
 		t.Fatalf("runScheduledOnce() error=%v", err)
 	}
 	if failed.runCount() != 1 || healthy.runCount() != 1 || failed.releaseCount() != 0 || healthy.releaseCount() != 0 {
@@ -1750,7 +1750,7 @@ func TestPhaseTwoWorkerBundleDoesNotDuplicateAttemptedRunnerFailureObservation(t
 	if err := bundle.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	if err := runScheduledOnceSettled(context.Background(), bundle); err != nil {
+	if err := runScheduledOnceSettled(t, context.Background(), bundle); err != nil {
 		t.Fatalf("runScheduledOnce(attempted failure) error = %v", err)
 	}
 	observationsMu.Lock()
@@ -1792,7 +1792,7 @@ func TestPhaseTwoWorkerBundleDoesNotReobserveSourceRetryResults(t *testing.T) {
 	if err := bundle.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := runScheduledOnceSettled(context.Background(), bundle); err != nil {
+	if err := runScheduledOnceSettled(t, context.Background(), bundle); err != nil {
 		t.Fatal(err)
 	}
 	var got []observability.Observation
@@ -1856,7 +1856,7 @@ func TestPhaseTwoWorkerBundleAppliesAssignmentDiffWithoutRestart(t *testing.T) {
 	if first.releaseCount() != 1 {
 		t.Fatalf("removed runner release calls = %d, want 1", first.releaseCount())
 	}
-	if err := runScheduledOnceSettled(context.Background(), bundle); err != nil {
+	if err := runScheduledOnceSettled(t, context.Background(), bundle); err != nil {
 		t.Fatalf("runScheduledOnce() error = %v", err)
 	}
 	if first.runCount() != 0 || second.runCount() != 1 {
@@ -2124,7 +2124,7 @@ func TestPhaseTwoWorkerBundleWaitsForBusyAssignedLeaseWithoutStoppingWorker(t *t
 	if snapshot := health.HealthSnapshot(); snapshot.State != observability.HealthNotReady || snapshot.Ready {
 		t.Fatalf("health while assigned lease is busy = %+v, want not ready", snapshot)
 	}
-	if err := runScheduledOnceSettled(context.Background(), bundle); err != nil {
+	if err := runScheduledOnceSettled(t, context.Background(), bundle); err != nil {
 		t.Fatalf("runScheduledOnce(with no acquired runner) error = %v", err)
 	}
 	_ = bundle.Shutdown(context.Background())
@@ -2144,7 +2144,7 @@ func TestPhaseTwoWorkerBundleDrainsInflightSlotBeforeConditionalRelease(t *testi
 	}
 
 	runDone := make(chan error, 1)
-	go func() { runDone <- runScheduledOnceSettled(context.Background(), bundle) }()
+	go func() { runDone <- runScheduledOnceSettled(t, context.Background(), bundle) }()
 	waitSignal(t, runner.runStarted, "inflight Slot")
 	shutdownDone := make(chan error, 1)
 	go func() { shutdownDone <- bundle.Shutdown(context.Background()) }()
@@ -2152,7 +2152,7 @@ func TestPhaseTwoWorkerBundleDrainsInflightSlotBeforeConditionalRelease(t *testi
 	if runner.releaseCount() != 0 {
 		t.Fatal("Shutdown released the lease before the inflight Slot drained")
 	}
-	if err := runScheduledOnceSettled(context.Background(), bundle); !errors.Is(err, errPhaseTwoWorkerDraining) {
+	if err := runScheduledOnceSettled(t, context.Background(), bundle); !errors.Is(err, errPhaseTwoWorkerDraining) {
 		t.Fatalf("runScheduledOnce(during drain) error = %v, want draining rejection", err)
 	}
 	close(runner.runRelease)
@@ -2190,7 +2190,7 @@ func TestPhaseTwoWorkerBundleObservesLifecycleWithoutInventingSlotTransitions(t 
 	if err := bundle.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	if err := runScheduledOnceSettled(context.Background(), bundle); err != nil {
+	if err := runScheduledOnceSettled(t, context.Background(), bundle); err != nil {
 		t.Fatalf("runScheduledOnce() error = %v", err)
 	}
 	if err := bundle.Shutdown(context.Background()); err != nil {

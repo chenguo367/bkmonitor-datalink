@@ -21,6 +21,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/segment"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 )
 
@@ -192,11 +193,15 @@ func (stream *streamedExecution) noDataCompletedSeries(
 			Kind: execution.SeriesKindNoData, RequirementIDs: []execution.RequirementID{noDataRequirementID},
 			Inputs: []execution.NamedInputBinding{binding},
 		}},
+		// A member of its Plan's no-data family is read, and checked in
+		// that family's sampled round, as a real member is in its own (014
+		// next9 ⑥); a split strategy's piece is told as a real one's.
 		item: execution.StatePreflightItem{
 			Identity: execution.StateKeyIdentity{
 				Plan: view.Identity, StateGeneration: view.StateGeneration, SeriesIdentityDigest: series,
 			},
-			ApplyVersion: version,
+			ApplyVersion: version, Sharded: !view.Shard.IsZero(),
+			VerifyCached: stream.segments.sampled(view, view.StateGeneration, segment.FamilyNoData),
 		},
 	}, nil
 }
@@ -223,14 +228,55 @@ func (stream *streamedExecution) noDataCompletedSeries(
 func (stream *streamedExecution) evaluateNoData(
 	ctx context.Context, prepared []preparedSeries, batchLimit int,
 ) error {
+	// The synthetic series are read a batch ahead as the real ones are
+	// (evaluateSeries): a full batch's State read starts as the batch is
+	// full, and the batch is evaluated once the next one is full, or at the
+	// end, so the read of one batch overlaps the evaluation and merge of the
+	// one before (014 next9 ⑦). The series of two batches are different
+	// keys: a key names its Plan, and a Plan's round says each of its groups
+	// once - a present group with the present keys, a stored one outside the
+	// present set once by name (takePage keeps each name once), the rest
+	// from Finish, which judges only the groups no stored entry named. No
+	// real batch is read beside them: evaluateSeries flushed every one, its
+	// last read come back, before it got here.
 	pending := make([]completedSeries, 0, batchLimit)
-	flush := func() error {
+	var read struct {
+		batch []completedSeries
+		state *preflightRead
+	}
+	// No read outlives the evaluation that started it, whichever way it
+	// returns: at the end, on a batch's failure, on a cancelled context.
+	defer func() {
+		if read.state != nil {
+			<-read.state.done
+		}
+	}()
+	evaluateRead := func() error {
+		if read.state == nil {
+			return nil
+		}
+		batch, state := read.batch, read.state
+		read.batch, read.state = nil, nil
+		return stream.evaluateReadBatch(ctx, batch, state)
+	}
+	// next starts the full batch's read and evaluates the batch before it.
+	// The batch read goes on with its own slice: the next one is a new one.
+	next := func() error {
 		if len(pending) == 0 {
 			return nil
 		}
-		err := stream.evaluateCompletedSeriesBatch(ctx, pending)
-		pending = pending[:0]
+		batch := pending
+		pending = make([]completedSeries, 0, batchLimit)
+		state := stream.startPreflightRead(ctx, batch, true)
+		err := evaluateRead()
+		read.batch, read.state = batch, state
 		return err
+	}
+	flush := func() error {
+		if err := next(); err != nil {
+			return err
+		}
+		return evaluateRead()
 	}
 	emit := func(entry completedSeries) error {
 		// After every prepared series: a window landed before it lets all of
@@ -246,7 +292,7 @@ func (stream *streamedExecution) evaluateNoData(
 		stream.seriesCensus.Read++
 		pending = append(pending, entry)
 		if len(pending) >= batchLimit {
-			return flush()
+			return next()
 		}
 		return nil
 	}

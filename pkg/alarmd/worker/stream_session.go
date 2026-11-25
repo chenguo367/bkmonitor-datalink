@@ -1796,7 +1796,7 @@ func (stream *streamedExecution) evaluateSeries(
 			item: execution.StatePreflightItem{Identity: execution.StateKeyIdentity{
 				Plan: due.Identity, StateGeneration: due.StateGeneration, SeriesIdentityDigest: prepared.identity,
 			}, ApplyVersion: version, CarryFrom: carryFrom(due), Sharded: !due.Shard.IsZero(),
-				VerifyCached: stream.segments.sampled(due, due.StateGeneration)}})
+				VerifyCached: stream.segments.sampled(due, due.StateGeneration, segment.FamilyReal)}})
 		if len(pending) >= batchLimit {
 			if err := next(); err != nil {
 				return err
@@ -2485,14 +2485,6 @@ func (stream *streamedExecution) mergePrimaryIncompleteSeries(
 		Result: observability.ResultDegraded, ReasonCode: reason,
 		Plans: []execution.PlanEvaluationResult{{Plan: due.Identity, Disposition: disposition,
 			ReasonCode: reason, GuardBeforeEvents: []execution.PlanGapMutation{mutation}}}}, 0)
-}
-
-// evaluateCompletedSeriesBatch reads the Runtime State of every series in the
-// batch with one preflight call, then evaluates each series against exactly its
-// own view. Per-item read outcomes stay isolated: a corrupt blob degrades only
-// its series, as it did when every series was read alone.
-func (stream *streamedExecution) evaluateCompletedSeriesBatch(ctx context.Context, batch []completedSeries) error {
-	return stream.evaluateReadBatch(ctx, batch, stream.startPreflightRead(ctx, batch, false))
 }
 
 // preflightRead is one preflight batch's State read, started on its own

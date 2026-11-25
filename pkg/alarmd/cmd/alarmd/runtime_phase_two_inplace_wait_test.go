@@ -118,7 +118,7 @@ func TestAPeriodUnderAMinuteMixedSlotHasNoInPlaceWait(t *testing.T) {
 			t.Fatalf("Query Groups = %v, want one", bundle.queryGroups)
 		}
 		backend.clock.Store((base+minute*inPlaceWaitPeriod)*1000 + (firstReadWaitOf(cfg, bundle.queryGroups[0], inPlaceWaitPeriod) - beforePrimaryReady).Milliseconds())
-		if err := runScheduledOnceSettled(ctx, bundle); err != nil {
+		if err := runScheduledOnceSettled(t, ctx, bundle); err != nil {
 			t.Fatalf("minute %d: %v", minute, err)
 		}
 		mu.Lock()

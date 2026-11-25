@@ -407,9 +407,13 @@ var NoDataStageAheadOutcomes = [4]string{"carried", "differs", "discarded", "sto
 // What a Slot did with its Query Group's shape - the leaves a slice that ran
 // out of time for its size was split into, which the next Slot starts in -
 // closed: started, read in it; kept, a slice split for its time kept in it;
-// merged, its last kept split taken back after quick rounds; dropped, by
+// merged, its last split kept for its time taken back after quick rounds, or
+// its last split kept for a slice's size after rounds its leaves held little
+// (the worker's shapeAfter and sizedDecay); dropped, by
 // why: voided, the query revision or the dimensions changed or it grew past
-// a starting tree's leaves; refused, its leaves not a partition of every
+// a starting tree's leaves, or a Slot started in it was refused
+// INPUT_SLICE_LEAVES_EXHAUSTED (voided_max_leaves, counted by the next Slot
+// to complete); refused, its leaves not a partition of every
 // value (inputslice.FromShape: a split of no leaf, children that are no
 // partition, more leaves than a tree may have); evicted_idle, the memories
 // of other Query Groups not started for ten of their periods and ten

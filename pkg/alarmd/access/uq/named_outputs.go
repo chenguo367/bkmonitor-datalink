@@ -404,11 +404,13 @@ func (session *seriesDecoder) indexOutput(ctx context.Context, answer namedOutpu
 			return fmt.Errorf("alarmd access uq: invalid series schema")
 		}
 		labels := alignLabels(series)
+		// The time and value columns, found once for the series' rows.
+		columns := rowColumnsOf(series.Columns, spec.PlanFacts.QueryList)
 		for _, row := range series.Values {
 			if len(row) != len(series.Columns) {
 				return fmt.Errorf("alarmd access uq: row width differs from columns")
 			}
-			timestamp, value, err := rowFacts(series.Columns, row, spec.PlanFacts.QueryList)
+			timestamp, value, err := columns.facts(row)
 			if err != nil {
 				return err
 			}

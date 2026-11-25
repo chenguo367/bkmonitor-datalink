@@ -28,7 +28,24 @@ import (
 // CanonicalJSONV2 produces the shared digest representation: sorted object
 // keys, preserved array order and number tokens, no insignificant whitespace,
 // no HTML escaping and no trailing newline.
+//
+// A value of a closed type is written straight from its plan
+// (v2_canonical_plan.go), one call in 1024 checked against the path below
+// (v2_canonical_shadow.go). A change to the rules of this form is made in
+// both: the plan, and canonicalStreamV2 and the established path here. The
+// static scan of review-static-scans.md holds a change to canonical* to
+// that.
 func CanonicalJSONV2(value any) ([]byte, error) {
+	if out, ok := canonicalPlannedV2(value); ok {
+		return out, nil
+	}
+	return canonicalReadBackV2(value)
+}
+
+// canonicalReadBackV2 is CanonicalJSONV2 without the plan: the value's JSON
+// from the standard encoder, checked, and read back by the single-pass form
+// or, where it declines, the established path.
+func canonicalReadBackV2(value any) ([]byte, error) {
 	raw, closed, final, err := canonicalInputV2(value)
 	if err != nil || final != nil {
 		return final, err
@@ -344,7 +361,9 @@ func EncodeDimensionIdentityV2(tenantID, businessID string, fields []DimensionFi
 	if tenantID == "" || !utf8.ValidString(tenantID) {
 		return DimensionIdentityEncodingV2{}, invalid("dimension_identity.tenant_id", "must be non-empty valid UTF-8")
 	}
-	if !canonicalSignedDecimalPattern.MatchString(businessID) {
+	// Byte by byte, the pattern's set (canonicalSignedDecimalPattern): this
+	// runs once a series.
+	if !isCanonicalSignedDecimal(businessID) {
 		return DimensionIdentityEncodingV2{}, invalid("dimension_identity.business_id", "must use canonical signed decimal form")
 	}
 	if fields == nil {
@@ -360,7 +379,9 @@ func EncodeDimensionIdentityV2(tenantID, businessID string, fields []DimensionFi
 		}
 		previous = dimension.Name
 	}
-	canonicalFields, err := CanonicalJSONV2(fields)
+	// Written by its shape, the names and values checked just above
+	// (v2_canonical_direct.go).
+	canonicalFields, err := canonicalDimensionFieldsV2(fields)
 	if err != nil {
 		return DimensionIdentityEncodingV2{}, invalid("dimension_identity.fields", err.Error())
 	}
@@ -375,6 +396,7 @@ func EncodeDimensionIdentityV2(tenantID, businessID string, fields []DimensionFi
 }
 
 func DeriveRecordIDV2(dimensionIdentityDigest string, sourceTime int64) (string, error) {
+	recordIDOneShots.Add(1)
 	if !isSHA256Hex(dimensionIdentityDigest) {
 		return "", invalid("record_id.dimension_identity_digest", "must be 64 lowercase hexadecimal characters")
 	}
@@ -416,6 +438,7 @@ type RecordIDDeriverV2 struct {
 // NewRecordIDDeriverV2 fixes the series, refused as DeriveRecordIDV2 refuses
 // it.
 func NewRecordIDDeriverV2(dimensionIdentityDigest string) (*RecordIDDeriverV2, error) {
+	recordIDDeriversBuilt.Add(1)
 	if !isSHA256Hex(dimensionIdentityDigest) {
 		return nil, invalid("record_id.dimension_identity_digest", "must be 64 lowercase hexadecimal characters")
 	}

@@ -328,7 +328,7 @@ func openCutoverFixtureSharing(
 	if fixture.initialSchedule.Segment.Start != execution.EvaluationTime(base) || fixture.initialSchedule.Plans[0].Spec.EvaluationIntervalSeconds != 60 {
 		t.Fatalf("initial Segment = %+v, want start %d on a 60s grid", fixture.initialSchedule.Segment, base)
 	}
-	fixture.runner = settledRunner(bundle, fixture.queryGroup)
+	fixture.runner = settledRunner(t, bundle, fixture.queryGroup)
 	progressStore, ok := fixture.production.dependencies.Progress.(*progress.Store)
 	if !ok {
 		t.Fatalf("production Progress store type = %T", fixture.production.dependencies.Progress)

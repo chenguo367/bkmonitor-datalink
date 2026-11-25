@@ -270,16 +270,56 @@ func AllSegmentShadowRounds() []string {
 	return []string{SegmentRoundNormal, SegmentRoundSampled}
 }
 
+// The family of a Plan's series a book holds (014 next9 ⑥): real, its real
+// series, or no_data, the synthetic series of its no-data view, each with
+// segments of their own. A cell's Family holds the zero value for real, so
+// a cell of the real family is the one it was before there were two.
+const (
+	SegmentFamilyReal   = "real"
+	SegmentFamilyNoData = "no_data"
+)
+
+// AllSegmentFamilies is every family's word on a counter, real first.
+func AllSegmentFamilies() []string {
+	return []string{SegmentFamilyReal, SegmentFamilyNoData}
+}
+
+// normalizeSegmentFamily is a cell's family: the zero value for real or any
+// word not a family, no_data for no_data.
+func normalizeSegmentFamily(family string) string {
+	if family == SegmentFamilyNoData {
+		return SegmentFamilyNoData
+	}
+	return ""
+}
+
+// SegmentFamilyLabel is a cell's family as its counter's label.
+func SegmentFamilyLabel(family string) string {
+	if family == SegmentFamilyNoData {
+		return SegmentFamilyNoData
+	}
+	return SegmentFamilyReal
+}
+
 // SegmentShadowKey and SegmentShadowMemberKey are a cell of each counter.
 type SegmentShadowKey struct {
 	Outcome     SegmentShadowOutcome
 	PeriodClass string
 	Round       string
+	Family      string
 }
 
 type SegmentShadowMemberKey struct {
 	Event       SegmentShadowEvent
 	PeriodClass string
+	Family      string
+}
+
+// SegmentSampleKey is a cell of the Plans' sampled rounds: the Plan's period
+// class and the family.
+type SegmentSampleKey struct {
+	PeriodClass string
+	Family      string
 }
 
 // Why a member the shadow compared as a match was written all the same, the
@@ -325,6 +365,7 @@ type SegmentNotSkippedKey struct {
 type SegmentRoundKey struct {
 	Mode        string
 	PeriodClass string
+	Family      string
 }
 
 // SegmentShadowFacts is one Slot's shadow: how its open members compared,
@@ -347,8 +388,8 @@ type SegmentShadowFacts struct {
 	// did not follow it, by why (AllSegmentSkipIgnoredReasons).
 	SkipFlagIgnored map[string]int64 `json:"skip_flag_ignored,omitempty"`
 	// Samples is the Plans' sampled rounds of the day the Slot ran, by
-	// period class.
-	Samples map[string]int64 `json:"samples,omitempty"`
+	// period class and family.
+	Samples map[SegmentSampleKey]int64 `json:"samples,omitempty"`
 	// Degraded is the Plans whose segments the Slot could not use as
 	// written, by why (AllSegmentDegradations).
 	Degraded map[string]int64 `json:"degraded,omitempty"`
@@ -377,12 +418,13 @@ func (facts *SegmentShadowFacts) NotSkip(gate, class string, count int64) {
 	facts.NotSkipped[SegmentNotSkippedKey{Gate: gate, PeriodClass: NormalizeSegmentPeriodClass(class)}] += count
 }
 
-// Round counts one Plan's round under the skip mode it ran under.
-func (facts *SegmentShadowFacts) Round(mode, class string) {
+// Round counts one Plan's round of a family under the skip mode it ran
+// under.
+func (facts *SegmentShadowFacts) Round(mode, class, family string) {
 	if facts.Rounds == nil {
 		facts.Rounds = map[SegmentRoundKey]int64{}
 	}
-	facts.Rounds[SegmentRoundKey{Mode: mode, PeriodClass: NormalizeSegmentPeriodClass(class)}]++
+	facts.Rounds[SegmentRoundKey{Mode: mode, PeriodClass: NormalizeSegmentPeriodClass(class), Family: normalizeSegmentFamily(family)}]++
 }
 
 // Degrade counts a Plan degraded. A reason outside the closed list is not
@@ -399,12 +441,13 @@ func (facts *SegmentShadowFacts) Degrade(reason string) {
 	}
 }
 
-// Sample counts a Plan's round that was its piece's sampled round.
-func (facts *SegmentShadowFacts) Sample(class string) {
+// Sample counts a Plan's round of a family that was its piece's sampled
+// round.
+func (facts *SegmentShadowFacts) Sample(class, family string) {
 	if facts.Samples == nil {
-		facts.Samples = map[string]int64{}
+		facts.Samples = map[SegmentSampleKey]int64{}
 	}
-	facts.Samples[NormalizeSegmentPeriodClass(class)]++
+	facts.Samples[SegmentSampleKey{PeriodClass: NormalizeSegmentPeriodClass(class), Family: normalizeSegmentFamily(family)}]++
 }
 
 // IgnoreSkipFlag counts a Slot that did not follow its segment skip word.
@@ -458,9 +501,9 @@ func (facts *SegmentShadowFacts) Skip(reason string) {
 	facts.Skipped[known]++
 }
 
-// Outcome adds count to an outcome's cell in a round, every label
-// normalised: a round not sampled is normal.
-func (facts *SegmentShadowFacts) Outcome(outcome SegmentShadowOutcome, class, round string, count int64) {
+// Outcome adds count to an outcome's cell in a round of a family, every
+// label normalised: a round not sampled is normal.
+func (facts *SegmentShadowFacts) Outcome(outcome SegmentShadowOutcome, class, round string, count int64, family string) {
 	if count == 0 {
 		return
 	}
@@ -471,18 +514,19 @@ func (facts *SegmentShadowFacts) Outcome(outcome SegmentShadowOutcome, class, ro
 		round = SegmentRoundNormal
 	}
 	facts.Outcomes[SegmentShadowKey{Outcome: normalizeSegmentShadowOutcome(outcome), PeriodClass: NormalizeSegmentPeriodClass(class),
-		Round: round}] += count
+		Round: round, Family: normalizeSegmentFamily(family)}] += count
 }
 
-// Member adds count to an event's cell.
-func (facts *SegmentShadowFacts) Member(event SegmentShadowEvent, class string, count int64) {
+// Member adds count to an event's cell of a family.
+func (facts *SegmentShadowFacts) Member(event SegmentShadowEvent, class string, count int64, family string) {
 	if count == 0 {
 		return
 	}
 	if facts.Members == nil {
 		facts.Members = map[SegmentShadowMemberKey]int64{}
 	}
-	facts.Members[SegmentShadowMemberKey{Event: normalizeSegmentShadowEvent(event), PeriodClass: NormalizeSegmentPeriodClass(class)}] += count
+	facts.Members[SegmentShadowMemberKey{Event: normalizeSegmentShadowEvent(event), PeriodClass: NormalizeSegmentPeriodClass(class),
+		Family: normalizeSegmentFamily(family)}] += count
 }
 
 // Pages adds the pages a round would have rewritten and their bytes.

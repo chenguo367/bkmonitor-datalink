@@ -78,7 +78,7 @@ func addedGroup(t *testing.T, fixture *cutoverStallFixture) (execution.QueryGrou
 	for _, candidate := range fixture.bundle.queryGroups {
 		schedule, err := fixture.production.dependencies.Catalog.ReadInitialFrozenSchedule(context.Background(), candidate)
 		if err == nil && len(schedule.Plans) == 1 && schedule.Plans[0].Identity.StrategyID == "1003" {
-			return candidate, settledRunner(fixture.bundle, candidate)
+			return candidate, settledRunner(t, fixture.bundle, candidate)
 		}
 	}
 	t.Fatal("strategy 1003 has no Query Group")

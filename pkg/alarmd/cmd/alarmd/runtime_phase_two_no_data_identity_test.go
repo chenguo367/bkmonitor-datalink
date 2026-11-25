@@ -277,7 +277,7 @@ func startIdentityFixture(t *testing.T, protocol string, shape noDataFixtureShap
 		t.Fatalf("Query Groups = %v, want one", bundle.queryGroups)
 	}
 	queryGroup := bundle.queryGroups[0]
-	fixture.runner = settledRunner(bundle, queryGroup)
+	fixture.runner = settledRunner(t, bundle, queryGroup)
 	fixture.readAt = func(evaluationAt int64) int64 {
 		return roundReadAtMillis(bundle.dependencies.Config, queryGroup, evaluationAt, fixture.interval)
 	}

@@ -786,7 +786,7 @@ func (source *ProductionSlotSource) Next(
 		KeepUntilUnixMilli:             keepUntil,
 		Dispatch: SlotDispatchContext{Operation: operation, OwnerFence: currentFence,
 			AssignmentGeneration: currentAssignment.AssignmentGeneration, ContentScope: declaredContentScope(schedule.Segment),
-			SegmentSkip: currentAssignment.SegmentSkip},
+			SegmentSkip: currentAssignment.SegmentSkip, SegmentSkipNoData: currentAssignment.SegmentSkipNoData},
 		ExpectedNextSlot: nextSlot,
 		Recovery:         recovery,
 		FollowingSlot:    followingSlot(schedule, nextSlot),
@@ -1022,7 +1022,8 @@ func (source *ProductionSlotSource) slotFromProjection(
 		// and replays declare nothing (declaredContentScope).
 		Dispatch: SlotDispatchContext{Operation: operation, OwnerFence: currentFence,
 			AssignmentGeneration: currentAssignment.AssignmentGeneration,
-			ContentScope:         source.projectionContentScope(ctx, projection), SegmentSkip: currentAssignment.SegmentSkip},
+			ContentScope:         source.projectionContentScope(ctx, projection), SegmentSkip: currentAssignment.SegmentSkip,
+			SegmentSkipNoData: currentAssignment.SegmentSkipNoData},
 		ExpectedNextSlot: projection.Contract.Slot.EvaluationTime, Recovery: recovery,
 		ShortPeriodCohort: source.cohortForSlot(ctx, projection.Contract.Slot.EvaluationTime),
 	}
@@ -1089,7 +1090,7 @@ func (source *ProductionSlotSource) snapshotUnavailableSlot(
 		KeepUntilUnixMilli:             keepUntil,
 		Dispatch: SlotDispatchContext{Operation: operation, OwnerFence: currentFence,
 			AssignmentGeneration: currentAssignment.AssignmentGeneration, ContentScope: declaredContentScope(schedule.Segment),
-			SegmentSkip: currentAssignment.SegmentSkip},
+			SegmentSkip: currentAssignment.SegmentSkip, SegmentSkipNoData: currentAssignment.SegmentSkipNoData},
 		ExpectedNextSlot: nextSlot,
 		Recovery:         recovery,
 		FollowingSlot:    followingSlot(schedule, nextSlot),

@@ -106,6 +106,9 @@ type phaseTwoMetrics struct {
 	retainedShareApproaching       prometheus.Counter
 	inputSlices                    *prometheus.CounterVec
 	slicedSlots                    prometheus.Counter
+	slotApplyWaitSeconds           prometheus.Counter
+	slotLandSeconds                prometheus.Counter
+	slotApplyOverlapSeconds        prometheus.Counter
 	firstSeenUnseen                *prometheus.CounterVec
 	sliceReadAhead                 *prometheus.CounterVec
 	seriesNotEvaluated             *prometheus.CounterVec
@@ -992,6 +995,34 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"evaluated, and discarded, let go past the slice limit while they streamed and split. A Slot read " +
 			"whole counts nothing. Read beside worker_sliced_slots_total: their ratio is the slices a sliced Slot " +
 			"reads."}, []string{"outcome"})
+	// The window pipeline's parts of the Slots' clock, which the completion
+	// row alone said, on a line the log admission samples: without them a
+	// scrape could not tell how much of the Slots' time the pipeline took
+	// off, nor what was left waiting on it. No Query Group label: which one
+	// is the completion row's.
+	metrics.slotApplyWaitSeconds = prometheus.NewCounter(prometheus.CounterOpts{Subsystem: metricSubsystem,
+		Name: "slot_apply_wait_seconds_total", Help: "Seconds completed Slots applied window by window spent on their " +
+			"own goroutine waiting on their apply goroutine - to hand it a window, to drain, for the last window and the " +
+			"tail - summed as each Slot completes: its completion row's apply_wait_millis (SlotTiming.ApplyWait), a phase " +
+			"of the Slot's own partition, whose phases, unattributed among them, add up to its slot_millis. A Slot " +
+			"applied whole writes on its own goroutine and adds nothing here, its writes in its " +
+			"apply_millis; a Slot that fails, or is retried, adds nothing. Its rate over the rate of " +
+			"alarmd_slot_operation_duration_seconds_sum{stage=\"execute\"}, which counts every attempt's execute, is a " +
+			"lower bound of the share of Slot time spent so."})
+	metrics.slotLandSeconds = prometheus.NewCounter(prometheus.CounterOpts{Subsystem: metricSubsystem,
+		Name: "slot_land_seconds_total", Help: "Seconds completed Slots applied window by window spent on their own " +
+			"goroutine taking landed windows back - what each held given back, its inputs let go - summed as each Slot " +
+			"completes: its completion row's land_millis (SlotTiming.Land), a phase of the Slot's own partition beside " +
+			"apply_wait (alarmd_slot_apply_wait_seconds_total). A Slot applied whole adds nothing here; a Slot that " +
+			"fails, or is retried, adds nothing."})
+	metrics.slotApplyOverlapSeconds = prometheus.NewCounter(prometheus.CounterOpts{Subsystem: metricSubsystem,
+		Name: "slot_apply_overlap_seconds_total", Help: "Seconds of writes completed Slots applied window by window did " +
+			"not wait for: each Slot's apply goroutine's busy time less what its own goroutine waited on it, apply_millis " +
+			"less apply_wait_millis on its completion row (SlotTiming.ApplyOverlap), summed as each Slot completes - what " +
+			"the window pipeline took off the Slots' time. It is no phase of the Slot's own partition: these writes ran " +
+			"beside its phases, so it adds to none of them, and with alarmd_slot_apply_wait_seconds_total it is the " +
+			"apply goroutines' busy time. A Slot applied whole adds nothing here; a Slot that fails, or is retried, adds " +
+			"nothing."})
 	metrics.slicedSlots = prometheus.NewCounter(prometheus.CounterOpts{Subsystem: metricSubsystem,
 		Name: "worker_sliced_slots_total", Help: "Completed Slots whose input was read in more than one slice or had a slice let go: the Slots slicing " +
 			"reached. Which Query Group is not a label here."})
@@ -1104,9 +1135,15 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.inputSliceShapes = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem,
 		Name: "worker_input_slice_shapes_total", Help: "Slots by what they did with their Query Group's shape, the leaves a " +
 			"slice that ran out of time for its size was split into, which the next Slot starts in: started, read in it; " +
-			"kept, a slice split for its time kept in it; merged, its last kept split taken back after three quick rounds; " +
+			"kept, a slice split for its time kept in it; merged, a kept split taken back: its last split kept for " +
+			"its time, after three rounds in a row that read each of its leaves whole under half a slice's target, or " +
+			"its last split kept for a slice's size (sized_split, sized_kept), after three rounds in a row whose leaves " +
+			"of it together held at most half a slice's series and half the input a slice may retain; " +
 			"voided_revision, voided_dimensions, voided_max_leaves, dropped as the query revision or the dimensions " +
-			"changed or it grew past a starting tree's leaves; refused_not_a_leaf, refused_not_a_partition, " +
+			"changed or it grew past a starting tree's leaves; voided_max_leaves also counts, on the next Slot to " +
+			"complete, the shape of a Slot started in it and refused INPUT_SLICE_LEAVES_EXHAUSTED, dropped there so " +
+			"that the next Slot starts in slices counted rather than in the same leaves to be refused again; " +
+			"refused_not_a_leaf, refused_not_a_partition, " +
 			"refused_max_leaves, dropped as its leaves were not a partition of every value. A dropped shape's Slot " +
 			"starts in slices counted anew. evicted_idle counts the Query Groups whose slice memory, shape or none, " +
 			"was dropped for no Slot started on this replica for ten of their periods and ten minutes at least. A " +
@@ -2451,7 +2488,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.queryAdmission, m.queryDownstreamDistress,
 		m.noDataSlotPlans, m.noDataAbsences, m.noDataManualCloseDropped, m.noDataManualCloseReadFailures, m.targetPlanResolutions, m.targetSelectorResolutions, m.targetExcludedAbsentMembers, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.inPlaceWaits, m.inPlaceHeldInputBytes, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetRedis,
-		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.retainedShareApproaching, m.inputSlices, m.slicedSlots, m.firstSeenUnseen, m.sliceReadAhead, m.seriesNotEvaluated, m.sliceReadAheadYields, m.windowZeroBoundCuts, m.windowAccountingClamped, m.sliceReadAheadWaits, m.sliceReadAheadWaitSeconds, m.sliceReadAheadWaitingSeconds, m.inputSliceTimeouts, m.inputSliceShapes, m.noDataStagesAhead, m.noDataStageAheadDiffers, m.noDataGroupsStagedAhead, m.schedulePruneSkipped, m.scheduleCutoverDuration,
+		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.retainedShareApproaching, m.inputSlices, m.slicedSlots, m.slotApplyWaitSeconds, m.slotLandSeconds, m.slotApplyOverlapSeconds, m.firstSeenUnseen, m.sliceReadAhead, m.seriesNotEvaluated, m.sliceReadAheadYields, m.windowZeroBoundCuts, m.windowAccountingClamped, m.sliceReadAheadWaits, m.sliceReadAheadWaitSeconds, m.sliceReadAheadWaitingSeconds, m.inputSliceTimeouts, m.inputSliceShapes, m.noDataStagesAhead, m.noDataStageAheadDiffers, m.noDataGroupsStagedAhead, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
 		m.scheduleCutoverQueryGroups, m.scheduleCutoverReadHoldLinks, m.fleetOverdueEpisodes, m.fleetRestoreUnread, m.scheduleCutoverTimelinesRead, m.scheduleCutoverFirstDuration,
 		m.scheduleCutoverFirstTimelines, m.replayExpiries, m.replayTakeovers, m.slotDiversions, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
@@ -2670,6 +2707,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		}
 		if usage := observation.SlotBudgetUsage; usage != nil {
 			m.observeSlicing(usage)
+		}
+		if timing := observation.SlotTiming; timing != nil {
+			m.observeWindowPipeline(timing)
 		}
 	}
 	// A Slot given up at its share is past the threshold, not short of it:
@@ -3723,6 +3763,15 @@ func (r *Recorder) ObserveLeaderForward(route, result string, duration time.Dura
 		return
 	}
 	r.phaseTwo.leaderForward.WithLabelValues(route, result).Observe(duration.Seconds())
+}
+
+// observeWindowPipeline adds a completed Slot's window pipeline parts:
+// ApplyWait and Land of its own partition, ApplyOverlap beside it. A Slot
+// applied whole has all three zero (execution.SlotTiming) and adds nothing.
+func (m phaseTwoMetrics) observeWindowPipeline(timing *observability.SlotTimingFacts) {
+	m.slotApplyWaitSeconds.Add(float64(timing.ApplyWait) / 1000)
+	m.slotLandSeconds.Add(float64(timing.Land) / 1000)
+	m.slotApplyOverlapSeconds.Add(float64(timing.ApplyOverlap) / 1000)
 }
 
 // observeSlicing counts a completed Slot's slices, its first-seen writes a

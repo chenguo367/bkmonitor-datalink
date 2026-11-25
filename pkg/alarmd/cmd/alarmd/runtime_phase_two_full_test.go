@@ -827,7 +827,7 @@ func testProductionFullTargetFlow(t *testing.T, diagnostic, split bool) {
 		bundle.dependencies.TargetFlow = f
 	}
 	clock.Store(base + 1)
-	if err := runScheduledOnceSettled(ctx, bundle); err != nil {
+	if err := runScheduledOnceSettled(t, ctx, bundle); err != nil {
 		t.Fatalf("phase-two production Slot error = %v", err)
 	}
 	if uqCalls.Load() != 1 {
@@ -953,7 +953,7 @@ func testProductionFullTargetFlow(t *testing.T, diagnostic, split bool) {
 	if !split {
 		// A return with nothing due, as every return between two rounds is:
 		// the bound it leaves names the Slot it waits for.
-		if err := runScheduledOnceSettled(ctx, bundle); err != nil {
+		if err := runScheduledOnceSettled(t, ctx, bundle); err != nil {
 			t.Fatal(err)
 		}
 		assertTheObjectReadsItsPlanSegmentsAndNextSlot(t, bundle, queryGroup, stateIdentity.Plan, stateIdentity.StateGeneration, firstSlot)
@@ -1075,7 +1075,7 @@ func TestProductionPhaseTwoBundleKeepsHealthyQueryGroupWhenSiblingEventACKIsRetr
 	}
 	bundle.mu.Unlock()
 	clock.Store(base + 1)
-	if err := runScheduledOnceSettled(ctx, bundle); err != nil {
+	if err := runScheduledOnceSettled(t, ctx, bundle); err != nil {
 		t.Fatalf("runScheduledOnce(retryable sibling) error = %v", err)
 	}
 	if uqCalls.Load() != 2 {
@@ -1227,7 +1227,7 @@ func TestProductionPhaseTwoBundleKeepsHealthyQueryGroupWhenSiblingInitialFreezeL
 	clock.Store((base + 1) * 1000)
 	healthy := queryGroupsByStrategy["1002"]
 	failed := queryGroupsByStrategy["1001"]
-	healthyResult, healthyAttempted, err := settledRunner(bundle, healthy).RunOne(ctx)
+	healthyResult, healthyAttempted, err := settledRunner(t, bundle, healthy).RunOne(ctx)
 	if err != nil || !healthyAttempted || !healthyResult.Completed {
 		t.Fatalf("healthy RunOne() = (%+v, %t, %v)", healthyResult, healthyAttempted, err)
 	}
@@ -1249,7 +1249,7 @@ func TestProductionPhaseTwoBundleKeepsHealthyQueryGroupWhenSiblingInitialFreezeL
 	if err := repository.ConfigureObjectCache(1, 1); err != nil {
 		t.Fatal(err)
 	}
-	failedResult, failedAttempted, failedErr := settledRunner(bundle, failed).RunOne(ctx)
+	failedResult, failedAttempted, failedErr := settledRunner(t, bundle, failed).RunOne(ctx)
 	if failedErr != nil || !failedAttempted || failedResult.Completed || failedResult.Result != observability.ResultRetrying ||
 		failedResult.ReasonCode != execution.ReasonCode(contract.ReasonSlotSourceRetry) {
 		t.Fatalf("failed RunOne() = (%+v, %t, %v)", failedResult, failedAttempted, failedErr)
@@ -1277,7 +1277,7 @@ func TestProductionPhaseTwoBundleKeepsHealthyQueryGroupWhenSiblingInitialFreezeL
 		t.Fatal(err)
 	}
 	clock.Store((base + int64((30*time.Minute)/time.Second)) * 1000)
-	recoveredResult, recoveredAttempted, err := settledRunner(bundle, failed).RunOne(ctx)
+	recoveredResult, recoveredAttempted, err := settledRunner(t, bundle, failed).RunOne(ctx)
 	if err != nil || !recoveredAttempted || !recoveredResult.Completed ||
 		recoveredResult.ReasonCode != execution.ReasonCode(contract.ReasonSnapshotUnavailable) {
 		t.Fatalf("RunOne(recovered after deadline) = (%+v, %t, %v)", recoveredResult, recoveredAttempted, err)
@@ -1414,7 +1414,7 @@ func TestProductionPhaseTwoBundleDrainsExpiredRetiredBacklogWithoutProjection(t 
 	}
 
 	clock.Store((int64(retiredBoundary) + int64((30*time.Minute)/time.Second)) * 1000)
-	result, attempted, err := settledRunner(bundle, retired).RunOne(ctx)
+	result, attempted, err := settledRunner(t, bundle, retired).RunOne(ctx)
 	if err != nil || !attempted || !result.Completed ||
 		result.ReasonCode != execution.ReasonCode(contract.ReasonSnapshotUnavailable) {
 		t.Fatalf("RunOne(expired retired backlog) = (%+v, %t, %v)", result, attempted, err)
@@ -1542,7 +1542,7 @@ func TestProductionPhaseTwoBundleSharesOneProcessRecoveryPermitBudgetAcrossOwned
 	clock.Store(time.Unix(base, 0).Add(500 * time.Millisecond).UnixMilli())
 
 	tickDone := make(chan error, 1)
-	go func() { tickDone <- runScheduledOnceSettled(ctx, bundle) }()
+	go func() { tickDone <- runScheduledOnceSettled(t, ctx, bundle) }()
 	select {
 	case <-firstEntered:
 	case err := <-tickDone:
@@ -1563,7 +1563,7 @@ func TestProductionPhaseTwoBundleSharesOneProcessRecoveryPermitBudgetAcrossOwned
 	if err := <-tickDone; err != nil {
 		t.Fatalf("production tick error = %v", err)
 	}
-	if err := runScheduledOnceSettled(ctx, bundle); err != nil {
+	if err := runScheduledOnceSettled(t, ctx, bundle); err != nil {
 		t.Fatalf("second production tick error = %v", err)
 	}
 	if uqCalls.Load() != 2 || maxInflight.Load() != 1 {
@@ -1647,7 +1647,7 @@ func TestProductionPhaseTwoBundleCommitsBudgetExhaustedRecoveryCompletionWithout
 
 	clock.Store(time.Unix(base, 0).Add(500 * time.Millisecond).UnixMilli())
 	for tick := 1; tick <= 2; tick++ {
-		if err := runScheduledOnceSettled(ctx, bundle); err != nil {
+		if err := runScheduledOnceSettled(t, ctx, bundle); err != nil {
 			t.Fatalf("budget-exhausted production tick %d error = %v", tick, err)
 		}
 	}
@@ -1785,7 +1785,7 @@ func TestProductionPhaseTwoBundleLetsNormalUseRemainingProcessPermitDuringRecove
 		}
 		queryGroupsByStrategy[schedule.Plans[0].Identity.StrategyID] = queryGroup
 	}
-	normalRunner := settledRunner(bundle, queryGroupsByStrategy["1002"])
+	normalRunner := settledRunner(t, bundle, queryGroupsByStrategy["1002"])
 	// The preparation has to have been answered, not only attempted: a round
 	// that timed out before its query was sent leaves this Query Group's Slot
 	// to the tick below as well, and the tick then waits on a recovery query
@@ -1801,7 +1801,7 @@ func TestProductionPhaseTwoBundleLetsNormalUseRemainingProcessPermitDuringRecove
 	clock.Store(time.Unix(base+1, 0).Add(2 * time.Millisecond).UnixMilli())
 
 	tickDone := make(chan error, 1)
-	go func() { tickDone <- runScheduledOnceSettled(ctx, bundle) }()
+	go func() { tickDone <- runScheduledOnceSettled(t, ctx, bundle) }()
 	waitSignal(t, recoveryEntered, "recovery Query Group UQ")
 	waitSignal(t, normalEntered, "normal Query Group UQ while recovery is inflight")
 	release()
@@ -1930,7 +1930,7 @@ func TestProductionPhaseTwoBundleCompletesIncompleteAccessWithoutStoppingHealthy
 	}
 
 	clock.Store(base)
-	if err := runScheduledOnceSettled(ctx, bundle); err != nil {
+	if err := runScheduledOnceSettled(t, ctx, bundle); err != nil {
 		t.Fatalf("runScheduledOnce(partial sibling) error = %v", err)
 	}
 	failed := loadPhaseTwoProgress(t, ctx, productionOwnership, queryGroupsByStrategy["1001"])
@@ -1961,7 +1961,7 @@ func TestProductionPhaseTwoBundleCompletesIncompleteAccessWithoutStoppingHealthy
 	}
 
 	clock.Store(base + 1)
-	if err := runScheduledOnceSettled(ctx, bundle); err != nil {
+	if err := runScheduledOnceSettled(t, ctx, bundle); err != nil {
 		t.Fatalf("runScheduledOnce(unavailable sibling) error = %v", err)
 	}
 	failed = loadPhaseTwoProgress(t, ctx, productionOwnership, queryGroupsByStrategy["1001"])
@@ -1975,7 +1975,7 @@ func TestProductionPhaseTwoBundleCompletesIncompleteAccessWithoutStoppingHealthy
 	}
 
 	clock.Store(base + 2)
-	if err := runScheduledOnceSettled(ctx, bundle); err != nil {
+	if err := runScheduledOnceSettled(t, ctx, bundle); err != nil {
 		t.Fatalf("runScheduledOnce(recovered sibling) error = %v", err)
 	}
 	recovered := loadPhaseTwoProgress(t, ctx, productionOwnership, queryGroupsByStrategy["1001"])
@@ -2415,10 +2415,10 @@ func TestProductionRunOneReadsControlBodiesOncePerRevisionAndVersion(t *testing.
 		var result execution.SlotExecutionResult
 		var attempted bool
 		if strategyID == "1002" {
-			result, attempted, err = settledRunner(bundle, queryGroupsByStrategy[strategyID]).RunOne(ctx)
+			result, attempted, err = settledRunner(t, bundle, queryGroupsByStrategy[strategyID]).RunOne(ctx)
 		} else {
 			var denied bool
-			result, attempted, denied, err = settledRunner(bundle, queryGroupsByStrategy[strategyID]).RunOneAdmitted(ctx, func(execution.Operation) (func(), bool) { return func() {}, true })
+			result, attempted, denied, err = settledRunner(t, bundle, queryGroupsByStrategy[strategyID]).RunOneAdmitted(ctx, func(execution.Operation) (func(), bool) { return func() {}, true })
 			if denied {
 				t.Fatal("denied")
 			}
@@ -2507,7 +2507,7 @@ func TestProductionRunOneReadsControlBodiesOncePerRevisionAndVersion(t *testing.
 	}
 	// The next round, before its read: the source answers it not due and
 	// names the read, so no Slot is frozen and nothing is queried.
-	deferredResult, deferredAttempted, err := settledRunner(bundle, queryGroupsByStrategy["1002"]).RunOne(ctx)
+	deferredResult, deferredAttempted, err := settledRunner(t, bundle, queryGroupsByStrategy["1002"]).RunOne(ctx)
 	if err != nil || deferredAttempted || deferredResult.Completed || uqCalls.Load() != beforeDeferredCalls {
 		t.Fatalf("expected the next round answered not due before its read, without a Query: %+v attempted=%v %v calls=%d",
 			deferredResult, deferredAttempted, err, uqCalls.Load())
@@ -2545,7 +2545,7 @@ func TestProductionRunOneReadsControlBodiesOncePerRevisionAndVersion(t *testing.
 		t.Fatal("the round before its read left no bound naming it")
 	}
 	clock.Store((bound + 2) * 1000)
-	reentry, _, err := settledRunner(bundle, queryGroupsByStrategy["1002"]).RunOne(ctx)
+	reentry, _, err := settledRunner(t, bundle, queryGroupsByStrategy["1002"]).RunOne(ctx)
 	if err != nil || reentry.Completed || reentry.ReasonCode != execution.ReasonCode(contract.ReasonSlotSourceRetry) || uqCalls.Load() != beforeDeferredCalls {
 		t.Fatalf("round at the read with the Snapshot facts lost: result=%+v error=%v clock=%v, want a source retry and no Query", reentry, err, now())
 	}

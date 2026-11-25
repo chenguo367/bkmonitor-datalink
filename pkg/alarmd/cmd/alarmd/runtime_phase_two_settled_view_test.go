@@ -39,12 +39,14 @@ import (
 // (decision-016 batch 4b, the accepted bound: renewal interval plus delta
 // propagation); a fixture that ran the pass at once ran it inside that
 // window and got view_not_executable, which is the answer it would get, not
-// the one the case is about. Bounded: a view that has not settled by the
+// the one the case is about. A view that has not settled by the test's
 // deadline is the pass's error (viewNotSettledError), and the pass does not
 // run - run on, it would answer on a lease behind its record, and the case
-// would fail, if at all, on an assertion about something else.
-func runScheduledOnceSettled(ctx context.Context, bundle *phaseTwoWorkerBundle) error {
-	if err := settleExecutableView(ctx, bundle, 10*time.Second); err != nil {
+// would fail, if at all, on an assertion about something else; one slower
+// than settleBound is said on t's log (settleExecutableView).
+func runScheduledOnceSettled(t settleT, ctx context.Context, bundle *phaseTwoWorkerBundle) error {
+	t.Helper()
+	if err := settleExecutableView(t, ctx, bundle, settleBound); err != nil {
 		return err
 	}
 	return bundle.runScheduledOnce(ctx)
@@ -56,7 +58,7 @@ func runScheduledOnceSettled(ctx context.Context, bundle *phaseTwoWorkerBundle) 
 // passes go on past the bound on an unsettled view, as their own schedulers
 // do (settleExecutableViewBestEffort).
 func runScheduledOnceBestEffort(ctx context.Context, bundle *phaseTwoWorkerBundle) error {
-	settleExecutableViewBestEffort(ctx, bundle, 10*time.Second)
+	settleExecutableViewBestEffort(ctx, bundle, settleBound)
 	return bundle.runScheduledOnce(ctx)
 }
 
@@ -162,28 +164,58 @@ func restoreControlStreamForTest(bundle *phaseTwoWorkerBundle) {
 	serveControlStreamForTest(bundle)
 }
 
-// viewNotSettledError is a view that did not settle (viewSettled) within the
-// bound a round waits for it: how long it was waited for, and what it still
-// lacked when the wait ended. A round run past it runs on a lease behind its
+// viewNotSettledError is a view that did not settle (viewSettled) by the
+// test's deadline: how long it was waited for, the bound past which the wait
+// was said slow, and what it lacked and the view stream's state when the
+// wait ended (viewDiagnosis). A round run past it runs on a lease behind its
 // record, so a case reading it would fail, if at all, on an assertion about
 // something else; this says which it was.
 type viewNotSettledError struct {
 	waited, bound time.Duration
-	lacked        string
+	diagnosis     string
 }
 
 func (err *viewNotSettledError) Error() string {
-	return fmt.Sprintf("view not settled: waited %s (bound %s), %s", err.waited.Round(time.Millisecond), err.bound, err.lacked)
+	return fmt.Sprintf("view not settled: waited %s (bound %s), %s", err.waited.Round(time.Millisecond), err.bound, err.diagnosis)
 }
 
-// settleExecutableView waits, up to wait, for every Query Group of the bundle
-// to be executable from the view with its lease at the record's timeline
-// revision (viewSettled), and is a viewNotSettledError when that has not come
-// by then. A case whose view cannot settle by design - its fleet with no
-// steady Control Leader - says so with settleExecutableViewBestEffort; a case
-// that needs the settled view for longer than the bound waits for it with
-// requireSettledView, to the test's deadline.
-func settleExecutableView(ctx context.Context, bundle *phaseTwoWorkerBundle, wait time.Duration) error {
+// settleT is what a settling wait says itself on and is bounded by: a test's
+// log and its deadline. *testing.T is one.
+type settleT interface {
+	Helper()
+	Logf(format string, args ...any)
+	Deadline() (time.Time, bool)
+}
+
+// settleBound is how long a view takes to settle before the wait says it is
+// slow: what a settled fixture's view takes, with room, on a host running
+// nothing else.
+const settleBound = 10 * time.Second
+
+// settleMargin is how long before the test's deadline a wait gives up, so it
+// fails saying why rather than the binary panicking on its timeout; a test
+// binary run with no timeout waits settleBound and this more.
+const settleMargin = 30 * time.Second
+
+// settleCap is the longest a wait goes on, from when it began, whatever the
+// deadline: one stuck view does not spend what is left of the package's
+// timeout, the cases after it unrun. The slow settles seen are of 10 s.
+const settleCap = 120 * time.Second
+
+// settleExecutableView waits for every Query Group of the bundle to be
+// executable from the view with its lease at the record's timeline revision
+// (viewSettled). Past wait, the view not settled yet is said on t's log -
+// what it lacks, the view stream's state, how long it was waited for
+// (viewDiagnosis) - and the wait goes on to the test's deadline, settleCap
+// after it began at most: a view
+// settling late is a case that passes with the evidence of a slow one on its
+// log; one never settling is a viewNotSettledError at the deadline, with the
+// same evidence. A host running other work beside the binary settles slower,
+// and that is what the log tells apart from a stream that stood still. A
+// case whose view cannot settle by design - its fleet with no steady Control
+// Leader - says so with settleExecutableViewBestEffort.
+func settleExecutableView(t settleT, ctx context.Context, bundle *phaseTwoWorkerBundle, wait time.Duration) error {
+	t.Helper()
 	client := bundle.dependencies.ViewClient
 	ownership, ok := bundle.dependencies.Ownership.(*productionPhaseTwoOwnership)
 	if client == nil || !ok {
@@ -191,17 +223,89 @@ func settleExecutableView(ctx context.Context, bundle *phaseTwoWorkerBundle, wai
 	}
 	serveControlStreamForTest(bundle)
 	started := time.Now()
-	deadline := started.Add(wait)
-	for { // fixed-wait: how long a round waits for the view to settle before it fails saying so
+	slow := started.Add(wait)
+	limit := started.Add(wait + settleMargin)
+	if deadline, bounded := t.Deadline(); bounded {
+		limit = deadline.Add(-settleMargin)
+	}
+	if capped := started.Add(settleCap); capped.Before(limit) {
+		limit = capped
+	}
+	said := false
+	for { // fixed-wait: a condition wait bounded by the test's deadline, said slow on the log past wait
 		renewLapsedRegistrationForTest(ctx, bundle, ownership)
 		lacked := viewLacks(ctx, bundle, ownership)
 		if lacked == "" {
+			if said {
+				t.Logf("view settled after %s, past the bound %s", time.Since(started).Round(time.Millisecond), wait)
+			}
 			return nil
 		}
-		if time.Now().After(deadline) {
-			return &viewNotSettledError{waited: time.Since(started), bound: wait, lacked: lacked}
+		now := time.Now()
+		if !said && now.After(slow) {
+			said = true
+			t.Logf("view not settled within %s, waiting on to the test's deadline: %s", wait, viewDiagnosis(bundle, lacked, now.Sub(started)))
 		}
-		time.Sleep(10 * time.Millisecond) // fixed-wait: the poll interval of a bounded settle; requireSettledView waits on the condition
+		if now.After(limit) {
+			return &viewNotSettledError{waited: now.Sub(started), bound: wait, diagnosis: viewDiagnosis(bundle, lacked, now.Sub(started))}
+		}
+		time.Sleep(10 * time.Millisecond) // fixed-wait: the poll interval of a condition wait bounded by the test's deadline
+	}
+}
+
+// settleBy is t with its deadline moved to by: a case about a view that does
+// not settle waits that long for it, not the binary's whole timeout.
+func settleBy(t settleT, by time.Time) settleT { return settleDeadline{settleT: t, by: by} }
+
+type settleDeadline struct {
+	settleT
+	by time.Time
+}
+
+func (t settleDeadline) Deadline() (time.Time, bool) { return t.by, true }
+
+// viewDiagnosis is what a view not settled says: what it lacks
+// (viewLacks), how long it was waited for, and the view stream's state - the
+// control stream the fixture serves (served, withheld or none), the view the
+// Worker has installed (its control epoch and revision, or none) and the
+// Query Groups the bundle holds.
+func viewDiagnosis(bundle *phaseTwoWorkerBundle, lacked string, waited time.Duration) string {
+	stream := "none"
+	if served, ok := controlStreamServers.Load(bundle); ok {
+		stream = "served"
+		if served.(*testControlStream).withheld {
+			stream = "withheld"
+		}
+	}
+	installed := "none"
+	if view, ok := bundle.dependencies.ViewClient.Installed(); ok {
+		installed = fmt.Sprintf("control epoch %d revision %d", view.Version.ControlEpoch, view.Version.Revision)
+	}
+	bundle.mu.RLock()
+	groups := len(bundle.queryGroups)
+	bundle.mu.RUnlock()
+	return fmt.Sprintf("%s; waited %s; control stream %s, view installed %s, %d Query Groups held", lacked,
+		waited.Round(time.Millisecond), stream, installed, groups)
+}
+
+// settleWithin waits, up to wait, for the view to settle, and says what it
+// still lacks when it has not: the bounded wait of a case whose view cannot
+// settle by design (settleExecutableViewBestEffort).
+func settleWithin(ctx context.Context, bundle *phaseTwoWorkerBundle, wait time.Duration) string {
+	client := bundle.dependencies.ViewClient
+	ownership, ok := bundle.dependencies.Ownership.(*productionPhaseTwoOwnership)
+	if client == nil || !ok {
+		return ""
+	}
+	serveControlStreamForTest(bundle)
+	deadline := time.Now().Add(wait)
+	for { // fixed-wait: how long a fleet with no steady Control Leader is given to settle its view before the pass goes on
+		renewLapsedRegistrationForTest(ctx, bundle, ownership)
+		lacked := viewLacks(ctx, bundle, ownership)
+		if lacked == "" || time.Now().After(deadline) {
+			return lacked
+		}
+		time.Sleep(10 * time.Millisecond) // fixed-wait: the poll interval of a bounded settle
 	}
 }
 
@@ -215,7 +319,7 @@ func settleExecutableView(ctx context.Context, bundle *phaseTwoWorkerBundle, wai
 // whether the view settled. Every other case fails on a view that does not
 // settle.
 func settleExecutableViewBestEffort(ctx context.Context, bundle *phaseTwoWorkerBundle, wait time.Duration) bool {
-	return settleExecutableView(ctx, bundle, wait) == nil
+	return settleWithin(ctx, bundle, wait) == ""
 }
 
 // requireSettledView waits, until the test's deadline, for every Query Group
@@ -337,31 +441,33 @@ func viewLacks(ctx context.Context, bundle *phaseTwoWorkerBundle, ownership *pro
 // out after a rollout or a cutover, and would read view_not_executable
 // where the case is about something else. A view that has not settled by
 // the bound is the round's error (viewNotSettledError) and the round does
-// not run. Everything but RunOne is the runtime's own.
-func settledRunner(bundle *phaseTwoWorkerBundle, queryGroup execution.QueryGroupIdentity) phaseTwoQueryGroupRuntime {
+// not run; one slower than settleBound is said on t's log. Everything but
+// RunOne is the runtime's own.
+func settledRunner(t settleT, bundle *phaseTwoWorkerBundle, queryGroup execution.QueryGroupIdentity) phaseTwoQueryGroupRuntime {
 	bundle.mu.RLock()
 	lifecycle := bundle.runners[queryGroup]
 	bundle.mu.RUnlock()
 	if lifecycle == nil {
 		return nil
 	}
-	return &settlingRuntime{phaseTwoQueryGroupRuntime: lifecycle.runner, bundle: bundle}
+	return &settlingRuntime{phaseTwoQueryGroupRuntime: lifecycle.runner, bundle: bundle, t: t}
 }
 
 type settlingRuntime struct {
 	phaseTwoQueryGroupRuntime
 	bundle *phaseTwoWorkerBundle
+	t      settleT
 }
 
 func (runtime *settlingRuntime) RunOne(ctx context.Context) (execution.SlotExecutionResult, bool, error) {
-	if err := settleExecutableView(ctx, runtime.bundle, 10*time.Second); err != nil {
+	if err := settleExecutableView(runtime.t, ctx, runtime.bundle, settleBound); err != nil {
 		return execution.SlotExecutionResult{}, false, err
 	}
 	return runtime.phaseTwoQueryGroupRuntime.RunOne(ctx)
 }
 
 func (runtime *settlingRuntime) RunOneAdmitted(ctx context.Context, admission scheduler.ExecutionAdmission) (execution.SlotExecutionResult, bool, bool, error) {
-	if err := settleExecutableView(ctx, runtime.bundle, 10*time.Second); err != nil {
+	if err := settleExecutableView(runtime.t, ctx, runtime.bundle, settleBound); err != nil {
 		return execution.SlotExecutionResult{}, false, false, err
 	}
 	return runtime.phaseTwoQueryGroupRuntime.RunOneAdmitted(ctx, admission)

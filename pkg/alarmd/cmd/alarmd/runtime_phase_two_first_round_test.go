@@ -141,7 +141,7 @@ func newFirstRoundRun(t *testing.T, settling time.Duration, strategyDocument fun
 func (run *firstRoundRun) at(t *testing.T, second int64) int64 {
 	t.Helper()
 	run.clock.Store(second)
-	if err := runScheduledOnceSettled(testwait.Context(t), run.bundle); err != nil {
+	if err := runScheduledOnceSettled(t, testwait.Context(t), run.bundle); err != nil {
 		t.Fatalf("round at %+d: %v", second-run.base, err)
 	}
 	run.bundle.mu.RLock()

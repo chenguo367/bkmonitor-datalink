@@ -57,7 +57,7 @@ func TestAReassignedQueryGroupIsReleasedOnlyAfterItsRunningSlotReturns(t *testin
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- runScheduledOnceSettled(context.Background(), bundle) }()
+	go func() { done <- runScheduledOnceSettled(t, context.Background(), bundle) }()
 	waitSignal(t, first.runStarted, "the Slot in flight")
 
 	control.queryGroups = nil

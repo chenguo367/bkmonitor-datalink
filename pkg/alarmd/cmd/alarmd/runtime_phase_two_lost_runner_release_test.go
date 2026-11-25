@@ -136,7 +136,7 @@ func TestALostRunnersLateReleaseLeavesItsSuccessorRunning(t *testing.T) {
 		t.Fatal("the lease the startup Assignment opened is not held under the worker session")
 	}
 	clock.Store((base+30)*1000 + 60*1000)
-	if _, _, err := settledRunner(bundle, queryGroup).RunOne(ctx); err != nil || queried.Load() == 0 {
+	if _, _, err := settledRunner(t, bundle, queryGroup).RunOne(ctx); err != nil || queried.Load() == 0 {
 		t.Fatalf("first round: %v, %d queries", err, queried.Load())
 	}
 
@@ -157,7 +157,7 @@ func TestALostRunnersLateReleaseLeavesItsSuccessorRunning(t *testing.T) {
 	if err := bundle.applyAssignment(ctx, []execution.QueryGroupIdentity{queryGroup}); err != nil {
 		t.Fatal(err)
 	}
-	if settledRunner(bundle, queryGroup) == nil {
+	if settledRunner(t, bundle, queryGroup) == nil {
 		t.Fatal("the reconcile did not open a successor")
 	}
 	// The worker holds its session, so the successor's lease is held under
@@ -173,7 +173,7 @@ func TestALostRunnersLateReleaseLeavesItsSuccessorRunning(t *testing.T) {
 	before := queried.Load()
 	clock.Store((base+30)*1000 + 5*60*1000)
 	restateWorkerSession(t, bundle)
-	if _, _, err := settledRunner(bundle, queryGroup).RunOne(ctx); err != nil {
+	if _, _, err := settledRunner(t, bundle, queryGroup).RunOne(ctx); err != nil {
 		t.Fatalf("the successor's round: %v", err)
 	}
 	if queried.Load() == before {

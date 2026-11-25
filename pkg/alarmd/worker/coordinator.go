@@ -782,6 +782,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 		if err != nil && stream.slicing() && errors.Is(err, errSliceOverflow) {
 			if refused := stream.splitSlice(leaf); refused != nil {
 				refused = stream.finalSliceRefusal(refused)
+				coordinator.voidRefusedShape(request.Contract.Slot.QueryGroup, stream.slices, refused)
 				coordinator.observeQueryFailure(ctx, request.Operation, started, "execute", refused)
 				return execution.SlotExecutionResult{}, inSlotStep(execution.SlotNotCommittedQueryFailed, fmt.Errorf("alarmd worker: query: %w", refused))
 			}

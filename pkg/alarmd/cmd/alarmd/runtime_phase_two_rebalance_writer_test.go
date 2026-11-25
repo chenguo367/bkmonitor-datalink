@@ -122,6 +122,12 @@ func (store *rebalanceOwnershipStore) PublishAssignment(
 	case decision.WithdrawSegmentSkip:
 		current.SegmentSkip = 0
 	}
+	switch {
+	case decision.SetSegmentSkipNoData:
+		current.SegmentSkipNoData = authority.Fence.OwnerEpoch
+	case decision.WithdrawSegmentSkipNoData:
+		current.SegmentSkipNoData = 0
+	}
 	if exists && current.DesiredWorkerID == decision.DesiredWorkerID {
 		store.assignments[decision.QueryGroup] = current
 		return current, nil
@@ -130,7 +136,7 @@ func (store *rebalanceOwnershipStore) PublishAssignment(
 		QueryGroup: decision.QueryGroup, DesiredWorkerID: decision.DesiredWorkerID,
 		AssignmentGeneration: current.AssignmentGeneration + 1, RecordRevision: current.RecordRevision + 1,
 		ControlEpoch: authority.Fence.OwnerEpoch, PlacementReason: decision.PlacementReason, AssignedAt: decision.DecidedAt,
-		SegmentSkip: current.SegmentSkip,
+		SegmentSkip: current.SegmentSkip, SegmentSkipNoData: current.SegmentSkipNoData,
 	}
 	store.assignments[decision.QueryGroup] = record
 	return record, nil

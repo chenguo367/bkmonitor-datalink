@@ -6,8 +6,10 @@
 package contract
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"reflect"
 	"testing"
 )
 
@@ -65,6 +67,11 @@ func TestCanonicalStreamMatchesThePinnedBranchTable(t *testing.T) {
 //
 // The two branches that never reach it are named rather than counted: a closed
 // string of valid UTF-8 returns earlier, before either path is consulted.
+//
+// Asked of the read-back (canonicalReadBackV2): a value of a closed type is
+// written from its plan and reaches the read-back only as the comparison
+// that checks the plan (TestEveryClosedBranchIsAnsweredByItsPlan), which the
+// single-pass form answers all the same.
 func TestCanonicalStreamAnswersEveryAcceptedBranchItShould(t *testing.T) {
 	skipsBothPaths := map[string]bool{
 		"closed string type":           true,
@@ -80,7 +87,7 @@ func TestCanonicalStreamAnswersEveryAcceptedBranchItShould(t *testing.T) {
 		}
 		t.Run(probe.name, func(t *testing.T) {
 			beforeServed, beforeDeclined := CanonicalStreamCounts()
-			if _, err := CanonicalJSONV2(probe.value); err != nil {
+			if _, err := canonicalReadBackV2(probe.value); err != nil {
 				t.Fatalf("unexpected error %v", err)
 			}
 			served, declined := CanonicalStreamCounts()
@@ -91,6 +98,35 @@ func TestCanonicalStreamAnswersEveryAcceptedBranchItShould(t *testing.T) {
 				t.Fatalf("neither served nor declined; the switch was not consulted")
 			}
 		})
+	}
+}
+
+// Every accepted branch of a closed type is answered by its plan (014 next9
+// ⑤ E1), the read-back's bytes: the plan is what CanonicalJSONV2 takes for
+// it, and it writes what the read-back writes.
+func TestEveryClosedBranchIsAnsweredByItsPlan(t *testing.T) {
+	planned := 0
+	for _, probe := range canonicalBranchProbes() {
+		want := canonicalBranchExpectations[probe.name]
+		if !want.accept || canonicalPlanCached(reflect.TypeOf(probe.value)) == nil {
+			continue
+		}
+		planned++
+		before := CanonicalPlanCounts()
+		got, err := CanonicalJSONV2(probe.value)
+		if err != nil {
+			t.Fatalf("%s: unexpected error %v", probe.name, err)
+		}
+		if CanonicalPlanCounts() == before {
+			t.Fatalf("%s: a closed value not answered by its plan", probe.name)
+		}
+		readBack, err := canonicalReadBackV2(probe.value)
+		if err != nil || !bytes.Equal(got, readBack) {
+			t.Fatalf("%s: planned %q, read back %q (%v)", probe.name, got, readBack, err)
+		}
+	}
+	if planned == 0 {
+		t.Fatal("no branch of a closed type: the case checks nothing")
 	}
 }
 

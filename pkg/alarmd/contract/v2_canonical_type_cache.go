@@ -72,3 +72,26 @@ func canonicalClosedTypeCached(t reflect.Type) bool {
 	canonicalClosedTypeCache.Store(t, verdict)
 	return verdict
 }
+
+// canonicalPlanCache is, by type, the plan its values are written by
+// (v2_canonical_plan.go), nil for a type that has none: not closed, or one the
+// plan does not write. The same bound as the verdicts above: one entry a type
+// passed to CanonicalJSONV2. Kept here for the same rule.
+var canonicalPlanCache sync.Map // reflect.Type -> *canonicalPlan
+
+func canonicalPlanCached(t reflect.Type) *canonicalPlan {
+	if t == nil {
+		return nil
+	}
+	if plan, ok := canonicalPlanCache.Load(t); ok {
+		return plan.(*canonicalPlan)
+	}
+	var plan *canonicalPlan
+	if canonicalClosedTypeCached(t) {
+		if built, ok := buildCanonicalPlan(t); ok {
+			plan = built
+		}
+	}
+	canonicalPlanCache.Store(t, plan)
+	return plan
+}

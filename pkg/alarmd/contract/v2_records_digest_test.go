@@ -226,6 +226,50 @@ func TestTheShadowServesTheCanonicalDigestAndReportsADifferenceOnce(t *testing.T
 	}
 }
 
+// A difference the record parts make answers to the series digest's check,
+// which compares digests, not canonical bytes: the line says so - the
+// encoder, the Go type, compared=digest, the offset in the hex string and no
+// path, the digest differing as a whole - and carries no value. The field a
+// part encoded otherwise is its own encoder's line to name.
+func TestARecordPartsDifferenceIsSaidAsTheDigestsWhole(t *testing.T) {
+	previousStride, previousAssemble := recordsShadowStride, assembleRecordsDigest
+	shadow := canonicalEncoderShadows[CanonicalEncoderRecordParts]
+	// On, and not said yet in this process: a case before may have had the
+	// parts differ.
+	shadow.off.Store(false)
+	shadow.said.Store(false)
+	var said []CanonicalEncoderDivergence
+	SetCanonicalEncoderDivergenceReporter(func(divergence CanonicalEncoderDivergence) { said = append(said, divergence) })
+	t.Cleanup(func() {
+		recordsShadowStride, assembleRecordsDigest = previousStride, previousAssemble
+		shadow.off.Store(false)
+		shadow.said.Store(false)
+		SetCanonicalEncoderDivergenceReporter(nil)
+		SetRecordsDigestDivergenceReporter(nil)
+		recordsDivergenceReported.Store(0)
+	})
+	recordsShadowStride = 1
+	records := seriesRecords(rand.New(rand.NewSource(5)), 4)
+	want, err := DeriveCanonicalDigestV2(recordsTestDomain, records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	served := strings.Repeat("0", 64)
+	assembleRecordsDigest = func(string, []CanonicalRecordV2, DimensionIdentityEncodingV2) (string, bool) { return served, true }
+	if got, err := DeriveRecordsDigestV2(recordsTestDomain, records); err != nil || got != want {
+		t.Fatalf("DeriveRecordsDigestV2 = %s, %v, want the canonical %s", got, err, want)
+	}
+	offset := 0
+	for offset < len(want) && want[offset] == served[offset] {
+		offset++
+	}
+	line := CanonicalEncoderDivergence{Encoder: CanonicalEncoderRecordParts, Type: "[]contract.CanonicalRecordV2",
+		Compared: CanonicalComparedDigest, Offset: offset}
+	if len(said) != 1 || said[0] != line {
+		t.Fatalf("said %+v, want %+v: the digest differing as a whole, no path", said, line)
+	}
+}
+
 // Assembling a series' digest allocates a fraction of what the canonical
 // encoding of its records does: the dimensions are encoded once, not once
 // per point.

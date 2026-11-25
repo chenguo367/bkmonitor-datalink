@@ -635,11 +635,10 @@ func (apply *slotApply) applyPlanState(
 		for _, mutation := range accepted {
 			reason, terminal := rejectedApply[mutation.Identity]
 			if !terminal {
-				// A no-data series is written as today, its presence the
-				// no-data memory's (014 B3 3.7): no member of a page.
-				if written := shadowedByState[mutation.Identity]; !written.noData {
-					apply.shadow.observe(due, written.view, mutation, written.class, written.eventsSent)
-				}
+				// A no-data series is compared in the no-data family's
+				// book, a real one in the real family's (014 next9 ⑥).
+				written := shadowedByState[mutation.Identity]
+				apply.shadow.observe(due, seriesFamily(written.noData), written.view, mutation, written.class, written.eventsSent)
 				continue
 			}
 			return 0, fmt.Errorf(
@@ -666,11 +665,13 @@ type shadowed struct {
 // decideLeaving is the round's shadow's decision on each of a Plan's
 // mutations (segmentShadowRound.decideLeave), by identity, and the
 // mutations it writes and those it leaves, each in the order given; nil
-// decisions when the round leaves none. A no-data series is written, its
-// presence the no-data memory's (014 B3 3.7): kept out by name here, though
-// the shadow would not leave it either - its write is never decided steady
-// (wouldLeave's unsteady) - so the rule does not rest on that. The Plan's
-// round is peeked once for all its mutations (peekedPlanRounds).
+// decisions when the round leaves none. A no-data series is decided in its
+// Plan's no-data family (014 next9 ⑥), by the same rules a real one is in
+// its own: steady and normal at its no-data Level's FULL window, on the
+// grid, its made read the write - which a steady synthetic series is, its
+// write decided decision_stable once its window is full (014 next9 ⑥ R1).
+// The Plan's round is peeked once for all its mutations of each family
+// (peekedPlanRounds).
 func (apply *slotApply) decideLeaving(due execution.DuePlan, mutations []execution.StateMutation,
 	shadowed map[execution.StateKeyIdentity]shadowed) (map[execution.StateKeyIdentity]leaveDecision, []execution.StateMutation, []execution.StateMutation) {
 	if apply.shadow == nil || !apply.shadow.skip {
@@ -681,10 +682,8 @@ func (apply *slotApply) decideLeaving(due execution.DuePlan, mutations []executi
 	var leaving []execution.StateMutation
 	peeked := peekedPlanRounds{}
 	for _, mutation := range mutations {
-		var decision leaveDecision
-		if written := shadowed[mutation.Identity]; !written.noData {
-			decision = apply.shadow.decideLeave(peeked, due, written.view, mutation, written.class, written.eventsSent)
-		}
+		written := shadowed[mutation.Identity]
+		decision := apply.shadow.decideLeave(peeked, due, seriesFamily(written.noData), written.view, mutation, written.class, written.eventsSent)
 		decided[mutation.Identity] = decision
 		if decision.leave {
 			leaving = append(leaving, mutation)
@@ -727,7 +726,7 @@ func (apply *slotApply) noteLeftMembers(due execution.DuePlan, landing, accepted
 	for _, mutation := range landing {
 		decision := decided[mutation.Identity]
 		if _, kept := written[mutation.Identity]; decision.leave || decision.fallback && kept {
-			apply.shadow.noteLeft(due, mutation, decision)
+			apply.shadow.noteLeft(due, decision.family, mutation, decision)
 		}
 	}
 	apply.frozenRenewals.RecordNotWritten(observability.StateNotWrittenSegmentMemberSkipped, len(leaving))

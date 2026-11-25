@@ -162,8 +162,8 @@ func TestARoundThatStartsItsPlanOverIsCountedRetried(t *testing.T) {
 	round := newSegmentShadowRound(request, slot)
 	round.retried(shadowDue)
 	written := steady(t, shadowSeries(0), 1260)
-	round.observe(shadowDue, written.view, written.write, written.class, false)
-	planRound := round.plans[shadowKey(shadowDue, shadowDue.StateGeneration)]
+	round.observe(shadowDue, segment.FamilyReal, written.view, written.write, written.class, false)
+	planRound := round.plans[shadowKey(shadowDue, shadowDue.StateGeneration, segment.FamilyReal)]
 	if mode := round.skipMode(planRound); mode != segment.SkipModeRetried {
 		t.Fatalf("the round ran under %s, want retried", mode)
 	}

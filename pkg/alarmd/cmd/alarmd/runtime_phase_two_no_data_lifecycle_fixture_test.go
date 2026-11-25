@@ -406,10 +406,10 @@ func (fixture *lifecycleFixture) open(workerID string, client *http.Client) {
 		if len(groups) == want {
 			settled := true
 			for _, group := range groups {
-				settled = settled && settledRunner(bundle, group) != nil
+				settled = settled && settledRunner(t, bundle, group) != nil
 			}
 			if settled {
-				fixture.queryGroup, fixture.runner = groups[0], settledRunner(bundle, groups[0])
+				fixture.queryGroup, fixture.runner = groups[0], settledRunner(t, bundle, groups[0])
 				return
 			}
 		}

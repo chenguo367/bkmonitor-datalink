@@ -31,11 +31,13 @@ type segmentUses struct {
 	byGroup map[execution.QueryGroupIdentity]map[segmentPiece]*segmentUse
 }
 
-// segmentPiece is a Plan's piece: the Plan and its shard, zero for a Plan
-// not split.
+// segmentPiece is a Plan's piece of one family of its series: the Plan, its
+// shard, zero for a Plan not split, and the family (segment.Family), each
+// family's segments read and written apart.
 type segmentPiece struct {
-	plan  execution.PlanIdentity
-	shard execution.ShardRef
+	plan   execution.PlanIdentity
+	shard  execution.ShardRef
+	family segment.Family
 }
 
 // segmentUse is one piece's entry: its generation, what was last done with
@@ -60,7 +62,7 @@ func (uses *segmentUses) useLocked(group execution.QueryGroupIdentity, key segme
 		plans = map[segmentPiece]*segmentUse{}
 		uses.byGroup[group] = plans
 	}
-	piece := segmentPiece{plan: key.Plan, shard: key.Shard}
+	piece := segmentPiece{plan: key.Plan, shard: key.Shard, family: key.Family}
 	use := plans[piece]
 	if use == nil || use.generation != key.Generation {
 		use = &segmentUse{generation: key.Generation}
@@ -130,7 +132,7 @@ func (uses *segmentUses) holds(group execution.QueryGroupIdentity) bool {
 func (uses *segmentUses) lastOf(group execution.QueryGroupIdentity, key segment.PlanKey) *segment.LastUse {
 	uses.mu.Lock()
 	defer uses.mu.Unlock()
-	use := uses.byGroup[group][segmentPiece{plan: key.Plan, shard: key.Shard}]
+	use := uses.byGroup[group][segmentPiece{plan: key.Plan, shard: key.Shard, family: key.Family}]
 	if use == nil || use.generation != key.Generation {
 		return nil
 	}

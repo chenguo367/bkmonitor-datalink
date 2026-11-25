@@ -257,6 +257,10 @@ type SlotExecutionRequest struct {
 	// worker follows it only while it equals the epoch of the view it has
 	// installed (SegmentSkipAdmitted).
 	SegmentSkip uint64
+	// SegmentSkipNoData is the Assignment's word for the no-data family's
+	// synthetic series (design 014 next9 ⑥), followed as SegmentSkip is and
+	// only beside it.
+	SegmentSkipNoData uint64
 	// Supplement is set exactly when Operation is OperationSupplement: the
 	// series this execution may evaluate. See SupplementScope.
 	Supplement *SupplementScope

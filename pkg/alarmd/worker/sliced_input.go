@@ -598,13 +598,16 @@ func completenessRank(completeness execution.Completeness) int {
 // replica, and the memory only ever growing are all ended so, with no word
 // from the scheduler. The Slots that start sweep it, at most once
 // sliceMemorySweepEvery; evicted is how many it dropped not yet counted,
-// the next Slot to complete counting them.
+// the next Slot to complete counting them. voided is the same for the
+// shapes dropped as a Slot started in one was refused for its leaves
+// (voidRefusedShape).
 type sliceTrees struct {
 	mu      sync.Mutex
 	input   map[execution.QueryGroupIdentity]slicedReading
 	started map[execution.QueryGroupIdentity]sliceStart
 	swept   time.Time
 	evicted uint64
+	voided  uint64
 }
 
 // sliceStart is when a Query Group last started a Slot on this replica, and

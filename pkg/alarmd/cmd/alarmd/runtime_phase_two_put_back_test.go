@@ -102,7 +102,7 @@ func TestAStrategyPutBackIntoItsRetiredGroupWarmsUp(t *testing.T) {
 				}
 			}
 
-			fixture.runner = settledRunner(fixture.bundle, group)
+			fixture.runner = settledRunner(t, fixture.bundle, group)
 			first := execution.EvaluationTime(boundary + 1)
 			fixture.clock.Store(firstRoundAtMillis(fixture.cfg, group, int64(first), 60))
 			for attempt := 0; attempt < 20; attempt++ {

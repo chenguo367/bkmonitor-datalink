@@ -25,7 +25,7 @@ func TestATakenOverQueryGroupReplaysTheMinutesItMissed(t *testing.T) {
 	ctx := context.Background()
 	f.clock.Store((f.base + 330) * 1000)
 	for _, qg := range f.bundle.queryGroups {
-		runner := settledRunner(f.bundle, qg)
+		runner := settledRunner(t, f.bundle, qg)
 		var kinds []execution.CompletionKind
 		for i := 0; i < 12; i++ {
 			result, attempted, err := runner.RunOne(ctx)
@@ -60,7 +60,7 @@ func TestExpiredRangeV2ProductionRestoresReplayAfterBothPrefixes(t *testing.T) {
 	f.heldSince(t, time.Unix(f.base, 0))
 	f.clock.Store((f.base + 1800) * 1000)
 	for _, qg := range f.bundle.queryGroups {
-		runner := settledRunner(f.bundle, qg)
+		runner := settledRunner(t, f.bundle, qg)
 		var kinds []execution.CompletionKind
 		for i := 0; i < 4; i++ {
 			result, attempted, err := runner.RunOne(ctx)
@@ -107,7 +107,7 @@ func TestAQueryFreeSlotNamesItsCompletionReason(t *testing.T) {
 	f.heldSince(t, time.Unix(f.base, 0))
 	f.clock.Store((f.base + 1800) * 1000)
 	for _, qg := range f.bundle.queryGroups {
-		runner := settledRunner(f.bundle, qg)
+		runner := settledRunner(t, f.bundle, qg)
 		for i := 0; i < 4; i++ {
 			if _, attempted, err := runner.RunOne(ctx); err != nil || !attempted {
 				t.Fatalf("run %d: attempted=%v err=%v", i, attempted, err)

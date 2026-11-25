@@ -48,8 +48,10 @@ func newSegmentShadowMetrics() segmentShadowMetrics {
 				"Plan's piece's sampled round of the day (014 B3 9.2), every member written whole and compared; " +
 				"normal, any other. Zero mismatches over every period class, read as sum without(round) - series " +
 				"from a process before the label carry none and sum the same - is the shadow stage's evidence; " +
-				"with members skipped, mismatch_* in round=\"sampled\" is the third stage's alarm reading.",
-		}, []string{"outcome", "period_class", "round"}),
+				"with members skipped, mismatch_* in round=\"sampled\" is the third stage's alarm reading. " +
+				"family: real, a Plan's real series, or no_data, the synthetic series of its no-data view in segments " +
+				"of their own (014 next9 6); read round=\"sampled\",family=\"no_data\" for the no-data family's alarm.",
+		}, []string{"outcome", "period_class", "round", "family"}),
 		members: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: metricSubsystem, Name: "state_segment_shadow_members_total",
 			Help: "What the shadow of a Plan's stable segments did with its pages' membership, by event and the " +
@@ -57,8 +59,8 @@ func newSegmentShadowMetrics() segmentShadowMetrics {
 				"departed: an open member absent from the round, closed at the mark before. expired: a closed " +
 				"member past its window and its key's life. reset: a Plan's shadow started over, its members " +
 				"counted - a retry of a Slot an earlier attempt had written some series of leaves the round's " +
-				"membership unknown.",
-		}, []string{"event", "period_class"}),
+				"membership unknown. family: real or no_data, as state_segment_shadow_total.",
+		}, []string{"event", "period_class", "family"}),
 		pageWrites: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: metricSubsystem, Name: "state_segment_shadow_page_writes_total",
 			Help: "Member pages a round of the shadow would have rewritten - a join, a close, a removal or an " +
@@ -114,8 +116,9 @@ func newSegmentShadowMetrics() segmentShadowMetrics {
 				"skips or not, by the Plan's period class: about one a day for each piece of each Plan, every round " +
 				"for a Plan run once a day or less often. In a sampled round no member is left unwritten - every " +
 				"one is written whole and compared, its outcomes under state_segment_shadow_total" +
-				"{round=\"sampled\"}. Flat while Plans run is a sampled round that never comes.",
-		}, []string{"period_class"}),
+				"{round=\"sampled\"}. Flat while Plans run is a sampled round that never comes. family: real or " +
+				"no_data, each family's piece sampled on a day of its own.",
+		}, []string{"period_class", "family"}),
 		degraded: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: metricSubsystem, Name: "state_segment_degraded_total",
 			Help: "Plans whose stable segments a Slot could not use as written (014 B3 9.7) - their members read as " +
@@ -159,8 +162,10 @@ func newSegmentShadowMetrics() segmentShadowMetrics {
 				"Slot nor a replay short of time), stopped, retried (an attempt that found the Plan's series applied in part and started its shadow " +
 				"over: it compares nothing), sampled - every member written whole - and skip, members compared a match " +
 				"left unwritten: the rounds state_segment_match_not_skipped_total and the members left are read against. " +
-				"Counted by the attempts that fold, as the matches are; a replay of a round already folded is none.",
-		}, []string{"mode", "period_class"}),
+				"Counted by the attempts that fold, as the matches are; a replay of a round already folded is none. " +
+				"family: real or no_data, as state_segment_shadow_total; off for no_data is also a Slot that follows " +
+				"the skip word and not the no-data family's.",
+		}, []string{"mode", "period_class", "family"}),
 	}
 	metrics.renewScript = prometheus.NewHistogram(prometheus.HistogramOpts{
 		Subsystem: metricSubsystem, Name: "state_segment_renew_script_seconds",
@@ -195,22 +200,24 @@ func newSegmentShadowMetrics() segmentShadowMetrics {
 		metrics.skipped.WithLabelValues(reason)
 	}
 	for _, class := range observability.AllSegmentPeriodClasses() {
-		for _, outcome := range observability.AllSegmentShadowOutcomes() {
-			for _, round := range observability.AllSegmentShadowRounds() {
-				metrics.outcomes.WithLabelValues(string(outcome), class, round)
+		for _, family := range observability.AllSegmentFamilies() {
+			for _, outcome := range observability.AllSegmentShadowOutcomes() {
+				for _, round := range observability.AllSegmentShadowRounds() {
+					metrics.outcomes.WithLabelValues(string(outcome), class, round, family)
+				}
 			}
-		}
-		metrics.samples.WithLabelValues(class)
-		for _, event := range observability.AllSegmentShadowEvents() {
-			metrics.members.WithLabelValues(string(event), class)
+			metrics.samples.WithLabelValues(class, family)
+			for _, event := range observability.AllSegmentShadowEvents() {
+				metrics.members.WithLabelValues(string(event), class, family)
+			}
+			for _, mode := range segment.SkipModes() {
+				metrics.rounds.WithLabelValues(mode, class, family)
+			}
 		}
 		metrics.pageWrites.WithLabelValues(class)
 		metrics.pageBytes.WithLabelValues(class)
 		for _, gate := range observability.AllSegmentNotSkippedGates() {
 			metrics.notSkipped.WithLabelValues(gate, class)
-		}
-		for _, mode := range segment.SkipModes() {
-			metrics.rounds.WithLabelValues(mode, class)
 		}
 	}
 	return metrics
@@ -226,10 +233,10 @@ func (m segmentShadowMetrics) observe(facts *observability.SegmentShadowFacts) {
 		return
 	}
 	for key, count := range facts.Outcomes {
-		m.outcomes.WithLabelValues(string(key.Outcome), key.PeriodClass, key.Round).Add(float64(count))
+		m.outcomes.WithLabelValues(string(key.Outcome), key.PeriodClass, key.Round, observability.SegmentFamilyLabel(key.Family)).Add(float64(count))
 	}
 	for key, count := range facts.Members {
-		m.members.WithLabelValues(string(key.Event), key.PeriodClass).Add(float64(count))
+		m.members.WithLabelValues(string(key.Event), key.PeriodClass, observability.SegmentFamilyLabel(key.Family)).Add(float64(count))
 	}
 	for class, count := range facts.PageWrites {
 		m.pageWrites.WithLabelValues(class).Add(float64(count))
@@ -247,8 +254,8 @@ func (m segmentShadowMetrics) observe(facts *observability.SegmentShadowFacts) {
 	for reason, count := range facts.SkipFlagIgnored {
 		m.skipFlagIgnored.WithLabelValues(reason).Add(float64(count))
 	}
-	for class, count := range facts.Samples {
-		m.samples.WithLabelValues(class).Add(float64(count))
+	for key, count := range facts.Samples {
+		m.samples.WithLabelValues(key.PeriodClass, observability.SegmentFamilyLabel(key.Family)).Add(float64(count))
 	}
 	for reason, count := range facts.Degraded {
 		m.degraded.WithLabelValues(reason).Add(float64(count))
@@ -265,7 +272,7 @@ func (m segmentShadowMetrics) observe(facts *observability.SegmentShadowFacts) {
 		// (segmentShadowRound.skipMode); a word outside them is not given a
 		// cell no reader expects.
 		if slices.Contains(modes, key.Mode) {
-			m.rounds.WithLabelValues(key.Mode, key.PeriodClass).Add(float64(count))
+			m.rounds.WithLabelValues(key.Mode, key.PeriodClass, observability.SegmentFamilyLabel(key.Family)).Add(float64(count))
 		}
 	}
 }

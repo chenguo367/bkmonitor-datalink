@@ -58,7 +58,7 @@ func TestAMissingTimelineIsReportedAndReopenedUnderTheCurrentPublication(t *test
 
 	// The Worker meets the absence on the Slot after the one it completed.
 	fixture.clock.Store((base + 61) * 1000)
-	if err := runScheduledOnceSettled(ctx, bundle); err != nil {
+	if err := runScheduledOnceSettled(t, ctx, bundle); err != nil {
 		t.Fatalf("the round that meets the missing key: %v", err)
 	}
 	if names, total := bundle.unreadableTimelinesRegistration(); total != 1 || len(names) != 1 || names[0] != string(queryGroup) {
@@ -96,7 +96,7 @@ func TestAMissingTimelineIsReportedAndReopenedUnderTheCurrentPublication(t *test
 	}
 
 	fixture.clock.Store((base + 121) * 1000)
-	if err := runScheduledOnceSettled(ctx, bundle); err != nil {
+	if err := runScheduledOnceSettled(t, ctx, bundle); err != nil {
 		t.Fatalf("the round after the reopen: %v", err)
 	}
 	if after := fixture.progress(ctx); after.LastFullSlot != execution.EvaluationTime(base+120) {

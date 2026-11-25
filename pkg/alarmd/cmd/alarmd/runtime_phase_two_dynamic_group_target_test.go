@@ -142,7 +142,7 @@ func startDynamicGroupFixture(t *testing.T, groups map[string]string) *dynamicGr
 	if len(bundle.queryGroups) != 1 {
 		t.Fatalf("Query Groups = %v, want one: the strategy was not admitted", bundle.queryGroups)
 	}
-	fixture.runner = settledRunner(bundle, bundle.queryGroups[0])
+	fixture.runner = settledRunner(t, bundle, bundle.queryGroups[0])
 	return fixture
 }
 

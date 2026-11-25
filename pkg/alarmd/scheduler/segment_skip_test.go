@@ -22,6 +22,7 @@ import (
 // record without the word dispatches none. So does a Slot of a Query Group
 // draining to its retired boundary: the word its record holds as it reads
 // it, none once the Leader took it back, and its next Slot is written whole.
+// The no-data family's word (014 next9 ⑥) travels beside it the same way.
 func TestASlotCarriesTheSegmentSkipWordItsFenceReadToItsRequest(t *testing.T) {
 	boundary := execution.EvaluationTime(600)
 	for _, shape := range []struct {
@@ -32,15 +33,16 @@ func TestASlotCarriesTheSegmentSkipWordItsFenceReadToItsRequest(t *testing.T) {
 		schedule := schedulerSchedule(t, 60, 60, shape.end, "snapshot-1", 1)
 		catalog := &fakeSlotCatalog{t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}}
 		record := testAssignment("worker-1", 3)
-		record.SegmentSkip = word
+		record.SegmentSkip, record.SegmentSkipNoData = word, word+1
 		session := &sequenceOwnerSession{fences: []execution.OwnerFence{testFence(7)}, records: []ownership.AssignmentRecord{record}}
 		source := mustProductionSlotSource(t, session, catalog, &fakeProgressReader{result: missingProgress(), catalog: catalog}, time.Unix(200, 0))
 		slot, due, _, err := source.Next(context.Background(), "query-group-1")
 		if err != nil || !due {
 			t.Fatalf("word %d: Next() due=%v error=%v", word, due, err)
 		}
-		if slot.Dispatch.SegmentSkip != word {
-			t.Fatalf("the Slot dispatched the word %d, want the record's %d", slot.Dispatch.SegmentSkip, word)
+		if slot.Dispatch.SegmentSkip != word || slot.Dispatch.SegmentSkipNoData != word+1 {
+			t.Fatalf("the Slot dispatched the words %d and %d, want the record's %d and %d", slot.Dispatch.SegmentSkip,
+				slot.Dispatch.SegmentSkipNoData, word, word+1)
 		}
 		if shape.end != nil && slot.Contract.Slot.EvaluationTime >= *shape.end {
 			t.Fatalf("the draining Query Group's Slot %d is not before its boundary %d", slot.Contract.Slot.EvaluationTime, *shape.end)
@@ -48,7 +50,7 @@ func TestASlotCarriesTheSegmentSkipWordItsFenceReadToItsRequest(t *testing.T) {
 	}
 	clock := newMutableClock(time.Unix(200, 0))
 	slot := frozenSlot("query-group-1")
-	slot.Dispatch.SegmentSkip = 9
+	slot.Dispatch.SegmentSkip, slot.Dispatch.SegmentSkipNoData = 9, 10
 	var requests []execution.SlotExecutionRequest
 	executor := &segmentSkipRecordingExecutor{requests: &requests}
 	flights, err := NewFlightCoordinatorWithRecovery(testRecoveryLimits(), clock.Now)
@@ -62,8 +64,8 @@ func TestASlotCarriesTheSegmentSkipWordItsFenceReadToItsRequest(t *testing.T) {
 	if _, _, err := runner.RunOne(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(requests) != 1 || requests[0].SegmentSkip != 9 {
-		t.Fatalf("requests %+v, want one carrying the word 9", requests)
+	if len(requests) != 1 || requests[0].SegmentSkip != 9 || requests[0].SegmentSkipNoData != 10 {
+		t.Fatalf("requests %+v, want one carrying the words 9 and 10", requests)
 	}
 }
 

@@ -65,6 +65,10 @@ func DeriveSeriesRecordsDigestV2(domain string, records []CanonicalRecordV2, ide
 	}
 	recordsShadowCompared.Add(1)
 	established, err := DeriveCanonicalDigestV2(domain, records)
+	// The parts are written directly (v2_canonical_direct.go): a difference
+	// is theirs to answer for too, counted under them and turning them off in
+	// this process.
+	canonicalDigestChecked(CanonicalEncoderRecordParts, "[]contract.CanonicalRecordV2", digest, established)
 	if err == nil && established == digest {
 		return digest, nil
 	}
@@ -93,7 +97,7 @@ func deriveSharedRecordsDigest(domain string, records []CanonicalRecordV2, encod
 			return "", false
 		}
 	}
-	business, err := CanonicalJSONV2(first.BusinessID)
+	business, err := canonicalRecordStringV2(first.BusinessID)
 	if err != nil {
 		return "", false
 	}
@@ -101,7 +105,7 @@ func deriveSharedRecordsDigest(domain string, records []CanonicalRecordV2, encod
 	if err != nil {
 		return "", false
 	}
-	dimensions, err := CanonicalJSONV2(first.Dimensions)
+	dimensions, err := canonicalRecordPartV2(first.Dimensions)
 	if err != nil {
 		return "", false
 	}
@@ -124,11 +128,11 @@ func deriveSharedRecordsDigest(domain string, records []CanonicalRecordV2, encod
 	ends := make([]int, len(records))
 	for index := range records {
 		record := &records[index]
-		id, err := CanonicalJSONV2(record.RecordID)
+		id, err := canonicalRecordStringV2(record.RecordID)
 		if err != nil {
 			return "", false
 		}
-		values, err := CanonicalJSONV2(record.Values)
+		values, err := canonicalRecordPartV2(record.Values)
 		if err != nil {
 			return "", false
 		}

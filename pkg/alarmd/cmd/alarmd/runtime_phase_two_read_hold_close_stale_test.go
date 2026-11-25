@@ -153,7 +153,7 @@ func TestAHeldGroupThatLostAPlanAWeekAgoKeepsRunningAfterARestart(t *testing.T) 
 	if previous.Segment.End == nil || len(previous.Plans) == 0 || len(current.Plans) == 0 || previous.Plans[0].Key() == current.Plans[0].Key() {
 		t.Fatalf("the group's previous Segment does not hold the departed Plan beside a current one: %+v / %+v", previous.Plans, current.Plans)
 	}
-	f.queryGroup, f.runner = left, settledRunner(f.bundle, left)
+	f.queryGroup, f.runner = left, settledRunner(t, f.bundle, left)
 	_ = runOneSlotFull(t, f)
 	// The departed Plan's closure was dropped after a week.
 	writeHoldRecord(t, f, left, readhold.Record{SinceSlot: 1, HoldMillis: 60_000, SegmentStart: current.Segment.Start})

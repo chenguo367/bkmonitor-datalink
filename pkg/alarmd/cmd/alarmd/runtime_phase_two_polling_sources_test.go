@@ -154,7 +154,7 @@ func TestProductionPollingSources(t *testing.T) {
 				}
 				for _, slot := range []int64{base, base + 60} {
 					clock.Store(slot + 1)
-					if err := runScheduledOnceSettled(ctx, bundle); err != nil {
+					if err := runScheduledOnceSettled(t, ctx, bundle); err != nil {
 						t.Fatal(err)
 					}
 				}

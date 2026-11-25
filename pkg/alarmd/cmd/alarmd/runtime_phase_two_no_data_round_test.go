@@ -469,7 +469,7 @@ func startNoDataFixtureWith(t *testing.T, protocol string, continuous int) *noDa
 	}
 	queryGroup := bundle.queryGroups[0]
 	fixture.queryGroup = queryGroup
-	fixture.runner = settledRunner(bundle, queryGroup)
+	fixture.runner = settledRunner(t, bundle, queryGroup)
 	fixture.events = events
 	fixture.readAt = func(evaluationAt int64) int64 {
 		return roundReadAtMillis(bundle.dependencies.Config, queryGroup, evaluationAt, fixture.interval)

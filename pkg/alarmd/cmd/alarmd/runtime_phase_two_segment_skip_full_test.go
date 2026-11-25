@@ -160,7 +160,7 @@ func (full *segmentSkipFull) round() {
 	if err := full.worker.refreshAndReconcile(ctx, false); err != nil {
 		full.t.Fatal(err)
 	}
-	if err := runScheduledOnceSettled(ctx, full.worker); err != nil {
+	if err := runScheduledOnceSettled(full.t, ctx, full.worker); err != nil {
 		full.t.Fatalf("the Slot at %d: %v", full.slot, err)
 	}
 	full.slot += 300
@@ -169,6 +169,33 @@ func (full *segmentSkipFull) round() {
 // skipped is the members the Worker's rounds left unwritten so far.
 func (full *segmentSkipFull) skipped() float64 {
 	return counterValue(full.t, full.recorder, "alarmd_state_series_not_written_total", map[string]string{"reason": "segment_member_skipped"})
+}
+
+// sampled is the Plan's rounds run as the day's sampled round of its
+// segments (worker sampleRound): every member written whole and compared,
+// once a day at a time of day the Plan's name sets. The processes' clock
+// starts at the wall clock's next Slot boundary (phaseTwoQueryableSlotBoundary),
+// so a case's rounds reach that time on some runs and not on others: a case
+// holding a round to leaving its member, or to serving it from the cache,
+// does not hold the round sampled to it.
+func (full *segmentSkipFull) sampled() float64 {
+	full.t.Helper()
+	families, err := full.recorder.Gatherer().Gather()
+	if err != nil {
+		full.t.Fatalf("gather metrics: %v", err)
+	}
+	sum := 0.0
+	for _, family := range families {
+		if family.GetName() != "alarmd_state_segment_rounds_total" {
+			continue
+		}
+		for _, sample := range family.Metric {
+			if sampleHasLabels(sample, map[string]string{"mode": "sampled"}) {
+				sum += sample.GetCounter().GetValue()
+			}
+		}
+	}
+	return sum
 }
 
 // ignored is the Worker's Slots that did not follow their word, by why.

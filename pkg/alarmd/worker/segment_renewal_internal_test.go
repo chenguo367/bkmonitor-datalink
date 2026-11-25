@@ -290,7 +290,7 @@ func TestARoundWhoseJoinsThePoolRefusesJoinsNobody(t *testing.T) {
 	round := newSegmentShadowRound(request, shadowSlot(t, store, request, shadowDue))
 	for index := 0; index < 3; index++ {
 		written := steady(t, shadowSeries(index), 1200)
-		round.observe(shadowDue, written.view, written.write, written.class, false)
+		round.observe(shadowDue, segment.FamilyReal, written.view, written.write, written.class, false)
 	}
 	asked := 0
 	facts, folded := foldSegmentShadowRound(round, []execution.DuePlan{shadowDue}, nil, func(joins int) bool {

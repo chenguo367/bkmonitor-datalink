@@ -256,7 +256,7 @@ func startRoundsFixture(t *testing.T, options roundsOptions) *roundsFixture {
 	if len(bundle.queryGroups) != 1 {
 		t.Fatalf("Query Groups = %v, want one", bundle.queryGroups)
 	}
-	fixture.runner = settledRunner(bundle, bundle.queryGroups[0])
+	fixture.runner = settledRunner(t, bundle, bundle.queryGroups[0])
 	fixture.queryGroup = bundle.queryGroups[0]
 	fixture.bundle = bundle
 	fixture.catalog = bundle.dependencies.Ownership.(*productionPhaseTwoOwnership).dependencies.Catalog

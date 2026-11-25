@@ -1169,11 +1169,18 @@ func normalizeSeriesKeeping(spec execution.PhysicalQuerySpec, ref execution.Prov
 	var dropped observability.PointDrops
 	records := make([]contract.CanonicalRecordV2, 0, len(source.Values))
 	lastTime := int64(-1)
+	// Once a series (014 next9 ⑤ R, T): which columns are the time and the
+	// value, and the record id deriver of the series - its version and
+	// series hashed once, each point continuing from them with its time, the
+	// ids DeriveRecordIDV2 gives. Each refusal is the one a row would have
+	// met, met at the first row.
+	columns := rowColumnsOf(source.Columns, spec.PlanFacts.QueryList)
+	deriver, deriverErr := contract.NewRecordIDDeriverV2(dimensionDigest)
 	for _, row := range source.Values {
 		if len(row) != len(source.Columns) {
 			return execution.ProviderSeriesBatch{}, none, nil, errors.New("alarmd access uq: row width differs from columns")
 		}
-		timestamp, value, err := rowFacts(source.Columns, row, spec.PlanFacts.QueryList)
+		timestamp, value, err := columns.facts(row)
 		if err != nil {
 			return execution.ProviderSeriesBatch{}, none, nil, err
 		}
@@ -1198,7 +1205,10 @@ func normalizeSeriesKeeping(spec execution.PhysicalQuerySpec, ref execution.Prov
 		if spec.PlanFacts.NotTimeAlign && !onRequestGrid(spec, sourceTime) {
 			return execution.ProviderSeriesBatch{}, none, nil, errOffRequestGrid
 		}
-		recordID, err := contract.DeriveRecordIDV2(dimensionDigest, sourceTime)
+		if deriverErr != nil {
+			return execution.ProviderSeriesBatch{}, none, nil, deriverErr
+		}
+		recordID, err := deriver.Derive(sourceTime)
 		if err != nil {
 			return execution.ProviderSeriesBatch{}, none, nil, err
 		}
@@ -1228,7 +1238,15 @@ func normalizeSeriesKeeping(spec execution.PhysicalQuerySpec, ref execution.Prov
 			Series: 1, Records: uint64(len(records)), Digest: digest}}, normalizedFacts{nullIdentityFields: nullIdentityFields, dropped: dropped}, recordIDs, nil
 }
 
-func rowFacts(columns []string, row []json.RawMessage, queries []execution.QueryClause) (int64, json.RawMessage, error) {
+// rowColumns is which of a series' columns are its time and its value, found
+// once for its rows: the last time column, the first value column, else the
+// first column a query names; err when either is missing, a row's refusal.
+type rowColumns struct {
+	timeIndex, valueIndex int
+	err                   error
+}
+
+func rowColumnsOf(columns []string, queries []execution.QueryClause) rowColumns {
 	timeIndex, valueIndex := -1, -1
 	for index, name := range columns {
 		switch name {
@@ -1254,21 +1272,84 @@ func rowFacts(columns []string, row []json.RawMessage, queries []execution.Query
 		}
 	}
 	if timeIndex < 0 || valueIndex < 0 {
-		return 0, nil, errors.New("alarmd access uq: time or result column is missing")
+		return rowColumns{err: errors.New("alarmd access uq: time or result column is missing")}
 	}
-	var timestamp json.Number
-	if err := json.Unmarshal(row[timeIndex], &timestamp); err != nil {
-		return 0, nil, errors.New("alarmd access uq: invalid source time")
+	return rowColumns{timeIndex: timeIndex, valueIndex: valueIndex}
+}
+
+// facts is a row's source time and its value's canonical form.
+func (columns rowColumns) facts(row []json.RawMessage) (int64, json.RawMessage, error) {
+	if columns.err != nil {
+		return 0, nil, columns.err
 	}
-	timeValue, err := timestamp.Int64()
+	timeValue, err := rowSourceTime(row[columns.timeIndex])
 	if err != nil {
-		return 0, nil, errors.New("alarmd access uq: non-integer source time")
+		return 0, nil, err
 	}
-	canonicalValue, err := contract.CanonicalJSONV2(row[valueIndex])
+	canonicalValue, err := contract.CanonicalScalarV2(row[columns.valueIndex])
 	if err != nil {
 		return 0, nil, err
 	}
 	return timeValue, json.RawMessage(canonicalValue), nil
+}
+
+// rowSourceTime is a row's time as a json.Number decoded and read as an
+// int64 gives it, each refusal by the same error. A bare decimal integer
+// token - a minus, then zero or digits not led by zero, JSON whitespace
+// around - is read byte by byte; any other writing is decoded as before: a
+// quoted number, an escape, a fraction, an exponent, null.
+func rowSourceTime(raw json.RawMessage) (int64, error) {
+	if token, ok := bareDecimalToken(raw); ok {
+		value, err := strconv.ParseInt(token, 10, 64)
+		if err != nil {
+			return 0, errors.New("alarmd access uq: non-integer source time")
+		}
+		return value, nil
+	}
+	var timestamp json.Number
+	if err := json.Unmarshal(raw, &timestamp); err != nil {
+		return 0, errors.New("alarmd access uq: invalid source time")
+	}
+	timeValue, err := timestamp.Int64()
+	if err != nil {
+		return 0, errors.New("alarmd access uq: non-integer source time")
+	}
+	return timeValue, nil
+}
+
+// bareDecimalToken is raw's integer token when raw is one and nothing else
+// but JSON whitespace: the JSON grammar's integer, -0 among them.
+func bareDecimalToken(raw []byte) (string, bool) {
+	start, end := 0, len(raw)
+	for start < end && isJSONSpace(raw[start]) {
+		start++
+	}
+	for end > start && isJSONSpace(raw[end-1]) {
+		end--
+	}
+	digits := start
+	if digits < end && raw[digits] == '-' {
+		digits++
+	}
+	if digits == end {
+		return "", false
+	}
+	if raw[digits] == '0' {
+		if digits+1 != end {
+			return "", false
+		}
+		return string(raw[start:end]), true
+	}
+	for index := digits; index < end; index++ {
+		if raw[index] < '0' || raw[index] > '9' {
+			return "", false
+		}
+	}
+	return string(raw[start:end]), true
+}
+
+func isJSONSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\r' || b == '\n'
 }
 
 func stripTableSuffix(value string) string {

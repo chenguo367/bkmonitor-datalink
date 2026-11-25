@@ -97,7 +97,7 @@ func startHungCase(t *testing.T, configure func(*hungQueryGroup)) *hungCase {
 			}
 		}}
 	t.Cleanup(hung.letGo)
-	go func() { hung.ran <- runScheduledOnceSettled(context.Background(), bundle) }()
+	go func() { hung.ran <- runScheduledOnceSettled(t, context.Background(), bundle) }()
 	waitSignal(t, started, "the Slot that will hang")
 	return hung
 }

@@ -138,7 +138,7 @@ func (fixture *predecessorWaitFixture) editQuery() execution.EvaluationTime {
 		fixture.t.Fatal("the query edit did not move the Plan to a new Query Group")
 	}
 	fixture.queryGroup = fixture.next
-	fixture.runner = settledRunner(fixture.bundle, fixture.next)
+	fixture.runner = settledRunner(fixture.t, fixture.bundle, fixture.next)
 	return boundary
 }
 

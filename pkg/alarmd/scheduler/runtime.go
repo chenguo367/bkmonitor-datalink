@@ -127,6 +127,9 @@ type SlotDispatchContext struct {
 	// epoch of the Leader that let the Slot leave its stable members'
 	// writes out, zero for none (execution.SlotExecutionRequest.SegmentSkip).
 	SegmentSkip uint64
+	// SegmentSkipNoData is the record's word for the no-data family, read
+	// with it (ownership.AssignmentRecord.SegmentSkipNoData).
+	SegmentSkipNoData uint64
 }
 
 func (slot FrozenSlot) Validate(queryGroup execution.QueryGroupIdentity) error {
@@ -1114,7 +1117,7 @@ func (runner *Runner) runOneTracked(
 		ShareExceeded:     runner.shareExceeded(slot) && slot.Recovery.Disposition != ReplayExpired && slot.ExpiredRange == nil,
 		QueryCooldownHeld: runner.queryCooldownHolds(), QueryCooldownProbe: runner.queryCooldownProbes(),
 		Operation: operation, AttemptNo: runner.attemptNo(slot), OwnerFence: fence, ExpectedNextSlot: slot.ExpectedNextSlot,
-		ContentScope: slot.Dispatch.ContentScope, SegmentSkip: slot.Dispatch.SegmentSkip,
+		ContentScope: slot.Dispatch.ContentScope, SegmentSkip: slot.Dispatch.SegmentSkip, SegmentSkipNoData: slot.Dispatch.SegmentSkipNoData,
 	}
 	if operation == execution.OperationReplay {
 		// What the worker tells a replay short of time by (ReplayShortOfTime).

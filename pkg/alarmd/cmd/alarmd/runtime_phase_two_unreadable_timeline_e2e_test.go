@@ -72,7 +72,7 @@ func TestAnUnreadableTimelineIsReportedRewrittenAndDetectedAgain(t *testing.T) {
 
 	// The Worker meets the bytes on the Slot after the one it completed.
 	fixture.clock.Store((base + 61) * 1000)
-	if err := runScheduledOnceSettled(ctx, bundle); err != nil {
+	if err := runScheduledOnceSettled(t, ctx, bundle); err != nil {
 		t.Fatalf("the round that meets the bytes: %v", err)
 	}
 	if names, total := bundle.unreadableTimelinesRegistration(); total != 1 || len(names) != 1 || names[0] != string(queryGroup) {
@@ -111,7 +111,7 @@ func TestAnUnreadableTimelineIsReportedRewrittenAndDetectedAgain(t *testing.T) {
 
 	// The Worker detects again, past a recorded skip.
 	fixture.clock.Store((base + 121) * 1000)
-	if err := runScheduledOnceSettled(ctx, bundle); err != nil {
+	if err := runScheduledOnceSettled(t, ctx, bundle); err != nil {
 		t.Fatalf("the round after the rewrite: %v", err)
 	}
 	after := fixture.progress(ctx)
@@ -165,7 +165,7 @@ func TestAMissingTimelineIsReopenedAndItsLostSlotsAreRecorded(t *testing.T) {
 	}
 
 	fixture.clock.Store((base + 121) * 1000)
-	if err := runScheduledOnceSettled(ctx, fixture.bundle); err != nil {
+	if err := runScheduledOnceSettled(t, ctx, fixture.bundle); err != nil {
 		t.Fatalf("the round after the reopen: %v", err)
 	}
 	if after := fixture.progress(ctx); after.LastFullSlot != execution.EvaluationTime(base+120) {

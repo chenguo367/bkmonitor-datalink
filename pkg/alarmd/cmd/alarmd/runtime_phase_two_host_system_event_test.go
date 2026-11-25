@@ -236,7 +236,7 @@ func runHostSystemEventRound(t *testing.T, round hostSystemEventRound) hostSyste
 		t.Fatal(err)
 	}
 	clock.Store(base + 1)
-	if err := runScheduledOnceSettled(ctx, bundle); err != nil {
+	if err := runScheduledOnceSettled(t, ctx, bundle); err != nil {
 		t.Fatal(err)
 	}
 

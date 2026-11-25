@@ -51,16 +51,35 @@ import (
 // margin), never shorter than it.
 const segmentShadowHorizon = 600
 
-// shadowKey is a due Plan's segments under generation: the Plan, its piece
-// of a split strategy and the generation, as its State store keys them.
-func shadowKey(due execution.DuePlan, generation execution.StateGeneration) segment.PlanKey {
-	return segment.PlanKey{Plan: due.Identity, Shard: due.Shard, Generation: generation}
+// shadowKey is a due Plan's segments of a family under generation: the
+// Plan, its piece of a split strategy, the generation and the family, as its
+// State store keys them.
+func shadowKey(due execution.DuePlan, generation execution.StateGeneration, family segment.Family) segment.PlanKey {
+	return segment.PlanKey{Plan: due.Identity, Shard: due.Shard, Generation: generation, Family: family}
 }
 
-// segmentDue is a due Plan whose segments a Slot reads: what its keys live
-// by, and the points its window keeps.
+// seriesFamily is the family of a Plan's series a written series is of: a
+// no-data series the no-data view's, any other the real one.
+func seriesFamily(noData bool) segment.Family {
+	if noData {
+		return segment.FamilyNoData
+	}
+	return segment.FamilyReal
+}
+
+// segmentFamilyLabel is a family's word on the shadow's counters.
+func segmentFamilyLabel(family segment.Family) string {
+	if family == segment.FamilyNoData {
+		return observability.SegmentFamilyNoData
+	}
+	return observability.SegmentFamilyReal
+}
+
+// segmentDue is a due Plan's family whose segments a Slot reads: what its
+// keys live by, and the points its window keeps.
 type segmentDue struct {
 	due       execution.DuePlan
+	family    segment.Family
 	lifetime  segment.Lifetime
 	retention uint32
 }
@@ -88,6 +107,10 @@ type segmentSlot struct {
 	// unwritten and its segments' write not landed: none is left now.
 	skip        bool
 	writeFailed bool
+	// skipNoData is the Slot's no-data family's skip word followed beside
+	// its segment skip word (014 next9 ⑥): the no-data family's members are
+	// left only then.
+	skipNoData bool
 	// leaves is whether the Slot's round leaves its stable members' State
 	// writes out - its skip word followed, no earlier attempt's segments
 	// write failed, a normal operation - as the round itself is told
@@ -132,28 +155,43 @@ type segmentShadowPlan struct {
 	retention uint32
 }
 
-// segmentDues is the due Plans a Slot reads the segments of: a Plan on a
-// grid, whose window keeps points.
+// segmentDues is the due Plans' families a Slot reads the segments of: a
+// Plan on a grid, whose window keeps points; its real series, and the
+// synthetic series of its no-data view when it has one (014 next9 ⑥), held
+// to that view's retention - its Levels' points, the lifetime its State keys
+// are given - by the same horizon and interval.
 func (coordinator *SlotExecutionCoordinator) segmentDues(header execution.InternalExecutionHeader) []segmentDue {
 	var dues []segmentDue
 	for _, due := range header.DuePlans {
 		interval := planInterval(due)
-		if interval <= 0 {
+		if interval <= 0 || due.CompiledPlan == nil {
 			continue
 		}
-		requirements, err := execution.DeriveStateRetentionRequirement(due.CompiledPlan)
-		if err != nil {
-			continue
+		for _, family := range segment.Families() {
+			kind := execution.SeriesKindReal
+			if family == segment.FamilyNoData {
+				kind = execution.SeriesKindNoData
+			}
+			// A Plan with no no-data Level has no view of it, nor
+			// synthetic series to keep.
+			view, err := execution.PlanViewFor(due, kind)
+			if err != nil || view.CompiledPlan == nil {
+				continue
+			}
+			requirements, err := execution.DeriveStateRetentionRequirement(view.CompiledPlan)
+			if err != nil {
+				continue
+			}
+			var retention uint32
+			for _, requirement := range requirements {
+				retention = max(retention, requirement.RetentionPoints)
+			}
+			if retention == 0 {
+				continue
+			}
+			dues = append(dues, segmentDue{due: due, family: family, retention: retention, lifetime: segment.Lifetime{Retention: requirements,
+				Horizon: coordinator.stateHorizon(due), Interval: time.Duration(interval) * time.Second}})
 		}
-		var retention uint32
-		for _, requirement := range requirements {
-			retention = max(retention, requirement.RetentionPoints)
-		}
-		if retention == 0 {
-			continue
-		}
-		dues = append(dues, segmentDue{due: due, retention: retention, lifetime: segment.Lifetime{Retention: requirements,
-			Horizon: coordinator.stateHorizon(due), Interval: time.Duration(interval) * time.Second}})
 	}
 	return dues
 }
@@ -184,6 +222,7 @@ func (coordinator *SlotExecutionCoordinator) loadSegments(ctx context.Context, r
 		return nil, "", nil
 	}
 	skip := coordinator.followsSegmentSkip(ctx, request)
+	skipNoData := skip && coordinator.followsSegmentSkipNoData(request)
 	dues := coordinator.segmentDues(header)
 	slot := loadSegmentSlot(ctx, store, request, dues)
 	var facts observability.SegmentShadowFacts
@@ -191,7 +230,7 @@ func (coordinator *SlotExecutionCoordinator) loadSegments(ctx context.Context, r
 	if slot == nil {
 		keys := make([]segment.PlanKey, 0, len(dues))
 		for _, due := range dues {
-			keys = append(keys, shadowKey(due.due, due.due.StateGeneration))
+			keys = append(keys, shadowKey(due.due, due.due.StateGeneration, due.family))
 		}
 		if coordinator.segmentReadFails(request, keys) {
 			return nil, "", segmentsUnreadError{why: "the read failed"}
@@ -213,7 +252,7 @@ func (coordinator *SlotExecutionCoordinator) loadSegments(ctx context.Context, r
 	for _, result := range slot.carries {
 		facts.Carry(result)
 	}
-	slot.skip = skip
+	slot.skip, slot.skipNoData = skip, skipNoData
 	slot.writeFailed = coordinator.segmentWriteFailures.failed(request.Contract.Slot.QueryGroup)
 	slot.leaves = slot.skip && !slot.writeFailed && leavesMembers(request)
 	slot.at = int64(request.Contract.Slot.EvaluationTime)
@@ -400,6 +439,27 @@ func (coordinator *SlotExecutionCoordinator) followsSegmentSkip(ctx context.Cont
 	return follows
 }
 
+// followsSegmentSkipNoData judges the Slot's no-data family's skip word as
+// followsSegmentSkip judges the segment skip word, against the same view:
+// the caller follows it only beside that word. A word it does not follow is
+// not counted on its own: the skip word's count says why a Slot left none.
+func (coordinator *SlotExecutionCoordinator) followsSegmentSkipNoData(request execution.SlotExecutionRequest) bool {
+	var epoch uint64
+	var installed bool
+	if read := coordinator.ports.InstalledControlEpoch; read != nil {
+		epoch, installed = read()
+	}
+	follows, _ := execution.SegmentSkipAdmitted(request.SegmentSkipNoData, epoch, installed)
+	return follows
+}
+
+// familyLeaves is whether the Slot's round leaves the family's stable
+// members' writes out: the round leaves members, and the no-data family's
+// only under the no-data family's word as well.
+func (slot *segmentSlot) familyLeaves(family segment.Family) bool {
+	return slot.leaves && (family != segment.FamilyNoData || slot.skipNoData)
+}
+
 // planKeys is the Slot's own Plans, in key order.
 func (slot *segmentSlot) planKeys() []segment.PlanKey {
 	keys := make([]segment.PlanKey, 0, len(slot.plans))
@@ -470,14 +530,15 @@ func (slot *segmentSlot) Coverage(identity execution.StateKeyIdentity) (segment.
 	return segment.Coverage{}, false
 }
 
-// sampled is whether the Plan's piece the due Plan is, under generation, is
-// in its sampled round in this Slot (sampleRound): its series' values the
-// State cache holds are checked against the store (014 next7 3.6).
-func (slot *segmentSlot) sampled(due execution.DuePlan, generation execution.StateGeneration) bool {
+// sampled is whether the Plan's piece the due Plan is, under generation, of
+// the family, is in its sampled round in this Slot (sampleRound): its
+// series' values the State cache holds are checked against the store (014
+// next7 3.6).
+func (slot *segmentSlot) sampled(due execution.DuePlan, generation execution.StateGeneration, family segment.Family) bool {
 	if slot == nil {
 		return false
 	}
-	key := shadowKey(due, generation)
+	key := shadowKey(due, generation, family)
 	state := slot.plans[key]
 	return state != nil && state.interval > 0 && sampleRound(key, slot.at, state.interval)
 }
@@ -490,7 +551,7 @@ func (slot *segmentSlot) sampled(due execution.DuePlan, generation execution.Sta
 // written whole for want of renewal. A series the evaluation then finds
 // changed is written all the same, and what was kept of it is replaced.
 func (slot *segmentSlot) leavesWritten(state *segmentShadowPlan, entry segment.Entry) (segment.Renewal, bool) {
-	if !slot.leaves || slot.plans[state.key] != state || !entry.Open() || state.stopped || state.ttl <= 0 ||
+	if !slot.familyLeaves(state.key.Family) || slot.plans[state.key] != state || !entry.Open() || state.stopped || state.ttl <= 0 ||
 		state.onFallback(entry.Digest) || sampleRound(state.key, slot.at, state.interval) {
 		return segment.Renewal{}, false
 	}
@@ -509,15 +570,16 @@ func loadSegmentSlot(ctx context.Context, store segment.Store, request execution
 	}
 	read := segment.ReadRequest{Contract: request.Contract, OwnerFence: request.OwnerFence}
 	for _, due := range dues {
-		read.Plans = append(read.Plans, segment.ReadPlan{Key: shadowKey(due.due, due.due.StateGeneration), Lifetime: due.lifetime})
+		read.Plans = append(read.Plans, segment.ReadPlan{Key: shadowKey(due.due, due.due.StateGeneration, due.family), Lifetime: due.lifetime})
 	}
 	// The generation a Plan carries from, after the Plans' own: a series
 	// with no record of its own is read under it, and what that read found
-	// is extended by its book as any read is.
+	// is extended by its book as any read is. Real series only: a no-data
+	// series is read under its own generation alone, carried from none.
 	carries := make([]segmentDue, 0)
 	for _, due := range dues {
-		if from := carryFrom(due.due); from != "" {
-			read.Plans = append(read.Plans, segment.ReadPlan{Key: shadowKey(due.due, from), Lifetime: due.lifetime})
+		if from := carryFrom(due.due); from != "" && due.family == segment.FamilyReal {
+			read.Plans = append(read.Plans, segment.ReadPlan{Key: shadowKey(due.due, from, due.family), Lifetime: due.lifetime})
 			carries = append(carries, due)
 		}
 	}
@@ -526,7 +588,7 @@ func loadSegmentSlot(ctx context.Context, store segment.Store, request execution
 		return nil
 	}
 	for index, stored := range result.Plans[len(dues):] {
-		own := shadowKey(carries[index].due, carries[index].due.StateGeneration)
+		own := shadowKey(carries[index].due, carries[index].due.StateGeneration, carries[index].family)
 		if stored.Reason == segment.ReadFailed {
 			slot.unread = append(slot.unread, own)
 			slot.carries = append(slot.carries, observability.SegmentCarryReadFailed)
@@ -613,9 +675,26 @@ type segmentShadowRound struct {
 	// operation is a normal one - a retry, a replay, a supplement and a
 	// probe write whole.
 	skip bool
+	// skipNoData is skip for the no-data family: the Slot follows the
+	// no-data family's word as well (segmentSlot.skipNoData).
+	skipNoData bool
 	// at is the Slot's evaluation time, the round's place in the day of a
 	// Plan's sample round (sampleRound).
 	at int64
+}
+
+// familySkips is whether the round leaves the family's members' writes out.
+func (round *segmentShadowRound) familySkips(family segment.Family) bool {
+	if family == segment.FamilyNoData {
+		return round.skipNoData
+	}
+	return round.skip
+}
+
+// familyOff is whether the Slot follows no skip word of the family: none,
+// or, for the no-data family, not its own beside the segment skip's.
+func (round *segmentShadowRound) familyOff(family segment.Family) bool {
+	return !round.slot.skip || family == segment.FamilyNoData && !round.slot.skipNoData
 }
 
 type segmentShadowPlanRound struct {
@@ -670,9 +749,9 @@ func newSegmentShadowRound(request execution.SlotExecutionRequest, slot *segment
 	if slot == nil || request.Operation == execution.OperationSupplement || request.Operation == execution.OperationProbe {
 		return nil
 	}
+	skip := slot.skip && !slot.writeFailed && leavesMembers(request)
 	return &segmentShadowRound{slot: slot, plans: map[segment.PlanKey]*segmentShadowPlanRound{},
-		skip: slot.skip && !slot.writeFailed && leavesMembers(request),
-		at:   int64(request.Contract.Slot.EvaluationTime)}
+		skip: skip, skipNoData: skip && slot.skipNoData, at: int64(request.Contract.Slot.EvaluationTime)}
 }
 
 // sampleRound is whether the round at evaluation time at is its Plan's
@@ -697,7 +776,7 @@ func sampleRound(key segment.PlanKey, at, interval int64) bool {
 // (segment.SkipModes): the Slot's reasons first, then the Plan's.
 func (round *segmentShadowRound) skipMode(planRound *segmentShadowPlanRound) string {
 	switch {
-	case !round.slot.skip:
+	case round.familyOff(planRound.state.key.Family):
 		return segment.SkipModeOff
 	case round.slot.writeFailed:
 		return segment.SkipModeWriteFailed
@@ -720,7 +799,7 @@ func (round *segmentShadowRound) skipMode(planRound *segmentShadowPlanRound) str
 // A retried round compares none, so it has no gate here.
 func (round *segmentShadowRound) notSkippedGate(planRound *segmentShadowPlanRound, digest execution.SeriesIdentityDigest) string {
 	switch {
-	case !round.slot.skip:
+	case round.familyOff(planRound.state.key.Family):
 		return observability.SegmentNotSkippedSlotSkipOff
 	case round.slot.writeFailed:
 		return observability.SegmentNotSkippedWriteFailed
@@ -776,10 +855,10 @@ func (state *segmentShadowPlan) markFallback(now int64) {
 
 // leaves is whether the round leaves the series' State write out (3.3 step
 // 2), decided and noted at once: decideLeave and then noteLeft.
-func (round *segmentShadowRound) leaves(due execution.DuePlan, view execution.RuntimeStateView, mutation execution.StateMutation,
-	class execution.SeriesClass, eventsSent bool) bool {
-	decision := round.decideLeave(nil, due, view, mutation, class, eventsSent)
-	round.noteLeft(due, mutation, decision)
+func (round *segmentShadowRound) leaves(due execution.DuePlan, family segment.Family, view execution.RuntimeStateView,
+	mutation execution.StateMutation, class execution.SeriesClass, eventsSent bool) bool {
+	decision := round.decideLeave(nil, due, family, view, mutation, class, eventsSent)
+	round.noteLeft(due, family, mutation, decision)
 	return decision.leave
 }
 
@@ -791,6 +870,8 @@ type leaveDecision struct {
 	leave    bool
 	fallback bool
 	last     int64
+	// family is the family of the Plan's series the decision is of.
+	family segment.Family
 }
 
 // decideLeave is whether the round leaves the series' State write out (3.3
@@ -804,12 +885,12 @@ type leaveDecision struct {
 // peeked's when the caller keeps one for the Plan's mutations, so that a
 // Plan's members decided together build the round it would start once, not
 // once each (014 n8 (i)); nil peeks it for this decision alone.
-func (round *segmentShadowRound) decideLeave(peeked peekedPlanRounds, due execution.DuePlan, view execution.RuntimeStateView,
-	mutation execution.StateMutation, class execution.SeriesClass, eventsSent bool) leaveDecision {
-	if round == nil || !round.skip || len(mutation.Points) == 0 {
+func (round *segmentShadowRound) decideLeave(peeked peekedPlanRounds, due execution.DuePlan, family segment.Family,
+	view execution.RuntimeStateView, mutation execution.StateMutation, class execution.SeriesClass, eventsSent bool) leaveDecision {
+	if round == nil || !round.familySkips(family) || len(mutation.Points) == 0 {
 		return leaveDecision{}
 	}
-	planRound := round.peekOnce(peeked, due, mutation.Identity, mutation.RetentionPoints)
+	planRound := round.peekOnce(peeked, due, family, mutation.Identity, mutation.RetentionPoints)
 	// A retried or sampled round writes every member and returns before the
 	// fallback below: a member on a fallback page stays on it this round,
 	// its key renewed by the write, and leaves it in the next round that
@@ -826,7 +907,7 @@ func (round *segmentShadowRound) decideLeave(peeked peekedPlanRounds, due execut
 	// renewals promise (3.5 fallback).
 	if planRound.state.onFallback(digest) {
 		entry, member := planRound.state.book.Entry(digest)
-		return leaveDecision{fallback: member && entry.Open()}
+		return leaveDecision{fallback: member && entry.Open(), family: family}
 	}
 	// A closed entry - a member back after it departed - is never left: its
 	// made read ends at its close, before the round's point, and so never
@@ -841,18 +922,18 @@ func (round *segmentShadowRound) decideLeave(peeked peekedPlanRounds, due execut
 	if len(outcomes) != 1 || outcomes[0] != observability.SegmentShadowMatch {
 		return leaveDecision{}
 	}
-	return leaveDecision{leave: true, last: last}
+	return leaveDecision{leave: true, last: last, family: family}
 }
 
 // noteLeft does what the round's decision of a series asks of its Plan's
 // round, once the Plan's events have landed: a series left is present at its
 // last point, compared a match and counted skipped; a fallback member is
 // taken off its page. Any other decision notes nothing.
-func (round *segmentShadowRound) noteLeft(due execution.DuePlan, mutation execution.StateMutation, decision leaveDecision) {
+func (round *segmentShadowRound) noteLeft(due execution.DuePlan, family segment.Family, mutation execution.StateMutation, decision leaveDecision) {
 	if !decision.leave && !decision.fallback {
 		return
 	}
-	planRound := round.planRound(due, mutation.Identity, mutation.RetentionPoints)
+	planRound := round.planRound(due, family, mutation.Identity, mutation.RetentionPoints)
 	if planRound == nil {
 		return
 	}
@@ -885,9 +966,10 @@ func planInterval(due execution.DuePlan) int64 {
 	return int64(due.CompiledPlan.EvaluationSemantics().EvaluationInterval)
 }
 
-func (round *segmentShadowRound) planRound(due execution.DuePlan, identity execution.StateKeyIdentity, retention uint32) *segmentShadowPlanRound {
-	key := shadowKey(due, identity.StateGeneration)
-	planRound := round.peekPlanRound(due, identity, retention)
+func (round *segmentShadowRound) planRound(due execution.DuePlan, family segment.Family, identity execution.StateKeyIdentity,
+	retention uint32) *segmentShadowPlanRound {
+	key := shadowKey(due, identity.StateGeneration, family)
+	planRound := round.peekPlanRound(due, family, identity, retention)
 	if planRound != nil && round.plans[key] == nil {
 		round.plans[key] = planRound
 	}
@@ -895,30 +977,37 @@ func (round *segmentShadowRound) planRound(due execution.DuePlan, identity execu
 }
 
 // peekedPlanRounds is the Plan's rounds the decisions on one Plan's
-// mutations have peeked, by the generation each is of: the round the shadow
-// keeps or the one it would start, built once for all of them.
-type peekedPlanRounds map[execution.StateGeneration]*segmentShadowPlanRound
+// mutations have peeked, by the generation and family each is of: the round
+// the shadow keeps or the one it would start, built once for all of them.
+type peekedPlanRounds map[peekedPlanRound]*segmentShadowPlanRound
+
+type peekedPlanRound struct {
+	generation execution.StateGeneration
+	family     segment.Family
+}
 
 // peekOnce is peekPlanRound, kept in peeked for the Plan's next decision; a
 // round there is not built again. None peeked - no State of the Plan read, no
 // interval or retention - is asked again, as each mutation's retention is its
 // own. nil peeked keeps nothing.
-func (round *segmentShadowRound) peekOnce(peeked peekedPlanRounds, due execution.DuePlan, identity execution.StateKeyIdentity,
-	retention uint32) *segmentShadowPlanRound {
-	if planRound := peeked[identity.StateGeneration]; planRound != nil {
+func (round *segmentShadowRound) peekOnce(peeked peekedPlanRounds, due execution.DuePlan, family segment.Family,
+	identity execution.StateKeyIdentity, retention uint32) *segmentShadowPlanRound {
+	at := peekedPlanRound{generation: identity.StateGeneration, family: family}
+	if planRound := peeked[at]; planRound != nil {
 		return planRound
 	}
-	planRound := round.peekPlanRound(due, identity, retention)
+	planRound := round.peekPlanRound(due, family, identity, retention)
 	if planRound != nil && peeked != nil {
-		peeked[identity.StateGeneration] = planRound
+		peeked[at] = planRound
 	}
 	return planRound
 }
 
 // peekPlanRound is planRound without keeping it: the Plan's round the shadow
 // has, or the one it would start, which a decision reads and changes not.
-func (round *segmentShadowRound) peekPlanRound(due execution.DuePlan, identity execution.StateKeyIdentity, retention uint32) *segmentShadowPlanRound {
-	key := shadowKey(due, identity.StateGeneration)
+func (round *segmentShadowRound) peekPlanRound(due execution.DuePlan, family segment.Family, identity execution.StateKeyIdentity,
+	retention uint32) *segmentShadowPlanRound {
+	key := shadowKey(due, identity.StateGeneration, family)
 	if planRound := round.plans[key]; planRound != nil {
 		return planRound
 	}
@@ -937,34 +1026,37 @@ func (round *segmentShadowRound) peekPlanRound(due execution.DuePlan, identity e
 // resumed before evaluation (an equal version, stream_session's resume): what
 // the round did with them is not in this attempt, so the Plan's shadow starts
 // over. Every series an equal version reaches is resumed there - real and
-// no-data alike come through evaluateCompletedSeriesBatch - so the write's
+// no-data alike come through evaluateReadBatch - so the write's
 // preflight, reading the same view, never finds one applied.
 func (round *segmentShadowRound) retried(due execution.DuePlan) {
 	if round == nil {
 		return
 	}
-	key := shadowKey(due, due.StateGeneration)
-	planRound := round.plans[key]
-	if planRound == nil {
-		state := round.slot.plans[key]
-		if state == nil {
-			return
+	// Both families: a no-data series is resumed as a real one is.
+	for _, family := range segment.Families() {
+		key := shadowKey(due, due.StateGeneration, family)
+		planRound := round.plans[key]
+		if planRound == nil {
+			state := round.slot.plans[key]
+			if state == nil {
+				continue
+			}
+			planRound = &segmentShadowPlanRound{due: due, state: state, interval: state.interval, retention: state.retention,
+				class: observability.SegmentPeriodClass(state.interval)}
+			round.plans[key] = planRound
 		}
-		planRound = &segmentShadowPlanRound{due: due, state: state, interval: state.interval, retention: state.retention,
-			class: observability.SegmentPeriodClass(state.interval)}
-		round.plans[key] = planRound
+		planRound.retried = true
 	}
-	planRound.retried = true
 }
 
 // observe is one series the round wrote, against the view it was decided
 // from.
-func (round *segmentShadowRound) observe(due execution.DuePlan, view execution.RuntimeStateView, mutation execution.StateMutation,
-	class execution.SeriesClass, eventsSent bool) {
+func (round *segmentShadowRound) observe(due execution.DuePlan, family segment.Family, view execution.RuntimeStateView,
+	mutation execution.StateMutation, class execution.SeriesClass, eventsSent bool) {
 	if round == nil || len(mutation.Points) == 0 {
 		return
 	}
-	planRound := round.planRound(due, mutation.Identity, mutation.RetentionPoints)
+	planRound := round.planRound(due, family, mutation.Identity, mutation.RetentionPoints)
 	if planRound == nil || planRound.retried {
 		return
 	}
@@ -1311,15 +1403,20 @@ func foldSegmentShadowRound(round *segmentShadowRound, due []execution.DuePlan, 
 	}
 	// A due Plan with a book and no series written this round is a round
 	// all of whose members were absent: they close.
+	// Each family on its own: a round whose no-data series were all absent -
+	// none produced, the round not complete - closes the no-data family's
+	// members whatever its real series did.
 	for _, plan := range due {
-		key := shadowKey(plan, plan.StateGeneration)
-		if _, folded := round.plans[key]; folded {
-			continue
-		}
-		if state := round.slot.plans[key]; state != nil && (state.hadMark || state.lost > 0) {
-			round.plans[key] = &segmentShadowPlanRound{due: plan, state: state, interval: state.interval,
-				retention: state.retention, class: observability.SegmentPeriodClass(state.interval),
-				present: map[execution.SeriesIdentityDigest]int64{}, sample: sampleRound(key, round.at, state.interval)}
+		for _, family := range segment.Families() {
+			key := shadowKey(plan, plan.StateGeneration, family)
+			if _, folded := round.plans[key]; folded {
+				continue
+			}
+			if state := round.slot.plans[key]; state != nil && (state.hadMark || state.lost > 0) {
+				round.plans[key] = &segmentShadowPlanRound{due: plan, state: state, interval: state.interval,
+					retention: state.retention, class: observability.SegmentPeriodClass(state.interval),
+					present: map[execution.SeriesIdentityDigest]int64{}, sample: sampleRound(key, round.at, state.interval)}
+			}
 		}
 	}
 	var folded []*segmentFolded
@@ -1328,7 +1425,8 @@ func foldSegmentShadowRound(round *segmentShadowRound, due []execution.DuePlan, 
 			continue
 		}
 		state, class := planRound.state, planRound.class
-		facts.Member(observability.SegmentShadowReset, class, state.lost)
+		family := segmentFamilyLabel(state.key.Family)
+		facts.Member(observability.SegmentShadowReset, class, state.lost, family)
 		state.lost = 0
 		if planRound.retried {
 			// A round of its own, its output landed: counted under its mode -
@@ -1337,8 +1435,8 @@ func foldSegmentShadowRound(round *segmentShadowRound, due []execution.DuePlan, 
 			// Slot that folded before it failed was a round too, counted
 			// once under its own mode: rounds are counted by the attempts that
 			// fold, as the matches are.
-			facts.Round(round.skipMode(planRound), class)
-			facts.Member(observability.SegmentShadowReset, class, int64(state.book.Len()))
+			facts.Round(round.skipMode(planRound), class, family)
+			facts.Member(observability.SegmentShadowReset, class, int64(state.book.Len()), family)
 			state.book, _ = segment.NewBook(nil)
 			state.position, state.fresh = 0, true
 			folded = append(folded, &segmentFolded{state: state, due: planRound.due, mode: round.skipMode(planRound)})
@@ -1355,28 +1453,28 @@ func foldSegmentShadowRound(round *segmentShadowRound, due []execution.DuePlan, 
 		// Every round whose comparisons are folded, by the mode it ran
 		// under: what the matches and the members left are read against. A
 		// replay folds none and is no round.
-		facts.Round(round.skipMode(planRound), class)
+		facts.Round(round.skipMode(planRound), class, family)
 		if planRound.sample {
-			facts.Sample(class)
+			facts.Sample(class, family)
 		}
 		book := state.book
 		for last, tally := range planRound.compared {
 			if last != mark {
-				facts.Outcome(observability.SegmentShadowExceptionShortOfMark, class, planRound.shadowRound(), int64(len(tally.members)))
+				facts.Outcome(observability.SegmentShadowExceptionShortOfMark, class, planRound.shadowRound(), int64(len(tally.members)), family)
 				for _, digest := range tally.members {
 					_ = book.Remove(digest)
 				}
 				continue
 			}
 			for outcome, count := range tally.outcomes {
-				facts.Outcome(outcome, class, planRound.shadowRound(), count)
+				facts.Outcome(outcome, class, planRound.shadowRound(), count, family)
 			}
 			for gate, count := range tally.notSkipped {
 				facts.NotSkip(gate, class, count)
 			}
 		}
 		for exception, digests := range planRound.exceptions {
-			facts.Outcome(exception, class, planRound.shadowRound(), int64(len(digests)))
+			facts.Outcome(exception, class, planRound.shadowRound(), int64(len(digests)), family)
 			for _, digest := range digests {
 				_ = book.Remove(digest)
 			}
@@ -1403,10 +1501,10 @@ func foldSegmentShadowRound(round *segmentShadowRound, due []execution.DuePlan, 
 		var departed []execution.SeriesIdentityDigest
 		for _, digest := range departing {
 			if book.Close(digest, state.position) == nil {
-				facts.Member(observability.SegmentShadowDeparted, class, 1)
+				facts.Member(observability.SegmentShadowDeparted, class, 1, family)
 				// A member departing from a page gone half its lifetime
 				// unrenewed, in a round that skips, is renewed whole too.
-				if renewed || (round.skip && state.onFallback(digest)) {
+				if renewed || (round.familySkips(state.key.Family) && state.onFallback(digest)) {
 					departed = append(departed, digest)
 				}
 			}
@@ -1420,12 +1518,12 @@ func foldSegmentShadowRound(round *segmentShadowRound, due []execution.DuePlan, 
 		}
 		for _, digest := range joins {
 			if book.Join(digest, mark) == nil {
-				facts.Member(observability.SegmentShadowJoined, class, 1)
+				facts.Member(observability.SegmentShadowJoined, class, 1, family)
 			}
 		}
 		reach := 2*int64(planRound.retention)*planRound.interval + segmentShadowHorizon
 		if expired, err := book.Expire(mark - reach); err == nil {
-			facts.Member(observability.SegmentShadowExpired, class, int64(expired))
+			facts.Member(observability.SegmentShadowExpired, class, int64(expired), family)
 		}
 		folded = append(folded, &segmentFolded{state: state, due: planRound.due, position: mark, skipped: planRound.skipped > 0,
 			departed: departed, mode: round.skipMode(planRound), left: planRound.skipped})
@@ -1553,12 +1651,18 @@ func settleSegmentShadow(ctx context.Context, store segment.Store, request execu
 }
 
 // segmentPlanName is what a Plan's new pages' renewal times are staggered
-// by: a piece of a split strategy's with its matcher digest, a Plan not
-// split's as it always was.
+// by, and its piece's sampled round placed by (sampleRound): a piece of a
+// split strategy's with its matcher digest, a Plan not split's as it always
+// was; the no-data family's with its family after, so the real family's
+// name - and with it the renewals its marks hold and its sampled day - is
+// the one it was before there were two (014 next9 ⑥).
 func segmentPlanName(key segment.PlanKey) string {
 	name := fmt.Sprintf("%s/%s/%s/%s", key.Plan.TenantID, key.Plan.BusinessID, key.Plan.StrategyID, key.Generation)
 	if !key.Shard.IsZero() {
 		name += "/" + key.Shard.MatcherDigest
+	}
+	if key.Family != segment.FamilyReal {
+		name += "/" + string(key.Family)
 	}
 	return name
 }

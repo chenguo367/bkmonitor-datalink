@@ -35,7 +35,7 @@ func runtimeExpiredZeroBridge(t *testing.T) (*productionReadHolds, *cutoverStall
 		t.Fatal("delay cutover did not create B")
 	}
 	f.queryGroup = next
-	f.runner = settledRunner(f.bundle, next)
+	f.runner = settledRunner(t, f.bundle, next)
 	f.session = f.runner.(*settlingRuntime).phaseTwoQueryGroupRuntime.(*productionPhaseTwoQueryGroup).session
 	_ = runOneSlotFull(t, f)
 	p := f.progress(ctx)

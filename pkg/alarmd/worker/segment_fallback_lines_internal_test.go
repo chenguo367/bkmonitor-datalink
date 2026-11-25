@@ -73,7 +73,7 @@ func (rig *fallbackRig) round(step time.Duration, present []int) {
 	request := shadowRequest(execution.OperationNormal, at)
 	round := newSegmentShadowRound(request, shadowSlot(rig.t, rig.store, request, rig.due))
 	for _, series := range rounds {
-		round.observe(rig.due, series.view, series.write, series.class, series.eventsSent)
+		round.observe(rig.due, segment.FamilyReal, series.view, series.write, series.class, series.eventsSent)
 	}
 	rig.coordinator.foldSegmentShadow(context.Background(), request, round, []execution.DuePlan{rig.due}, nil)
 	rig.holdR()

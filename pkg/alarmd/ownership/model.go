@@ -384,6 +384,22 @@ func SegmentSkipAdmission(workers []WorkerRegistration) ShardSplitGate {
 	return capabilityGate(workers, CapabilitySegmentSkip)
 }
 
+// CapabilitySegmentSkipNoData is the stable-segment skip of the no-data
+// family (design 014 next9 ⑥): a worker that declares it keeps the synthetic
+// series of a Plan's no-data view in segments of their own and reads them
+// through those when a Slot of it leaves their writes out, and follows the
+// Assignment's segment_skip_no_data word. A Leader sets that word only beside
+// the segment_skip word and only while every ready worker declares this, and
+// takes it back with that word, or when one that does not joins: a worker
+// without it reads every synthetic series' own key.
+const CapabilitySegmentSkipNoData = "segment-skip-no-data.v1"
+
+// SegmentSkipNoDataAdmission decides the no-data family's skip gate for a
+// ready set, the way SegmentSkipAdmission decides the skip's.
+func SegmentSkipNoDataAdmission(workers []WorkerRegistration) ShardSplitGate {
+	return capabilityGate(workers, CapabilitySegmentSkipNoData)
+}
+
 // Declares reports whether the registration names the capability.
 func (worker WorkerRegistration) Declares(capability string) bool {
 	for _, declared := range worker.Capabilities {
@@ -478,6 +494,11 @@ type AssignmentRecord struct {
 	// not know the word and so never takes it back - is ignored. Zero is no
 	// skip.
 	SegmentSkip uint64
+	// SegmentSkipNoData is SegmentSkip's word for the no-data family's
+	// synthetic series (CapabilitySegmentSkipNoData), set and followed the
+	// same way, by the same epoch; a worker leaves their writes out only
+	// while it follows both words. Zero is no skip of them.
+	SegmentSkipNoData uint64
 	// ObservedAt is the server instant a fence check read the record at, on
 	// the clock EffectiveAt is on; zero for a record read any other way.
 	ObservedAt time.Time
@@ -530,6 +551,10 @@ type AssignmentDecision struct {
 	// the timeline revision is.
 	SetSegmentSkip      bool
 	WithdrawSegmentSkip bool
+	// SetSegmentSkipNoData and WithdrawSegmentSkipNoData are the same for
+	// the record's SegmentSkipNoData.
+	SetSegmentSkipNoData      bool
+	WithdrawSegmentSkipNoData bool
 }
 
 func (decision AssignmentDecision) Validate() error {
@@ -542,6 +567,9 @@ func (decision AssignmentDecision) Validate() error {
 	}
 	if decision.SetSegmentSkip && decision.WithdrawSegmentSkip {
 		return errors.New("alarmd ownership: an Assignment decision cannot both set and withdraw the segment skip")
+	}
+	if decision.SetSegmentSkipNoData && decision.WithdrawSegmentSkipNoData {
+		return errors.New("alarmd ownership: an Assignment decision cannot both set and withdraw the no-data segment skip")
 	}
 	return nil
 }

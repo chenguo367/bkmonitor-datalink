@@ -439,7 +439,7 @@ func runGroupedEventCount(t *testing.T, run eventSpanCase) eventSpanRounds {
 		seen := len(observations)
 		mu.Unlock()
 		clock.Store(base + int64(current)*period + 1)
-		if err := runScheduledOnceSettled(ctx, bundle); err != nil {
+		if err := runScheduledOnceSettled(t, ctx, bundle); err != nil {
 			t.Fatalf("round %d: %v", current, err)
 		}
 		if run.openAlert {
@@ -844,7 +844,7 @@ func TestAnUngroupedEventCountAnsweredWithNothingIsNoDataNotQuiet(t *testing.T) 
 // it owns from the records - and reads the object back from its own API.
 func restoredRowKind(t *testing.T, ctx context.Context, bundle *phaseTwoWorkerBundle) string {
 	t.Helper()
-	if err := settleExecutableView(ctx, bundle, 10*time.Second); err != nil {
+	if err := settleExecutableView(t, ctx, bundle, settleBound); err != nil {
 		t.Fatal(err)
 	}
 	deadline := testwait.Deadline(t)

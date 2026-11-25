@@ -23,3 +23,8 @@ func SegmentCoverageAfterFold() uint64 { return segmentCoverageAfterFold.Load() 
 func SegmentSampledRound(plan execution.PlanIdentity, generation execution.StateGeneration, at, interval int64) bool {
 	return sampleRound(segment.PlanKey{Plan: plan, Generation: generation}, at, interval)
 }
+
+// SegmentSampledRoundOf is SegmentSampledRound of the family's piece.
+func SegmentSampledRoundOf(plan execution.PlanIdentity, generation execution.StateGeneration, family segment.Family, at, interval int64) bool {
+	return sampleRound(segment.PlanKey{Plan: plan, Generation: generation, Family: family}, at, interval)
+}

@@ -80,7 +80,7 @@ func startLateTakeoverReplay(t *testing.T) *lateReplay {
 	arrival := frozenDeadline + (150 * time.Second).Milliseconds()
 	fixture.clock.Store(arrival)
 	ran := make(chan error, 1)
-	go func() { ran <- runScheduledOnceSettled(context.Background(), fixture.bundle) }()
+	go func() { ran <- runScheduledOnceSettled(t, context.Background(), fixture.bundle) }()
 	select {
 	case <-entered:
 	case <-testwait.Expired(t):
@@ -343,7 +343,7 @@ func TestAnExecutionInsideItsCommitIsNotDeclinedAndItsStateLands(t *testing.T) {
 
 	fixture.clock.Store(latestRoundReadAtMillis(fixture.bundle, fixture.evaluationAt(1), fixture.interval))
 	ran := make(chan error, 1)
-	go func() { ran <- runScheduledOnceSettled(context.Background(), fixture.bundle) }()
+	go func() { ran <- runScheduledOnceSettled(t, context.Background(), fixture.bundle) }()
 	select {
 	case <-entered:
 	case <-testwait.Expired(t):
@@ -404,7 +404,7 @@ func TestARolloverWithSeveralUnfinishedSlotsDeclinesNoReplay(t *testing.T) {
 	var unfinished map[string]unfinishedProgressSlot
 	for round := int64(1); round <= 3 && len(unfinished) < 2; round++ {
 		fixture.clock.Store(latestRoundReadAtMillis(fixture.bundle, fixture.evaluationAt(round), fixture.interval))
-		if err := runScheduledOnceSettled(context.Background(), fixture.bundle); err != nil {
+		if err := runScheduledOnceSettled(t, context.Background(), fixture.bundle); err != nil {
 			t.Fatalf("worker 0's pass of round %d: %v", round, err)
 		}
 		unfinished = fixture.unfinishedSlotsByProgress()
@@ -432,7 +432,7 @@ func TestARolloverWithSeveralUnfinishedSlotsDeclinesNoReplay(t *testing.T) {
 		return false
 	})
 	ran := make(chan error, 1)
-	go func() { ran <- runScheduledOnceSettled(context.Background(), fixture.bundle) }()
+	go func() { ran <- runScheduledOnceSettled(t, context.Background(), fixture.bundle) }()
 	sweeps := 0
 sweep:
 	for {
@@ -557,7 +557,7 @@ func (fixture *lifecycleFixture) addSecondStrategy() {
 		fixture.bundle.mu.RUnlock()
 		settled := len(groups) == 2
 		for _, group := range groups {
-			settled = settled && settledRunner(fixture.bundle, group) != nil
+			settled = settled && settledRunner(t, fixture.bundle, group) != nil
 		}
 		if settled {
 			return

@@ -285,11 +285,23 @@ Labels: `version`, `commit`, `schema_version`
 
 alarmd build information.
 
+## alarmd_canonical_encoder_checked_total
+
+Labels: `encoder`
+
+Calls of a direct encoder of the canonical form checked against the canonical encoding, by encoder (as canonical_encoder_divergences_total): what that count is out of.
+
+## alarmd_canonical_encoder_divergences_total
+
+Labels: `encoder`
+
+Calls of a direct encoder of the canonical form whose bytes differed from the canonical encoding's, by encoder: closed_type, a closed type's plan; dimension_fields, a dimension identity's fields; record_parts, a series' shared record parts; scalar, a number or literal a query answered with. One call in 1024 of each is checked (record_parts: one series digest in 4096). Should be 0. Not 0 is an encoder that gave some input other bytes than the canonical encoding does: this process has turned it off and takes the canonical encoding since, and the digests it gave before - State mutation digests, the skip's decisions, event identities - may be wrong. The canonical_encoder line names the encoder, the Go type, what was compared and the field path at the first byte that differs: the encoder is fixed there. A dimension_fields or scalar difference is named, field and all, on that encoder's own line; one in record_parts' own map and string writes is said only on the record_parts line, which compares digests (compared=digest): the series digest differs as a whole, no path.
+
 ## alarmd_canonical_encoding_calls_total
 
 Labels: `outcome`
 
-Canonical encodings by what the single-pass form did with them: served, or declined back to the established path.
+Canonical encodings by what answered them: planned, a closed type's value written from its type's plan; served, the single-pass form; or declined, by it back to the established path.
 
 ## alarmd_canonical_encoding_records_shadow_total
 
@@ -2129,6 +2141,14 @@ Labels: `cohort`, `completion_kind`
 
 Duration of the committed executor call, excluding SlotSource preparation and earlier attempts, by the completion kind it committed.
 
+## alarmd_slot_apply_overlap_seconds_total
+
+Seconds of writes completed Slots applied window by window did not wait for: each Slot's apply goroutine's busy time less what its own goroutine waited on it, apply_millis less apply_wait_millis on its completion row (SlotTiming.ApplyOverlap), summed as each Slot completes - what the window pipeline took off the Slots' time. It is no phase of the Slot's own partition: these writes ran beside its phases, so it adds to none of them, and with alarmd_slot_apply_wait_seconds_total it is the apply goroutines' busy time. A Slot applied whole adds nothing here; a Slot that fails, or is retried, adds nothing.
+
+## alarmd_slot_apply_wait_seconds_total
+
+Seconds completed Slots applied window by window spent on their own goroutine waiting on their apply goroutine - to hand it a window, to drain, for the last window and the tail - summed as each Slot completes: its completion row's apply_wait_millis (SlotTiming.ApplyWait), a phase of the Slot's own partition, whose phases, unattributed among them, add up to its slot_millis. A Slot applied whole writes on its own goroutine and adds nothing here, its writes in its apply_millis; a Slot that fails, or is retried, adds nothing. Its rate over the rate of alarmd_slot_operation_duration_seconds_sum{stage="execute"}, which counts every attempt's execute, is a lower bound of the share of Slot time spent so.
+
 ## alarmd_slot_begin_total
 
 Labels: `result`
@@ -2162,6 +2182,10 @@ Slot attempts whose execution took half their Query Group's period or longer - n
 Labels: `kind`, `cause`
 
 Slots given up without a query, by the kind their completion committed under (GAP_SKIPPED or SNAPSHOT_UNAVAILABLE) and its cause, counted in Slots once the commit giving them up applied: a range by the Slots it covers, a Slot alone by one. Each commit is one slot_skipped line with its skip_count. EXPIRED_REPLAY is a Query Group that fell behind; QUERY_COOLDOWN is the degraded pool's gap, Slots whose queries did not run because the pool held them, given up at the end of the hold. The two are different populations and are read apart, never added. progress_completion_causes_total counts commits rather than Slots and does not carry these kinds. Every cell exists from the start; a cause outside the list is other.
+
+## alarmd_slot_land_seconds_total
+
+Seconds completed Slots applied window by window spent on their own goroutine taking landed windows back - what each held given back, its inputs let go - summed as each Slot completes: its completion row's land_millis (SlotTiming.Land), a phase of the Slot's own partition beside apply_wait (alarmd_slot_apply_wait_seconds_total). A Slot applied whole adds nothing here; a Slot that fails, or is retried, adds nothing.
 
 ## alarmd_slot_not_committed_total
 
@@ -2485,21 +2509,21 @@ The renewals of a Plan's member pages due - a quarter of the shorter of the life
 
 ## alarmd_state_segment_rounds_total
 
-Labels: `mode`, `period_class`
+Labels: `mode`, `period_class`, `family`
 
-Plans' rounds of Slots whose output landed, by the skip mode each ran under and the Plan's period class. The modes: off (the Slot follows no segment skip word), write_failed, operation (neither a normal Slot nor a replay short of time), stopped, retried (an attempt that found the Plan's series applied in part and started its shadow over: it compares nothing), sampled - every member written whole - and skip, members compared a match left unwritten: the rounds state_segment_match_not_skipped_total and the members left are read against. Counted by the attempts that fold, as the matches are; a replay of a round already folded is none.
+Plans' rounds of Slots whose output landed, by the skip mode each ran under and the Plan's period class. The modes: off (the Slot follows no segment skip word), write_failed, operation (neither a normal Slot nor a replay short of time), stopped, retried (an attempt that found the Plan's series applied in part and started its shadow over: it compares nothing), sampled - every member written whole - and skip, members compared a match left unwritten: the rounds state_segment_match_not_skipped_total and the members left are read against. Counted by the attempts that fold, as the matches are; a replay of a round already folded is none. family: real or no_data, as state_segment_shadow_total; off for no_data is also a Slot that follows the skip word and not the no-data family's.
 
 ## alarmd_state_segment_sample_total
 
-Labels: `period_class`
+Labels: `period_class`, `family`
 
-Plans' rounds that were their piece's sampled round of the day (014 B3 9.2), whether the round skips or not, by the Plan's period class: about one a day for each piece of each Plan, every round for a Plan run once a day or less often. In a sampled round no member is left unwritten - every one is written whole and compared, its outcomes under state_segment_shadow_total{round="sampled"}. Flat while Plans run is a sampled round that never comes.
+Plans' rounds that were their piece's sampled round of the day (014 B3 9.2), whether the round skips or not, by the Plan's period class: about one a day for each piece of each Plan, every round for a Plan run once a day or less often. In a sampled round no member is left unwritten - every one is written whole and compared, its outcomes under state_segment_shadow_total{round="sampled"}. Flat while Plans run is a sampled round that never comes. family: real or no_data, each family's piece sampled on a day of its own.
 
 ## alarmd_state_segment_shadow_members_total
 
-Labels: `event`, `period_class`
+Labels: `event`, `period_class`, `family`
 
-What the shadow of a Plan's stable segments did with its pages' membership, by event and the Plan's period class. joined: a series written and decided steady and normal at the mark. departed: an open member absent from the round, closed at the mark before. expired: a closed member past its window and its key's life. reset: a Plan's shadow started over, its members counted - a retry of a Slot an earlier attempt had written some series of leaves the round's membership unknown.
+What the shadow of a Plan's stable segments did with its pages' membership, by event and the Plan's period class. joined: a series written and decided steady and normal at the mark. departed: an open member absent from the round, closed at the mark before. expired: a closed member past its window and its key's life. reset: a Plan's shadow started over, its members counted - a retry of a Slot an earlier attempt had written some series of leaves the round's membership unknown. family: real or no_data, as state_segment_shadow_total.
 
 ## alarmd_state_segment_shadow_page_bytes_total
 
@@ -2521,9 +2545,9 @@ Slots run without the shadow of their Plans' stable segments, their State writte
 
 ## alarmd_state_segment_shadow_total
 
-Labels: `outcome`, `period_class`, `round`
+Labels: `outcome`, `period_class`, `round`, `family`
 
-Open members of a Plan's stable segments present in a round, as the shadow kept in process compared them - every State still written - by outcome and the Plan's period class (lt_1m, 1m, le_5m, le_1h, le_1d, gt_1d). match: the points the segment makes and the Level state it reads as are what the round wrote. exception_*: a member the skip would have written whole and taken off its page, by the first reason - events (it sent events), unsteady (not decided steady and normal with its stored Levels unchanged), level (a Level not FULL), off_grid (its points off the mark's grid), returned (a closed member back), short_of_mark (its last point short of the round's mark): read exception_events for whether quiet members send events. mismatch_*: a member the skip would have left unwritten, once each field the made read differs in from the write: a skip would read it otherwise than written. mismatch_unmade: the points could not be made. round: sampled, the Plan's piece's sampled round of the day (014 B3 9.2), every member written whole and compared; normal, any other. Zero mismatches over every period class, read as sum without(round) - series from a process before the label carry none and sum the same - is the shadow stage's evidence; with members skipped, mismatch_* in round="sampled" is the third stage's alarm reading.
+Open members of a Plan's stable segments present in a round, as the shadow kept in process compared them - every State still written - by outcome and the Plan's period class (lt_1m, 1m, le_5m, le_1h, le_1d, gt_1d). match: the points the segment makes and the Level state it reads as are what the round wrote. exception_*: a member the skip would have written whole and taken off its page, by the first reason - events (it sent events), unsteady (not decided steady and normal with its stored Levels unchanged), level (a Level not FULL), off_grid (its points off the mark's grid), returned (a closed member back), short_of_mark (its last point short of the round's mark): read exception_events for whether quiet members send events. mismatch_*: a member the skip would have left unwritten, once each field the made read differs in from the write: a skip would read it otherwise than written. mismatch_unmade: the points could not be made. round: sampled, the Plan's piece's sampled round of the day (014 B3 9.2), every member written whole and compared; normal, any other. Zero mismatches over every period class, read as sum without(round) - series from a process before the label carry none and sum the same - is the shadow stage's evidence; with members skipped, mismatch_* in round="sampled" is the third stage's alarm reading. family: real, a Plan's real series, or no_data, the synthetic series of its no-data view in segments of their own (014 next9 6); read round="sampled",family="no_data" for the no-data family's alarm.
 
 ## alarmd_state_segment_skip_flag_ignored_total
 
@@ -2897,7 +2921,7 @@ One per held gap scope per round that read it, by status, by why it is held, and
 
 Labels: `outcome`
 
-Slots by what they did with their Query Group's shape, the leaves a slice that ran out of time for its size was split into, which the next Slot starts in: started, read in it; kept, a slice split for its time kept in it; merged, its last kept split taken back after three quick rounds; voided_revision, voided_dimensions, voided_max_leaves, dropped as the query revision or the dimensions changed or it grew past a starting tree's leaves; refused_not_a_leaf, refused_not_a_partition, refused_max_leaves, dropped as its leaves were not a partition of every value. A dropped shape's Slot starts in slices counted anew. evicted_idle counts the Query Groups whose slice memory, shape or none, was dropped for no Slot started on this replica for ten of their periods and ten minutes at least. A slice read whole past a slice's series is kept split for the next Slot: refused_max_leaves (as above), refused_condition_budget, refused_single_value (its sample told none of its series apart) and refused_split_error count such a split that kept nothing; merge_refused a split taken back whose shape would not rebuild without it, the shape kept as it was rather than dropped. Two count a split kept for a slice's size that did keep: sized_split, a slice the Slot started in let go for its size, its split kept for the next Slot to start in its parts (the completion row's input_slice_start_discarded; a Query Group that keeps paying it every round is what the split exists to end); sized_kept, a slice read whole past a slice's series kept split for the next Slot. Which Query Group is not a label here.
+Slots by what they did with their Query Group's shape, the leaves a slice that ran out of time for its size was split into, which the next Slot starts in: started, read in it; kept, a slice split for its time kept in it; merged, a kept split taken back: its last split kept for its time, after three rounds in a row that read each of its leaves whole under half a slice's target, or its last split kept for a slice's size (sized_split, sized_kept), after three rounds in a row whose leaves of it together held at most half a slice's series and half the input a slice may retain; voided_revision, voided_dimensions, voided_max_leaves, dropped as the query revision or the dimensions changed or it grew past a starting tree's leaves; voided_max_leaves also counts, on the next Slot to complete, the shape of a Slot started in it and refused INPUT_SLICE_LEAVES_EXHAUSTED, dropped there so that the next Slot starts in slices counted rather than in the same leaves to be refused again; refused_not_a_leaf, refused_not_a_partition, refused_max_leaves, dropped as its leaves were not a partition of every value. A dropped shape's Slot starts in slices counted anew. evicted_idle counts the Query Groups whose slice memory, shape or none, was dropped for no Slot started on this replica for ten of their periods and ten minutes at least. A slice read whole past a slice's series is kept split for the next Slot: refused_max_leaves (as above), refused_condition_budget, refused_single_value (its sample told none of its series apart) and refused_split_error count such a split that kept nothing; merge_refused a split taken back whose shape would not rebuild without it, the shape kept as it was rather than dropped. Two count a split kept for a slice's size that did keep: sized_split, a slice the Slot started in let go for its size, its split kept for the next Slot to start in its parts (the completion row's input_slice_start_discarded; a Query Group that keeps paying it every round is what the split exists to end); sized_kept, a slice read whole past a slice's series kept split for the next Slot. Which Query Group is not a label here.
 
 ## alarmd_worker_input_slice_timeouts_total
 

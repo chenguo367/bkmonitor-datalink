@@ -126,7 +126,7 @@ func TestAnAlertTheLastOwnerOpenedIsEndedByTheNextOwnerAfterAHandover(t *testing
 		t.Helper()
 		fixture.placement.pin(to.id, queryGroup)
 		fixture.reconcile("the move to "+to.id, func() bool {
-			return !from.holds()[queryGroup] && to.holds()[queryGroup] && settledRunner(to.bundle, queryGroup) != nil
+			return !from.holds()[queryGroup] && to.holds()[queryGroup] && settledRunner(t, to.bundle, queryGroup) != nil
 		})
 	}
 

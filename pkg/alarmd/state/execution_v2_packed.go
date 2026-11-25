@@ -229,6 +229,30 @@ func seriesRecordIDs(series string) func(int64) (string, error) {
 	}
 }
 
+// seriesRecordIDMatches is seriesRecordIDs for a caller that only compares:
+// whether the id the series and sourceTime derive is id, derived into one
+// buffer of the series and compared as bytes, no string made a point (014
+// next9 ⑤ R). Refused as seriesRecordIDs refuses.
+func seriesRecordIDMatches(series string) func(sourceTime int64, id string) (bool, error) {
+	var deriver *contract.RecordIDDeriverV2
+	var buffer []byte
+	return func(sourceTime int64, id string) (bool, error) {
+		if deriver == nil {
+			built, err := contract.NewRecordIDDeriverV2(series)
+			if err != nil {
+				return false, err
+			}
+			deriver = built
+		}
+		derived, err := deriver.AppendDerive(buffer[:0], sourceTime)
+		if err != nil {
+			return false, err
+		}
+		buffer = derived
+		return string(derived) == id, nil
+	}
+}
+
 // levelFingerprints picks each Level's one detect fingerprint out of the points
 // and refuses a mutation whose points disagree with each other.
 //
@@ -358,7 +382,7 @@ func encodeRuntimePackedParts(mutation execution.StateMutation, revision uint64)
 	previous := int64(0)
 	pointIndex := -1
 	pointCount := 0
-	derive := seriesRecordIDs(string(mutation.Identity.SeriesIdentityDigest))
+	derives := seriesRecordIDMatches(string(mutation.Identity.SeriesIdentityDigest))
 	if err := walkRecordPoints(mutation, func(point execution.StateHistoryPoint) error {
 		pointIndex++
 		pointCount++
@@ -368,11 +392,11 @@ func encodeRuntimePackedParts(mutation execution.StateMutation, revision uint64)
 		// The id is not stored. It is checked here against the derivation every
 		// producer uses, so a producer that stops deriving it is refused where
 		// it writes rather than read back as a different record later.
-		expected, deriveErr := derive(point.SourceTime)
+		derived, deriveErr := derives(point.SourceTime, point.RecordID)
 		if deriveErr != nil {
 			return packedRefusal(PackedRuleRecordIDUnderivable, "derive record id at %d: %v", point.SourceTime, deriveErr)
 		}
-		if point.RecordID != expected {
+		if !derived {
 			// A point this round produced must derive: that is the check that
 			// catches a producer which has stopped deriving, and it has to
 			// refuse where the write happens or the record reads back as a

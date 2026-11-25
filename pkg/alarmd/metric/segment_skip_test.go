@@ -52,37 +52,54 @@ func TestASegmentSkipWordNotFollowedIsCountedByReason(t *testing.T) {
 func TestTheSampledRoundsAndTheShadowsRoundsAreCountedEveryCellFromTheStart(t *testing.T) {
 	recorder := NewRecorder(BuildInfo{Version: "0.7.9999", Commit: "0123456789abcdef", SchemaVersion: "v3"})
 	for _, class := range observability.AllSegmentPeriodClasses() {
-		if samples := redisSamples(t, recorder, "alarmd_state_segment_sample_total", map[string]string{"period_class": class}); len(samples) != 1 ||
-			samples[0].GetCounter().GetValue() != 0 {
-			t.Fatalf("sample cell %s: %v, want one at zero", class, samples)
-		}
-		for _, round := range observability.AllSegmentShadowRounds() {
-			if samples := redisSamples(t, recorder, "alarmd_state_segment_shadow_total", map[string]string{"period_class": class,
-				"outcome": string(observability.SegmentShadowMatch), "round": round}); len(samples) != 1 || samples[0].GetCounter().GetValue() != 0 {
-				t.Fatalf("shadow cell %s %s: %v, want one at zero", class, round, samples)
+		for _, family := range observability.AllSegmentFamilies() {
+			if samples := redisSamples(t, recorder, "alarmd_state_segment_sample_total", map[string]string{"period_class": class,
+				"family": family}); len(samples) != 1 || samples[0].GetCounter().GetValue() != 0 {
+				t.Fatalf("sample cell %s %s: %v, want one at zero", class, family, samples)
+			}
+			for _, round := range observability.AllSegmentShadowRounds() {
+				if samples := redisSamples(t, recorder, "alarmd_state_segment_shadow_total", map[string]string{"period_class": class,
+					"outcome": string(observability.SegmentShadowMatch), "round": round, "family": family}); len(samples) != 1 ||
+					samples[0].GetCounter().GetValue() != 0 {
+					t.Fatalf("shadow cell %s %s %s: %v, want one at zero", class, round, family, samples)
+				}
 			}
 		}
 	}
+	// The no-data family's own cells (014 next9 6), a family not one counted
+	// as real.
 	var facts observability.SegmentShadowFacts
-	facts.Sample(observability.SegmentPeriodMinute)
-	facts.Outcome(observability.SegmentShadowMatch, observability.SegmentPeriodMinute, observability.SegmentRoundSampled, 3)
-	facts.Outcome(observability.SegmentShadowMatch, observability.SegmentPeriodMinute, "not_a_round", 2)
+	facts.Sample(observability.SegmentPeriodMinute, observability.SegmentFamilyReal)
+	facts.Sample(observability.SegmentPeriodMinute, observability.SegmentFamilyNoData)
+	facts.Outcome(observability.SegmentShadowMatch, observability.SegmentPeriodMinute, observability.SegmentRoundSampled, 3, observability.SegmentFamilyReal)
+	facts.Outcome(observability.SegmentShadowMatch, observability.SegmentPeriodMinute, "not_a_round", 2, observability.SegmentFamilyReal)
+	facts.Outcome(observability.SegmentShadowMatch, observability.SegmentPeriodMinute, observability.SegmentRoundSampled, 5, observability.SegmentFamilyNoData)
+	facts.Outcome(observability.SegmentShadowMatch, observability.SegmentPeriodMinute, observability.SegmentRoundSampled, 7, "not_a_family")
 	recorder.Observe(context.Background(), observability.NormalizeObservation(observability.Observation{
 		Component: observability.ComponentState, Stage: observability.StageMutationCompared,
 		Result: observability.ResultSuccess, Operation: observability.OperationNormal, SegmentShadow: &facts,
 	}))
-	if samples := redisSamples(t, recorder, "alarmd_state_segment_sample_total", map[string]string{"period_class": observability.SegmentPeriodMinute}); len(samples) != 1 ||
-		samples[0].GetCounter().GetValue() != 1 {
-		t.Fatalf("the sample counted %v, want one", samples)
+	for _, family := range observability.AllSegmentFamilies() {
+		if samples := redisSamples(t, recorder, "alarmd_state_segment_sample_total", map[string]string{"period_class": observability.SegmentPeriodMinute,
+			"family": family}); len(samples) != 1 || samples[0].GetCounter().GetValue() != 1 {
+			t.Fatalf("the %s sample counted %v, want one", family, samples)
+		}
 	}
-	for round, want := range map[string]float64{observability.SegmentRoundSampled: 3, observability.SegmentRoundNormal: 2} {
+	for cell, want := range map[[2]string]float64{
+		{observability.SegmentRoundSampled, observability.SegmentFamilyReal}: 3 + 7, {observability.SegmentRoundNormal, observability.SegmentFamilyReal}: 2,
+		{observability.SegmentRoundSampled, observability.SegmentFamilyNoData}: 5, {observability.SegmentRoundNormal, observability.SegmentFamilyNoData}: 0,
+	} {
 		if samples := redisSamples(t, recorder, "alarmd_state_segment_shadow_total", map[string]string{"period_class": observability.SegmentPeriodMinute,
-			"outcome": string(observability.SegmentShadowMatch), "round": round}); len(samples) != 1 || samples[0].GetCounter().GetValue() != want {
-			t.Fatalf("round %s: %v, want %v", round, samples, want)
+			"outcome": string(observability.SegmentShadowMatch), "round": cell[0], "family": cell[1]}); len(samples) != 1 ||
+			samples[0].GetCounter().GetValue() != want {
+			t.Fatalf("round %s family %s: %v, want %v", cell[0], cell[1], samples, want)
 		}
 	}
 	if samples := redisSamples(t, recorder, "alarmd_state_segment_shadow_total", map[string]string{"round": "not_a_round"}); len(samples) != 0 {
 		t.Fatalf("a round outside the list made a cell: %v", samples)
+	}
+	if samples := redisSamples(t, recorder, "alarmd_state_segment_shadow_total", map[string]string{"family": "not_a_family"}); len(samples) != 0 {
+		t.Fatalf("a family outside the list made a cell: %v", samples)
 	}
 }
 
@@ -175,17 +192,20 @@ func TestTheMatchesNotSkippedAndTheRoundsAreCountedEveryCellFromTheStart(t *test
 			}
 		}
 		for _, mode := range segment.SkipModes() {
-			if got := cell("alarmd_state_segment_rounds_total", map[string]string{"mode": mode, "period_class": class}); got != 0 {
-				t.Fatalf("mode %s %s starts at %v", mode, class, got)
+			for _, family := range observability.AllSegmentFamilies() {
+				if got := cell("alarmd_state_segment_rounds_total", map[string]string{"mode": mode, "period_class": class, "family": family}); got != 0 {
+					t.Fatalf("mode %s %s %s starts at %v", mode, class, family, got)
+				}
 			}
 		}
 	}
 	var facts observability.SegmentShadowFacts
 	facts.NotSkip(observability.SegmentNotSkippedSampled, observability.SegmentPeriodClass(60), 3)
 	facts.NotSkip("not_a_gate", observability.SegmentPeriodClass(60), 2)
-	facts.Round(segment.SkipModeSkip, observability.SegmentPeriodClass(60))
-	facts.Round(segment.SkipModeSkip, observability.SegmentPeriodClass(60))
-	facts.Round("not_a_mode", observability.SegmentPeriodClass(60))
+	facts.Round(segment.SkipModeSkip, observability.SegmentPeriodClass(60), observability.SegmentFamilyReal)
+	facts.Round(segment.SkipModeSkip, observability.SegmentPeriodClass(60), observability.SegmentFamilyReal)
+	facts.Round(segment.SkipModeSkip, observability.SegmentPeriodClass(60), observability.SegmentFamilyNoData)
+	facts.Round("not_a_mode", observability.SegmentPeriodClass(60), observability.SegmentFamilyReal)
 	recorder.Observe(context.Background(), observability.NormalizeObservation(observability.Observation{
 		Component: observability.ComponentState, Stage: observability.StageMutationCompared,
 		Result: observability.ResultSuccess, Operation: observability.OperationNormal, SegmentShadow: &facts,
@@ -197,8 +217,10 @@ func TestTheMatchesNotSkippedAndTheRoundsAreCountedEveryCellFromTheStart(t *test
 			t.Fatalf("gate %s: %v, want %v", gate, got, want)
 		}
 	}
-	if got := cell("alarmd_state_segment_rounds_total", map[string]string{"mode": segment.SkipModeSkip, "period_class": minute}); got != 2 {
-		t.Fatalf("rounds skip: %v, want 2", got)
+	for family, want := range map[string]float64{observability.SegmentFamilyReal: 2, observability.SegmentFamilyNoData: 1} {
+		if got := cell("alarmd_state_segment_rounds_total", map[string]string{"mode": segment.SkipModeSkip, "period_class": minute, "family": family}); got != want {
+			t.Fatalf("rounds skip %s: %v, want %v", family, got, want)
+		}
 	}
 	if samples := redisSamples(t, recorder, "alarmd_state_segment_rounds_total", map[string]string{"mode": "not_a_mode"}); len(samples) != 0 {
 		t.Fatalf("a mode outside the list made a cell: %v", samples)

@@ -78,7 +78,7 @@ func TestARoundThatMeetsAnUnreadableTimelineNamesItOnTheRegistration(t *testing.
 	}
 	round := func(want []string, step string) {
 		t.Helper()
-		if err := runScheduledOnceSettled(context.Background(), bundle); err != nil {
+		if err := runScheduledOnceSettled(t, context.Background(), bundle); err != nil {
 			t.Fatal(err)
 		}
 		if err := bundle.register(context.Background(), ownership.WorkerReady); err != nil {
@@ -115,7 +115,7 @@ func TestTheUnreadableTimelineNamesAreBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = bundle.Shutdown(context.Background()) }()
-	if err := runScheduledOnceSettled(context.Background(), bundle); err != nil {
+	if err := runScheduledOnceSettled(t, context.Background(), bundle); err != nil {
 		t.Fatal(err)
 	}
 	names, total := bundle.unreadableTimelinesRegistration()

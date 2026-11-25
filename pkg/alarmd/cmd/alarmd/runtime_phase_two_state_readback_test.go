@@ -44,20 +44,44 @@ func TestAStableMemberItsRoundsLeaveUnwrittenIsServedFromTheCacheRoundAfterRound
 		}
 		return sum
 	}
-	for _, queryGroup := range full.worker.ownedQueryGroups() {
-		full.worker.dependencies.DropStateCache(queryGroup)
+	// Let go and read back again, past the day's sampled round should the
+	// round meet it: it writes its member whole and reads it back besides.
+	// Twice again at most - the round is once a day; a build that samples
+	// every round fails here rather than spinning.
+	var kept, absent float64
+	for tries, sampled := 0, -1.0; sampled != full.sampled(); tries++ {
+		if tries > 2 {
+			t.Fatalf("the round after the cache was let go ran as the day's sampled round %d times running, "+
+				"want one at most: a sampled round is once a day", tries)
+		}
+		for _, queryGroup := range full.worker.ownedQueryGroups() {
+			full.worker.dependencies.DropStateCache(queryGroup)
+		}
+		kept, absent = cell("alarmd_state_cache_readback_inserted_total", "result", state.StateCacheReadbackKept),
+			cell("alarmd_state_cache_fallback_mget_total", "reason", state.StateCacheFallbackAbsent)
+		sampled = full.sampled()
+		full.round()
 	}
-	kept, absent := cell("alarmd_state_cache_readback_inserted_total", "result", state.StateCacheReadbackKept),
-		cell("alarmd_state_cache_fallback_mget_total", "reason", state.StateCacheFallbackAbsent)
-	full.round()
 	if got := cell("alarmd_state_cache_readback_inserted_total", "result", state.StateCacheReadbackKept); got != kept+1 ||
 		cell("alarmd_state_cache_fallback_mget_total", "reason", state.StateCacheFallbackAbsent) != absent+1 {
 		t.Fatalf("the round after the cache was let go kept %v values read back, read %v back for nothing kept; want the quiet series'",
 			got-kept, cell("alarmd_state_cache_fallback_mget_total", "reason", state.StateCacheFallbackAbsent)-absent)
 	}
+	passed := 0
 	for round := 0; round < 6; round++ {
 		skipped, hits, read := full.skipped(), cell("alarmd_state_cache_lookups_total", "result", state.StateCacheHit), fallbacks()
+		sampled := full.sampled()
 		full.round()
+		if full.sampled() != sampled {
+			// The day's sampled round: its member written whole, by design.
+			// Once at most: a build sampling every round would pass a case
+			// that held no round to the skip.
+			if passed++; passed > 1 {
+				t.Fatalf("round %d ran as the day's sampled round, the %d-th of the case's: want one at most, a sampled round is once a day",
+					round, passed)
+			}
+			continue
+		}
 		if full.skipped() != skipped+1 {
 			t.Fatalf("round %d left %v writes out, want the quiet series'", round, full.skipped()-skipped)
 		}

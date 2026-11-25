@@ -23,15 +23,37 @@ import (
 // once a Slot before its State and written once a round before its Progress.
 
 // PlanKey is one Plan's segments: the Plan, the piece of a split strategy
-// it is (Shard, zero for a Plan not split), under one generation. Two pieces
-// of one strategy are two Plans' segments - mark, pages, cache entries and
-// the shadow's books - as they are two gap markers and two no-data
-// memories: sharing them, each piece would read the others' members as its
-// own and write a mark over theirs.
+// it is (Shard, zero for a Plan not split), under one generation, of one
+// family of its series. Two pieces of one strategy are two Plans' segments -
+// mark, pages, cache entries and the shadow's books - as they are two gap
+// markers and two no-data memories: sharing them, each piece would read the
+// others' members as its own and write a mark over theirs.
 type PlanKey struct {
 	Plan       execution.PlanIdentity
 	Shard      execution.ShardRef
 	Generation execution.StateGeneration
+	// Family is which of the Plan's series the segments hold: its real
+	// series, the zero value, whose keys and names are the ones they always
+	// were; or the synthetic series of its no-data view (014 next9 ⑥), held
+	// to that view's retention, so a book of their own.
+	Family Family
+}
+
+// Family is a family of a Plan's series, each with segments of its own
+// (PlanKey.Family).
+type Family string
+
+const (
+	// FamilyReal is the Plan's real series: the zero value.
+	FamilyReal Family = ""
+	// FamilyNoData is the synthetic series of the Plan's no-data view, one a
+	// no-data group, judged by that view's Levels and retention.
+	FamilyNoData Family = "no_data"
+)
+
+// Families is every family, the real one first.
+func Families() []Family {
+	return []Family{FamilyReal, FamilyNoData}
 }
 
 // Lifetime is what a Plan's segment keys live by: its State's lifetime, by

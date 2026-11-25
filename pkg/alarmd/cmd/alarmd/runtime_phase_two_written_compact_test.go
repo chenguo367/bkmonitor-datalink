@@ -45,9 +45,21 @@ func TestTheValueARoundWritesIsKeptCompactAndServedTheRoundsAfter(t *testing.T) 
 		t.Fatalf("after the round that wrote the quiet series the cache holds %v compact and %v as bytes, want it compact",
 			compact, bytes)
 	}
+	passed := 0
 	for round := 0; round < 4; round++ {
 		hits, read := cell("alarmd_state_cache_lookups_total", "result", state.StateCacheHit), fallbacks()
+		sampled := full.sampled()
 		full.round()
+		if full.sampled() != sampled {
+			// The day's sampled round: its member written whole and read
+			// back, by design. Once at most: a build sampling every round
+			// would pass a case that held no round to the cache.
+			if passed++; passed > 1 {
+				t.Fatalf("round %d ran as the day's sampled round, the %d-th of the case's: want one at most, a sampled round is once a day",
+					round, passed)
+			}
+			continue
+		}
 		if got := cell("alarmd_state_cache_lookups_total", "result", state.StateCacheHit); got != hits+1 || fallbacks() != read {
 			t.Fatalf("round %d: %v hits and %v members read back, want the quiet series served from the cache", round, got-hits,
 				fallbacks()-read)

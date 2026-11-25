@@ -117,12 +117,12 @@ func testExpiredRangeSharesF2WithHealthyFull(t *testing.T, distance bool) {
 	f.heldSince(t, time.Unix(f.base, 0))
 	slot = f.base + 1800
 	f.clock.Store(slot*1000 + 100)
-	first, attempted, err := settledRunner(f.bundle, hot).RunOne(ctx)
+	first, attempted, err := settledRunner(t, f.bundle, hot).RunOne(ctx)
 	if err != nil || !attempted || !first.Completed {
 		t.Fatalf("hot initialization %+v %v %v", first, attempted, err)
 	}
 	if distance {
-		age, attempted, err := settledRunner(f.bundle, hot).RunOne(ctx)
+		age, attempted, err := settledRunner(t, f.bundle, hot).RunOne(ctx)
 		if err != nil || !attempted || !age.Completed || age.CompletionKind != execution.CompletionSnapshotUnavailable {
 			t.Fatalf("age prefix initialization %+v %v %v", age, attempted, err)
 		}
@@ -146,7 +146,7 @@ func testExpiredRangeSharesF2WithHealthyFull(t *testing.T, distance bool) {
 		t.Fatal(err)
 	}
 	mixed.Store(true)
-	if err = runScheduledOnceSettled(ctx, f.bundle); err != nil {
+	if err = runScheduledOnceSettled(t, ctx, f.bundle); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -283,7 +283,7 @@ func TestExpiredRangeProductionBundleUsesSingleFlightAndRealRedis(t *testing.T) 
 			t.Fatal(err)
 		}
 		interval := execution.EvaluationTime(schedule.Plans[0].Spec.EvaluationIntervalSeconds)
-		runner := settledRunner(bundle, qg)
+		runner := settledRunner(t, bundle, qg)
 		// Missing Progress remains an ordinary single Slot, then the persisted
 		// head permits one bounded range on the next real RunOne invocation.
 		first, attempted, err := runner.RunOne(ctx)

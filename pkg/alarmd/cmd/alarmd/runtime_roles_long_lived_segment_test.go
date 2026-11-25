@@ -149,7 +149,7 @@ func TestALongLivedSegmentKeepsDetectingAcrossASnapshotChangeAndATakeover(t *tes
 	round := func(bundle *phaseTwoWorkerBundle, n int64) {
 		t.Helper()
 		clock.Store(base + n*period + 1)
-		if err := runScheduledOnceSettled(ctx, bundle); err != nil {
+		if err := runScheduledOnceSettled(t, ctx, bundle); err != nil {
 			t.Fatalf("round %d on %s: %v", n, bundle.dependencies.Config.PhaseTwo.Worker.ID, err)
 		}
 	}
