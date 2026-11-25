@@ -39,7 +39,7 @@ func TestABudgetRejectionNamesWhetherRetryingCanHelp(t *testing.T) {
 	}{
 		{
 			name: "the Slot's own output is past a per-Slot cap",
-			err: (&streamedExecution{request: execution.SlotExecutionRequest{Operation: execution.OperationNormal}}).
+			err: (&streamedExecution{slotStream: &slotStream{request: execution.SlotExecutionRequest{Operation: execution.OperationNormal}}}).
 				slotBudgetRejection(observability.CapacityBudgetStateMutations,
 					effectCounts{states: 100}, effectCounts{states: 1}, ProvisionalBudget{MaxStateMutations: 100}),
 			want: contract.ReasonSlotBudgetExceeded,

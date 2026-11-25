@@ -116,7 +116,7 @@ func (p *BoundedLogPolicy) Admit(observation Observation) LogAdmission {
 // function for both, so the two cannot part.
 func Routine(observation Observation) bool {
 	return routineResult(observation.Result) && !evaluationHeldQuery(observation) && !readAtLimitRound(observation) &&
-		!supersededRound(observation)
+		!supersededRound(observation) && !slicedRound(observation)
 }
 
 type LoggingObserver struct {
@@ -589,6 +589,8 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.Uint64("query_body_millis", f.QueryBodyMillis),
 			slog.Uint64("query_wait_millis_max", f.QueryWaitMillisMax),
 			slog.Uint64("query_body_millis_max", f.QueryBodyMillisMax),
+			slog.Uint64("query_body_micros", f.QueryBodyMicros),
+			slog.Uint64("query_body_micros_max", f.QueryBodyMicrosMax),
 			slog.Uint64("input_slices", f.InputSlices),
 			slog.Uint64("input_slice_tail_millis", f.InputSliceTailMillis),
 			slog.Uint64("input_slice_tail_millis_max", f.InputSliceTailMillisMax))
@@ -613,6 +615,9 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		}
 		if f.HTTPStatus != 0 {
 			attributes = append(attributes, slog.Int("failure_http_status", f.HTTPStatus))
+		}
+		if f.SliceTimeout != "" {
+			attributes = append(attributes, slog.String("slice_timeout", f.SliceTimeout), slog.String("slice_timeout_cause", f.SliceTimeoutCause))
 		}
 		// The class and the provider's trace id only: the excerpt can echo the
 		// request and stays with the Query Group's last failure.
@@ -1143,6 +1148,8 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.Int("assignment_sweep_reclaimed", facts.Reclaimed),
 			slog.Int("assignment_sweep_held_by_lease", facts.HeldByLease),
 			slog.Int("assignment_sweep_changed", facts.Changed),
+			slog.String("assignment_sweep_trigger", facts.Trigger),
+			slog.Int("assignment_sweep_scan_pages", facts.ScanPages),
 		)
 	}
 	if facts := observation.AssignmentIndex; facts != nil {
@@ -1596,6 +1603,17 @@ func readAtLimitRound(observation Observation) bool {
 // at its limit is.
 func supersededRound(observation Observation) bool {
 	return observation.SlotSuperseded != nil && observation.SlotSuperseded.Series > 0
+}
+
+// slicedRound is the slot_completed line of a Slot that completed read in
+// slices (its usage's input_slices above one). Its result is success and it
+// is not routine (015 O1): a successful round wrote no line, so a Query
+// Group read in slices had no reading of its slices' series, bytes, seams
+// and reads ahead but on the rounds that failed. Written under the
+// repeated-line limit of its Query Group, an hour's first and the rest
+// merged into the next, as a round read at its limit is.
+func slicedRound(observation Observation) bool {
+	return observation.Stage == StageSlotCompleted && observation.SlotBudgetUsage != nil && observation.SlotBudgetUsage.InputSlices > 1
 }
 
 func repeatedLogObservation(observation Observation) bool {

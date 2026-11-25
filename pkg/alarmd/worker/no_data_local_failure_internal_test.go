@@ -42,12 +42,14 @@ func TestANoDataRoundThatCannotBeDerivedIsThatPlansOutcome(t *testing.T) {
 	duePlans := []execution.DuePlan{failing, working}
 
 	stream := &streamedExecution{
-		coordinator: &SlotExecutionCoordinator{
-			ports:  Ports{NoData: &emptyNoDataStore{}, Hosts: SharedHostBusiness, State: failingStatePort{}},
-			budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 8, MaxEvents: 8},
-		},
-		header: execution.InternalExecutionHeader{
-			Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans,
+		slotStream: &slotStream{
+			coordinator: &SlotExecutionCoordinator{
+				ports:  Ports{NoData: &emptyNoDataStore{}, Hosts: SharedHostBusiness, State: failingStatePort{}},
+				budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 8, MaxEvents: 8},
+			},
+			header: execution.InternalExecutionHeader{
+				Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans,
+			},
 		},
 	}
 	if err := stream.loadNoDataMemory(context.Background()); err != nil {
@@ -96,13 +98,15 @@ func TestANoDataRoundThatCannotBeDerivedIsReportedTimed(t *testing.T) {
 	failing := noDataWiredPlan(t)
 	var observed []observability.Observation
 	stream := &streamedExecution{
-		coordinator: &SlotExecutionCoordinator{
-			ports: Ports{NoData: &emptyNoDataStore{}, Hosts: SharedHostBusiness, State: failingStatePort{},
-				Observer: observability.ObserverFunc(func(_ context.Context, o observability.Observation) { observed = append(observed, o) })},
-			budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 8, MaxEvents: 8},
-		},
-		header: execution.InternalExecutionHeader{
-			Contract: noDataPreflightContract(t, []execution.DuePlan{failing}), DuePlans: []execution.DuePlan{failing},
+		slotStream: &slotStream{
+			coordinator: &SlotExecutionCoordinator{
+				ports: Ports{NoData: &emptyNoDataStore{}, Hosts: SharedHostBusiness, State: failingStatePort{},
+					Observer: observability.ObserverFunc(func(_ context.Context, o observability.Observation) { observed = append(observed, o) })},
+				budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 8, MaxEvents: 8},
+			},
+			header: execution.InternalExecutionHeader{
+				Contract: noDataPreflightContract(t, []execution.DuePlan{failing}), DuePlans: []execution.DuePlan{failing},
+			},
 		},
 	}
 	if err := stream.loadNoDataMemory(context.Background()); err != nil {

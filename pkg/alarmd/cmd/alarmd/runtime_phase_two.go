@@ -3250,7 +3250,7 @@ func phaseTwoWorkerRegistration(
 		// The control contracts this binary takes part in. The leader
 		// starts a contract only when every ready worker declares it.
 		Capabilities: []string{ownership.CapabilityContentScope, ownership.CapabilityShardAware, ownership.CapabilitySegmentSkip,
-			ownership.CapabilitySegmentSkipNoData},
+			ownership.CapabilitySegmentSkipNoData, ownership.CapabilityMultiDetect},
 		// Where this process serves the view stream and what a Worker must
 		// present to it (decision-016); empty for a process without one.
 		Endpoint: stream.Endpoint, StreamToken: stream.Token,

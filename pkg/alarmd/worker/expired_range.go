@@ -38,7 +38,7 @@ func (coordinator *SlotExecutionCoordinator) executeExpiredRange(ctx context.Con
 		p := request.ExpiredRange
 		observability.EmitTargetFlow(ctx, "expired_range_returned", observability.TraceFields{}, observability.TargetFlowFacts{Decision: outcome, RangeFirst: int64(p.First.Contract.Slot.EvaluationTime), RangeLast: int64(p.Last.Contract.Slot.EvaluationTime), RangeCount: p.Count, RangeDigest: p.Digest, NextSlot: int64(p.Next), Completed: result.Completed})
 	}()
-	owner := &streamedExecution{coordinator: coordinator, request: request}
+	owner := &streamedExecution{slotStream: &slotStream{coordinator: coordinator, request: request}}
 	defer owner.releaseProvisional()
 	if err := owner.retainTargets(ctx, len(request.DuePlanTargets.Plans), request.ExpiredRange); err != nil {
 		return execution.SlotExecutionResult{}, err

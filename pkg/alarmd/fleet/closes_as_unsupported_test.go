@@ -43,6 +43,8 @@ func TestOnlyAnIrreversibleCapabilityRefusalClosesAsUnsupported(t *testing.T) {
 		"TARGET_PLAN_MISSING", "TARGET_PLAN_EMPTY", "TARGET_PLAN_TENANT_MISMATCH",
 		// A defect of this build.
 		"EVALUATION_STEP_INCONSISTENT",
+		// A capability this build reads and has not yet turned on.
+		"MULTI_DETECT_NOT_ENABLED",
 		"A_REASON_NOBODY_WROTE",
 	}
 	neverRefusals := []string{

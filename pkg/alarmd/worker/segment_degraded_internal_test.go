@@ -199,7 +199,7 @@ func TestBooksTheRetainedPoolKeepsRefusingStopThePlanAfterTwoRetries(t *testing.
 	rig.coordinator.budget = ProvisionalBudget{MaxSeries: 1000, MaxRetainedBytes: books - 1}
 	hold := func(request execution.SlotExecutionRequest) (*segmentSlot, error) {
 		t.Helper()
-		stream := &streamedExecution{coordinator: rig.coordinator, request: request, began: true}
+		stream := &streamedExecution{slotStream: &slotStream{coordinator: rig.coordinator, request: request, began: true}}
 		return stream.holdSegments(context.Background(), shadowSlot(t, rig.store, request, shadowDue), "")
 	}
 	for slot := 0; slot < 2; slot++ {

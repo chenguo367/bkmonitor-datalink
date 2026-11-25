@@ -71,11 +71,11 @@ func TestASeriesIsCoveredByTheBookOfItsPieceTheSlotRead(t *testing.T) {
 		t.Error("no segments cover a series")
 	}
 
-	stream := &streamedExecution{segments: slot}
+	stream := &streamedExecution{slotStream: &slotStream{segments: slot}}
 	if _, covered := segment.SourceFrom(withRetainedOwner(context.Background(), stream)).Coverage(identity); !covered {
 		t.Fatal("the Slot's context does not hand the store the segments it read")
 	}
-	if _, covered := segment.SourceFrom(withRetainedOwner(context.Background(), &streamedExecution{})).Coverage(identity); covered {
+	if _, covered := segment.SourceFrom(withRetainedOwner(context.Background(), &streamedExecution{slotStream: &slotStream{}})).Coverage(identity); covered {
 		t.Fatal("a stream that read no segments covers a series")
 	}
 	if segment.SourceFrom(withRetainedOwner(context.Background(), nil)) != nil {

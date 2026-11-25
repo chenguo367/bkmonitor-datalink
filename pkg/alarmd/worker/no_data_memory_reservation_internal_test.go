@@ -190,7 +190,7 @@ func loadedMemory(strategyID string, groups int) execution.NoDataMemorySnapshot 
 func TestALoadedNoDataMemoryIsHeldOrRefusedForItsPlanAlone(t *testing.T) {
 	coordinator, _, _ := pooledNoDataFixture(256 << 10)
 	share := coordinator.qgShareBytes()
-	stream := &streamedExecution{coordinator: coordinator, began: true}
+	stream := &streamedExecution{slotStream: &slotStream{coordinator: coordinator, began: true}}
 	small, large := loadedMemory("100", 100), loadedMemory("856", 5000)
 	stream.noData = execution.NoDataLoadResult{Items: []execution.NoDataMemorySnapshot{small, large}}
 	if err := stream.reserveNoDataMemory(context.Background()); err != nil {
@@ -209,7 +209,7 @@ func TestALoadedNoDataMemoryIsHeldOrRefusedForItsPlanAlone(t *testing.T) {
 
 	full, _, _ := pooledNoDataFixture(4 << 20)
 	full.reservations.retainedBytes = full.budget.MaxRetainedBytes - 1<<10
-	crowded := &streamedExecution{coordinator: full, began: true}
+	crowded := &streamedExecution{slotStream: &slotStream{coordinator: full, began: true}}
 	crowded.noData = execution.NoDataLoadResult{Items: []execution.NoDataMemorySnapshot{small}}
 	var exceeded *provisionalBudgetExceededError
 	if err := crowded.reserveNoDataMemory(context.Background()); !errors.As(err, &exceeded) || exceeded.share {

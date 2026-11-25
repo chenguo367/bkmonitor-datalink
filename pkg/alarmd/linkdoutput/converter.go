@@ -666,6 +666,9 @@ func content(event *contract.TriggerEventV1, primary contract.LevelResultV1, noD
 		return noDataEndRecovered
 	}
 	values := renderedValues(event.Observed)
+	if inputs := renderedInputs(event.DetectionSnapshot); inputs != "" {
+		values = inputs
+	}
 	if values == "" {
 		values = "no value"
 	}
@@ -684,6 +687,59 @@ func noDataPeriods(observed contract.TriggerObservedV1) string {
 		return string(raw)
 	}
 	return "an unknown number of"
+}
+
+// renderedInputs is the decided record of an item detected over several
+// inputs as its content words it (015 F1 section 7): each input as its shown
+// name, its value and unit, in the order the item lists them, joined by 且.
+// Read off the event's snapshot, which alone carries the names; "" for an
+// event of one query, or one whose snapshot was dropped - its values are
+// then named by their references.
+func renderedInputs(snapshot json.RawMessage) string {
+	if len(snapshot) == 0 {
+		return ""
+	}
+	var decoded contract.DetectionSnapshotV1
+	if err := json.Unmarshal(snapshot, &decoded); err != nil || decoded.Version != contract.DetectionSnapshotVersionMultiDetect ||
+		len(decoded.Inputs) == 0 || len(decoded.Levels) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(decoded.Inputs))
+	for _, algorithm := range decoded.Levels[0].Algorithms {
+		input, found := decoded.Inputs[algorithm.InputRef]
+		if !found || input.State != "SUCCESS" {
+			return ""
+		}
+		parts = append(parts, input.DisplayName+"="+trimmedDecimal(string(input.Value))+unitSuffix(input.Unit))
+	}
+	return strings.Join(parts, " 且 ")
+}
+
+// unitSuffix is how the content writes the unit a judged value is in (a
+// platform unit id): percent as %, a unit of no scale as nothing, any other
+// by its id.
+func unitSuffix(unit string) string {
+	switch unit {
+	case "percent":
+		return "%"
+	case "", "none", "short":
+		return ""
+	}
+	return " " + unit
+}
+
+// trimmedDecimal is a judged value as a reader reads it: the snapshot holds
+// it at the threshold's precision, 86.000000, and the content says 86.
+// A value rounded to zero from below reads as 0, not -0.
+func trimmedDecimal(value string) string {
+	if !strings.Contains(value, ".") || strings.ContainsAny(value, "eE") {
+		return value
+	}
+	trimmed := strings.TrimSuffix(strings.TrimRight(value, "0"), ".")
+	if trimmed == "-0" {
+		return "0"
+	}
+	return trimmed
 }
 
 func renderedValues(observed contract.TriggerObservedV1) string {

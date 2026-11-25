@@ -17,6 +17,58 @@ func (counts effectCounts) minus(other effectCounts) effectCounts {
 	return effectCounts{states: counts.states - min(other.states, counts.states), events: counts.events - min(other.events, counts.events)}
 }
 
+// plus is counts and other together.
+func (counts effectCounts) plus(other effectCounts) effectCounts {
+	return effectCounts{states: counts.states + other.states, events: counts.events + other.events, gaps: counts.gaps + other.gaps}
+}
+
+// admitEffects judges what the Slot holds in hand with delta added against
+// its per-Slot caps and, when they hold it, adds delta, in one step: two
+// merges into one Slot are never both judged on counts holding neither. It
+// returns the counts judged, delta included either way.
+func (stream *streamedExecution) admitEffects(delta effectCounts, budget ProvisionalBudget) (effectCounts, error) {
+	stream.effectsMu.Lock()
+	defer stream.effectsMu.Unlock()
+	count := stream.effects.plus(delta)
+	if err := checkEffectCounts(count, budget); err != nil {
+		return count, err
+	}
+	stream.effects = count
+	return count, nil
+}
+
+// addEffects adds what the pool took for the Slot beyond the caps' judgement.
+func (stream *streamedExecution) addEffects(delta effectCounts) {
+	stream.effectsMu.Lock()
+	defer stream.effectsMu.Unlock()
+	stream.effects = stream.effects.plus(delta)
+}
+
+// giveBackEffects takes off what a window that landed, or a reservation the
+// pool refused, held of the Slot's counts.
+func (stream *streamedExecution) giveBackEffects(held effectCounts) {
+	stream.effectsMu.Lock()
+	defer stream.effectsMu.Unlock()
+	stream.effects = effectCounts{states: stream.effects.states - min(held.states, stream.effects.states),
+		events: stream.effects.events - min(held.events, stream.effects.events), gaps: stream.effects.gaps - min(held.gaps, stream.effects.gaps)}
+}
+
+// heldEffects is what the Slot holds of its counts now.
+func (stream *streamedExecution) heldEffects() effectCounts {
+	stream.effectsMu.Lock()
+	defer stream.effectsMu.Unlock()
+	return stream.effects
+}
+
+// takeEffects is everything the Slot holds of its counts, now none.
+func (stream *streamedExecution) takeEffects() effectCounts {
+	stream.effectsMu.Lock()
+	defer stream.effectsMu.Unlock()
+	held := stream.effects
+	stream.effects = effectCounts{}
+	return held
+}
+
 func checkEffectCounts(count effectCounts, budget ProvisionalBudget) error {
 	for _, check := range []struct {
 		count, limit uint64
@@ -121,13 +173,13 @@ func (stream *streamedExecution) mergeMeasured(ctx context.Context, next executi
 		return err
 	}
 	delta := addedEffectCounts(stream.evaluated, next)
-	count := effectCounts{stream.effects.states + delta.states, stream.effects.events + delta.events, stream.effects.gaps + delta.gaps}
 	// The Slot's own output is checked against the per-Slot caps before the
 	// shared reservation: a Slot above them can never be applied by this
 	// process, so that rejection is deterministic and carries the Slot's own
-	// facts instead of the shared usage.
+	// facts instead of the shared usage. Admitted, the counts are the
+	// Slot's at once (admitEffects), and given back if the pool refuses.
 	slotBudget := stream.coordinator.slotBudget()
-	err := checkEffectCounts(count, slotBudget)
+	count, err := stream.admitEffects(delta, slotBudget)
 	if err != nil && stream.inflightEffects() != (effectCounts{}) {
 		// The counts are the windows in hand: one written, one filled. With
 		// a window still being written, the cap is judged again once it has
@@ -135,8 +187,7 @@ func (stream *streamedExecution) mergeMeasured(ctx context.Context, next executi
 		if drainErr := stream.drainApply(ctx); drainErr != nil {
 			return drainErr
 		}
-		count = effectCounts{stream.effects.states + delta.states, stream.effects.events + delta.events, stream.effects.gaps + delta.gaps}
-		err = checkEffectCounts(count, slotBudget)
+		count, err = stream.admitEffects(delta, slotBudget)
 	}
 	if err != nil {
 		var exceeded *provisionalBudgetExceededError
@@ -146,33 +197,38 @@ func (stream *streamedExecution) mergeMeasured(ctx context.Context, next executi
 		}
 		return err
 	}
-	if err := stream.coordinator.acquireEffects(delta, measured.total(), stream, stream.reservationPhase("normal_output")); err != nil {
+	// Split where it was summed: the loaded State the caller measured under
+	// its own phase, the effects this call adds under the output's. One
+	// reservation, the same total, two answers instead of one.
+	charges := retainedCharges{retainPhaseState: measured.retained + measured.held,
+		retainPhaseOutput: measured.effects + measured.summarized}
+	if err := stream.coordinator.acquireEffects(delta, stream, stream.reservationPhase("normal_output"), charges); err != nil {
+		stream.giveBackEffects(delta)
 		var exceeded *provisionalBudgetExceededError
 		if errors.As(err, &exceeded) {
 			stream.coordinator.observeCapacityRejection(ctx, stream.request.Operation, exceeded.budget, err)
 		}
 		return err
 	}
+	// Counted as reserved: what the pool holds of it the stream gives back,
+	// whether or not the append below takes the batch.
+	stream.retainedCharged(retainPhaseState, charges[retainPhaseState])
+	stream.retainedCharged(retainPhaseOutput, charges[retainPhaseOutput])
 	// The contract check and shared reservation cover everything this append
 	// can refuse except one: two batches disagreeing about a Plan's gap
 	// marker, which is a shape neither batch's own result contains.
 	// Loaded Gap facts remain independently accounted in stream.gapFacts.
-	if err := appendProvisional(&stream.evaluated, next); err != nil {
+	// At its place among the Slot's batches: the slice its series were read
+	// in, then its turn (execution.MergeOrder).
+	order := stream.summary.nextOrder(stream.sliceNumber)
+	if err := appendProvisionalAt(&stream.evaluated, next, order, &stream.summary.results); err != nil {
 		return err
 	}
 	// After the append and only when it took the batch, so the summary
 	// never holds a batch the results do not: every result the Slot keeps -
 	// evaluated, resumed, superseded, no-data, a Plan without series, a
 	// budget replacement - arrives here.
-	stream.summary.add(next, stream.noDataEnds)
-	stream.effects.states += delta.states
-	stream.effects.events += delta.events
-	stream.effects.gaps += delta.gaps
-	// Split where it was summed: the loaded State the caller measured under
-	// its own phase, the effects this call adds under the output's. One
-	// reservation, the same total, two answers instead of one.
-	stream.retainBytes(retainPhaseState, measured.retained+measured.held)
-	stream.retainBytes(retainPhaseOutput, measured.effects+measured.summarized)
+	stream.summary.addAt(next, stream.noDataEnds, order)
 	stream.keysHeld += measured.held
 	stream.summaryHeld += measured.summarized
 	// The window's own share: what applying it gives back (applyWindow).
@@ -217,7 +273,24 @@ func newEffectBytes(current, next execution.EvaluationResult) uint64 {
 	return retained
 }
 
-func (coordinator *SlotExecutionCoordinator) acquireEffects(delta effectCounts, retained uint64, stream *streamedExecution, phase string) error {
+// retainedCharges is what one reservation charges each phase of a stream.
+type retainedCharges [retainPhaseCount]uint64
+
+// total is the bytes the reservation holds of the pool.
+func (charges retainedCharges) total() uint64 {
+	var total uint64
+	for _, bytes := range charges {
+		total += bytes
+	}
+	return total
+}
+
+// acquireEffects reserves the side effects of delta and the bytes charges
+// holds for stream, the bytes judged against its share and the pool and
+// charged to its phases in the same step (chargeRetained).
+func (coordinator *SlotExecutionCoordinator) acquireEffects(delta effectCounts, stream *streamedExecution, phase string,
+	charges retainedCharges) error {
+	retained := charges.total()
 	reservation := &coordinator.reservations
 	reservation.mu.Lock()
 	defer reservation.mu.Unlock()
@@ -267,6 +340,11 @@ func (coordinator *SlotExecutionCoordinator) acquireEffects(delta effectCounts, 
 	reservation.events += delta.events
 	reservation.gaps += delta.gaps
 	reservation.retainedBytes += retained
+	if stream != nil {
+		for charge, bytes := range charges {
+			stream.chargeRetained(retainPhase(charge), bytes)
+		}
+	}
 	return nil
 }
 

@@ -46,6 +46,16 @@ type AlgorithmCapability struct {
 	ExternalCallBudget  uint32 `json:"external_call_budget"`
 	FixedComputeCost    uint64 `json:"fixed_compute_cost"`
 	CostPerRecord       uint64 `json:"cost_per_record"`
+	// Gate is the worker capability an algorithm is offered under, empty for
+	// every algorithm a worker runs as part of its execution contract. A
+	// gated algorithm is left out of the registry's digest - the execution
+	// contract the fleet places Query Groups by - and a Plan that uses it
+	// is placed only once every ready worker declares the gate: adding one
+	// changes no worker's contract, so a rolling upgrade does not have new
+	// and old Leaders take each other's Query Groups as replaced. Omitted
+	// when empty, so every other algorithm's capability digest is what it
+	// was.
+	Gate string `json:"gate,omitempty"`
 }
 
 type AlgorithmCompiler interface {
@@ -93,7 +103,9 @@ func NewAlgorithmCompilerRegistry(compilers ...AlgorithmCompiler) (*AlgorithmCom
 		registry.compilers[key] = registeredAlgorithm{
 			compiler: compiler, capability: capability, capabilityDigest: capabilityDigest,
 		}
-		capabilities = append(capabilities, capability)
+		if capability.Gate == "" {
+			capabilities = append(capabilities, capability)
+		}
 	}
 	sort.Slice(capabilities, func(left, right int) bool {
 		if capabilities[left].Kind == capabilities[right].Kind {
@@ -119,7 +131,7 @@ func NewDefaultAlgorithmCompilerRegistry() *AlgorithmCompilerRegistry {
 		traditionalComparisonCompiler{DetectorKindSimpleYearRound}, traditionalComparisonCompiler{DetectorKindAdvancedRingRatio},
 		traditionalComparisonCompiler{DetectorKindAdvancedYearRound}, traditionalComparisonCompiler{DetectorKindRingRatioAmplitude},
 		traditionalComparisonCompiler{DetectorKindYearRoundAmplitude}, traditionalComparisonCompiler{DetectorKindYearRoundRange},
-		procPortAlgorithmCompiler{},
+		procPortAlgorithmCompiler{}, multiDetectThresholdAlgorithmCompiler{},
 	)
 	if err != nil {
 		panic(err)

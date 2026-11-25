@@ -29,8 +29,8 @@ func TestTheSliceMemoryReadingCountsWhatTheSweepCannotReach(t *testing.T) {
 	reading := trees.reading()
 	// Three memories, each a shape of one leaf (none kept a split); two of
 	// them out of the sweep's reach; six per-slice series entries; one
-	// deferred slice.
-	want := SliceMemoryReading{Remembered: 3, Unswept: 2, Leaves: 3, LeafSeries: 6, Deferred: 1}
+	// deferred slice; the largest shape, one leaf.
+	want := SliceMemoryReading{Remembered: 3, Unswept: 2, Leaves: 3, LeafSeries: 6, Deferred: 1, LeavesMax: 1}
 	if reading != want {
 		t.Fatalf("reading = %+v, want %+v", reading, want)
 	}

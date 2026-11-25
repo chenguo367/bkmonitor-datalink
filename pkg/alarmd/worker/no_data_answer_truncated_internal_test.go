@@ -104,8 +104,12 @@ func TestThreeCutRoundsAreAStallAndARoundReadWholeEndsIt(t *testing.T) {
 	contract := noDataPreflightContract(t, duePlans)
 	whole := map[int]bool{4: true}
 	for round := 1; round <= 7; round++ {
-		stream := &streamedExecution{coordinator: coordinator,
-			header: execution.InternalExecutionHeader{Contract: contract, DuePlans: duePlans}}
+		stream := &streamedExecution{
+			slotStream: &slotStream{
+				coordinator: coordinator,
+				header:      execution.InternalExecutionHeader{Contract: contract, DuePlans: duePlans},
+			},
+		}
 		stream.request.Contract = contract
 		stream.request.Contract.Slot.EvaluationTime += execution.EvaluationTime(60 * round)
 		if err := stream.loadNoDataMemory(context.Background()); err != nil {

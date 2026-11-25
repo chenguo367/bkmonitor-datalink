@@ -21,8 +21,8 @@ func TestAShareRefusalOfTheSlotsOwnTotalIsMarkedDeterministic(t *testing.T) {
 	co := &SlotExecutionCoordinator{budget: ProvisionalBudget{
 		MaxSeries: 10, MaxRetainedBytes: 100, MaxStateMutations: 10, MaxEvents: 10, MaxGapMutations: 10,
 	}}
-	stream := &streamedExecution{coordinator: co, began: true, retainedByPhase: retainedSeed(60)}
-	err := co.acquireEffects(effectCounts{states: 1}, 20, stream, stream.reservationPhase("normal_output"))
+	stream := &streamedExecution{slotStream: &slotStream{coordinator: co, began: true, retainedByPhase: retainedSeed(60)}}
+	err := co.acquireEffects(effectCounts{states: 1}, stream, stream.reservationPhase("normal_output"), retainedCharges{retainPhaseOutput: 20})
 	if err == nil {
 		t.Fatal("an object over its share was admitted")
 	}
@@ -44,8 +44,8 @@ func TestAPoolPressureRefusalIsNotMarkedDeterministic(t *testing.T) {
 		MaxSeries: 10, MaxRetainedBytes: 100, MaxStateMutations: 10, MaxEvents: 10, MaxGapMutations: 10,
 	}}
 	co.reservations.retainedBytes = 90
-	stream := &streamedExecution{coordinator: co, began: true, retainedByPhase: retainedSeed(10)}
-	err := co.acquireEffects(effectCounts{states: 1}, 20, stream, stream.reservationPhase("normal_output"))
+	stream := &streamedExecution{slotStream: &slotStream{coordinator: co, began: true, retainedByPhase: retainedSeed(10)}}
+	err := co.acquireEffects(effectCounts{states: 1}, stream, stream.reservationPhase("normal_output"), retainedCharges{retainPhaseOutput: 20})
 	if err == nil {
 		t.Fatal("a reservation past a pool others filled was admitted")
 	}

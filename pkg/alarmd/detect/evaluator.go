@@ -218,6 +218,18 @@ const (
 
 func combineAlgorithmTruth(connector string, truths []algorithmTruth) (bool, bool) {
 	unknown := false
+	if connector == contract.LevelConnectorStrictAND {
+		// The inputs of an item detected over several: undecided while any
+		// is, a miss beside an input that cannot be read included.
+		matched := true
+		for _, truth := range truths {
+			if truth == algorithmTruthUnknown {
+				return false, false
+			}
+			matched = matched && truth == algorithmTruthTrue
+		}
+		return matched, true
+	}
 	if connector == contract.LevelConnectorAND {
 		for _, truth := range truths {
 			if truth == algorithmTruthFalse {

@@ -227,6 +227,12 @@ type SourceReconciler struct {
 	// Nil means the zero policy, which is a horizon of zero: absence tracked
 	// indefinitely, the behaviour every Plan had before the horizon existed.
 	noDataPolicy func() NoDataPolicy
+	// multiDetect is the round's admission of items detected over several
+	// inputs, read once per round as noDataPolicy is and for the same
+	// reason: the round key covers it, so a fleet whose last worker came to
+	// declare the capability gets those Plans on the next round, whatever
+	// the documents did. Nil admits none.
+	multiDetect func(context.Context) MultiDetectAdmission
 	// candidates carries the compiler's output from one round to the next,
 	// so a round compiles only the documents that changed. It lives on the
 	// reconciler because that is the object that survives between rounds; a
@@ -350,6 +356,25 @@ func (reconciler *SourceReconciler) ConfigureNoDataPolicy(policy func() NoDataPo
 	return nil
 }
 
+// ConfigureMultiDetectAdmission sets where each round reads whether it admits
+// the Plans of items detected over several inputs: every ready worker
+// declares the capability. Nothing configured admits none, which keeps them
+// withheld as MULTI_DETECT_NOT_ENABLED.
+func (reconciler *SourceReconciler) ConfigureMultiDetectAdmission(admission func(context.Context) MultiDetectAdmission) error {
+	if reconciler == nil {
+		return errors.New("alarmd controlplane: no source reconciler")
+	}
+	reconciler.multiDetect = admission
+	return nil
+}
+
+func (reconciler *SourceReconciler) effectiveMultiDetect(ctx context.Context) MultiDetectAdmission {
+	if reconciler == nil || reconciler.multiDetect == nil {
+		return MultiDetectAdmission{}
+	}
+	return reconciler.multiDetect(ctx)
+}
+
 // effectiveNoDataPolicy is the policy this round builds under.
 func (reconciler *SourceReconciler) effectiveNoDataPolicy() NoDataPolicy {
 	if reconciler == nil || reconciler.noDataPolicy == nil {
@@ -459,10 +484,14 @@ func (reconciler *SourceReconciler) Refresh(
 		return SourceRefreshResult{}, err
 	}
 	policy := reconciler.effectiveNoDataPolicy()
+	multiDetect := reconciler.effectiveMultiDetect(ctx)
 	roundKey, err := catalogRoundKey(planner, reconciler.outputProtocol, reconciler.targetSources, policy)
 	if err != nil {
 		return SourceRefreshResult{}, exitAt(SourceRefreshExitBuildCatalog, err)
 	}
+	// The candidate cache is keyed by the four parts above; the admission
+	// decides after it, so it joins the round's key alone.
+	roundKey += "\x00" + multiDetect.key()
 	// Nothing this round would build from has moved since the previous round
 	// ended UNCHANGED: publish that round's Catalog again rather than build
 	// the same one. The publication step is the one an UNCHANGED round always
@@ -504,7 +533,7 @@ func (reconciler *SourceReconciler) Refresh(
 		Strategies: cycle.strategies, Planner: planner, LastGood: current, PreviousDispositions: previousDispositions,
 		Now: reconciler.now(), WriterHoldsLastGood: reconciler.memory.Load().holdsLastGood,
 		OutputProtocol: reconciler.outputProtocol, TargetSources: reconciler.targetSources, Cache: reconciler.candidates,
-		NoDataPolicy: policy,
+		NoDataPolicy: policy, MultiDetect: multiDetect,
 	})
 	if err != nil {
 		return SourceRefreshResult{}, exitAt(SourceRefreshExitBuildCatalog, err)

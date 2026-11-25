@@ -185,7 +185,12 @@ type slotWindows struct {
 	releasing  []execution.StateKeyIdentity
 	landing    planLanding
 	decided    map[execution.PlanIdentity]struct{}
-	count      int
+	// count is the windows landed - taken back on the Slot's goroutine
+	// (landWindow); handed the windows handed to the apply goroutine
+	// (handOver). The last one handed lands at the next take-back, which an
+	// attempt whose read fails after it reaches only in joinApply.
+	count  int
+	handed int
 	// pipe is the Slot's apply goroutine, started at the first window handed
 	// to it (windowed_pipeline.go); nil before.
 	pipe *applyPipe
@@ -354,7 +359,7 @@ func windowCap(slotCap uint64) uint64 {
 // alone does not fit is refused by name, as it always was.
 func (stream *streamedExecution) windowBeforeMerge(ctx context.Context, next execution.EvaluationResult, measured mergeBytes) error {
 	windows := &stream.windows
-	own := stream.effects.minus(stream.inflightEffects())
+	own := stream.heldEffects().minus(stream.inflightEffects())
 	if stream.supplement != nil || windows.single || own.states+own.events == 0 {
 		return nil
 	}
@@ -542,7 +547,7 @@ func (coordinator *SlotExecutionCoordinator) applyWindowHead(ctx context.Context
 			if err := stream.firstSeenPrepass(sequenceCtx, candidates); err != nil {
 				return err
 			}
-			unseen = stream.unseenPlans()
+			unseen = stream.unseenPlansAtRead()
 		}
 		apply.judgeForced(unseen)
 		apply.keys = make(slotStateKeys)
@@ -759,6 +764,14 @@ func (stream *streamedExecution) raiseSliceCeiling(ctx context.Context) {
 // PRIMARY records): so the bound is per record, not per Level, and the
 // records are what the completion handed it. A synthetic no-data series holds
 // one record.
+//
+// A series of an item detected over several inputs is judged at every time any
+// input holds a point of it (evaluation's withMultiDetectRounds), more rounds
+// than its PRIMARY records where another input holds a time the PRIMARY does
+// not. The bound still holds: at such a time the PRIMARY lacks its point, the
+// strict join makes the round undecided, and an undecided round sends no event
+// - it writes a point the Level could not use, into the one State the series
+// writes.
 func (stream *streamedExecution) eventsPerSeries() uint64 {
 	most := max(stream.primaryRecords, 1)
 	for _, prepared := range stream.windows.prepared {
@@ -857,6 +870,9 @@ type windowTask struct {
 	// a window written as it is cut read (decideLanding).
 	passed  map[execution.PlanIdentity]struct{}
 	resumed map[execution.PlanIdentity]int
+	// moreSlices is whether slices are left to read after the one the window
+	// was cut from: a Plan passed in this slice has series in those too.
+	moreSlices bool
 	// stateBytes and outputBytes are what the window gives back of the state
 	// and output phases when it lands, and effects its State and event
 	// counts, which the per-Slot caps and the pool hold until then.
@@ -926,7 +942,8 @@ func (stream *streamedExecution) takeWindow(ctx context.Context, final bool) (*w
 	}
 	task := &windowTask{final: final, parts: parts, views: views, items: stream.stateItems, readBeside: windows.readBeside,
 		absenceStarts: stream.windowAbsenceStarts(parts), passed: maps.Clone(windows.passed), resumed: maps.Clone(windows.resumed),
-		stateBytes: windows.stateBytes, effects: stream.effects.minus(stream.inflightEffects())}
+		moreSlices: stream.readInSlices() && !stream.slices.last,
+		stateBytes: windows.stateBytes, effects: stream.heldEffects().minus(stream.inflightEffects())}
 	stream.noteSeenViews(views)
 	stream.state.Items, stream.stateItems, windows.readBeside = nil, nil, nil
 	var kept uint64
@@ -1037,8 +1054,7 @@ func (stream *streamedExecution) landWindow(ctx context.Context, landing windowL
 	stream.coordinator.releaseEffects(task.effects)
 	stream.effectsSpent.states += task.effects.states
 	stream.effectsSpent.events += task.effects.events
-	stream.effects.states -= task.effects.states
-	stream.effects.events -= task.effects.events
+	stream.giveBackEffects(effectCounts{states: task.effects.states, events: task.effects.events})
 	stream.windows.count++
 	return landing.err
 }
@@ -1117,12 +1133,7 @@ func (stream *streamedExecution) letGoWindowInputs(ctx context.Context, series [
 	for index := range series {
 		entry := series[index]
 		if entry.due.CompiledPlan != nil && entry.due.CompiledPlan.NoData() != nil {
-			for _, dimensions := range stream.seriesDimensionsFor(series[index:index+1], entry.due.Identity) {
-				if key, fresh := windows.presentSet(*entry.due).Add(dimensions); fresh {
-					kept += presentKeyHeldBytes(key)
-					stream.stageAhead(ctx, *entry.due, key)
-				}
-			}
+			kept += stream.collectPresent(ctx, *entry.due, stream.seriesDimensionsFor(series[index:index+1], entry.due.Identity))
 		}
 		released += stream.dropSeriesInputs(entry.due.Identity, entry.identity)
 		series[index] = preparedSeries{}
@@ -1132,6 +1143,27 @@ func (stream *streamedExecution) letGoWindowInputs(ctx context.Context, series [
 		return released - kept, nil
 	}
 	return 0, stream.reserveRetainedInput(ctx, kept-released)
+}
+
+// collectPresent takes into the Plan's present set the no-data groups a
+// window's series project onto - their dimensions, worked out by the stream
+// that cut the window from its own slice's completion - and stages a first
+// write's worth as they come (stageAhead). It returns what the groups new to
+// the set hold. The collector of the Slot's landings': a Plan has one present
+// set and one staging for the Slot, which, with slices consumed side by side,
+// only the stream that dispatches them adds to, taking each slice's groups
+// in slice order (015 C1 appendix A 8); a Slot read one slice at a time
+// collects them as its windows are cut.
+func (stream *streamedExecution) collectPresent(ctx context.Context, due execution.DuePlan, groups []map[string]string) uint64 {
+	var kept uint64
+	present := stream.windows.presentSet(due)
+	for _, dimensions := range groups {
+		if key, fresh := present.Add(dimensions); fresh {
+			kept += presentKeyHeldBytes(key)
+			stream.stageAhead(ctx, due, key)
+		}
+	}
+	return kept
 }
 
 // dropSeriesInputs takes one prepared series' streamed bindings out of
@@ -1350,11 +1382,11 @@ func (stream *streamedExecution) completeWindowsBeyondSlotBudget(ctx context.Con
 	if err := stream.drainApply(ctx); err != nil {
 		return err
 	}
-	stream.coordinator.releaseEffects(stream.effects)
-	stream.effectsSpent.states += stream.effects.states
-	stream.effectsSpent.events += stream.effects.events
-	stream.effectsSpent.gaps += stream.effects.gaps
-	stream.effects = effectCounts{}
+	held := stream.takeEffects()
+	stream.coordinator.releaseEffects(held)
+	stream.effectsSpent.states += held.states
+	stream.effectsSpent.events += held.events
+	stream.effectsSpent.gaps += held.gaps
 	windows := &stream.windows
 	landed := make(map[execution.PlanIdentity]struct{}, len(windows.passed))
 	for _, due := range stream.header.DuePlans {
@@ -1397,7 +1429,10 @@ func (stream *streamedExecution) completeWindowsBeyondSlotBudget(ctx context.Con
 // as applied. A Plan is decided once its last window is applied: before then
 // the keys of its later windows have not been sent, and counting what landed
 // so far would vouch for them. A no-data Plan's synthetic series come after
-// every Plan's own, so it is decided with the last window.
+// every Plan's own, so it is decided with the last window. So is every Plan
+// of a Slot read in slices while slices are left to read: a read evaluates
+// its Plans one after another, so passing a Plan says only that this slice's
+// series of it are done, and the slices after hold more of them.
 func (stream *streamedExecution) decideLanding(ctx context.Context, task *windowTask) {
 	windows := &stream.windows
 	final := task.final
@@ -1409,7 +1444,7 @@ func (stream *streamedExecution) decideLanding(ctx context.Context, task *window
 		}
 		_, passed := task.passed[plan]
 		noData := due.CompiledPlan != nil && due.CompiledPlan.NoData() != nil
-		if !final && (!passed || noData) {
+		if !final && (!passed || noData || task.moreSlices) {
 			continue
 		}
 		if windows.decided == nil {

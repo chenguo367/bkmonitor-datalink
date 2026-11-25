@@ -225,8 +225,8 @@ func TestEverySlotCompletedReasonIsACellFromTheStart(t *testing.T) {
 			t.Errorf("scrape lacks %s", line)
 		}
 	}
-	if len(want) != 132 || len(slotReasonCells()) != len(want) {
-		t.Fatalf("slot_completed reason cells = %d (built %d), want 132: three words and the catalogue's 129",
+	if len(want) != 133 || len(slotReasonCells()) != len(want) {
+		t.Fatalf("slot_completed reason cells = %d (built %d), want 133: three words and the catalogue's 130",
 			len(want), len(slotReasonCells()))
 	}
 }
@@ -705,7 +705,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("worker_slice_read_ahead_yields_total"):         len(observability.SliceReadAheadYieldPhases),
 		fqName("slot_window_zero_bound_cuts_total"):            len(observability.WindowZeroBoundReasons),
 		fqName("slot_window_accounting_clamped_slots_total"):   len(observability.WindowAccountingClamps),
-		fqName("worker_input_slice_timeouts_total"):            len(observability.InputSliceTimeoutOutcomes),
+		fqName("worker_input_slice_timeouts_total"):            len(observability.InputSliceTimeoutOutcomes) * len(observability.InputSliceTimeoutCauses),
 		fqName("worker_input_slice_shapes_total"):              len(observability.InputSliceShapeOutcomes),
 		fqName("worker_no_data_stage_ahead_total"):             len(observability.NoDataStageAheadOutcomes),
 		fqName("worker_no_data_groups_staged_ahead_total"):     1,
@@ -730,6 +730,12 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("capacity_reserved"):                            1,
 		fqName("worker_slice_memory_groups"):                   2,
 		fqName("worker_slice_memory_entries"):                  3,
+		fqName("ownership_assignment_sweeps_total"):            len(observability.AssignmentSweepTriggers) * 2,
+		fqName("ownership_assignment_sweep_scan_pages_total"):  1,
+		fqName("worker_slice_shape_leaves_max"):                1,
+		fqName("state_segment_members_left_total"):             len(observability.AllStateSeriesKinds()),
+		fqName("worker_slice_reads_in_flight"):                 histogramSeries(1, 5),
+		fqName("slot_windowed_total"):                          3,
 		fqName("container_memory_limit_bytes"):                 len(capacitySources) + 1,
 		fqName("container_cpu_cores"):                          len(capacitySources) + 1,
 		fqName("container_memory_used_bytes"):                  1,
@@ -1035,6 +1041,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("algorithm_input_total")] = 160
 	bounds[fqName("trigger_recovery_beside_level_total")] = 3
 	bounds[fqName("trigger_recovery_withheld_total")] = len(observability.RecoveryWithheldReasons)
+	bounds[fqName("multi_detect_recovery_held_total")] = len(observability.MultiDetectHeldPositions)
+	bounds[fqName("multi_detect_undecided_total")] = len(observability.MultiDetectUndecidedReasons)
 	bounds[fqName("no_data_end_total")] = len(observability.NoDataEndOutcomes)
 	bounds[fqName("source_liveness_checks_total")] = len(sourceliveness.Kinds) *
 		(1 + len(sourceliveness.UnknownReasons) + len(sourceliveness.UnsupportedReasons))
@@ -1382,7 +1390,7 @@ func countCustomSeriesByFamily(t *testing.T, recorder *Recorder) map[string]int 
 // cardinality bound. It is the same number controlplane's own scan holds its
 // source to, repeated here rather than exported because exporting a test's
 // constant would make it look like a value the package promises.
-const catalogReasonHeadroom = 140
+const catalogReasonHeadroom = 160
 
 // Every route and result pair exists at zero from construction, so "no
 // timeout since the release" reads as zero and not as a missing series; a
@@ -1783,8 +1791,9 @@ func TestDetectionSnapshotsAreCountedByResultAndState(t *testing.T) {
 	for _, m := range gatherFamily(t, r, "alarmd_event_detection_snapshot_ref_states_total") {
 		states[m.GetLabel()[0].GetValue()] = m.GetCounter().GetValue()
 	}
-	if results["whole"] != 2 || results["truncated"] != 1 || results["dropped"] != 1 || len(results) != 3 {
-		t.Fatalf("results %v, want two whole, one truncated and one dropped", results)
+	if results["whole"] != 2 || results["truncated"] != 1 || results["dropped"] != 1 || results["without_inputs"] != 0 ||
+		len(results) != len(DetectionSnapshotResults) {
+		t.Fatalf("results %v, want two whole, one truncated and one dropped, every result a cell", results)
 	}
 	if states["SUCCESS"] != 2 || states["MISSING"] != 1 || states["_other"] != 1 || states["ERROR"] != 0 || len(states) != len(DetectionSnapshotStates) {
 		t.Fatalf("states %v", states)

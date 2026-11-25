@@ -194,9 +194,11 @@ func TestNoDataLoadSkipsTheStoreWhenNoPlanDetectsNoData(t *testing.T) {
 		StateGeneration: "state-v1", StateApplyEpoch: 1, ScheduleRevision: "plan-schedule-v1",
 	}}
 	stream := &streamedExecution{
-		coordinator: &SlotExecutionCoordinator{ports: Ports{NoData: store}},
-		header: execution.InternalExecutionHeader{
-			Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans,
+		slotStream: &slotStream{
+			coordinator: &SlotExecutionCoordinator{ports: Ports{NoData: store}},
+			header: execution.InternalExecutionHeader{
+				Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans,
+			},
 		},
 	}
 	if err := stream.loadNoDataMemory(context.Background()); err != nil {

@@ -390,6 +390,9 @@ var failureFacets = map[string]facets{
 	// The window: the detection ran and could not decide.
 	"HISTORY_GAPPED":  {StageEvaluate, ClassUnlocated, ""},
 	"HISTORY_WARMING": {StageEvaluate, ClassUnlocated, ""},
+	// An input of an item detected over several had no point of the series:
+	// where the data went is not this deployment's to say.
+	"MULTI_DETECT_INPUT_MISSING": {StageEvaluate, ClassUnlocated, ""},
 	// A Level held by a guard an earlier round's gap opened, on a round that
 	// answered whole: where it stops is evaluation, and what holds it is the
 	// guard's warmup, not a dependency.

@@ -64,9 +64,14 @@ func TestAReturnIsToldByItsMarkerItsStateOrItsMemory(t *testing.T) {
 			gaps: marker(execution.GapFound, own, contract.ReasonPlanReactivated), want: activationChangeReactivated},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			stream := &streamedExecution{header: execution.InternalExecutionHeader{Contract: frozenRenewalContract(),
-				DuePlans: []execution.DuePlan{due}}, state: execution.StatePreflightResult{Items: testCase.views},
-				noData: execution.NoDataLoadResult{Items: testCase.memory}}
+			stream := &streamedExecution{
+				state: execution.StatePreflightResult{Items: testCase.views},
+				slotStream: &slotStream{
+					header: execution.InternalExecutionHeader{Contract: frozenRenewalContract(),
+						DuePlans: []execution.DuePlan{due}},
+					noData: execution.NoDataLoadResult{Items: testCase.memory},
+				},
+			}
 			unseen := stream.unseenPlans()
 			if testCase.readNone {
 				unseen = nil

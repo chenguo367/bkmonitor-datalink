@@ -237,6 +237,9 @@ func (evaluator *Evaluator) evaluateNamedInputLevel(
 	var fallbackEvidence ThresholdEvidence
 	var fallbackEvidenceSet bool
 	var evaluations uint64
+	// Every input of a strictly joined Level, as it was read.
+	var inputs []InputEvidence
+	strict := level.compiled.Connector() == contract.LevelConnectorStrictAND
 	standardProjectionEntries := make([]projectionEntry, 0)
 	for ordinal, algorithm := range level.algorithms {
 		if err := ctx.Err(); err != nil {
@@ -278,6 +281,10 @@ func (evaluator *Evaluator) evaluateNamedInputLevel(
 		currentEvidence := ThresholdEvidence{
 			PredicateDigest: result.predicateDigest, ProjectedValueOrdinal: projectionOrdinal, HasProjectedValue: true,
 		}
+		if strict {
+			inputs = append(inputs, InputEvidence{ProjectedValueOrdinal: projectionOrdinal,
+				Decided: result.result == FactResultNormal || result.result == FactResultAnomalous, Matched: result.result == FactResultAnomalous})
+		}
 		if result.result == FactResultAnomalous {
 			currentEvidence.MatchedAlgorithmOrdinal = uint32(ordinal)
 			currentEvidence.HasMatchedAlgorithm = true
@@ -314,7 +321,8 @@ func (evaluator *Evaluator) evaluateNamedInputLevel(
 		// level: a normal one on an anomalous OR, a matched one on a normal
 		// AND.
 		matched, determined := combineAlgorithmTruth(level.compiled.Connector(), truths)
-		if !decidingEvidenceSet && determined && ((level.compiled.Connector() == contract.LevelConnectorAND && !matched) ||
+		and := level.compiled.Connector() == contract.LevelConnectorAND || level.compiled.Connector() == contract.LevelConnectorStrictAND
+		if !decidingEvidenceSet && determined && ((and && !matched) ||
 			(level.compiled.Connector() == contract.LevelConnectorOR && matched)) {
 			evidence, decidingEvidenceSet = currentEvidence, true
 		}
@@ -322,7 +330,7 @@ func (evaluator *Evaluator) evaluateNamedInputLevel(
 	matched, determined := combineAlgorithmTruth(level.compiled.Connector(), truths)
 	if !determined {
 		fact.Result, fact.ReasonCode = firstUnavailable.result, firstUnavailable.reasonCode
-		fact.Evidence = ThresholdEvidence{ResultReason: firstUnavailable.reasonCode}
+		fact.Evidence = ThresholdEvidence{ResultReason: firstUnavailable.reasonCode, Inputs: inputs}
 		return fact, evaluations, nil
 	}
 	if matched {
@@ -333,6 +341,7 @@ func (evaluator *Evaluator) evaluateNamedInputLevel(
 	if evidence.PredicateDigest == "" && fallbackEvidenceSet {
 		evidence = fallbackEvidence
 	}
+	evidence.Inputs = inputs
 	fact.Evidence = evidence
 	return fact, evaluations, nil
 }

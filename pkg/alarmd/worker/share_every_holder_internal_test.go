@@ -40,7 +40,7 @@ func TestEveryHolderOfASlotIsJudgedAgainstItsShareThenThePool(t *testing.T) {
 			return stream.reserveProvisional(context.Background(), 0, asked)
 		}},
 		{"the side effects", func(coordinator *SlotExecutionCoordinator, stream *streamedExecution) error {
-			return coordinator.acquireEffects(effectCounts{states: 1}, asked, stream, "normal_output")
+			return coordinator.acquireEffects(effectCounts{states: 1}, stream, "normal_output", retainedCharges{retainPhaseOutput: asked})
 		}},
 		{"a no-data first write's segment", func(coordinator *SlotExecutionCoordinator, stream *streamedExecution) error {
 			return coordinator.holdRetained(stream, asked, noDataReservationPhase)
@@ -121,7 +121,7 @@ func TestANoDataFirstWriteIsJudgedWithTheRestOfItsSlot(t *testing.T) {
 	share := coordinator.qgShareBytes()
 	mutation := wholeMemory(t, 2000)
 	segment := noDataFirstWriteSegmentBytes(mutation)
-	stream := &streamedExecution{coordinator: coordinator, began: true}
+	stream := &streamedExecution{slotStream: &slotStream{coordinator: coordinator, began: true}}
 	stream.retainBytes(retainPhaseInput, share-segment/2)
 	coordinator.reservations.retainedBytes = stream.retainedTotal()
 	ctx := withRetainedOwner(context.Background(), stream)
@@ -146,7 +146,7 @@ func TestANoDataFirstWriteIsJudgedWithTheRestOfItsSlot(t *testing.T) {
 	}
 
 	coordinator, store, observed = pooledNoDataFixture(4 << 20)
-	stream = &streamedExecution{coordinator: coordinator, began: true}
+	stream = &streamedExecution{slotStream: &slotStream{coordinator: coordinator, began: true}}
 	coordinator.reservations.retainedBytes = coordinator.budget.MaxRetainedBytes - segment/2
 	ctx = withRetainedOwner(context.Background(), stream)
 	err := coordinator.applyNoDataMemory(ctx, request, refusedMemoryDue(t), []execution.PlanNoDataMutation{mutation})
@@ -170,7 +170,7 @@ func shareFixture(pool, others, own uint64) (*SlotExecutionCoordinator, *streame
 	coordinator := &SlotExecutionCoordinator{budget: ProvisionalBudget{MaxSeries: 1 << 20, MaxRetainedBytes: pool,
 		MaxStateMutations: 100, MaxEvents: 100, MaxGapMutations: 10},
 		ports: Ports{Observer: observability.ObserverFunc(func(context.Context, observability.Observation) {})}}
-	stream := &streamedExecution{coordinator: coordinator, began: true}
+	stream := &streamedExecution{slotStream: &slotStream{coordinator: coordinator, began: true}}
 	coordinator.reservations.retainedBytes = others + own
 	if own > 0 {
 		stream.retainedByPhase[retainPhaseInput] = own

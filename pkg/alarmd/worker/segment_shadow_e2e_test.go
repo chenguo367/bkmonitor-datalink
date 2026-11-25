@@ -299,7 +299,17 @@ type shadowProvider struct {
 	absent     map[string]bool
 	value      map[string]string
 	partial    bool
+	// failSlicesAfter, when set, fails every read of a slice past the first
+	// failSlicesAfter distinct slices the provider was asked for, as a
+	// provider down mid-Slot does; seen and failing keep which slices those
+	// are, so a read ahead and its read again both fail.
+	failSlicesAfter int
+	seen, failing   map[string]bool
 }
+
+// errShadowProviderDown is the provider refusing a read, failing the Slot's
+// query: no timeout, so nothing of it is put on the slice's size.
+var errShadowProviderDown = errors.New("shadow provider: down")
 
 func (provider *shadowProvider) round(evaluation int64, absent []string, value map[string]string, partial bool) {
 	provider.mu.Lock()
@@ -313,6 +323,20 @@ func (provider *shadowProvider) round(evaluation int64, absent []string, value m
 func (provider *shadowProvider) Execute(ctx context.Context, attempt execution.QueryAttempt, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
 	provider.mu.Lock()
 	evaluation, absent, value, partial := provider.evaluation, provider.absent, provider.value, provider.partial
+	if provider.failSlicesAfter > 0 && !attempt.Slice.IsZero() {
+		digest := attempt.Slice.Digest()
+		if provider.seen == nil {
+			provider.seen, provider.failing = map[string]bool{}, map[string]bool{}
+		}
+		if !provider.seen[digest] && len(provider.seen) >= provider.failSlicesAfter {
+			provider.failing[digest] = true
+		}
+		provider.seen[digest] = true
+		if provider.failing[digest] {
+			provider.mu.Unlock()
+			return execution.ProviderCompletion{}, errShadowProviderDown
+		}
+	}
 	provider.mu.Unlock()
 	window := attempt.Spec.LogicalWindow
 	primary := window.End > evaluation-60

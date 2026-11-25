@@ -67,7 +67,7 @@ func TestEachPhaseIsChargedForItsOwnBytesAndNobodyElses(t *testing.T) {
 	}} {
 		t.Run(testCase.name, func(t *testing.T) {
 			coordinator := &SlotExecutionCoordinator{budget: sideEffectTestBudget("")}
-			stream := &streamedExecution{coordinator: coordinator, began: true}
+			stream := &streamedExecution{slotStream: &slotStream{coordinator: coordinator, began: true}}
 			defer stream.releaseProvisional()
 			testCase.drive(t, stream)
 
@@ -93,12 +93,12 @@ func TestEachPhaseIsChargedForItsOwnBytesAndNobodyElses(t *testing.T) {
 // holds, and the refusals name whichever object is unlucky enough to be next.
 func TestReleasingAnExecutionGivesBackEveryPhaseItHeld(t *testing.T) {
 	coordinator := &SlotExecutionCoordinator{budget: sideEffectTestBudget("")}
-	stream := &streamedExecution{coordinator: coordinator, began: true}
+	stream := &streamedExecution{slotStream: &slotStream{coordinator: coordinator, began: true}}
 	if err := stream.reserveProvisional(context.Background(), 1, 100); err != nil {
 		t.Fatalf("reserve input: %v", err)
 	}
 	stream.series++
-	stream.retainBytes(retainPhaseInput, 100)
+	stream.retainedCharged(retainPhaseInput, 100)
 	if err := stream.retainTargetBytes(context.Background(), 1, 64); err != nil {
 		t.Fatalf("retain targets: %v", err)
 	}

@@ -420,7 +420,7 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 		completion.RouteFacts.Attempts[0].Request = request
 		completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
 		completion.Stats.Answered = true
-		completion.Stats.WaitMillis, completion.Stats.BodyMillis = answerPhases(started, answered, client.now())
+		completion.Stats.WaitMillis, completion.Stats.BodyMillis, completion.Stats.BodyMicros = answerPhases(started, answered, client.now())
 		completion.RouteFacts.Attempts[0].Timing = attemptTiming(attempt.Budget, started, client.now(), 0)
 		return completion, nil
 	}
@@ -463,7 +463,7 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 	completion.Stats.Bytes = counted.bytes
 	completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
 	completion.Stats.Answered = true
-	completion.Stats.WaitMillis, completion.Stats.BodyMillis = answerPhases(started, answered, client.now())
+	completion.Stats.WaitMillis, completion.Stats.BodyMillis, completion.Stats.BodyMicros = answerPhases(started, answered, client.now())
 	completion.Stats.ResponseCodec = "legacy_json"
 	if shared {
 		completion.Stats.ResponseCodec = "shared_json_v1"
@@ -1385,6 +1385,6 @@ func onRequestGrid(spec execution.PhysicalQuerySpec, sourceTime int64) bool {
 // answerPhases splits a query answered at answered - its response's headers
 // in - into the wait before them, the provider's, and the body after, read
 // and decoded, alarmd's.
-func answerPhases(started, answered, done time.Time) (wait, body uint64) {
-	return uint64(answered.Sub(started).Milliseconds()), uint64(done.Sub(answered).Milliseconds())
+func answerPhases(started, answered, done time.Time) (wait, body, bodyMicros uint64) {
+	return uint64(answered.Sub(started).Milliseconds()), uint64(done.Sub(answered).Milliseconds()), uint64(done.Sub(answered).Microseconds())
 }

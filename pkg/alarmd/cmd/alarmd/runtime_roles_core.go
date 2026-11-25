@@ -29,9 +29,12 @@ import (
 // phaseTwoCoreResources assembles the shared control/read contract. Worker
 // execution storage is created only for a process that executes Query Groups.
 type phaseTwoCoreResources struct {
-	Repository      *controlplane.RedisCatalogRepository
-	Catalog         *controlplane.RedisCatalogRuntime
-	Ownership       *ownership.RedisStore
+	Repository *controlplane.RedisCatalogRepository
+	Catalog    *controlplane.RedisCatalogRuntime
+	Ownership  *ownership.RedisStore
+	// MultiDetect is the release gate of items detected over several inputs,
+	// recorded by the ownership round and read by the source round.
+	MultiDetect     *multiDetectGate
 	Progress        *progress.Store
 	Control         *productionPhaseTwoControl
 	Reconciler      *controlplane.SourceReconciler
@@ -307,6 +310,14 @@ func openPhaseTwoCoreResources(ctx context.Context, cfg config.Config, recorder 
 	if err := wait.await(ctx, "ownership_store", ownershipStore.Ping); err != nil {
 		return nil, err
 	}
+	// Items detected over several inputs enter the Catalog only while every
+	// ready worker declares the capability: the ownership round records the
+	// ready set it reads, the source round reads the gate (multiDetectGate).
+	multiDetect := &multiDetectGate{list: ownershipStore.ListReadyWorkers, now: now,
+		fresh: 2 * cfg.PhaseTwo.Control.ReconcileInterval.Duration()}
+	if err := reconciler.ConfigureMultiDetectAdmission(multiDetect.admission); err != nil {
+		return nil, err
+	}
 	// A cutover stamps each rewritten timeline's revision on the Query
 	// Group's Assignment record in the same script (decision-016 batch 4);
 	// both live on the runtime Redis, and the catalog learns the record
@@ -429,6 +440,7 @@ func openPhaseTwoCoreResources(ctx context.Context, cfg config.Config, recorder 
 		Repository:      repository,
 		Catalog:         catalog,
 		Ownership:       ownershipStore,
+		MultiDetect:     multiDetect,
 		Progress:        progressStore,
 		Control:         control,
 		Reconciler:      reconciler,

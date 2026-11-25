@@ -27,15 +27,18 @@ type SliceMemoryReading struct {
 	// leaves of each kept shape, the entries of each one's per-slice series
 	// and of its deferred slices.
 	Leaves, LeafSeries, Deferred uint64
+	// LeavesMax is the leaves of the largest shape among them.
+	LeavesMax uint64
 }
 
 // SliceMemorySource reads the sliced-input memory at scrape time.
 type SliceMemorySource func() SliceMemoryReading
 
 type sliceMemoryCollector struct {
-	source  SliceMemorySource
-	groups  *prometheus.Desc
-	entries *prometheus.Desc
+	source    SliceMemorySource
+	groups    *prometheus.Desc
+	entries   *prometheus.Desc
+	leavesMax *prometheus.Desc
 }
 
 func newSliceMemoryCollector(source SliceMemorySource) *sliceMemoryCollector {
@@ -58,12 +61,21 @@ func newSliceMemoryCollector(source SliceMemorySource) *sliceMemoryCollector {
 				"deferred the slices each one defers for a timeout. Entries, not bytes: an estimate of what the "+
 				"memories retain, which grows with each entry, to read against the live heap.",
 			[]string{"kind"}, nil),
+		leavesMax: prometheus.NewDesc(prometheus.BuildFQName("", metricSubsystem, "worker_slice_shape_leaves_max"),
+			"The leaves of the largest shape this worker's sliced-input memories keep, at the scrape: the slices "+
+				"the next Slot of its Query Group starts in, whichever Query Group it is (none is named). "+
+				"worker_slice_memory_entries{kind=leaves} sums every shape's; this is the one that nears the "+
+				"tree's 64 leaves first, which a Slot started in its shape is refused at "+
+				"(INPUT_SLICE_LEAVES_EXHAUSTED). Rising over rounds is a shape kept split again and again; "+
+				"falling, a split merged back. 0 with no shape remembered.",
+			nil, nil),
 	}
 }
 
 func (c *sliceMemoryCollector) Describe(descriptions chan<- *prometheus.Desc) {
 	descriptions <- c.groups
 	descriptions <- c.entries
+	descriptions <- c.leavesMax
 }
 
 func (c *sliceMemoryCollector) Collect(metrics chan<- prometheus.Metric) {
@@ -73,6 +85,7 @@ func (c *sliceMemoryCollector) Collect(metrics chan<- prometheus.Metric) {
 	metrics <- prometheus.MustNewConstMetric(c.entries, prometheus.GaugeValue, float64(reading.Leaves), "leaves")
 	metrics <- prometheus.MustNewConstMetric(c.entries, prometheus.GaugeValue, float64(reading.LeafSeries), "leaf_series")
 	metrics <- prometheus.MustNewConstMetric(c.entries, prometheus.GaugeValue, float64(reading.Deferred), "deferred")
+	metrics <- prometheus.MustNewConstMetric(c.leavesMax, prometheus.GaugeValue, float64(reading.LeavesMax))
 }
 
 // BindSliceMemory registers the sliced-input memory reading. Bound once, to

@@ -757,7 +757,7 @@ Named outputs on the detection snapshots of ABNORMAL events, one per output per 
 
 Labels: `result`
 
-Detection snapshots built onto events, by result: whole; truncated (past the snapshot's size bound, the algorithm facts of the least severe levels were dropped; its ref_values and windows never are); dropped (the snapshot was past its size bound with no algorithm facts left to drop, so the event was sent without it - detection is never held for it). Only the ABNORMAL and RECOVERY events of strategies with named outputs carry one. Counted once per event built, where it is built and before the output sends it, so this is snapshots built, not sent; a retried Slot counts again. Every result exists from the start.
+Detection snapshots built onto events, by result: whole; truncated (past the snapshot's size bound, the algorithm facts of the least severe levels were dropped; its ref_values and windows never are); dropped (the snapshot was past its size bound with no algorithm facts left to drop, so the event was sent without it - detection is never held for it); without_inputs (the snapshot of an item detected over several inputs built without them, its detection not handing each over: never expected, and its content names the values by reference). Only the ABNORMAL and RECOVERY events of strategies with named outputs, and of items detected over several inputs, carry one. Counted once per event built, where it is built and before the output sends it, so this is snapshots built, not sent; a retried Slot counts again. Every result exists from the start.
 
 ## alarmd_execute_return_total
 
@@ -1437,6 +1437,18 @@ Labels: `loop`
 
 How long one turn of a long-running loop took, by loop, failed turns included. control is the refresh and reconcile loop; dispatch is the scheduler's queue loop, measured up to the wait. The liveness bound on a loop is judged against the longest turn this shows.
 
+## alarmd_multi_detect_recovery_held_total
+
+Labels: `position`
+
+Recovery windows of Levels detected over several inputs that the recovery walk did not count as quiet because of undecided rounds - rounds an input of the item could not be read for - by where the undecided round stood: window_end, a window ending on one, stepped over without breaking the run of quiet windows (it delays the recovery by that round only); window_inside, a window ending on a decided round whose undecided rounds could have been anomalies enough to fire it, counted as possibly anomalous (it holds the recovery until the window holds none, so undecided rounds in every window hold it until the data improves). Counted per window per evaluation, summed over series: an alert of such an item that stays open while this rises is waiting on rounds nobody could judge, and a holes-only wait does not count here. Levels of one query never count. Every position exists from the start.
+
+## alarmd_multi_detect_undecided_total
+
+Labels: `reason`
+
+Rounds of items detected over several inputs that could not be decided, one per series and Level, by why: input_missing, every input read whole and one holding nothing of the series at the round (a pod with no memory limit beside its CPU, say); input_partial, an input came back PARTIAL; input_error, an input was not read - timed out, unavailable, refused; input_stale and key_ambiguous are kept for inputs of different periods and for series a key does not name alone, and stay at zero while every input reads at one period by exactly the common dimensions. Such a round neither fires nor recovers its alert, and is written as a point the Level could not use. Levels of one query never count. Every reason exists from the start.
+
 ## alarmd_new_opens_total
 
 Labels: `outcome`
@@ -1604,6 +1616,16 @@ Events decided that the protocol has no message for, by the event's resolved wir
 Labels: `refusal`
 
 Slots whose events the broker acknowledged and whose State write the ownership store then refused, by the refusal: the Slot stops there, Progress does not move, and the next owner redoes it from Progress and sends the same events again (same event identities). Counted where the Slot holds both facts, once per Slot. A planned handover or stop that waits for the Slot keeps this at zero; what is left is a Slot that outlived its lease - a crash, a hung Slot, a drain deadline - and a lease lost to the store. ownership_refusals_total{site="state_apply"} counts every refused State write, with or without events before it; this is the subset that sent something. Every refusal has a series at startup. Reader: the release acceptance, from /metrics after each deploy.
+
+## alarmd_ownership_assignment_sweep_scan_pages_total
+
+SCAN calls the Control Leader's Assignment sweeps made, a page of up to 500 keys each, summed over sweeps (ownership_assignment_sweeps_total): a full sweep walks the whole key space, a recheck of held records by name makes none.
+
+## alarmd_ownership_assignment_sweeps_total
+
+Labels: `trigger`, `result`
+
+Sweeps of the Assignment records by the Control Leader, by why its round swept and how it ended. trigger: term, the first round of its term, a full sweep; retired, a Query Group of the last round's set gone from this one, a full sweep; owed, a sweep the last left owed - a full sweep after a failed one, or a recheck by name of the records a live lease held (no SCAN). result: success or failed. A full sweep walks the key space with SCAN, so its cost follows the store's key count, not the records': read with ownership_assignment_sweep_scan_pages_total - pages over sweeps{trigger=term|retired} is a full sweep's walk, and an owed sweep with no pages beside it is a recheck. Every cell exists from the start.
 
 ## alarmd_ownership_refusals_total
 
@@ -2227,6 +2249,12 @@ Labels: `reason`
 
 Windows cut while the window bound was zero: what the Slot holds outside the window being filled had reached half its Query Group share (the bound is share/2 less that), so each series merged was cut into a window of its own. reason is the retained phase holding the most of what is outside: input (the series' inputs and the reads ahead), gap (the gap facts), output and state (the results, summary and State outside the window). Any increase means a Query Group ran one series per window: its output is correct but each series pays its own Sequence and fence check, so the Slot is slow; read it beside the group's share and slot_operation_duration_seconds. input points at slices too large or reads ahead holding too much, state or output at a share too small. Counted from completed Slots. Every reason exists from the start.
 
+## alarmd_slot_windowed_total
+
+Labels: `outcome`
+
+Slot attempts this worker applied window by window - one window or more written on the Slot's apply goroutine - by how each ended: completed, the Slot completed; retried, the attempt returned no error and did not complete, asking for another (an activation or output retry); failed, it returned an error. A Slot applied whole is in none of them. The window pipeline's phase seconds (slot_apply_wait_seconds_total, slot_land_seconds_total, slot_apply_overlap_seconds_total) are the completed ones' alone, so completed is their denominator: apply_wait over completed is a windowed Slot's mean wait on its apply goroutine, and a zero apply_wait reads as zero only beside completed above zero (015 O1). Counted from the process's start, every cell from the start.
+
 ## alarmd_source_change_signal_age_seconds
 
 How long ago the source's publisher last moved its change signal, in seconds by the Control Leader's clock, as of the latest refresh round. NaN when the latest round found no signal. A value that keeps growing while strategies are being saved means the signal has stopped following the source, and every skipped round since is a round that read nothing for a wrong reason.
@@ -2490,6 +2518,12 @@ Reads of a Plan's stable segment member's State (014 B3 3.2 rule 3), by what the
 Labels: `gate`, `period_class`
 
 Open members of a Plan's stable segments the shadow compared as a match and wrote all the same, by the first gate that kept them written and the Plan's period class. The gates, in the order the round checks them: slot_skip_off (the Slot follows no segment skip word), write_failed (an earlier attempt's segment write did not land), not_normal_operation (the Slot is neither a normal one nor a replay short of time - one sent before its deadline for a read that would not fit, the normal round in its place), plan_stopped (the Plan degraded twice in its owner's term), sampled (the Plan's sampled round of the day), ttl_zero (the Plan's segments have no lifetime to be written with), fallback_page (the member's page went unrenewed for half its lifetime). other is none of these and a defect: a match is written only for one of them. With state_series_not_written_total{reason="segment_member_skipped"} it adds up to state_segment_shadow_total{outcome="match"} summed over round, a replayed round aside.
+
+## alarmd_state_segment_members_left_total
+
+Labels: `family`
+
+Runtime State mutations the segment skip left unwritten - open members of their Plan's stable segments, steady, normal and quiet on the grid - by the family of the Plan's series they were left in: real, its real series; no_data, the synthetic series of its no-data view in segments of their own. The two sum to state_series_not_written_total{reason="segment_member_skipped"}, counted on the same observation. A family's skip share is members_left{family} over state_series_class_total{series=family}: what the skip saved that family's writes. Both cells exist from the start.
 
 ## alarmd_state_segment_read_total
 
@@ -2925,9 +2959,9 @@ Slots by what they did with their Query Group's shape, the leaves a slice that r
 
 ## alarmd_worker_input_slice_timeouts_total
 
-Labels: `outcome`
+Labels: `outcome`, `cause`
 
-Slices of Slots read in slices whose read ran out of time, by how each ended: split_succeeded, split and its children read in its place, the Slot's query completing; split_failed, split and the Slot's query failing after; not_split, failed as before - the query cooldown held, its time could not be put on its size, the window left was too short for its children, or the Slot had split once. A Slot splits so once. Which Query Group is not a label here.
+Slices of Slots read in slices whose read ran out of time, by how each ended: split_succeeded, split and its children read in its place, the Slot's query completing; split_failed, split and the Slot's query failing after; not_split, failed as before - the query cooldown held, its time could not be put on its size, the window left was too short for its children, or the Slot had split once. A Slot splits so once. Which Query Group is not a label here. cause is who timed the read out: provider, the provider answering a timeout before alarmd's deadline (504 or 408, or its status saying so), the only one a slice is split for; deadline, alarmd's own deadline for the read passing first, never split (the window was short, not the slice large); other, neither, which nothing writes today. split_succeeded is provider by construction; not_split by cause tells a slow backend from a Slot out of time. Every cell exists from the start.
 
 ## alarmd_worker_input_slices_total
 
@@ -3092,6 +3126,14 @@ Waits of the slices read ahead for room - a read that has an answer's bytes and 
 Labels: `phase`
 
 Slices read ahead that yielded - let go while they held bytes, for a reservation of the Slot's own the share would otherwise refuse - by the phase of that reservation: normal_input a slice's input, normal_output its State and events, normal_gap its gap facts, normal_no_data its no-data memory, slot_output and frames what a write keeps, window_bound a window cut to fit beside the reads ahead, query_free a Slot that runs no query, other a phase named nowhere here. Together they are worker_slice_read_ahead_total{outcome=yielded}. Each yielded slice is read again whole; which phase they yield to says which part of the share the reads ahead stand in. Counted from completed Slots, whose rows carry what the yielded reads held (read_ahead_yielded_bytes), the farthest from the slice being read (read_ahead_yield_distance_max) and the longest any read ahead waited for room (read_ahead_wait_millis_max).
+
+## alarmd_worker_slice_reads_in_flight
+
+Slice reads of completed Slots read in slices, by how many of their Slot's reads were in flight as each began, itself included: the Slot's own read and its reads ahead not yet ended (015 O1). A Slot reads at most its read width at once (min(4, query permits / 2)); reads ahead that keep up begin beside one another and read near that width, and reads that each wait on the Slot before the next begins read near 1. The mean is sum over count; read it against the Slots' slice reads' waits (query_wait_millis over input_millis on their rows), which is the reads actually waiting at once. Counted at the Slot's completion.
+
+## alarmd_worker_slice_shape_leaves_max
+
+The leaves of the largest shape this worker's sliced-input memories keep, at the scrape: the slices the next Slot of its Query Group starts in, whichever Query Group it is (none is named). worker_slice_memory_entries{kind=leaves} sums every shape's; this is the one that nears the tree's 64 leaves first, which a Slot started in its shape is refused at (INPUT_SLICE_LEAVES_EXHAUSTED). Rising over rounds is a shape kept split again and again; falling, a split merged back. 0 with no shape remembered.
 
 ## alarmd_worker_sliced_slots_total
 

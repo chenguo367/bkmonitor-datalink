@@ -47,8 +47,8 @@ func gapReservationFixture() (*SlotExecutionCoordinator, *reservationGapStore, e
 
 func TestNormalAndQueryFreeGapFactOwnersShareBudgetWithoutMutation(t *testing.T) {
 	coordinator, _, request := gapReservationFixture()
-	normal := &streamedExecution{coordinator: coordinator, request: execution.SlotExecutionRequest{Operation: execution.OperationNormal}}
-	queryFree := &streamedExecution{coordinator: coordinator, request: execution.SlotExecutionRequest{Operation: execution.OperationReplay}}
+	normal := &streamedExecution{slotStream: &slotStream{coordinator: coordinator, request: execution.SlotExecutionRequest{Operation: execution.OperationNormal}}}
+	queryFree := &streamedExecution{slotStream: &slotStream{coordinator: coordinator, request: execution.SlotExecutionRequest{Operation: execution.OperationReplay}}}
 	defer normal.releaseProvisional()
 	defer queryFree.releaseProvisional()
 	if _, err := normal.loadGapFacts(context.Background(), request); err != nil {
@@ -83,7 +83,7 @@ func TestGapFactPartialCancelReleasesAllAcceptedReferences(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	store.afterAccept = cancel
-	owner := &streamedExecution{coordinator: coordinator}
+	owner := &streamedExecution{slotStream: &slotStream{coordinator: coordinator}}
 	_, err := owner.loadGapFacts(ctx, request)
 	if !errors.Is(err, context.Canceled) || store.reads != 1 || len(owner.gaps.Items) != 1 {
 		t.Fatalf("cancel err=%v reads=%d retained=%d", err, store.reads, len(owner.gaps.Items))
@@ -96,7 +96,7 @@ func TestGapFactPartialCancelReleasesAllAcceptedReferences(t *testing.T) {
 
 func TestTargetBudgetRejectsBeforeCopiesOrGapReads(t *testing.T) {
 	coordinator, store, _ := gapReservationFixture()
-	owner := &streamedExecution{coordinator: coordinator}
+	owner := &streamedExecution{slotStream: &slotStream{coordinator: coordinator}}
 	targets := []execution.PlanIdentity{{StrategyID: "1"}, {StrategyID: "2"}}
 	if err := owner.retainTargets(context.Background(), len(targets), targets); err == nil {
 		t.Fatal("oversized target list accepted")

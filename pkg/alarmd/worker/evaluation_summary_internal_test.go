@@ -31,11 +31,13 @@ func TestASlotsSummaryReadsWhatItsMergedResultsSay(t *testing.T) {
 	planA := execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "summary-a"}
 	planB := execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "summary-b"}
 	stream := &streamedExecution{
-		coordinator: &SlotExecutionCoordinator{budget: sideEffectTestBudget("")},
-		header:      execution.InternalExecutionHeader{DuePlans: []execution.DuePlan{{Identity: planA}, {Identity: planB}}},
-		// Only A's no-data end index was read, so only A's series are kept
-		// as present.
-		noDataEnds: map[execution.PlanIdentity]execution.NoDataEndLoaded{planA: {}},
+		slotStream: &slotStream{
+			coordinator: &SlotExecutionCoordinator{budget: sideEffectTestBudget("")},
+			header:      execution.InternalExecutionHeader{DuePlans: []execution.DuePlan{{Identity: planA}, {Identity: planB}}},
+			// Only A's no-data end index was read, so only A's series are kept
+			// as present.
+			noDataEnds: map[execution.PlanIdentity]execution.NoDataEndLoaded{planA: {}},
+		},
 	}
 	defer stream.releaseProvisional()
 	ref := execution.FrozenExecutionContractRef{Slot: execution.SlotIdentity{QueryGroup: "qg"}}

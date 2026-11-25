@@ -716,6 +716,20 @@ func unsettled(request *EvaluationRequestV2) {
 type pointHistory struct {
 	step   int64
 	points map[int64]bool
+	// unusable are positions holding a point the Level could not use, kept
+	// apart from points: the real view counts them in neither CountObserved
+	// nor CountAnomalies.
+	unusable map[int64]bool
+}
+
+func (h pointHistory) CountUnusable(fromTime, untilTime int64) uint32 {
+	var count uint32
+	for timestamp := range h.unusable {
+		if timestamp >= fromTime && timestamp <= untilTime {
+			count++
+		}
+	}
+	return count
 }
 
 // CountObserved mirrors the real view: a position is observed when the history

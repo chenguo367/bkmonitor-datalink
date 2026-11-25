@@ -9,6 +9,29 @@
 
 package execution
 
+import "slices"
+
+// MergeOrder is where one batch of a Slot's results stands among the Slot's
+// batches: the number of the slice its series were read in, then its place
+// among the batches merged. A Slot read one slice at a time merges its
+// batches in this order; one whose slices are consumed side by side merges
+// them as they come, and every fold that keeps the first of several alike -
+// a Plan's place, a reason of equal rank, an UNKNOWN outcome - keeps the one
+// first in this order, so its fold is the one a Slot read one slice at a time
+// makes.
+type MergeOrder struct {
+	Slice int
+	Seq   uint64
+}
+
+// Before says whether order stands before other.
+func (order MergeOrder) Before(other MergeOrder) bool {
+	if order.Slice != other.Slice {
+		return order.Slice < other.Slice
+	}
+	return order.Seq < other.Seq
+}
+
 // CompletionAttributionFold is what the completion derivation reads of a
 // Slot's evaluation, kept as the results arrive rather than as the results.
 //
@@ -33,6 +56,8 @@ package execution
 // because that is when its inputs are all known.
 type CompletionAttributionFold struct {
 	plans []completionPlanFold
+	// next is the place Add gives a batch it is handed without one.
+	next uint64
 }
 
 // completionPlanFold is one Plan's part of the fold. The field names are the
@@ -45,9 +70,13 @@ type completionPlanFold struct {
 	// terminal is a Level of the Plan decided TERMINAL.
 	terminal bool
 	// unknown is the first UNKNOWN outcome of each (outcome Plan, guard
-	// tail) pair, in arrival order: two in practice, one per guard tail
-	// value, since a Plan's outcomes name the Plan.
-	unknown []LevelOutcome
+	// tail) pair, in merge order (MergeOrder): two in practice, one per
+	// guard tail value, since a Plan's outcomes name the Plan. unknownOrder
+	// is each one's batch's order; first is the Plan's first batch's, and
+	// disposed the batch's whose disposition it holds.
+	unknown         []LevelOutcome
+	unknownOrder    []MergeOrder
+	first, disposed MergeOrder
 }
 
 // Add folds one batch of a Slot's results in. A Plan already in the fold
@@ -55,7 +84,15 @@ type completionPlanFold struct {
 // it, which is the rule the worker merges a Slot's results by, so the fold
 // of a Slot's batches is the fold of the merged result.
 func (fold *CompletionAttributionFold) Add(result EvaluationResult) {
-	fold.add(result, true)
+	fold.next++
+	fold.add(result, true, MergeOrder{Seq: fold.next})
+}
+
+// AddAt folds one batch in at its place among the Slot's batches: where the
+// fold keeps the first of several alike, the first in that order, whatever
+// order the batches come in.
+func (fold *CompletionAttributionFold) AddAt(result EvaluationResult, order MergeOrder) {
+	fold.add(result, true, order)
 }
 
 // FoldCompletionAttribution is the fold of one result taken whole, each Plan
@@ -64,11 +101,11 @@ func (fold *CompletionAttributionFold) Add(result EvaluationResult) {
 // Slot's merged result never names one twice.
 func FoldCompletionAttribution(result EvaluationResult) CompletionAttributionFold {
 	var fold CompletionAttributionFold
-	fold.add(result, false)
+	fold.add(result, false, MergeOrder{})
 	return fold
 }
 
-func (fold *CompletionAttributionFold) add(result EvaluationResult, merge bool) {
+func (fold *CompletionAttributionFold) add(result EvaluationResult, merge bool, order MergeOrder) {
 	for _, next := range result.Plans {
 		index := -1
 		if merge {
@@ -80,10 +117,29 @@ func (fold *CompletionAttributionFold) add(result EvaluationResult, merge bool) 
 			}
 		}
 		if index < 0 {
-			fold.plans = append(fold.plans, completionPlanFold{Plan: next.Plan, Disposition: next.Disposition, ReasonCode: next.ReasonCode})
-			index = len(fold.plans) - 1
-		} else if PlanDispositionOutranks(next.Disposition, fold.plans[index].Disposition) {
-			fold.plans[index].Disposition, fold.plans[index].ReasonCode = next.Disposition, next.ReasonCode
+			// In order of the Plans' first batches: last, for a batch
+			// merged after every one before it.
+			index = len(fold.plans)
+			for index > 0 && order.Before(fold.plans[index-1].first) {
+				index--
+			}
+			fold.plans = slices.Insert(fold.plans, index, completionPlanFold{Plan: next.Plan, Disposition: next.Disposition,
+				ReasonCode: next.ReasonCode, first: order, disposed: order})
+		} else {
+			if order.Before(fold.plans[index].first) {
+				// Met first in this batch: to its place among the Plans' first.
+				moved := fold.plans[index]
+				moved.first = order
+				fold.plans = slices.Delete(fold.plans, index, index+1)
+				for index > 0 && order.Before(fold.plans[index-1].first) {
+					index--
+				}
+				fold.plans = slices.Insert(fold.plans, index, moved)
+			}
+			if current := &fold.plans[index]; PlanDispositionOutranks(next.Disposition, current.Disposition) ||
+				!PlanDispositionOutranks(current.Disposition, next.Disposition) && order.Before(current.disposed) {
+				current.Disposition, current.ReasonCode, current.disposed = next.Disposition, next.ReasonCode, order
+			}
 		}
 		plan := &fold.plans[index]
 		for _, outcome := range next.LevelOutcomes {
@@ -91,19 +147,31 @@ func (fold *CompletionAttributionFold) add(result EvaluationResult, merge bool) 
 			case LevelOutcomeTerminal:
 				plan.terminal = true
 			case LevelOutcomeUnknown:
-				plan.keepUnknown(outcome)
+				plan.keepUnknown(outcome, order)
 			}
 		}
 	}
 }
 
-func (plan *completionPlanFold) keepUnknown(outcome LevelOutcome) {
-	for _, kept := range plan.unknown {
+// keepUnknown keeps outcome when it is the first of its (Plan, guard tail)
+// pair in merge order, in its place among the outcomes kept.
+func (plan *completionPlanFold) keepUnknown(outcome LevelOutcome, order MergeOrder) {
+	for index, kept := range plan.unknown {
 		if kept.Plan == outcome.Plan && kept.GuardTail == outcome.GuardTail {
-			return
+			if !order.Before(plan.unknownOrder[index]) {
+				return
+			}
+			plan.unknown = slices.Delete(plan.unknown, index, index+1)
+			plan.unknownOrder = slices.Delete(plan.unknownOrder, index, index+1)
+			break
 		}
 	}
-	plan.unknown = append(plan.unknown, outcome)
+	at := len(plan.unknown)
+	for at > 0 && order.Before(plan.unknownOrder[at-1]) {
+		at--
+	}
+	plan.unknown = slices.Insert(plan.unknown, at, outcome)
+	plan.unknownOrder = slices.Insert(plan.unknownOrder, at, order)
 }
 
 // Plans is how many Plans the fold holds.

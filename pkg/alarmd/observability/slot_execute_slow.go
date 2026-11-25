@@ -63,12 +63,19 @@ type SlotExecuteSlowFacts struct {
 
 	QueryWaitMillis, QueryBodyMillis       uint64
 	QueryWaitMillisMax, QueryBodyMillisMax uint64
+	QueryBodyMicros, QueryBodyMicrosMax    uint64
 	InputSlices                            uint64
 	InputSliceTailMillis                   uint64
 	InputSliceTailMillisMax                uint64
 
 	ExecutionSlotWaitMillis                         float64
 	QueryPermitWaitMillis, QueryPermitWaitMillisMax int64
+	// Usage is the attempt's budget usage, written on the line as a
+	// completion row writes it (slot_budget_usage): its series, bytes,
+	// slices' seams and reads ahead, the reading a slow Slot that completed
+	// has no completion row for (015 O1). Readers of the usage take a
+	// completed Slot's alone; this line is not one.
+	Usage *SlotBudgetUsageFacts
 }
 
 // SlotExecuteSlowOperations is every operation slow attempts are counted
@@ -92,6 +99,7 @@ func ObserveSlotExecution(ctx context.Context, observer Observer, operation Oper
 	observer.Observe(ctx, Observation{
 		Component: ComponentScheduler, Stage: StageSlotExecuteSlow, Result: Result(ResultDegraded), Operation: operation,
 		ReasonCode: ReasonSlotExecuteSlow, Trace: trace, Duration: elapsed, DurationKnown: true, SlotExecuteSlow: &facts,
+		SlotBudgetUsage: facts.Usage,
 	})
 	return true
 }

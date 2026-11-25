@@ -26,6 +26,11 @@ type sliceSeams struct {
 	first, last, ended time.Time
 	tail, tailMax      time.Duration
 	change, changeMax  time.Duration
+	// handoff and handoffMax time each read's end from the read before's,
+	// series or none (015 O1): change and tail leave a read of no series
+	// out, and a Query Group whose slices answer nothing has no seam to
+	// read without these.
+	handoff, handoffMax time.Duration
 }
 
 // seriesCame notes a series of the read in hand reaching the Slot at at.
@@ -48,6 +53,10 @@ func (seams *sliceSeams) readEnded(at time.Time) {
 	if !seams.first.IsZero() && !seams.ended.IsZero() {
 		change := max(seams.first.Sub(seams.ended), 0)
 		seams.change, seams.changeMax = seams.change+change, max(seams.changeMax, change)
+	}
+	if !seams.ended.IsZero() {
+		handoff := max(at.Sub(seams.ended), 0)
+		seams.handoff, seams.handoffMax = seams.handoff+handoff, max(seams.handoffMax, handoff)
 	}
 	seams.first, seams.last, seams.ended = time.Time{}, time.Time{}, at
 }

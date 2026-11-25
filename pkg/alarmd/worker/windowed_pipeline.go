@@ -237,6 +237,7 @@ func (stream *streamedExecution) handOver(ctx context.Context, task applyTask) e
 		case pipe.tasks <- task:
 			pipe.inflight++
 			if window := task.window; window != nil {
+				stream.windows.handed++
 				pipe.inflightEffects.states += window.effects.states
 				pipe.inflightEffects.events += window.effects.events
 				for phase, bytes := range window.release {
@@ -372,9 +373,11 @@ func (stream *streamedExecution) joinApply(ctx context.Context) {
 			taken = true
 		}
 	}
+	// The apply side's holds become the Slot's once its goroutine has ended:
+	// the pool took them as they were judged, and they are charged the one
+	// way bytes are added to the Slot's total (chargeRetained).
 	if held := pipe.stream.applyHeldBytes.Swap(0); held > 0 {
-		stream.retainedByPhase[retainPhaseState] += held
-		stream.retainedNow[retainPhaseState].Add(held)
+		stream.chargeRetained(retainPhaseState, held)
 	}
 	if pipe.peak > stream.peakRetained {
 		stream.peakRetained, stream.peakByPhase = pipe.peak, pipe.peakByPhase
@@ -435,13 +438,17 @@ func (stream *streamedExecution) judgeHeldLocked(bytes uint64, phase string) err
 
 func (stream *streamedExecution) yieldHeld(phase string) bool { return stream.yieldReadAhead(phase) }
 
-// keepHeldLocked counts nothing under the lock: the Slot's side counts what it
-// holds after it (keepHeld, retainBytes), as its own reservations do, so the
-// apply side, judging the two sides' sum, may miss the Slot's latest hold -
-// by one reservation at most, the pool exact.
-func (stream *streamedExecution) keepHeldLocked(uint64) {}
+// keepHeldLocked charges the hold under the lock it was judged under
+// (chargeRetained), as every reservation of the Slot's does: the apply side,
+// judging the two sides' sum from the same copies, sees every hold judged
+// before its own. keepHeld counts it on the Slot's side after.
+func (stream *streamedExecution) keepHeldLocked(bytes uint64) {
+	stream.chargeRetained(retainPhaseState, bytes)
+}
 
-func (stream *streamedExecution) keepHeld(bytes uint64) { stream.retainBytes(retainPhaseState, bytes) }
+func (stream *streamedExecution) keepHeld(bytes uint64) {
+	stream.retainedCharged(retainPhaseState, bytes)
+}
 
 func (stream *streamedExecution) letGoHeld(bytes uint64) { stream.unretain(retainPhaseState, bytes) }
 

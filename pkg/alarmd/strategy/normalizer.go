@@ -191,6 +191,43 @@ var decimalUnits = map[string]int{
 	"decpbytes": 5, "PBs": 5, "Pbits": 5,
 }
 
+// decimalBases is each decimal unit's first step: the same measure at no
+// prefix, the unit its values are normalized to. Its steps alone do not say
+// it - bytes, bytes a second and bits a second step alike.
+var decimalBases = map[string]string{
+	"decbits": "decbits", "pps": "pps", "hertz": "hertz",
+	"decbytes": "decbytes", "deckbytes": "decbytes", "decmbytes": "decbytes", "decgbytes": "decbytes", "dectbytes": "decbytes", "decpbytes": "decbytes",
+	"Bps": "Bps", "KBs": "Bps", "MBs": "Bps", "GBs": "Bps", "TBs": "Bps", "PBs": "Bps",
+	"bps": "bps", "Kbits": "bps", "Mbits": "bps", "Gbits": "bps", "Tbits": "bps", "Pbits": "bps",
+}
+
+// normalizedUnitID is the unit a value of dataUnit is in once normalized,
+// by the platform's unit id: the first step of its unit's steps - percent
+// for the percent units, bytes or bits for the binary ones, ns for time, the
+// decimal unit of its measure - and a unit with no scale itself.
+func normalizedUnitID(dataUnit string) string {
+	unitID := dataUnit
+	if parts := strings.Split(dataUnit, "||"); len(parts) == 2 {
+		unitID = parts[1]
+	}
+	if base, ok := decimalBases[unitID]; ok {
+		return base
+	}
+	if _, ok := timeUnits[unitID]; ok {
+		return "ns"
+	}
+	_, binary := binaryUnits[unitID]
+	switch {
+	case unitID == "percent" || unitID == "percentunit":
+		return "percent"
+	case unitID == "bits":
+		return "bits"
+	case binary:
+		return "bytes"
+	}
+	return unitID
+}
+
 func unitSpecFor(unitID string) (unitSpec, bool) {
 	if _, ok := identityUnits[unitID]; ok {
 		return unitSpec{unitID: unitID, targetUnit: unitID, identity: true, suffixes: []string{""}, factorsToBase: []int64{1}}, true

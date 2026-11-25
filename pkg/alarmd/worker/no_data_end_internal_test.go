@@ -113,9 +113,11 @@ func TestAnOpenReadGapHoldsAnEndPastDueUntilTheGapCloses(t *testing.T) {
 	identity := execution.PlanGapIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration}
 	round := func(gaps ...execution.GapGuardSnapshot) noDataEndPlan {
 		stream := &streamedExecution{
-			header:     execution.InternalExecutionHeader{DuePlans: []execution.DuePlan{due}},
-			noDataEnds: map[execution.PlanIdentity]execution.NoDataEndLoaded{due.Identity: {Entries: []execution.NoDataEndEntry{overdue}}},
-			gaps:       execution.GapLoadResult{Items: gaps},
+			slotStream: &slotStream{
+				header:     execution.InternalExecutionHeader{DuePlans: []execution.DuePlan{due}},
+				noDataEnds: map[execution.PlanIdentity]execution.NoDataEndLoaded{due.Identity: {Entries: []execution.NoDataEndEntry{overdue}}},
+				gaps:       execution.GapLoadResult{Items: gaps},
+			},
 		}
 		return stream.noDataEndRound()[due.Identity]
 	}

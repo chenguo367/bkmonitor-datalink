@@ -94,4 +94,18 @@ type ThresholdEvidence struct {
 	MatchedGroupOrdinal     uint32
 	HasMatchedGroup         bool
 	ResultReason            string
+	// Inputs is, on a Level joined strictly - an item detected over several
+	// inputs - every input as the join read it, one per algorithm in order:
+	// what its events show of each, not only of the one that decided. Nil on
+	// any other Level.
+	Inputs []InputEvidence
+}
+
+// InputEvidence is one input of an item detected over several, as its
+// Level's strict join read it: the projected value its MultiDetectThreshold
+// judged (an ordinal of the record's projections), whether the input was
+// read at all, and whether it matched.
+type InputEvidence struct {
+	ProjectedValueOrdinal uint32
+	Decided, Matched      bool
 }

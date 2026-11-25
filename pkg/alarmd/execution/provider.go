@@ -602,6 +602,10 @@ type ProviderStats struct {
 	Answered   bool
 	WaitMillis uint64
 	BodyMillis uint64
+	// BodyMicros is BodyMillis in microseconds: a body under a millisecond,
+	// the answer of a query that matched nearly nothing, reads 0 in
+	// milliseconds and not here (015 O1).
+	BodyMicros uint64 `json:",omitempty"`
 	// SharedFrameWaitConsumerMicros and SharedFrameWaitReaderMicros are what
 	// the two sides of a shared-schema answer's frames waited for each other,
 	// over an answer decoded to its end: its frame reader, a frame read and

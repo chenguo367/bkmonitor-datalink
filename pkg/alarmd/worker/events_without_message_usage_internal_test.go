@@ -22,7 +22,7 @@ import (
 // stopped holding Python-compatible recoveries.
 func TestTheCompletionRowCountsTheEventsKeptAsIdentities(t *testing.T) {
 	recovery := execution.EventWithoutMessage{EventKind: contract.TriggerEventRecovery, Format: contract.WireFormatPythonCompatible}
-	stream := &streamedExecution{coordinator: &SlotExecutionCoordinator{}}
+	stream := &streamedExecution{slotStream: &slotStream{coordinator: &SlotExecutionCoordinator{}}}
 	stream.effects.events = 1
 	stream.evaluated = execution.EvaluationResult{Plans: []execution.PlanEvaluationResult{
 		{StateResults: []execution.StateEvaluation{

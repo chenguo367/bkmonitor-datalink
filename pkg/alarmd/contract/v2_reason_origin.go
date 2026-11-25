@@ -126,6 +126,7 @@ var reasonSourcesV2 = map[string]ReasonSourceV2{
 	ReasonEffectiveTimeUnknown:     ReasonSourceJudged,
 	ReasonHistoryWarming:           ReasonSourceJudged,
 	ReasonHistoryGapped:            ReasonSourceJudged,
+	ReasonMultiDetectInputMissing:  ReasonSourceJudged,
 	ReasonViewNotExecutable:        ReasonSourceJudged,
 	ReasonSupplementKeptReadAbsent: ReasonSourceJudged,
 	// alarmd's own contract checks on what it produced.

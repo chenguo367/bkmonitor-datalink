@@ -27,6 +27,15 @@ const (
 	DetectorKindSimpleRingRatio = "SimpleRingRatio"
 	DetectorKindOsRestart       = "OsRestart"
 	DetectorKindProcPort        = "ProcPort"
+	// DetectorKindMultiDetectThreshold is the threshold of an input of an
+	// item detected over several: the input's own point at the round's
+	// source time, judged by the input's own threshold - the first input's
+	// read from the PRIMARY, every other's from its own named input.
+	DetectorKindMultiDetectThreshold = "MultiDetectThreshold"
+	// MultiDetectCapability is the worker capability MultiDetectThreshold is
+	// offered under (AlgorithmCapability.Gate): a worker that runs items
+	// detected over several inputs declares it.
+	MultiDetectCapability = "multi-detect.v1"
 
 	SourceAlgorithmFamilyPingUnreachable = "ping_unreachable"
 	SourceMappingPingUnreachableV1       = "ping-unreachable-to-threshold-v1"
@@ -474,6 +483,14 @@ func (s NumericNormalizerSpec) SourceMultiplier() int64 { return s.sourceMultipl
 
 func (s NumericNormalizerSpec) TargetUnit() string {
 	return s.targetUnit
+}
+
+// ValueUnit is the unit a value this normalizes is in, by the platform's
+// unit id (normalizedUnitID): what a reader formats it by. Not TargetUnit,
+// which names the scale compared at - "base" for every scaled measure - and
+// is part of the normalizer's identity.
+func (s NumericNormalizerSpec) ValueUnit() string {
+	return normalizedUnitID(s.sourceUnit)
 }
 
 func (s NumericNormalizerSpec) DecimalPlaces() uint32 {

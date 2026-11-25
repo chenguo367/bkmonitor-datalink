@@ -113,11 +113,17 @@ func newWindowedFixture(t *testing.T) *windowedFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stream := &streamedExecution{coordinator: coordinator, request: request, header: header, gapItems: gapItems,
-		gaps:       execution.GapLoadResult{Items: []execution.GapGuardSnapshot{{Identity: due.GapIdentity(), Status: execution.GapMissing}}},
+	stream := &streamedExecution{
 		planSeries: map[execution.PlanIdentity]map[execution.SeriesIdentityDigest]struct{}{plan: {}},
-		evaluated: execution.EvaluationResult{Contract: contractRef, Result: observability.ResultSuccess, ReasonCode: observability.ReasonNone,
-			Plans: []execution.PlanEvaluationResult{{Plan: plan, Disposition: execution.PlanDecided}}},
+		slotStream: &slotStream{
+			coordinator: coordinator,
+			request:     request,
+			header:      header,
+			gapItems:    gapItems,
+			gaps:        execution.GapLoadResult{Items: []execution.GapGuardSnapshot{{Identity: due.GapIdentity(), Status: execution.GapMissing}}},
+			evaluated: execution.EvaluationResult{Contract: contractRef, Result: observability.ResultSuccess, ReasonCode: observability.ReasonNone,
+				Plans: []execution.PlanEvaluationResult{{Plan: plan, Disposition: execution.PlanDecided}}},
+		},
 	}
 	// A case that cuts windows without running the Slot to its end leaves its
 	// apply goroutine to be joined here, as every return of Execute joins it.

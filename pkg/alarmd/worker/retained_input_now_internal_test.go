@@ -18,7 +18,7 @@ import (
 // alone - not what it retained for gaps, output or State - read while the
 // series path keeps adding, and back to nothing when the stream lets go.
 func TestTheStreamSaysItsRetainedInputToAnyGoroutine(t *testing.T) {
-	stream := &streamedExecution{coordinator: &SlotExecutionCoordinator{}}
+	stream := &streamedExecution{slotStream: &slotStream{coordinator: &SlotExecutionCoordinator{}}}
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {

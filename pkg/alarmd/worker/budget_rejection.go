@@ -32,10 +32,11 @@ func (stream *streamedExecution) ownBudgetUsage(budget ProvisionalBudget) []obse
 		// worse than publishing nothing.
 		return nil
 	}
+	held := stream.heldEffects()
 	return []observability.CapacityBudgetUsage{
-		{Budget: observability.CapacityBudgetStateMutations, OwnUsed: stream.effects.states, Limit: budget.MaxStateMutations},
-		{Budget: observability.CapacityBudgetEvents, OwnUsed: stream.effects.events, Limit: budget.MaxEvents},
-		{Budget: observability.CapacityBudgetGapMutations, OwnUsed: stream.effects.gaps, Limit: budget.MaxGapMutations},
+		{Budget: observability.CapacityBudgetStateMutations, OwnUsed: held.states, Limit: budget.MaxStateMutations},
+		{Budget: observability.CapacityBudgetEvents, OwnUsed: held.events, Limit: budget.MaxEvents},
+		{Budget: observability.CapacityBudgetGapMutations, OwnUsed: held.gaps, Limit: budget.MaxGapMutations},
 		{Budget: observability.CapacityBudgetRetainedBytes, OwnUsed: stream.retainedTotal(), Limit: budget.MaxRetainedBytes},
 		{Budget: observability.CapacityBudgetSeries, OwnUsed: stream.series, Limit: budget.MaxSeries},
 	}
@@ -92,11 +93,11 @@ func (stream *streamedExecution) ownBudget(kind observability.CapacityBudget) *u
 	case observability.CapacityBudgetRetainedBytes:
 		value = stream.retainedTotal()
 	case observability.CapacityBudgetStateMutations:
-		value = stream.effects.states
+		value = stream.heldEffects().states
 	case observability.CapacityBudgetEvents:
-		value = stream.effects.events
+		value = stream.heldEffects().events
 	case observability.CapacityBudgetGapMutations:
-		value = stream.effects.gaps
+		value = stream.heldEffects().gaps
 	}
 	return stream.ownReservation(value)
 }

@@ -37,6 +37,9 @@ type QueryFailureFacts struct {
 	// slice ran out of time, how that slice ended: split_failed or not_split
 	// (InputSliceTimeoutOutcomes); empty otherwise.
 	SliceTimeout string
+	// SliceTimeoutCause is who timed that slice's read out
+	// (InputSliceTimeoutCauses); empty with SliceTimeout.
+	SliceTimeoutCause string
 }
 
 // QueryRequestFacts is execution.RequestFacts as a line renders it.

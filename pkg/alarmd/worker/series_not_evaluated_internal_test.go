@@ -62,8 +62,12 @@ func TestASlotThatLostSeriesNamesThePlanOnOneWarnLine(t *testing.T) {
 		Now: func() time.Time { return now }}}
 	plan := execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "7"}
 	bound := 5
-	stream := &streamedExecution{header: execution.InternalExecutionHeader{DuePlans: []execution.DuePlan{{Identity: plan}}},
-		planSeriesCounts: map[execution.PlanIdentity]*int{plan: &bound}}
+	stream := &streamedExecution{
+		slotStream: &slotStream{
+			header: execution.InternalExecutionHeader{DuePlans: []execution.DuePlan{{Identity: plan}}},
+		},
+		planSeriesCounts: map[execution.PlanIdentity]*int{plan: &bound},
+	}
 	for range 3 {
 		stream.noteTakenUp(plan)
 	}

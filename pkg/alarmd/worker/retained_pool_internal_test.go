@@ -54,13 +54,13 @@ func holdSeries(stream *streamedExecution, series int) (int, error) {
 // series that crosses it.
 func TestALargeQueryGroupHoldsItsWholeShareWithTheStateCacheOn(t *testing.T) {
 	co := coordinatorOfReplica(fourGiB)
-	stream := &streamedExecution{coordinator: co, began: true}
+	stream := &streamedExecution{slotStream: &slotStream{coordinator: co, began: true}}
 	if held, err := holdSeries(stream, 100_000); err != nil {
 		t.Fatalf("held %d of 100000 series (%d bytes) before %v; want the whole group within its share", held, stream.retainedTotal(), err)
 	}
 
 	co = coordinatorOfReplica(fourGiB)
-	stream = &streamedExecution{coordinator: co, began: true}
+	stream = &streamedExecution{slotStream: &slotStream{coordinator: co, began: true}}
 	share := uint64(768 << 20)
 	held, err := holdSeries(stream, 110_000)
 	if _, byShare := execution.ShareRefusalOf(err); err == nil || !byShare {
@@ -95,11 +95,11 @@ func TestAFullStateCacheGivesWayToALargeQueryGroup(t *testing.T) {
 	co := coordinatorOfReplica(fourGiB)
 	cache := &fullCache{held: 128 << 20}
 	co.ports.RetainedBorrower = cache
-	beside := &streamedExecution{coordinator: co, began: true}
+	beside := &streamedExecution{slotStream: &slotStream{coordinator: co, began: true}}
 	if err := beside.ReserveRetainedBytes(context.Background(), 250<<20); err != nil {
 		t.Fatal(err)
 	}
-	stream := &streamedExecution{coordinator: co, began: true}
+	stream := &streamedExecution{slotStream: &slotStream{coordinator: co, began: true}}
 	if held, err := holdSeries(stream, 100_000); err != nil {
 		t.Fatalf("held %d of 100000 series beside a full State cache before %v", held, err)
 	}
@@ -117,11 +117,11 @@ func TestTheStateCacheGivesNothingBackForAReservationThatCannotFit(t *testing.T)
 	cache := &fullCache{held: 128 << 20}
 	co.ports.RetainedBorrower = cache
 	for _, bytes := range []uint64{700 << 20, 300 << 20} {
-		if err := (&streamedExecution{coordinator: co, began: true}).ReserveRetainedBytes(context.Background(), bytes); err != nil {
+		if err := (&streamedExecution{slotStream: &slotStream{coordinator: co, began: true}}).ReserveRetainedBytes(context.Background(), bytes); err != nil {
 			t.Fatal(err)
 		}
 	}
-	err := (&streamedExecution{coordinator: co, began: true}).ReserveRetainedBytes(context.Background(), 30<<20)
+	err := (&streamedExecution{slotStream: &slotStream{coordinator: co, began: true}}).ReserveRetainedBytes(context.Background(), 30<<20)
 	if _, byShare := execution.ShareRefusalOf(err); err == nil || byShare {
 		t.Fatalf("30 MiB past a pool with 24 MiB unreserved: %v (by the share: %v), want the pool's refusal", err, byShare)
 	}
@@ -157,7 +157,7 @@ func TestEveryWayIntoThePoolHasTheStateCacheGiveWay(t *testing.T) {
 			return nil
 		},
 		"a side effect": func(co *SlotExecutionCoordinator, stream *streamedExecution) error {
-			return co.acquireEffects(effectCounts{states: 1}, 4096, stream, "normal_apply")
+			return co.acquireEffects(effectCounts{states: 1}, stream, "normal_apply", retainedCharges{retainPhaseOutput: 4096})
 		},
 		"a gap fact": func(co *SlotExecutionCoordinator, stream *streamedExecution) error {
 			co.ports.GapGuard = oneGapFact{}
@@ -177,7 +177,7 @@ func TestEveryWayIntoThePoolHasTheStateCacheGiveWay(t *testing.T) {
 			cache := &fullCache{held: 128 << 20}
 			co.ports.RetainedBorrower = cache
 			co.reservations.retainedBytes = co.budget.MaxRetainedBytes - cache.held
-			if err := reserve(co, &streamedExecution{coordinator: co, began: true}); err != nil {
+			if err := reserve(co, &streamedExecution{slotStream: &slotStream{coordinator: co, began: true}}); err != nil {
 				t.Fatalf("refused with the cache holding the pool's room: %v", err)
 			}
 			if cache.yields == 0 || RetainedReserved(co)+cache.held > co.budget.MaxRetainedBytes {

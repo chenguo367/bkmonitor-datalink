@@ -61,6 +61,9 @@ type Recorder struct {
 	retainedBound     bool
 	sliceMemoryMu     sync.Mutex
 	sliceMemoryBound  bool
+	// windowedSlotsMu guards windowedSlotsBound (BindWindowedSlots).
+	windowedSlotsMu    sync.Mutex
+	windowedSlotsBound bool
 	// segmentStore* guard the Plans' segments' binding (segment_store.go).
 	segmentStoreMu    sync.Mutex
 	segmentStoreBound bool

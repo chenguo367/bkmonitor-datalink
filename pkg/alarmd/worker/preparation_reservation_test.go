@@ -12,7 +12,7 @@ func TestPreparationSharesRetainedAccountWithoutWaiting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := co.acquireProvisional(1, 30, nil, "normal_input"); err != nil {
+	if err := co.acquireProvisional(1, 30, nil, "normal_input", retainNone); err != nil {
 		t.Fatal(err)
 	}
 	_, err = co.reservePreparationBytes(context.Background(), 11)

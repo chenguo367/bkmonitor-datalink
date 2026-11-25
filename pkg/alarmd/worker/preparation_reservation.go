@@ -14,7 +14,7 @@ func (coordinator *SlotExecutionCoordinator) reservePreparationBytes(ctx context
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := coordinator.acquireProvisional(0, size, nil, "snapshot_prepare"); err != nil {
+	if err := coordinator.acquireProvisional(0, size, nil, "snapshot_prepare", retainNone); err != nil {
 		coordinator.observeCapacityRejection(ctx, "", observability.CapacityBudgetRetainedBytes, err)
 		return nil, err
 	}

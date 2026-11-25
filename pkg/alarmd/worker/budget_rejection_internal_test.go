@@ -21,13 +21,13 @@ func TestBudgetRejectionLogsSnapshotWithoutMutatingSibling(t *testing.T) {
 	limiter, _ := observability.NewScopedLogLimiter(observability.ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 10, MaxScopes: 1024})
 	policy, _ := observability.NewScopedBoundedLogPolicy(limiter)
 	co := &SlotExecutionCoordinator{budget: ProvisionalBudget{MaxSeries: 10, MaxRetainedBytes: 100}, ports: Ports{Observer: observability.NewLoggingObserver(observability.New("alarmd", &output), policy)}}
-	sibling := &streamedExecution{coordinator: co, began: true}
+	sibling := &streamedExecution{slotStream: &slotStream{coordinator: co, began: true}}
 	if err := sibling.reserveProvisional(context.Background(), 1, 60); err != nil {
 		t.Fatal(err)
 	}
 	sibling.series, sibling.retainedByPhase = 1, retainedSeed(60)
 	defer sibling.releaseProvisional()
-	failing := &streamedExecution{coordinator: co, began: true, request: execution.SlotExecutionRequest{Operation: execution.OperationNormal}}
+	failing := &streamedExecution{slotStream: &slotStream{coordinator: co, began: true, request: execution.SlotExecutionRequest{Operation: execution.OperationNormal}}}
 	err := failing.reserveProvisional(context.Background(), 1, 50)
 	var exceeded *provisionalBudgetExceededError
 	if !errors.As(err, &exceeded) || err.Error() != "alarmd worker: provisional retained_bytes budget exceeded" ||
@@ -54,7 +54,7 @@ func TestBudgetRejectionLogsSnapshotWithoutMutatingSibling(t *testing.T) {
 		t.Fatal(err)
 	}
 	sibling.series++
-	sibling.retainBytes(retainPhaseInput, 15)
+	sibling.retainedCharged(retainPhaseInput, 15)
 	sibling.releaseProvisional()
 	if co.reservations.series != 0 || co.reservations.retainedBytes != 0 {
 		t.Fatal("sibling completion did not release")
@@ -71,8 +71,8 @@ func TestBudgetRejectionOutputAndQueryFreeOwnership(t *testing.T) {
 		// Twenty rather than thirty: one Query Group may hold half the pool, so
 		// at thirty this execution crosses its own share and the shared-pool
 		// rejection this case is about never happens.
-		stream := &streamedExecution{coordinator: co, began: normal, retainedByPhase: retainedSeed(20)}
-		err := co.acquireEffects(effectCounts{states: 1}, 25, stream, stream.reservationPhase("normal_output"))
+		stream := &streamedExecution{slotStream: &slotStream{coordinator: co, began: normal, retainedByPhase: retainedSeed(20)}}
+		err := co.acquireEffects(effectCounts{states: 1}, stream, stream.reservationPhase("normal_output"), retainedCharges{retainPhaseOutput: 25})
 		var exceeded *provisionalBudgetExceededError
 		if !errors.As(err, &exceeded) {
 			t.Fatal(err)
@@ -105,7 +105,7 @@ func TestGapLoadBudgetRejectionUsesFailedReservationSnapshot(t *testing.T) {
 		co.budget.MaxRetainedBytes = 1 << 20
 		others := co.budget.MaxRetainedBytes - 100
 		co.reservations.retainedBytes = others
-		stream := &streamedExecution{coordinator: co, began: normal}
+		stream := &streamedExecution{slotStream: &slotStream{coordinator: co, began: normal}}
 		_, err := stream.loadGapFacts(context.Background(), request)
 		var exceeded *provisionalBudgetExceededError
 		if !errors.As(err, &exceeded) || exceeded.facts == nil || exceeded.share {

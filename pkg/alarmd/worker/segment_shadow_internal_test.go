@@ -654,7 +654,7 @@ func TestASlotReservesItsBooksAndRunsWithoutTheShadowWhenThePoolRefusesThem(t *t
 		coordinator := &SlotExecutionCoordinator{ports: Ports{State: segmentStateStore{memorySegments: store}, Observer: observations},
 			budget: ProvisionalBudget{MaxSeries: 1000, MaxRetainedBytes: room}}
 		request := shadowRequest(execution.OperationNormal, 1260)
-		stream := &streamedExecution{coordinator: coordinator, request: request, began: true}
+		stream := &streamedExecution{slotStream: &slotStream{coordinator: coordinator, request: request, began: true}}
 		held, _ := stream.holdSegments(context.Background(), shadowSlot(t, store, request, shadowDue), "")
 		var skipped, rejected int
 		for _, observation := range observations.observed {

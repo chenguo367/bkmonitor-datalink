@@ -174,6 +174,8 @@ func (stream *streamedExecution) startSliceReadAhead(ctx context.Context, reques
 	request.FollowingRead = true
 	ahead.contract = request.Contract
 	stream.aheads = append(stream.aheads, ahead)
+	// Begun as the read before ended: the Slot's own read is not in flight.
+	stream.noteReadBegan(0)
 	query := stream.coordinator.ports.Query
 	go func() {
 		defer close(ahead.done)
@@ -183,6 +185,22 @@ func (stream *streamedExecution) startSliceReadAhead(ctx context.Context, reques
 		ahead.contextEnded = readCtx.Err() != nil
 		ahead.mu.Unlock()
 	}()
+}
+
+// noteReadBegan counts a slice read beginning by how many reads are in
+// flight with it: own, the Slot's own read (1 when it is that read), and
+// every read ahead not yet ended, this one included (015 O1). A Slot whose
+// reads ahead keep up reads at its width; one whose reads wait on it, at 1.
+func (stream *streamedExecution) noteReadBegan(own int) {
+	flying := own
+	for _, ahead := range stream.aheads {
+		select {
+		case <-ahead.done:
+		default:
+			flying++
+		}
+	}
+	stream.readsInFlight[min(max(flying, 1), len(stream.readsInFlight))-1]++
 }
 
 func (ahead *sliceReadAhead) Begin(ctx context.Context, header execution.InternalExecutionHeader) error {
@@ -498,6 +516,12 @@ const readAheadYieldWindowBound = "window_bound"
 // slices it was from the one being read: which reservations the reads ahead
 // stand in the way of, and whether the far ones would have been enough.
 func (stream *streamedExecution) yieldReadAhead(phase string) bool {
+	if stream != nil && stream.yieldTo != nil {
+		// Asked of the stream that dispatches, as the apply side asks.
+		reply := make(chan bool, 1)
+		stream.yieldTo <- yieldRequest{phase: phase, reply: reply}
+		return <-reply
+	}
 	if stream == nil || len(stream.aheads) == 0 {
 		return false
 	}

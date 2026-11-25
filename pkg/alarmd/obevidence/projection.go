@@ -84,7 +84,7 @@ var algorithmConfigPolicy = func() *policy {
 	p.fields["config"] = p
 	return p
 }()
-var algorithmPolicy = fields("type version level unit_prefix", map[string]*policy{"config": algorithmConfigPolicy})
+var algorithmPolicy = fields("type version level unit_prefix input_ref", map[string]*policy{"config": algorithmConfigPolicy})
 var triggerPolicy = fields("type version count check_window window_size required_anomalies required_normals", map[string]*policy{"uptime": uptimePolicy, "config": algorithmConfigPolicy})
 
 // recoveryPolicy is a detect's recovery_config: the trigger's keys, which the

@@ -33,12 +33,16 @@ func TestOneResolutionServesAdmissionAndAbsence(t *testing.T) {
 	incomplete := execution.PlanIdentity{TenantID: "t", BusinessID: "2", StrategyID: "2"}
 	unavailable := execution.PlanIdentity{TenantID: "t", BusinessID: "2", StrategyID: "3"}
 	unresolved := execution.PlanIdentity{TenantID: "t", BusinessID: "2", StrategyID: "4"}
-	stream := &streamedExecution{targetResolutions: map[execution.PlanIdentity]*resolvedTarget{
-		complete:    {absence: nodata.TargetResolution{State: nodata.TargetResolutionComplete, Members: []string{"101"}}, members: map[string]struct{}{"101": {}}},
-		incomplete:  {absence: nodata.TargetResolution{State: nodata.TargetResolutionIncomplete, Members: []string{"101"}}, members: map[string]struct{}{"101": {}}},
-		unavailable: {absence: nodata.TargetResolution{State: nodata.TargetResolutionUnavailable, Members: []string{"101"}}, members: map[string]struct{}{"101": {}}},
-		unresolved:  {absence: nodata.TargetResolution{State: nodata.TargetResolutionUnavailable}, unresolved: true},
-	}}
+	stream := &streamedExecution{
+		slotStream: &slotStream{
+			targetResolutions: map[execution.PlanIdentity]*resolvedTarget{
+				complete:    {absence: nodata.TargetResolution{State: nodata.TargetResolutionComplete, Members: []string{"101"}}, members: map[string]struct{}{"101": {}}},
+				incomplete:  {absence: nodata.TargetResolution{State: nodata.TargetResolutionIncomplete, Members: []string{"101"}}, members: map[string]struct{}{"101": {}}},
+				unavailable: {absence: nodata.TargetResolution{State: nodata.TargetResolutionUnavailable, Members: []string{"101"}}, members: map[string]struct{}{"101": {}}},
+				unresolved:  {absence: nodata.TargetResolution{State: nodata.TargetResolutionUnavailable}, unresolved: true},
+			},
+		},
+	}
 	memberships := stream.ResolvedTargets()
 	if len(memberships) != 3 || memberships[complete] == nil || memberships[incomplete] == nil || memberships[unavailable] == nil || memberships[unresolved] != nil {
 		t.Fatalf("memberships = %v, want every resolution but the unresolved Plan", memberships)
@@ -55,7 +59,7 @@ func TestOneResolutionServesAdmissionAndAbsence(t *testing.T) {
 	if view := stream.targetResolutions[execution.PlanIdentity{StrategyID: "none"}].absenceView(); view != nil {
 		t.Fatalf("absence view of nothing = %+v, want nil", view)
 	}
-	if (&streamedExecution{}).ResolvedTargets() != nil {
+	if (&streamedExecution{slotStream: &slotStream{}}).ResolvedTargets() != nil {
 		t.Fatal("a Slot that resolved nothing hands out memberships")
 	}
 }
@@ -147,12 +151,14 @@ func TestBeginResolvesEachTargetPlanOnceForBothViews(t *testing.T) {
 	two := execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "2"}
 	plain := execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "3"}
 	stream := &streamedExecution{
-		coordinator: &SlotExecutionCoordinator{ports: Ports{Targets: resolver, Observer: observer}},
-		header: execution.InternalExecutionHeader{DuePlans: []execution.DuePlan{
-			{Identity: one, CompiledPlan: targetPlanCompiledPlan(t, "1", host("1"))},
-			{Identity: two, CompiledPlan: targetPlanCompiledPlan(t, "2", host("2"))},
-			{Identity: plain, CompiledPlan: targetPlanCompiledPlan(t, "3", nil)},
-		}},
+		slotStream: &slotStream{
+			coordinator: &SlotExecutionCoordinator{ports: Ports{Targets: resolver, Observer: observer}},
+			header: execution.InternalExecutionHeader{DuePlans: []execution.DuePlan{
+				{Identity: one, CompiledPlan: targetPlanCompiledPlan(t, "1", host("1"))},
+				{Identity: two, CompiledPlan: targetPlanCompiledPlan(t, "2", host("2"))},
+				{Identity: plain, CompiledPlan: targetPlanCompiledPlan(t, "3", nil)},
+			}},
+		},
 	}
 	stream.resolveTargetPlans(context.Background())
 	if len(resolver.calls) != 2 || resolver.intervals[0] != time.Minute || resolver.intervals[1] != time.Minute {
@@ -203,8 +209,10 @@ func TestBeginResolvesEachTargetPlanOnceForBothViews(t *testing.T) {
 
 	// No resolver: every target-plan Plan is unavailable, by the source's name.
 	unwired := &streamedExecution{
-		coordinator: &SlotExecutionCoordinator{ports: Ports{Observer: observer}},
-		header:      execution.InternalExecutionHeader{DuePlans: []execution.DuePlan{{Identity: one, CompiledPlan: targetPlanCompiledPlan(t, "1", host("1"))}}},
+		slotStream: &slotStream{
+			coordinator: &SlotExecutionCoordinator{ports: Ports{Observer: observer}},
+			header:      execution.InternalExecutionHeader{DuePlans: []execution.DuePlan{{Identity: one, CompiledPlan: targetPlanCompiledPlan(t, "1", host("1"))}}},
+		},
 	}
 	unwired.resolveTargetPlans(context.Background())
 	if unwired.ResolvedTargets() != nil || unwired.targetResolutions[one].absenceView().State != nodata.TargetResolutionUnavailable {
@@ -235,8 +243,10 @@ func TestTheTargetResolvedLineNamesTheDroppedMembers(t *testing.T) {
 	plan := &contract.TargetPlanV1{SchemaVersion: 1, ModelID: "cw-Host", Rule: contract.TargetPlanRuleHostID,
 		Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}, StaticKeys: []string{"1"}, DynamicGroups: []string{"1001"}}
 	stream := &streamedExecution{
-		coordinator: &SlotExecutionCoordinator{ports: Ports{Targets: &scriptedTargetResolver{resolutions: map[string]*targetplan.Resolution{"1": incomplete}}, Observer: observer}},
-		header:      execution.InternalExecutionHeader{DuePlans: []execution.DuePlan{{Identity: one, CompiledPlan: targetPlanCompiledPlan(t, "1", plan)}}},
+		slotStream: &slotStream{
+			coordinator: &SlotExecutionCoordinator{ports: Ports{Targets: &scriptedTargetResolver{resolutions: map[string]*targetplan.Resolution{"1": incomplete}}, Observer: observer}},
+			header:      execution.InternalExecutionHeader{DuePlans: []execution.DuePlan{{Identity: one, CompiledPlan: targetPlanCompiledPlan(t, "1", plan)}}},
+		},
 	}
 	stream.resolveTargetPlans(context.Background())
 	if facts == nil || len(facts.Selectors) != 1 || !reflect.DeepEqual(facts.Selectors[0].DroppedMembers, []string{"709:member_lost", "703:no_host_id"}) {

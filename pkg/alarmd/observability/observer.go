@@ -766,6 +766,10 @@ type FrozenStateRenewalFacts struct {
 	// one that failed.
 	SeriesClasses map[StateSeriesKind]map[StateSeriesClass]int64 `json:"series_classes,omitempty"`
 	NotWritten    map[StateNotWrittenReason]int64                `json:"not_written,omitempty"`
+	// MembersLeft is NotWritten[segment_member_skipped] by the family of the
+	// Plan's series the members were left in, real or no_data (015 O1): what
+	// the skip saved each family, summing to that reason's count.
+	MembersLeft map[StateSeriesKind]int64 `json:"members_left,omitempty"`
 	// WriteReuse is the same admitted mutations by how much of what each
 	// write carries was already stored (state_write_reuse), counted at the
 	// same admission and reported on the observation the classes are, as
@@ -797,7 +801,7 @@ func (facts *FrozenStateRenewalFacts) CloneSeriesWrites() {
 	if facts.SeriesClasses == nil {
 		classes = nil
 	}
-	facts.SeriesClasses, facts.NotWritten = classes, maps.Clone(facts.NotWritten)
+	facts.SeriesClasses, facts.NotWritten, facts.MembersLeft = classes, maps.Clone(facts.NotWritten), maps.Clone(facts.MembersLeft)
 	facts.WriteReuse.Counts = maps.Clone(facts.WriteReuse.Counts)
 }
 
@@ -810,6 +814,18 @@ func (facts *FrozenStateRenewalFacts) RecordNotWritten(reason StateNotWrittenRea
 		facts.NotWritten = map[StateNotWrittenReason]int64{}
 	}
 	facts.NotWritten[NormalizeStateNotWrittenReason(reason)] += int64(mutations)
+}
+
+// RecordMembersLeft counts mutations the skip left unwritten in a Plan's
+// segments of family series, beside RecordNotWritten's segment_member_skipped.
+func (facts *FrozenStateRenewalFacts) RecordMembersLeft(series StateSeriesKind, mutations int) {
+	if mutations <= 0 {
+		return
+	}
+	if facts.MembersLeft == nil {
+		facts.MembersLeft = map[StateSeriesKind]int64{}
+	}
+	facts.MembersLeft[series] += int64(mutations)
 }
 
 // Admitted is every mutation counted under a class; NotWrittenTotal every one
@@ -2010,7 +2026,26 @@ type AssignmentSweepFacts struct {
 	Reclaimed   int `json:"reclaimed"`
 	HeldByLease int `json:"held_by_lease"`
 	Changed     int `json:"changed"`
+	// Trigger is why the round swept (AssignmentSweepTriggers); ScanPages
+	// the SCAN calls it made, none for a recheck of held records by name.
+	Trigger   string `json:"trigger,omitempty"`
+	ScanPages int    `json:"scan_pages"`
 }
+
+// The reasons a control leader's round sweeps the Assignment records, as
+// alarmd_ownership_assignment_sweeps_total labels them: term, the first
+// round of its term (a full sweep); retired, a Query Group of the last
+// round's set gone from this one (a full sweep); owed, a sweep the last one
+// left owed - a full sweep after a failed one, a recheck by name of the
+// records a live lease held.
+const (
+	AssignmentSweepTriggerTerm    = "term"
+	AssignmentSweepTriggerRetired = "retired"
+	AssignmentSweepTriggerOwed    = "owed"
+)
+
+// AssignmentSweepTriggers is every trigger, each a label at startup.
+var AssignmentSweepTriggers = []string{AssignmentSweepTriggerTerm, AssignmentSweepTriggerRetired, AssignmentSweepTriggerOwed}
 
 // MaxAssignmentAppliedSamples bounds the Query Groups an assignment_applied
 // line names in each list; the counts carry the rest.
@@ -2627,6 +2662,44 @@ type RecoveryWithheldFact struct {
 	Reason RecoveryWithheldReason `json:"reason"`
 	Levels uint64                 `json:"levels"`
 }
+
+// MultiDetectHeldPosition is where the undecided round stood in a window it
+// held: at its end (the window stepped over) or within it (the window counted
+// as possibly anomalous).
+type MultiDetectHeldPosition string
+
+const (
+	MultiDetectHeldWindowEnd    MultiDetectHeldPosition = "window_end"
+	MultiDetectHeldWindowInside MultiDetectHeldPosition = "window_inside"
+)
+
+// MultiDetectHeldPositions is the closed list.
+var MultiDetectHeldPositions = []MultiDetectHeldPosition{MultiDetectHeldWindowEnd, MultiDetectHeldWindowInside}
+
+// MultiDetectUndecidedReason is why a round of an item detected over several
+// inputs could not be decided (alarmd_multi_detect_undecided_total).
+type MultiDetectUndecidedReason string
+
+const (
+	// MultiDetectUndecidedInputMissing: every input was read whole, and one
+	// holds nothing of the series at the round.
+	MultiDetectUndecidedInputMissing MultiDetectUndecidedReason = "input_missing"
+	// MultiDetectUndecidedInputError: an input was not read - timed out,
+	// unavailable, refused.
+	MultiDetectUndecidedInputError MultiDetectUndecidedReason = "input_error"
+	// MultiDetectUndecidedInputPartial: an input came back PARTIAL.
+	MultiDetectUndecidedInputPartial MultiDetectUndecidedReason = "input_partial"
+	// MultiDetectUndecidedInputStale and MultiDetectUndecidedKeyAmbiguous are
+	// kept for inputs of different periods and for inputs whose series a key
+	// does not name alone; neither occurs yet - every input reads at one
+	// period, by exactly the common dimensions.
+	MultiDetectUndecidedInputStale   MultiDetectUndecidedReason = "input_stale"
+	MultiDetectUndecidedKeyAmbiguous MultiDetectUndecidedReason = "key_ambiguous"
+)
+
+// MultiDetectUndecidedReasons is the closed list.
+var MultiDetectUndecidedReasons = []MultiDetectUndecidedReason{MultiDetectUndecidedInputMissing, MultiDetectUndecidedInputError,
+	MultiDetectUndecidedInputPartial, MultiDetectUndecidedInputStale, MultiDetectUndecidedKeyAmbiguous}
 
 // LevelOutcomeFact is one cell of an evaluation's Level outcomes: the
 // outcome kind, the reason for an UNKNOWN or TERMINAL one, the reason a

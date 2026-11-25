@@ -31,7 +31,7 @@ func TestProcessProvisionalReservationCapsConcurrentSlotsAndReleases(t *testing.
 				go func() {
 					waiting.Done()
 					<-start
-					results <- coordinator.acquireProvisional(test.series, test.retained, nil, "query_free")
+					results <- coordinator.acquireProvisional(test.series, test.retained, nil, "query_free", retainNone)
 				}()
 			}
 			waiting.Wait()
@@ -55,7 +55,7 @@ func TestProcessProvisionalReservationCapsConcurrentSlotsAndReleases(t *testing.
 			}
 
 			coordinator.releaseProvisional(test.series, test.retained)
-			if err := coordinator.acquireProvisional(test.series, test.retained, nil, "query_free"); err != nil {
+			if err := coordinator.acquireProvisional(test.series, test.retained, nil, "query_free", retainNone); err != nil {
 				t.Fatalf("reservation after release failed: %v", err)
 			}
 			coordinator.releaseProvisional(test.series, test.retained)
@@ -74,7 +74,7 @@ func TestProcessProvisionalReservationCapsConcurrentSlotsAndReleases(t *testing.
 // again for the worker's own reservation.
 func TestStreamedExecutionReleaseProvisionalIsIdempotentAndReusable(t *testing.T) {
 	coordinator := &SlotExecutionCoordinator{budget: ProvisionalBudget{MaxSeries: 1, MaxRetainedBytes: 100}}
-	stream := &streamedExecution{coordinator: coordinator}
+	stream := &streamedExecution{slotStream: &slotStream{coordinator: coordinator}}
 	if err := stream.reserveProvisional(context.Background(), 1, 75); err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestStreamedExecutionReleaseProvisionalIsIdempotentAndReusable(t *testing.T
 	if series != 0 || retained != 0 {
 		t.Fatalf("repeated stream release leaked or underflowed series/bytes=%d/%d", series, retained)
 	}
-	if err := coordinator.acquireProvisional(1, 100, nil, "query_free"); err != nil {
+	if err := coordinator.acquireProvisional(1, 100, nil, "query_free", retainNone); err != nil {
 		t.Fatalf("budget is not reusable after repeated stream release: %v", err)
 	}
 	coordinator.releaseProvisional(1, 100)
@@ -96,7 +96,7 @@ func TestStreamedExecutionReleaseProvisionalIsIdempotentAndReusable(t *testing.T
 
 func TestStreamedExecutionReleasesAcceptedReservationAfterLaterBudgetRejection(t *testing.T) {
 	coordinator := &SlotExecutionCoordinator{budget: ProvisionalBudget{MaxSeries: 10, MaxRetainedBytes: 1_000}}
-	stream := &streamedExecution{coordinator: coordinator}
+	stream := &streamedExecution{slotStream: &slotStream{coordinator: coordinator}}
 	if err := stream.reserveProvisional(context.Background(), 1, 600); err != nil {
 		t.Fatal(err)
 	}

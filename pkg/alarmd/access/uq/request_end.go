@@ -53,32 +53,9 @@ func requestEndOf(spec execution.PhysicalQuerySpec) int64 {
 	return end
 }
 
-// metricTimeSeriesSources is the clause data sources that are a metric time
-// series: the compilers' empty one and the two names unify-query normalizes
-// to bkmonitor. Confirmed by the provider's owners for v3.9.4910 and
-// v3.9.4892, the versions deployed: such a table has a VmRt and must-vm-query
-// is on by default, so the query is read by DirectQueryRange - VictoriaMetrics
-// valuing each point from its own look-back, never through the engine - and
-// asking its end a second or a step earlier answered the same points and
-// values on a production deployment. No influxdb traffic was read on any of
-// them.
-var metricTimeSeriesSources = map[string]bool{"": true, "bkmonitor": true, "bk_monitor": true}
-
-// eligibleForTrim is whether every clause of a structured query is a metric
-// time series (metricTimeSeriesSources) with no query string. A PromQL query,
-// a query with no clause, and every other source - logs, events, APM, bk_data,
-// custom names - are not: providers that bucket each point [t, t+step) and
-// filter their data by the range's end (Elasticsearch's Lte(end), influxdb's
-// GROUP BY time, bk_sql's FLOOR) would lose the end of the window's last
-// bucket.
+// eligibleForTrim is whether a query's end may be asked a second earlier
+// (execution.RequestEndTrimEligible): decided in execution, where an item
+// detected over several inputs is held to one answer for all of them.
 func eligibleForTrim(facts execution.QueryPlanFacts) bool {
-	if facts.PromQL != nil || len(facts.QueryList) == 0 {
-		return false
-	}
-	for _, clause := range facts.QueryList {
-		if !metricTimeSeriesSources[clause.DataSource] || clause.QueryString != "" {
-			return false
-		}
-	}
-	return true
+	return execution.RequestEndTrimEligible(facts)
 }

@@ -30,7 +30,7 @@ func TestTheRetainedHighWaterIsTheMostHeldAtOnceWithinTheHour(t *testing.T) {
 		t.Fatalf("at the start: %d over %v", high, window)
 	}
 	// A short peak: 300 MiB reserved and given back within the minute.
-	if err := coordinator.acquireProvisional(0, 300<<20, nil, "normal_input"); err != nil {
+	if err := coordinator.acquireProvisional(0, 300<<20, nil, "normal_input", retainNone); err != nil {
 		t.Fatal(err)
 	}
 	coordinator.releaseProvisional(0, 300<<20)

@@ -637,8 +637,10 @@ type scanIndex struct {
 	functions map[string][]*scanFunc
 	methods   map[string][]*scanFunc
 	enclosing map[*ast.FuncDecl]*scanFunc
-	// fields is each struct type's field types, by type name.
+	// fields is each struct type's field types, by type name; embeds the
+	// types each embeds, whose fields it is read through (declaring).
 	fields map[string]map[string]string
+	embeds map[string][]string
 	// calls is every call in the module, by the name it calls.
 	calls map[string][]scanCall
 	// writes is every write of a struct field, by type and field.
@@ -675,6 +677,7 @@ func buildScanIndex(root string) (*scanIndex, error) {
 		methods:   map[string][]*scanFunc{},
 		enclosing: map[*ast.FuncDecl]*scanFunc{},
 		fields:    map[string]map[string]string{},
+		embeds:    map[string][]string{},
 		calls:     map[string][]scanCall{},
 		writes:    map[string][]scanWrite{},
 		locals:    map[*ast.FuncDecl]map[string]string{},
@@ -766,6 +769,7 @@ func (index *scanIndex) add(file *scanFile) {
 						if len(field.Names) == 0 {
 							embedded := qualifiedType(file, field.Type)
 							index.fields[owner][embedded[strings.LastIndex(embedded, ".")+1:]] = embedded
+							index.embeds[owner] = append(index.embeds[owner], embedded)
 						}
 					}
 				case *ast.ValueSpec:
@@ -867,6 +871,9 @@ func (index *scanIndex) indexWrites() {
 						typ := resolver.typeOf(scope, selector.X)
 						if typ == "" {
 							continue
+						}
+						if declaring := index.declaring(typ, selector.Sel.Name); declaring != "" {
+							typ = declaring
 						}
 						key := typ + "|" + selector.Sel.Name
 						index.writes[key] = append(index.writes[key], scanWrite{scope: scope, expr: node.Rhs[i]})
@@ -1786,6 +1793,9 @@ func (r *scanResolver) globalField(scope *scanScope, selector *ast.SelectorExpr,
 	if owner == "" {
 		return r.leaf(scope, selector)
 	}
+	if declaring := r.index.declaring(owner, selector.Sel.Name); declaring != "" {
+		owner = declaring
+	}
 	key := owner + "|" + selector.Sel.Name
 	if r.sinks[key] {
 		return nil
@@ -2153,7 +2163,27 @@ func (r *scanResolver) typeOf(scope *scanScope, expression ast.Expr) string {
 		if owner == "" {
 			return ""
 		}
+		if declaring := r.index.declaring(owner, typed.Sel.Name); declaring != "" {
+			owner = declaring
+		}
 		return r.index.fields[owner][typed.Sel.Name]
+	}
+	return ""
+}
+
+// declaring is the struct type that declares field as a field of owner: owner
+// itself, or a type it embeds, as Go promotes the embedded type's fields; empty
+// when neither does.
+func (index *scanIndex) declaring(owner, field string) string {
+	for depth, owners := 0, []string{owner}; depth < 4 && len(owners) > 0; depth++ {
+		var next []string
+		for _, candidate := range owners {
+			if _, declared := index.fields[candidate][field]; declared {
+				return candidate
+			}
+			next = append(next, index.embeds[candidate]...)
+		}
+		owners = next
 	}
 	return ""
 }

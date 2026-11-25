@@ -38,16 +38,18 @@ func noDataWiredStream(t *testing.T, due execution.DuePlan, store execution.Plan
 	t.Helper()
 	duePlans := []execution.DuePlan{due}
 	return &streamedExecution{
-		coordinator: &SlotExecutionCoordinator{
-			ports: Ports{NoData: store, Hosts: SharedHostBusiness},
-			// A budget the coordinator would accept: it refuses a zero cap at
-			// construction, and a zero here would skip every no-data Plan on
-			// whichever cap a case did not set, for a reason no case means.
-			budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10,
-				MaxStateMutations: 100, MaxEvents: 100},
-		},
-		header: execution.InternalExecutionHeader{
-			Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans,
+		slotStream: &slotStream{
+			coordinator: &SlotExecutionCoordinator{
+				ports: Ports{NoData: store, Hosts: SharedHostBusiness},
+				// A budget the coordinator would accept: it refuses a zero cap at
+				// construction, and a zero here would skip every no-data Plan on
+				// whichever cap a case did not set, for a reason no case means.
+				budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10,
+					MaxStateMutations: 100, MaxEvents: 100},
+			},
+			header: execution.InternalExecutionHeader{
+				Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans,
+			},
 		},
 	}
 }
@@ -364,15 +366,17 @@ func (failingStatePort) ApplyRuntime(
 func TestNoDataOutcomesAreReportedOncePerOutcomeWithTheirCount(t *testing.T) {
 	recorded := make([]observability.Observation, 0, 4)
 	stream := &streamedExecution{
-		coordinator: &SlotExecutionCoordinator{
-			ports: Ports{Observer: observability.ObserverFunc(
-				func(_ context.Context, observation observability.Observation) {
-					recorded = append(recorded, observation)
-				})},
-		},
-		noDataOutcomes: []nodata.SlotOutcome{
-			nodata.OutcomeEvaluated, nodata.OutcomeSkippedSlotBudget, nodata.OutcomeEvaluated,
-			nodata.OutcomeEvaluated,
+		slotStream: &slotStream{
+			coordinator: &SlotExecutionCoordinator{
+				ports: Ports{Observer: observability.ObserverFunc(
+					func(_ context.Context, observation observability.Observation) {
+						recorded = append(recorded, observation)
+					})},
+			},
+			noDataOutcomes: []nodata.SlotOutcome{
+				nodata.OutcomeEvaluated, nodata.OutcomeSkippedSlotBudget, nodata.OutcomeEvaluated,
+				nodata.OutcomeEvaluated,
+			},
 		},
 	}
 	stream.observeNoDataOutcomes(context.Background())
@@ -431,13 +435,15 @@ func TestEverySlotReportsHowManyNoDataPlansItFound(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var recorded []observability.Observation
 			stream := &streamedExecution{
-				coordinator: &SlotExecutionCoordinator{
-					ports: Ports{Observer: observability.ObserverFunc(
-						func(_ context.Context, observation observability.Observation) {
-							recorded = append(recorded, observation)
-						})},
+				slotStream: &slotStream{
+					coordinator: &SlotExecutionCoordinator{
+						ports: Ports{Observer: observability.ObserverFunc(
+							func(_ context.Context, observation observability.Observation) {
+								recorded = append(recorded, observation)
+							})},
+					},
+					noDataPlansSeen: test.seen,
 				},
-				noDataPlansSeen: test.seen,
 			}
 
 			stream.observeNoDataOutcomes(context.Background())
@@ -482,16 +488,18 @@ func TestEverySlotReportsHowManyNoDataPlansItFound(t *testing.T) {
 func TestTheCensusAndTheOutcomesAgreeOnHowManyPlans(t *testing.T) {
 	var recorded []observability.Observation
 	stream := &streamedExecution{
-		coordinator: &SlotExecutionCoordinator{
-			ports: Ports{Observer: observability.ObserverFunc(
-				func(_ context.Context, observation observability.Observation) {
-					recorded = append(recorded, observation)
-				})},
-		},
-		noDataPlansSeen: 4,
-		noDataOutcomes: []nodata.SlotOutcome{
-			nodata.OutcomeEvaluated, nodata.OutcomeEvaluated,
-			nodata.OutcomeSkippedSlotBudget, nodata.OutcomeSkippedQueryNotFull,
+		slotStream: &slotStream{
+			coordinator: &SlotExecutionCoordinator{
+				ports: Ports{Observer: observability.ObserverFunc(
+					func(_ context.Context, observation observability.Observation) {
+						recorded = append(recorded, observation)
+					})},
+			},
+			noDataPlansSeen: 4,
+			noDataOutcomes: []nodata.SlotOutcome{
+				nodata.OutcomeEvaluated, nodata.OutcomeEvaluated,
+				nodata.OutcomeSkippedSlotBudget, nodata.OutcomeSkippedQueryNotFull,
+			},
 		},
 	}
 
@@ -531,12 +539,14 @@ func TestTheCensusCountsTheSlotsOwnNoDataPlans(t *testing.T) {
 	duePlans := []execution.DuePlan{withNoData, plain}
 
 	stream := &streamedExecution{
-		coordinator: &SlotExecutionCoordinator{
-			ports:  Ports{NoData: &emptyNoDataStore{}, Hosts: SharedHostBusiness, State: failingStatePort{}},
-			budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 1, MaxEvents: 1},
-		},
-		header: execution.InternalExecutionHeader{
-			Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans,
+		slotStream: &slotStream{
+			coordinator: &SlotExecutionCoordinator{
+				ports:  Ports{NoData: &emptyNoDataStore{}, Hosts: SharedHostBusiness, State: failingStatePort{}},
+				budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 1, MaxEvents: 1},
+			},
+			header: execution.InternalExecutionHeader{
+				Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans,
+			},
 		},
 	}
 	if err := stream.loadNoDataMemory(context.Background()); err != nil {
@@ -572,12 +582,14 @@ func TestTheCensusIsZeroWhenNoPlanDetectsNoData(t *testing.T) {
 	plain.CompiledPlan = noDataPreflightPlan(t, "7", nil)
 	duePlans := []execution.DuePlan{plain}
 	stream := &streamedExecution{
-		coordinator: &SlotExecutionCoordinator{
-			ports:  Ports{NoData: &emptyNoDataStore{}, Hosts: SharedHostBusiness, State: failingStatePort{}},
-			budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 8, MaxEvents: 8},
-		},
-		header: execution.InternalExecutionHeader{
-			Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans,
+		slotStream: &slotStream{
+			coordinator: &SlotExecutionCoordinator{
+				ports:  Ports{NoData: &emptyNoDataStore{}, Hosts: SharedHostBusiness, State: failingStatePort{}},
+				budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 8, MaxEvents: 8},
+			},
+			header: execution.InternalExecutionHeader{
+				Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans,
+			},
 		},
 	}
 	if err := stream.loadNoDataMemory(context.Background()); err != nil {

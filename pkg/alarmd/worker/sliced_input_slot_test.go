@@ -559,6 +559,46 @@ func TestASlotPastHalfItsShareIsReadInSlicesEachSeriesWrittenOnce(t *testing.T) 
 	}
 }
 
+// A Slot read in slices loads what it holds whole - its gaps, its no-data
+// memory and ends - once for the Slot, after its first slice is read and
+// before any series is evaluated, and finishes once, after its last slice:
+// the Plan without series decided once and the no-data census reported once.
+// Whichever slice completes first or last, these are the Slot's steps, not a
+// slice's (015 C1 appendix A 1).
+func TestASlotReadInSlicesLoadsWhatItHoldsWholeOnceAndFinishesOnce(t *testing.T) {
+	series := slicedHosts(24, 40<<10)
+	fixture := newSlicedFixture(t, series, sliceableFacts(), 200)
+	plans, requirements, request := withCompletionOnlyPlan(t)
+	fixture.source.plans, fixture.source.requirements = plans, requirements
+
+	result, err := fixture.coordinator.Execute(context.Background(), request)
+	if err != nil || !result.Completed {
+		t.Fatalf("Execute() result=%+v err=%v, want the Slot completed in slices", result, err)
+	}
+	if slices := len(fixture.source.landed()); slices < 2 {
+		t.Fatalf("fixture: landed %d reads, want the Slot read in more than one slice", slices)
+	}
+	trace := *fixture.ports.trace
+	if loads := countStage(trace, "gap_load"); loads != 1 {
+		t.Fatalf("the Slot's gaps were loaded %d times, want once for all its slices: %v", loads, trace)
+	}
+	if load := nthStage(t, trace, "gap_load", 1); load < nthStage(t, trace, "query", 1) || load > nthStage(t, trace, "state_load", 1) {
+		t.Fatalf("the gaps were loaded at %d, want after the first slice's read and before any series' State: %v", load, trace)
+	}
+	if censuses := fixture.noDataCensuses(); censuses != 1 {
+		t.Fatalf("no-data census reported %d times, want once for the Slot", censuses)
+	}
+	decided := 0
+	for _, observation := range *fixture.observations {
+		if observation.Stage == observability.StageEvaluationCompleted && observation.Trace.BusinessID == "3" {
+			decided++
+		}
+	}
+	if decided != 1 {
+		t.Fatalf("the Plan without series was decided %d times, want once, after the last slice", decided)
+	}
+}
+
 // A store that drops the slice's conditions answers the whole Query Group to
 // every slice: no split can make a slice fit, and the Slot is refused by the
 // value-distribution word within the K_max bound instead of looping.

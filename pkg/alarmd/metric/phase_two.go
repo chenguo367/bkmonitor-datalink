@@ -49,6 +49,7 @@ type phaseTwoMetrics struct {
 	segmentShadow                  segmentShadowMetrics
 	stateSeriesClass               *prometheus.CounterVec
 	stateSeriesNotWritten          *prometheus.CounterVec
+	stateSegmentMembersLeft        *prometheus.CounterVec
 	stateAlreadyApplied            *prometheus.CounterVec
 	stateVersionConflict           *prometheus.CounterVec
 	stateSuperseded                *prometheus.CounterVec
@@ -117,6 +118,7 @@ type phaseTwoMetrics struct {
 	windowAccountingClamped        *prometheus.CounterVec
 	sliceReadAheadWaits            *prometheus.CounterVec
 	sliceReadAheadWaitSeconds      prometheus.Counter
+	sliceReadsInFlight             prometheus.Histogram
 	sliceReadAheadWaitingSeconds   prometheus.Counter
 	inputSliceTimeouts             *prometheus.CounterVec
 	inputSliceShapes               *prometheus.CounterVec
@@ -178,6 +180,8 @@ type phaseTwoMetrics struct {
 	controlReadDuration             *prometheus.HistogramVec
 	assignmentIndexStaleRounds      *loadedGauge
 	assignmentIndexWrites           *prometheus.CounterVec
+	assignmentSweeps                *prometheus.CounterVec
+	assignmentSweepScanPages        prometheus.Counter
 	assignmentIndexReads            *prometheus.CounterVec
 	assignmentIndexConfirm          *prometheus.CounterVec
 	assignmentRecordReads           *prometheus.CounterVec
@@ -187,6 +191,8 @@ type phaseTwoMetrics struct {
 	algorithmEvaluations            *prometheus.CounterVec
 	recoveryBeside                  *prometheus.CounterVec
 	recoveryWithheld                *prometheus.CounterVec
+	multiDetectRecoveryHeld         *prometheus.CounterVec
+	multiDetectUndecided            *prometheus.CounterVec
 	noDataEnd                       *prometheus.CounterVec
 	levelAbnormal                   *prometheus.CounterVec
 	historyCoverageRejected         *prometheus.CounterVec
@@ -446,6 +452,15 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"three reported in one observation, an attempt that failed included: a minute's three " +
 				"increments reconcile exactly.",
 		}, []string{"class", "series"}),
+		stateSegmentMembersLeft: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Subsystem: metricSubsystem, Name: "state_segment_members_left_total",
+			Help: "Runtime State mutations the segment skip left unwritten - open members of their Plan's stable segments, " +
+				"steady, normal and quiet on the grid - by the family of the Plan's series they were left in: real, its " +
+				"real series; no_data, the synthetic series of its no-data view in segments of their own. The two sum to " +
+				"state_series_not_written_total{reason=\"segment_member_skipped\"}, counted on the same observation. " +
+				"A family's skip share is members_left{family} over state_series_class_total{series=family}: what the " +
+				"skip saved that family's writes. Both cells exist from the start.",
+		}, []string{"family"}),
 		stateSeriesNotWritten: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: metricSubsystem, Name: "state_series_not_written_total",
 			Help: "Runtime State mutations classified for writing (state_series_class_total) that their attempt " +
@@ -1107,6 +1122,14 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			metrics.sliceReadAheadWaits.WithLabelValues(outcome, duration)
 		}
 	}
+	metrics.sliceReadsInFlight = prometheus.NewHistogram(prometheus.HistogramOpts{Subsystem: metricSubsystem,
+		Name: "worker_slice_reads_in_flight", Buckets: []float64{1, 2, 3, 4, 5},
+		Help: "Slice reads of completed Slots read in slices, by how many of their Slot's reads were in flight as each " +
+			"began, itself included: the Slot's own read and its reads ahead not yet ended (015 O1). A Slot reads at " +
+			"most its read width at once (min(4, query permits / 2)); reads ahead that keep up begin beside one another " +
+			"and read near that width, and reads that each wait on the Slot before the next begins read near 1. The " +
+			"mean is sum over count; read it against the Slots' slice reads' waits (query_wait_millis over input_millis " +
+			"on their rows), which is the reads actually waiting at once. Counted at the Slot's completion."})
 	metrics.sliceReadAheadWaitSeconds = prometheus.NewCounter(prometheus.CounterOpts{Subsystem: metricSubsystem,
 		Name: "worker_slice_read_ahead_wait_seconds_total", Help: "Seconds the slices read ahead waited for room, summed " +
 			"over every wait as it ends (worker_slice_read_ahead_waits_total), every attempt's. Reads ahead side by " +
@@ -1128,9 +1151,15 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"children read in its place, the Slot's query completing; split_failed, split and the Slot's query failing " +
 			"after; not_split, failed as before - the query cooldown held, its time could not be put on its size, the " +
 			"window left was too short for its children, or the Slot had split once. A Slot splits so once. Which Query " +
-			"Group is not a label here."}, []string{"outcome"})
+			"Group is not a label here. cause is who timed the read out: provider, the provider answering a timeout before " +
+			"alarmd's deadline (504 or 408, or its status saying so), the only one a slice is split for; deadline, alarmd's " +
+			"own deadline for the read passing first, never split (the window was short, not the slice large); other, " +
+			"neither, which nothing writes today. split_succeeded is provider by construction; not_split by cause tells a " +
+			"slow backend from a Slot out of time. Every cell exists from the start."}, []string{"outcome", "cause"})
 	for _, outcome := range observability.InputSliceTimeoutOutcomes {
-		metrics.inputSliceTimeouts.WithLabelValues(outcome)
+		for _, cause := range observability.InputSliceTimeoutCauses {
+			metrics.inputSliceTimeouts.WithLabelValues(outcome, cause)
+		}
 	}
 	metrics.inputSliceShapes = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem,
 		Name: "worker_input_slice_shapes_total", Help: "Slots by what they did with their Query Group's shape, the leaves a " +
@@ -1577,6 +1606,21 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	}
 	metrics.assignmentIndexStaleRounds = newLoadedGauge(prometheus.GaugeOpts{Subsystem: metricSubsystem, Name: "assignment_index_stale_rounds", Help: "Consecutive reconcile rounds in which this worker read the same Assignment index round number. Healthy values are zero and one: the Leader writes once per reconcile interval and workers read on their own interval of the same length, so a reader that runs just before the writer sees the previous round once. Two or more means the index has stopped advancing, which reads exactly like an unchanged fleet otherwise. Per worker; aggregate with max."})
 	metrics.assignmentIndexWrites = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "assignment_index_write_total", Help: "Assignment index rounds the Control Leader attempted, by result."}, []string{"result"})
+	metrics.assignmentSweeps = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "ownership_assignment_sweeps_total",
+		Help: "Sweeps of the Assignment records by the Control Leader, by why its round swept and how it ended. trigger: term, the first round " +
+			"of its term, a full sweep; retired, a Query Group of the last round's set gone from this one, a full sweep; owed, a sweep the last " +
+			"left owed - a full sweep after a failed one, or a recheck by name of the records a live lease held (no SCAN). result: success or " +
+			"failed. A full sweep walks the key space with SCAN, so its cost follows the store's key count, not the records': read with " +
+			"ownership_assignment_sweep_scan_pages_total - pages over sweeps{trigger=term|retired} is a full sweep's walk, and an owed sweep " +
+			"with no pages beside it is a recheck. Every cell exists from the start."}, []string{"trigger", "result"})
+	for _, trigger := range observability.AssignmentSweepTriggers {
+		for _, result := range []string{"success", "failed"} {
+			metrics.assignmentSweeps.WithLabelValues(trigger, result)
+		}
+	}
+	metrics.assignmentSweepScanPages = prometheus.NewCounter(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "ownership_assignment_sweep_scan_pages_total",
+		Help: "SCAN calls the Control Leader's Assignment sweeps made, a page of up to 500 keys each, summed over sweeps " +
+			"(ownership_assignment_sweeps_total): a full sweep walks the whole key space, a recheck of held records by name makes none."})
 	metrics.assignmentIndexReads = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "assignment_index_read_total", Help: "Assignment index reads by this worker, by result: fresh (round advanced), stale (same round), missing (no index or no set), invalid (unreadable)."}, []string{"result"})
 	metrics.assignmentIndexConfirm = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "assignment_index_confirm_total", Help: "Changes a worker took from the Assignment index and confirmed against the Assignment records, by outcome: opened (a candidate the record confirmed), rejected (a candidate the record refused), released (a held Query Group the record confirmed gone), retained (a held Query Group the index dropped but the record still assigns here). The record always wins; rejected and retained measure how often the index was behind it."}, []string{"result"})
 	metrics.assignmentRecordReads = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "assignment_record_read_total", Help: "Assignment records this worker read to learn what it owns, by path: index (only the changes the index named) or full (every record of the population, when no usable index was there). The index exists to keep the index path near zero in a quiet round."}, []string{"path"})
@@ -1746,6 +1790,34 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, reason := range observability.RecoveryWithheldReasons {
 		metrics.recoveryWithheld.WithLabelValues(string(reason))
 	}
+	metrics.multiDetectRecoveryHeld = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: metricSubsystem, Name: "multi_detect_recovery_held_total",
+		Help: "Recovery windows of Levels detected over several inputs that the recovery walk did not count as quiet " +
+			"because of undecided rounds - rounds an input of the item could not be read for - by where the undecided " +
+			"round stood: window_end, a window ending on one, stepped over without breaking the run of quiet windows " +
+			"(it delays the recovery by that round only); window_inside, a window ending on a decided round whose " +
+			"undecided rounds could have been anomalies enough to fire it, counted as possibly anomalous (it holds the " +
+			"recovery until the window holds none, so undecided rounds in every window hold it until the data " +
+			"improves). Counted per window per evaluation, summed over series: an alert of such an item that stays " +
+			"open while this rises is waiting on rounds nobody could judge, and a holes-only wait does not count " +
+			"here. Levels of one query never count. Every position exists from the start.",
+	}, []string{"position"})
+	for _, position := range observability.MultiDetectHeldPositions {
+		metrics.multiDetectRecoveryHeld.WithLabelValues(string(position))
+	}
+	metrics.multiDetectUndecided = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: metricSubsystem, Name: "multi_detect_undecided_total",
+		Help: "Rounds of items detected over several inputs that could not be decided, one per series and Level, by why: " +
+			"input_missing, every input read whole and one holding nothing of the series at the round (a pod with no memory " +
+			"limit beside its CPU, say); input_partial, an input came back PARTIAL; input_error, an input was not read - timed " +
+			"out, unavailable, refused; input_stale and key_ambiguous are kept for inputs of different periods and for series a " +
+			"key does not name alone, and stay at zero while every input reads at one period by exactly the common dimensions. " +
+			"Such a round neither fires nor recovers its alert, and is written as a point the Level could not use. Levels of " +
+			"one query never count. Every reason exists from the start.",
+	}, []string{"reason"})
+	for _, reason := range observability.MultiDetectUndecidedReasons {
+		metrics.multiDetectUndecided.WithLabelValues(string(reason))
+	}
 	metrics.noDataEnd = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: metricSubsystem, Name: "no_data_end_total",
 		Help: "What the no-data end index did, by outcome: sent (series whose end event the sink took, for a level " +
@@ -1900,8 +1972,10 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		Help: "Detection snapshots built onto events, by result: whole; truncated (past the snapshot's size " +
 			"bound, the algorithm facts of the least severe levels were dropped; its ref_values and windows " +
 			"never are); dropped (the snapshot was past its size bound with no algorithm facts left to drop, " +
-			"so the event was sent without it - detection is never held for it). Only the ABNORMAL and " +
-			"RECOVERY events of strategies with named outputs carry one. " +
+			"so the event was sent without it - detection is never held for it); without_inputs (the snapshot of an " +
+			"item detected over several inputs built without them, its detection not handing each over: never " +
+			"expected, and its content names the values by reference). Only the ABNORMAL and RECOVERY events of " +
+			"strategies with named outputs, and of items detected over several inputs, carry one. " +
 			"Counted once per event built, where it is built and before the output sends it, so this is " +
 			"snapshots built, not sent; a retried Slot counts again. Every result exists from the start.",
 	}, []string{"result"})
@@ -2309,6 +2383,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			metrics.stateWriteReuse.WithLabelValues(string(class), string(stored))
 		}
 	}
+	for _, series := range observability.AllStateSeriesKinds() {
+		metrics.stateSegmentMembersLeft.WithLabelValues(string(series))
+	}
 	for _, class := range observability.AllStateSeriesClasses() {
 		for _, series := range observability.AllStateSeriesKinds() {
 			metrics.stateSeriesClass.WithLabelValues(string(class), string(series))
@@ -2481,21 +2558,21 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.queryCooldown,
 		m.slotReadiness.slack, m.slotReadiness.boundary,
 		m.slotTiming, m.slotWait,
-		m.work, m.busy, m.lastProgress, m.capacity, m.stateWriteReuse, m.stateSeriesClass, m.stateSeriesNotWritten, m.stateAlreadyApplied, m.stateVersionConflict, m.stateSuperseded, m.sourceObservations, m.sourceRefreshes, m.sourceCompiles,
+		m.work, m.busy, m.lastProgress, m.capacity, m.stateWriteReuse, m.stateSeriesClass, m.stateSeriesNotWritten, m.stateSegmentMembersLeft, m.stateAlreadyApplied, m.stateVersionConflict, m.stateSuperseded, m.sourceObservations, m.sourceRefreshes, m.sourceCompiles,
 		m.sourceReads, m.sourceRefreshBuilds, m.sourceStrategiesRead, m.sourceChangeSignalAge,
 		m.activationFailures, m.unmappedSeverity,
 		m.ownedQueryGroups, m.ownershipTransitions, m.leaseRenewals, m.ownershipRefusals,
 		m.queryAdmission, m.queryDownstreamDistress,
 		m.noDataSlotPlans, m.noDataAbsences, m.noDataManualCloseDropped, m.noDataManualCloseReadFailures, m.targetPlanResolutions, m.targetSelectorResolutions, m.targetExcludedAbsentMembers, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.inPlaceWaits, m.inPlaceHeldInputBytes, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetRedis,
-		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.retainedShareApproaching, m.inputSlices, m.slicedSlots, m.slotApplyWaitSeconds, m.slotLandSeconds, m.slotApplyOverlapSeconds, m.firstSeenUnseen, m.sliceReadAhead, m.seriesNotEvaluated, m.sliceReadAheadYields, m.windowZeroBoundCuts, m.windowAccountingClamped, m.sliceReadAheadWaits, m.sliceReadAheadWaitSeconds, m.sliceReadAheadWaitingSeconds, m.inputSliceTimeouts, m.inputSliceShapes, m.noDataStagesAhead, m.noDataStageAheadDiffers, m.noDataGroupsStagedAhead, m.schedulePruneSkipped, m.scheduleCutoverDuration,
+		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.retainedShareApproaching, m.inputSlices, m.slicedSlots, m.slotApplyWaitSeconds, m.slotLandSeconds, m.slotApplyOverlapSeconds, m.firstSeenUnseen, m.sliceReadAhead, m.seriesNotEvaluated, m.sliceReadAheadYields, m.windowZeroBoundCuts, m.windowAccountingClamped, m.sliceReadAheadWaits, m.sliceReadAheadWaitSeconds, m.sliceReadsInFlight, m.sliceReadAheadWaitingSeconds, m.inputSliceTimeouts, m.inputSliceShapes, m.noDataStagesAhead, m.noDataStageAheadDiffers, m.noDataGroupsStagedAhead, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
 		m.scheduleCutoverQueryGroups, m.scheduleCutoverReadHoldLinks, m.fleetOverdueEpisodes, m.fleetRestoreUnread, m.scheduleCutoverTimelinesRead, m.scheduleCutoverFirstDuration,
 		m.scheduleCutoverFirstTimelines, m.replayExpiries, m.replayTakeovers, m.slotDiversions, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
 		m.queryFailures,
 		m.objectCatalogObjects, m.catalogRenewals, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectCatalogWrittenBytes, m.objectReads, m.stateGenerationSkew, m.stateCarry,
-		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.segmentSkipAsked, m.segmentSkipHeld, m.segmentSkipUnawareReplicas, m.rebalanceGap, m.assignmentMoves, m.byteOverloadedWorkers, m.byteMostLoadedShare, m.byteUnreadGroups, m.placementUnfit, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlRecordReads, m.controlRecordMismatches, m.controlRecordConflicts, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
-		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.recoveryWithheld, m.noDataEnd, m.openAlertGate,
+		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.segmentSkipAsked, m.segmentSkipHeld, m.segmentSkipUnawareReplicas, m.rebalanceGap, m.assignmentMoves, m.byteOverloadedWorkers, m.byteMostLoadedShare, m.byteUnreadGroups, m.placementUnfit, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlRecordReads, m.controlRecordMismatches, m.controlRecordConflicts, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentSweeps, m.assignmentSweepScanPages, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
+		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.recoveryWithheld, m.multiDetectRecoveryHeld, m.multiDetectUndecided, m.noDataEnd, m.openAlertGate,
 	}...), append(append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), append(append(m.handover.collectors(), m.slotProgress.collectors()...), m.sreActions.actions, m.sreActions.rollouts, m.sreActions.watched, m.sreActions.receipts, m.cliAuth.total, m.cliAuth.rosterApplied)...), append(append(m.controlFacts.collectors(), m.traceExport.collectors()...), m.segmentShadow.collectors()...)...),
 		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.activeCopy, m.fleetTracker, m.effectiveTimeRefresh, m.activationRebuild, m.timelineRepair, m.activationSkippedTimelines, m.timelineUnreadableReports, m.activationHeader, m.activationBlocked, m.liveReserve, m.roundMemory, m.stateSeriesHeld, m.targetGroup, m.effectiveClose, m.logLines, m.observerPanics, m.absentClose, m.editClose, m.noDataCloseAPI, m.linkdFilterClose, m.linkdFilterCloseRequests, m.openEpisodeRecord, m.newOpens, m.frontRefused, m.processMemory, m.strategyScopeClose, m.targetScopeClose, m.controlSourceRounds, m.apmCarried, m.apmCarriedBytes, m.sourceLivenessChecks, m.sourceLivenessSeconds, m.sourceLivenessDeferred, m.sourceLivenessEvicted, m.sourceLivenessHeldEvicted, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.controlFactsWrites, m.planCarriesReads, m.planSegmentsReads, m.queryCooldownLoads, m.eventBusinessAttribution, m.detectionSnapshots, m.detectionSnapshotStates, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
 		m.controlSourceRetainedStale, m.controlSourceLastGoodIdentity, m.platformSettings,
@@ -2614,6 +2691,16 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 			m.rebalancePaused.WithLabelValues("set_unstable").Inc()
 		}
 	}
+	if facts := observation.AssignmentSweep; facts != nil && observation.Stage == observability.StageAssignmentSwept {
+		result := "failed"
+		if observation.Result == observability.ResultSuccess {
+			result = "success"
+		}
+		if facts.Trigger != "" {
+			m.assignmentSweeps.WithLabelValues(facts.Trigger, result).Inc()
+		}
+		m.assignmentSweepScanPages.Add(float64(facts.ScanPages))
+	}
 	if facts := observation.AssignmentIndex; facts != nil {
 		switch observation.Stage {
 		case observability.StageAssignmentIndexWritten:
@@ -2674,7 +2761,11 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	if facts := observation.QueryFailure; facts != nil && observation.Result == observability.ResultFailed {
 		m.queryFailures.WithLabelValues(facts.Stage, facts.Category).Inc()
 		if facts.SliceTimeout != "" {
-			m.inputSliceTimeouts.WithLabelValues(facts.SliceTimeout).Inc()
+			cause := facts.SliceTimeoutCause
+			if cause == "" {
+				cause = observability.InputSliceTimeoutCauseOther
+			}
+			m.inputSliceTimeouts.WithLabelValues(facts.SliceTimeout, cause).Inc()
 		}
 	}
 	if facts := observation.ReplayExpiry; facts != nil {
@@ -2904,6 +2995,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		}
 		for reason, count := range facts.NotWritten {
 			m.stateSeriesNotWritten.WithLabelValues(string(observability.NormalizeStateNotWrittenReason(reason))).Add(float64(count))
+		}
+		for series, count := range facts.MembersLeft {
+			m.stateSegmentMembersLeft.WithLabelValues(string(series)).Add(float64(count))
 		}
 		// Added rather than incremented once: one observation carries a whole
 		// Slot's outcomes, and a Slot that renewed two hundred keys is not the
@@ -3643,6 +3737,30 @@ var (
 		string(execution.NamedOutputMissing), string(execution.NamedOutputError), string(execution.NamedOutputUnsupported), "_other"}
 )
 
+// ObserveMultiDetectRecoveryHeld counts the recovery windows undecided rounds
+// held in one Level's walk, by position (evaluation's
+// WithMultiDetectRecoveryHeld).
+func (r *Recorder) ObserveMultiDetectRecoveryHeld(end, inside uint32) {
+	if r == nil || r.phaseTwo.multiDetectRecoveryHeld == nil {
+		return
+	}
+	if end > 0 {
+		r.phaseTwo.multiDetectRecoveryHeld.WithLabelValues(string(observability.MultiDetectHeldWindowEnd)).Add(float64(end))
+	}
+	if inside > 0 {
+		r.phaseTwo.multiDetectRecoveryHeld.WithLabelValues(string(observability.MultiDetectHeldWindowInside)).Add(float64(inside))
+	}
+}
+
+// ObserveMultiDetectUndecided counts one undecided round of an item detected
+// over several inputs, by why (evaluation's WithMultiDetectUndecided).
+func (r *Recorder) ObserveMultiDetectUndecided(reason observability.MultiDetectUndecidedReason) {
+	if r == nil || r.phaseTwo.multiDetectUndecided == nil || !slices.Contains(observability.MultiDetectUndecidedReasons, reason) {
+		return
+	}
+	r.phaseTwo.multiDetectUndecided.WithLabelValues(string(reason)).Inc()
+}
+
 // ObserveDetectionSnapshot counts one detection snapshot an event was to
 // carry by its result, and each named output of one it carries by its
 // state; a result outside contract.DetectionSnapshotResults is not counted.
@@ -3783,6 +3901,11 @@ func (m phaseTwoMetrics) observeSlicing(usage *observability.SlotBudgetUsageFact
 		m.inputSlices.WithLabelValues("discarded").Add(float64(usage.InputSlicesDiscarded))
 	}
 	m.firstSeenUnseen.WithLabelValues("slices").Add(float64(usage.FirstSeenUnseenSlices))
+	for index, count := range usage.InputSliceReadsInFlight {
+		for range count {
+			m.sliceReadsInFlight.Observe(float64(index + 1))
+		}
+	}
 	m.firstSeenUnseen.WithLabelValues("series").Add(float64(usage.FirstSeenUnseenSeries))
 	for outcome, count := range [...]uint64{usage.InputSlicesReadAhead, usage.InputSlicesReadAheadOtherLeaf,
 		usage.InputSlicesReadAheadYielded, usage.InputSlicesReadAheadFailed, usage.InputSlicesReadAheadContextEnded} {
@@ -3803,7 +3926,7 @@ func (m phaseTwoMetrics) observeSlicing(usage *observability.SlotBudgetUsageFact
 			m.windowAccountingClamped.WithLabelValues(observability.WindowAccountingClamps[reason]).Inc()
 		}
 	}
-	m.inputSliceTimeouts.WithLabelValues(observability.InputSliceTimeoutSplitSucceeded).Add(float64(usage.InputSliceTimeouts))
+	m.inputSliceTimeouts.WithLabelValues(observability.InputSliceTimeoutSplitSucceeded, observability.InputSliceTimeoutCauseProvider).Add(float64(usage.InputSliceTimeouts))
 	for outcome, count := range [...]uint64{usage.InputSliceShapeStarted, usage.InputSliceShapeKept, usage.InputSliceShapeMerged, usage.InputSliceShapeVoidedRevision, usage.InputSliceShapeVoidedDimensions, usage.InputSliceShapeVoidedMaxLeaves, usage.InputSliceShapeRefusedNotALeaf, usage.InputSliceShapeRefusedNotAPartition, usage.InputSliceShapeRefusedMaxLeaves, usage.InputSliceShapeEvictedIdle, usage.InputSliceShapeRefusedCondition, usage.InputSliceShapeRefusedSingleValue, usage.InputSliceShapeRefusedSplitError, usage.InputSliceShapeMergeRefused, usage.InputSliceStartDiscarded, usage.InputSliceShapeSizedKept} {
 		m.inputSliceShapes.WithLabelValues(observability.InputSliceShapeOutcomes[outcome]).Add(float64(count))
 	}

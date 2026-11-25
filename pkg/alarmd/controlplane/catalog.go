@@ -132,6 +132,9 @@ type BuildRequest struct {
 	// round that finds it absent. Without it the strategy serves
 	// AbsenceGracePeriod first.
 	WriterHoldsLastGood bool
+	// MultiDetect is whether this round admits the Plans of items detected
+	// over several inputs. The zero value admits none.
+	MultiDetect MultiDetectAdmission
 }
 
 // AbsenceGracePeriod is how long a LastGood strategy absent from the
@@ -769,6 +772,14 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 			}
 			continue
 		}
+		if candidate.multiDetect != "" && !request.MultiDetect.Admitted {
+			// Compiled whole, and held out of the Catalog until every ready
+			// worker can run it: a reversible capability refusal, the alerts
+			// it holds left open, the Plan back on the round that admits it.
+			catalog.Dispositions = append(catalog.Dispositions, candidate.dispositions...)
+			catalog.Dispositions = append(catalog.Dispositions, multiDetectWithheld(source.SourceID, candidate.multiDetect, request.MultiDetect))
+			continue
+		}
 		if _, duplicate := seenPlans[candidate.plan.Key()]; duplicate {
 			catalog.Dispositions = append(catalog.Dispositions, ObjectDisposition{SourceID: source.SourceID, Scope: "PLAN", Disposition: DispositionConfigRejected, Reason: "DUPLICATE_STRATEGY_IDENTITY"})
 			continue
@@ -1234,6 +1245,12 @@ type sourceCandidate struct {
 	// facts.
 	querySource   string
 	globalRefusal string
+	// multiDetect is what an item detected over several inputs compiled to
+	// (multiDetectCompiledDetail), empty for any other: such a Plan enters
+	// the Catalog only on a round that admits it (BuildRequest.MultiDetect).
+	// Decided by the round and not here, so the candidate cache keeps the
+	// compiled Plan whichever way the next round's admission goes.
+	multiDetect string
 }
 
 func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source SourceStrategy, outputProtocol string, sources TargetSources, policy NoDataPolicy) (sourceCandidate, error) {
@@ -1346,24 +1363,39 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 	}
 	var facts execution.QueryPlanFacts
 	var fallbacks []aggMethodFallback
-	if noting, ok := planner.(aggMethodNotingCompiler); ok {
-		facts, fallbacks, err = noting.compilePrimaryQueryNoted(querySource)
-	} else {
-		facts, err = planner.CompilePrimaryQuery(ctx, querySource)
-	}
-	if err != nil {
-		var compileFailure *QueryPlanCompileError
-		if errors.As(err, &compileFailure) && compileFailure.Disposition != "" && compileFailure.Reason != "" {
-			disposition := ObjectDisposition{SourceID: source.SourceID, Scope: "PLAN", Disposition: compileFailure.Disposition, Reason: compileFailure.Reason}
-			if compileFailure.FieldPath != "" {
-				disposition.FieldPath = "items[0]." + compileFailure.FieldPath
-			}
-			if compileFailure.Err != nil {
-				disposition.Detail = dispositionDetail(compileFailure.Err.Error())
-			}
-			candidate.dispositions = append(candidate.dispositions, disposition)
+	var detected *MultiDetect
+	if queryOutputContractOf(item.QueryOutputConfig) == execution.MultiDetectContract {
+		// An item detected over several inputs: its first input is the
+		// Plan's PRIMARY, and the Query Group's query.
+		multi, refusal, err := compileMultiDetectItem(ctx, planner, source.SourceID, item, querySource)
+		if refusal != nil {
+			candidate.dispositions = append(candidate.dispositions, *refusal)
 		}
-		return candidate, fmt.Errorf("QUERY_PLAN_INVALID: %w", err)
+		if err != nil {
+			return candidate, err
+		}
+		detected, facts, fallbacks = &multi, multi.Inputs[0].Facts, multi.fallbacks
+		for _, input := range multi.Inputs[1:] {
+			if err := validateQueryIdentity(source.Identity, input.Facts); err != nil {
+				return candidate, err
+			}
+		}
+	} else {
+		if refusal := algorithmInputRefRefusal(source.SourceID, item); refusal != nil {
+			candidate.dispositions = append(candidate.dispositions, *refusal)
+			return candidate, errors.New(refusal.Reason + ": " + refusal.Detail)
+		}
+		if noting, ok := planner.(aggMethodNotingCompiler); ok {
+			facts, fallbacks, err = noting.compilePrimaryQueryNoted(querySource)
+		} else {
+			facts, err = planner.CompilePrimaryQuery(ctx, querySource)
+		}
+		if err != nil {
+			if disposition, named := compileFailureDisposition(source.SourceID, err); named {
+				candidate.dispositions = append(candidate.dispositions, disposition)
+			}
+			return candidate, fmt.Errorf("QUERY_PLAN_INVALID: %w", err)
+		}
 	}
 	candidate.querySource = GlobalQuerySource(facts)
 	if err := validateQueryIdentity(source.Identity, facts); err != nil {
@@ -1375,6 +1407,9 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 		return candidate, errors.New(ReasonGlobalStrategyUnsupported + ": " + refusal.Detail)
 	}
 	compiledInputs := compiledPlanInputs{primary: facts, aggMethodFallbacks: fallbacks}
+	if detected != nil {
+		compiledInputs.multiDetect, compiledInputs.multiDetectAll = detected.Inputs[1:], detected.Inputs
+	}
 	for _, label := range itemDataTypes(item) {
 		if label == "log" || label == "event" {
 			compiledInputs.missingHistoryAsZero = true
@@ -1400,6 +1435,9 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 	if err != nil {
 		candidate.dispositions = append(candidate.dispositions, dispositions...)
 		return candidate, err
+	}
+	if detected != nil {
+		candidate.multiDetect = multiDetectCompiledDetail(*detected, plan)
 	}
 	if refusal := globalBusinessDimensionRefusal(source.SourceID, source.Identity, facts, plan); refusal != nil {
 		candidate.dispositions = append(candidate.dispositions, *refusal)
@@ -1434,6 +1472,18 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 		candidate.dispositions = append(candidate.dispositions, refusal)
 		candidate.globalRefusal = GlobalBusinessOutputProtocol
 		return candidate, errors.New(ReasonGlobalStrategyUnsupported + ": " + refusal.Detail)
+	}
+	if candidate.multiDetect != "" && format == contract.WireFormatPythonCompatible {
+		// The compatible event carries one value, the item's, and the
+		// platform's pipeline compares it with each threshold; an item
+		// detected over several inputs has a value for each and none for the
+		// item. Held as the capability refusal it is: the deployment's
+		// output decides it, and the alerts it holds stay as they are.
+		held := ObjectDisposition{SourceID: source.SourceID, Scope: "PLAN", Disposition: DispositionUnsupported, Reason: "MULTI_DETECT_NOT_ENABLED",
+			FieldPath: "items[0].query_output_config",
+			Detail:    dispositionDetail(candidate.multiDetect + "; held: the Python-compatible output carries one value an event, and an item detected over several inputs has one for each")}
+		candidate.dispositions = append(candidate.dispositions, held)
+		return candidate, errors.New("MULTI_DETECT_NOT_ENABLED: " + held.Detail)
 	}
 	plan.WireFormat = format
 	// Beside the wire format and for the same reason: the sink writes one
@@ -2100,6 +2150,11 @@ type legacyAlgorithm struct {
 	Type       string          `json:"type"`
 	UnitPrefix string          `json:"unit_prefix"`
 	Config     json.RawMessage `json:"config"`
+	// InputRef names the input of an item detected over several
+	// (multi_detect/v1) the algorithm detects; empty on every other item,
+	// and omitted when empty, so the revision of every strategy taken from a
+	// digest of this struct stays what it was.
+	InputRef string `json:"input_ref,omitempty"`
 }
 type legacyDetect struct {
 	Level     uint32          `json:"level"`
@@ -2371,9 +2426,18 @@ type compiledPlanInputs struct {
 	// each noted on the Plan.
 	aggMethodFallbacks []aggMethodFallback
 	osRestartHistory   *execution.QueryPlanFacts
-	requirements       []execution.DataRequirementTemplate
-	queryPlans         map[execution.LogicalQueryRef]execution.QueryPlanFacts
-	seenRequirements   map[execution.RequirementID]struct{}
+	// multiDetect is every input after the first of an item detected over
+	// several (MultiDetect.Inputs[1:]): each read over primary's own window
+	// as a requirement of its own (InputRoleMultiDetectInput). The first is
+	// primary.
+	multiDetect []MultiDetectInput
+	// multiDetectAll is every input of an item detected over several, the
+	// first among them, by which its algorithms find the input they judge
+	// and its unit; nil for every other item.
+	multiDetectAll   []MultiDetectInput
+	requirements     []execution.DataRequirementTemplate
+	queryPlans       map[execution.LogicalQueryRef]execution.QueryPlanFacts
+	seenRequirements map[execution.RequirementID]struct{}
 }
 
 // frozenSubjectFacts freezes the strategy facts the subject projection reads
@@ -2451,6 +2515,12 @@ func compilePlan(
 	// Every rule of an item detects its one expression today, so the item's
 	// expression is the one asked about.
 	expressionUnit := unitOfDetectedExpression(item, item.Expression)
+	multiDetect := inputs != nil && len(inputs.multiDetectAll) > 0
+	if multiDetect {
+		// The Plan's value is its PRIMARY's, the first input's, in that
+		// input's own unit; each algorithm reads its own input's below.
+		expressionUnit = expressionDataUnit{unit: inputs.multiDetectAll[0].Unit, basis: DataUnitBasisExpressionUnit}
+	}
 	unit := expressionUnit.projectionUnit()
 	var rawLevels []DataUnitRawLevel
 	dimensionFields := append([]string(nil), dataset.IdentityFields...)
@@ -2579,7 +2649,8 @@ func compilePlan(
 				Detail: refused})
 			continue
 		}
-		levelInputs := compiledPlanInputs{missingHistoryAsZero: inputs.missingHistoryAsZero, primary: inputs.primary, osRestartHistory: inputs.osRestartHistory}
+		levelInputs := compiledPlanInputs{missingHistoryAsZero: inputs.missingHistoryAsZero, primary: inputs.primary, osRestartHistory: inputs.osRestartHistory,
+			multiDetect: inputs.multiDetect, multiDetectAll: inputs.multiDetectAll}
 		compiledAlgorithms := make([]contract.AlgorithmIRV2, 0, len(rawAlgorithms[levelID]))
 		invalid := false
 		for _, raw := range rawAlgorithms[levelID] {
@@ -2594,16 +2665,32 @@ func compilePlan(
 				invalid = true
 				break
 			}
-			algorithmUnit := unit
+			algorithmUnit, readUnit := unit, expressionUnit
+			// The input an algorithm of an item detected over several judges:
+			// every input, the first among them, reads its own point, so that
+			// a round some input has no point at - the first's included - is
+			// undecided rather than read from another input's record.
+			var peer *MultiDetectInput
+			if multiDetect {
+				input := multiDetectInputOf(inputs.multiDetectAll, raw.InputRef)
+				readUnit = expressionDataUnit{unit: input.Unit, basis: DataUnitBasisExpressionUnit}
+				peer = &input
+			}
 			if algorithmReadsUnit(raw.Type) {
-				reading := readAlgorithmUnit(expressionUnit, raw.UnitPrefix)
+				reading := readAlgorithmUnit(readUnit, raw.UnitPrefix)
 				if reading.note != "" && algorithmReadsPrefix(raw.Type) && !levelNoted(rawLevels, levelID, reading.note) {
-					dispositions = append(dispositions, unitNote(sourceID, levelID, expressionUnit, raw.UnitPrefix, reading.note))
-					rawLevels = append(rawLevels, DataUnitRawLevel{LevelID: levelID, Reason: reading.note, Unit: expressionUnit.unit, Prefix: raw.UnitPrefix})
+					dispositions = append(dispositions, unitNote(sourceID, levelID, readUnit, raw.UnitPrefix, reading.note))
+					rawLevels = append(rawLevels, DataUnitRawLevel{LevelID: levelID, Reason: reading.note, Unit: readUnit.unit, Prefix: raw.UnitPrefix})
 				}
 				raw.UnitPrefix, algorithmUnit = reading.prefix, reading.dataUnit
 			}
-			config, err := compileAlgorithmConfig(raw, algorithmUnit, levelID, projection, dataset.IdentityFields, interval, step.Seconds, &levelInputs)
+			var config json.RawMessage
+			var err error
+			if peer != nil {
+				config, err = multiDetectThresholdConfig(raw, algorithmUnit, levelID, projection, dataset.IdentityFields, interval, step.Seconds, &levelInputs, *peer)
+			} else {
+				config, err = compileAlgorithmConfig(raw, algorithmUnit, levelID, projection, dataset.IdentityFields, interval, step.Seconds, &levelInputs)
+			}
 			if err != nil {
 				reason := "ALGORITHM_CONFIG_INVALID"
 				if raw.Type == strategy.DetectorKindThreshold {
@@ -2617,6 +2704,9 @@ func compilePlan(
 			detectorKind := raw.Type
 			if raw.Type == SourceAlgorithmTypePingUnreachable {
 				detectorKind = strategy.DetectorKindThreshold
+			}
+			if peer != nil {
+				detectorKind = strategy.DetectorKindMultiDetectThreshold
 			}
 			compiledAlgorithms = append(compiledAlgorithms, contract.AlgorithmIRV2{Type: detectorKind, Version: 1, Config: config})
 		}
@@ -2706,6 +2796,11 @@ func compilePlan(
 		connector := contract.LevelConnectorAND
 		if strings.EqualFold(detect.Connector, "or") {
 			connector = contract.LevelConnectorOR
+		}
+		if multiDetect {
+			// The inputs of an item detected over several, each one
+			// Threshold: joined strictly, whatever the item's connector.
+			connector = contract.LevelConnectorStrictAND
 		}
 		if borrowed {
 			dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigNoted, Reason: ReasonLevelTriggerBorrowed,
@@ -3038,6 +3133,24 @@ func (inputs *compiledPlanInputs) buildRequirements(
 	result := []execution.DataRequirementTemplate{primary}
 	inputs.addRequirement(primary)
 	inputs.addQuery(primaryRef, inputs.primary)
+	// Each further input of an item detected over several reads primary's
+	// window, step and alignment, no more and no less: the inputs are judged
+	// point by point side by side, so the provider is asked the same start,
+	// end and step for each.
+	for _, input := range inputs.multiDetect {
+		ref := execution.LogicalQueryRef(input.Facts.QueryRevision)
+		peer, err := execution.BuildDataRequirementTemplate(execution.DataRequirementTemplate{
+			DatasetName: multiDetectDatasetName(input.Ref), Role: execution.InputRoleMultiDetectInput, ConsumerLevelID: levelID,
+			LogicalQueryRef: ref, RelativeWindow: primary.RelativeWindow, StepMillis: primary.StepMillis, AlignmentMillis: primary.AlignmentMillis,
+			ResultWindowPolicy: primary.ResultWindowPolicy, ReadinessClass: primary.ReadinessClass, InputProjection: projection,
+		})
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, peer)
+		inputs.addRequirement(peer)
+		inputs.addQuery(ref, input.Facts)
+	}
 
 	switch kind {
 	case strategy.DetectorKindSimpleRingRatio:

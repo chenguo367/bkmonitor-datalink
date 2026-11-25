@@ -20,6 +20,11 @@ import (
 // carries. A field is only ever added; a change of meaning is a new version.
 const DetectionSnapshotVersion = 1
 
+// DetectionSnapshotVersionMultiDetect is the version of the snapshot of an
+// item detected over several inputs (015 F1): version 1's fields, and its
+// inputs. A reader tells the two apart by version.
+const DetectionSnapshotVersionMultiDetect = 2
+
 // The bounds of one event's detection snapshot, part of its contract: at
 // most as many ref_values as a query has named outputs, as many levels as a
 // strategy has, and as many scalar facts per algorithm as a reader needs to
@@ -44,8 +49,14 @@ const (
 	DetectionSnapshotDropped   = "dropped"
 )
 
+// DetectionSnapshotWithoutInputs is the snapshot of an item detected over
+// several inputs built without them: its detection did not hand each input
+// over, so the snapshot is version 1, and its content names the values by
+// reference. Never expected; counted so that a fall-back is seen.
+const DetectionSnapshotWithoutInputs = "without_inputs"
+
 // DetectionSnapshotResults is every result.
-var DetectionSnapshotResults = []string{DetectionSnapshotWhole, DetectionSnapshotTruncated, DetectionSnapshotDropped}
+var DetectionSnapshotResults = []string{DetectionSnapshotWhole, DetectionSnapshotTruncated, DetectionSnapshotDropped, DetectionSnapshotWithoutInputs}
 
 // DetectionSnapshotV1 is what a detection decided on, carried on its
 // ABNORMAL and RECOVERY events under extra_data.detection_snapshot: the
@@ -55,8 +66,25 @@ var DetectionSnapshotResults = []string{DetectionSnapshotWhole, DetectionSnapsho
 type DetectionSnapshotV1 struct {
 	Version   int                            `json:"version"`
 	RefValues map[string]DetectionRefValueV1 `json:"ref_values,omitempty"`
-	Levels    []DetectionLevelV1             `json:"levels"`
-	Truncated bool                           `json:"truncated,omitempty"`
+	// Inputs is, on version 2, each input of an item detected over several
+	// at the decided record, by its reference, on ABNORMAL and RECOVERY
+	// alike. At most MaxDetectionSnapshotRefValues, and never dropped for
+	// size.
+	Inputs    map[string]DetectionInputV2 `json:"inputs,omitempty"`
+	Levels    []DetectionLevelV1          `json:"levels"`
+	Truncated bool                        `json:"truncated,omitempty"`
+}
+
+// DetectionInputV2 is one input of an item detected over several at the
+// decided record: its state - SUCCESS when it was read, MISSING when it was
+// not - and then its value as judged, in its unit; whether it met its
+// threshold; and the name a reader is shown.
+type DetectionInputV2 struct {
+	State       string          `json:"state"`
+	Value       json.RawMessage `json:"value,omitempty"`
+	Unit        string          `json:"unit,omitempty"`
+	Hit         bool            `json:"hit"`
+	DisplayName string          `json:"display_name"`
 }
 
 // DetectionRefValueV1 is one named output at the decided record: its state
@@ -87,8 +115,11 @@ type DetectionWindowV1 struct {
 // DetectionAlgorithmV1 is one of a level's algorithms: its type and the
 // scalar facts it decided on, in the order they are listed.
 type DetectionAlgorithmV1 struct {
-	Type  string           `json:"type"`
-	Facts DetectionFactsV1 `json:"facts,omitempty"`
+	Type string `json:"type"`
+	// InputRef is, on version 2, the input the algorithm judges; on version
+	// 2 the algorithm's type is the Threshold it judges the input by.
+	InputRef string           `json:"input_ref,omitempty"`
+	Facts    DetectionFactsV1 `json:"facts,omitempty"`
 }
 
 // DetectionFactV1 is one scalar fact: a name and a JSON scalar.
@@ -156,8 +187,9 @@ func (facts *DetectionFactsV1) UnmarshalJSON(data []byte) error {
 // still holding any - the highest level number - are dropped. Anything cut
 // or dropped sets Truncated. The snapshot passed is not changed.
 func EncodeDetectionSnapshotV1(snapshot DetectionSnapshotV1) (json.RawMessage, bool, error) {
-	if len(snapshot.RefValues) > MaxDetectionSnapshotRefValues || len(snapshot.Levels) > MaxDetectionSnapshotLevels {
-		return nil, false, errors.New("alarmd contract: detection snapshot holds more ref_values or levels than it may")
+	if len(snapshot.RefValues) > MaxDetectionSnapshotRefValues || len(snapshot.Inputs) > MaxDetectionSnapshotRefValues ||
+		len(snapshot.Levels) > MaxDetectionSnapshotLevels {
+		return nil, false, errors.New("alarmd contract: detection snapshot holds more ref_values, inputs or levels than it may")
 	}
 	bounded := snapshot
 	bounded.Levels = make([]DetectionLevelV1, len(snapshot.Levels))

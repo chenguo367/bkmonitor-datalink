@@ -238,6 +238,14 @@ func ringRatioCompiledPlanRecovering(t *testing.T, ref, recovery string) (*strat
 func ringRatioCompiledPlanWith(t *testing.T, ref, recovery string, snapshotRevision int64,
 	noData *contract.NoDataConfigV1) (*strategy.CompiledPlan, []execution.DataRequirement) {
 	t.Helper()
+	return ringRatioCompiledPlanFor(t, "7", ref, recovery, snapshotRevision, noData)
+}
+
+// ringRatioCompiledPlanFor is ringRatioCompiledPlanWith for the strategy
+// strategyID: a Plan of its own, beside the fixture's strategy 7.
+func ringRatioCompiledPlanFor(t *testing.T, strategyID, ref, recovery string, snapshotRevision int64,
+	noData *contract.NoDataConfigV1) (*strategy.CompiledPlan, []execution.DataRequirement) {
+	t.Helper()
 	projection := strategy.AlgorithmInputProjection{ValueFields: []string{"value"}, DimensionFields: []string{"host"}, IdentityFields: []string{"host"}}
 	requirement := func(name string, role strategy.AlgorithmInputRole, start, end int64, points []strategy.AlgorithmNamedInputPoint,
 		readiness strategy.AlgorithmReadinessClass) strategy.AlgorithmInputRequirement {
@@ -285,11 +293,11 @@ func ringRatioCompiledPlanWith(t *testing.T, ref, recovery string, snapshotRevis
 	if err != nil {
 		t.Fatal(err)
 	}
-	strategyRef := contract.StrategyRefV2{TenantID: "tenant", StrategyID: "7", Revision: "strategy-v1", SnapshotRevision: snapshotRevision}
+	strategyRef := contract.StrategyRefV2{TenantID: "tenant", StrategyID: strategyID, Revision: "strategy-v1", SnapshotRevision: snapshotRevision}
 	inputProjection := contract.InputProjectionV2{ValueFields: []string{"value"}, DimensionFields: []string{"host"},
 		BusinessIdentityField: "bk_biz_id", MultiValueAlignment: "SINGLE_VALUE", DataUnit: "percent",
 		MissingValuePolicy: contract.MissingValuePolicyRequired}
-	plan := contract.EvaluationPlanV2{PlanID: "7", StrategyRef: strategyRef, InputProjection: inputProjection, NoData: noData,
+	plan := contract.EvaluationPlanV2{PlanID: strategyID, StrategyRef: strategyRef, InputProjection: inputProjection, NoData: noData,
 		StrategyIR: contract.StrategyIRV2{Schema: contract.Schema{Name: contract.StrategyIRSchemaV2, Major: 2},
 			StrategyRef: strategyRef, InputProjection: inputProjection,
 			ExecutionSemantics: contract.ExecutionSemanticsV2{EvaluationScope: contract.EvaluationScopeSeries,

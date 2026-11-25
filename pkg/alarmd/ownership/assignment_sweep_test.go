@@ -188,3 +188,89 @@ func TestASweptQueryGroupThatComesBackAcquiresPastItsLastEpoch(t *testing.T) {
 		t.Fatalf("CheckFence(returning owner) = %v", err)
 	}
 }
+
+// A recheck reads again by name only the records a sweep found a live lease
+// holding (015 O2): it reclaims the one whose lease has lapsed, leaves the
+// one still held and names it again, leaves alone a Query Group the leader
+// runs again, counts nothing for a record gone since, and never walks the
+// key space - a record it was not named is not touched, retired or not.
+func TestARecheckReadsTheHeldRecordsByNameAndOnlyThem(t *testing.T) {
+	store := newIntegrationStore(t)
+	ctx := context.Background()
+	if err := store.ConfigureEpochRetention(time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	now := time.UnixMilli(1_700_000_000_000)
+	authority, err := store.AcquireControlLeader(ctx, "control-1", now, 10*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, queryGroup := range []execution.QueryGroupIdentity{"qg-lapses", "qg-still-held", "qg-back", "qg-gone", "qg-not-named"} {
+		if _, err := store.PublishAssignment(ctx, authority, AssignmentDecision{
+			QueryGroup: queryGroup, DesiredWorkerID: "worker-1", PlacementReason: PlacementRendezvous, DecidedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if queryGroup != "qg-not-named" {
+			if _, err := store.Acquire(ctx, queryGroup, "worker-1", now, time.Minute); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	keep := map[execution.QueryGroupIdentity]struct{}{}
+	began := time.Now()
+	sweep, err := store.SweepAssignments(ctx, authority, keep)
+	took := time.Since(began)
+	if err != nil || sweep.HeldByLease != 4 || len(sweep.Held) != 4 || sweep.ScanPages < 1 {
+		t.Fatalf("sweep = (%+v, %v), want the four leased records held and named, the never-leased one reclaimed, pages counted", sweep, err)
+	}
+	// What a sweep took is the caller's to read (the fleet's
+	// duration_seconds, the assignment_swept line): within the call's own
+	// wall time, and not 0 - a walk of the store and a reclaim are round
+	// trips.
+	if sweep.Duration <= 0 || sweep.Duration > took {
+		t.Fatalf("sweep took %v by its own account, the call %v: want it measured and within the call", sweep.Duration, took)
+	}
+	// Since: qg-lapses' lease lapses, qg-back is run again, qg-gone's record
+	// is deleted by someone else, and a record no sweep named appears.
+	elapseOnRedis(t, store, "qg-lapses", time.Minute+time.Second)
+	if err := store.client.Del(ctx, store.assignmentKey("qg-gone")).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PublishAssignment(ctx, authority, AssignmentDecision{
+		QueryGroup: "qg-unnamed", DesiredWorkerID: "worker-1", PlacementReason: PlacementRendezvous, DecidedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	keep["qg-back"] = struct{}{}
+	began = time.Now()
+	recheck, err := store.RecheckAssignments(ctx, authority, keep, sweep.Held)
+	took = time.Since(began)
+	if err != nil {
+		t.Fatalf("RecheckAssignments() error = %v", err)
+	}
+	if recheck.Duration <= 0 || recheck.Duration > took {
+		t.Fatalf("recheck took %v by its own account, the call %v: want it measured and within the call", recheck.Duration, took)
+	}
+	if recheck.Scanned != 2 || recheck.Retired != 2 || recheck.Reclaimed != 1 || recheck.HeldByLease != 1 ||
+		len(recheck.Held) != 1 || recheck.Held[0] != "qg-still-held" || recheck.ScanPages != 0 {
+		t.Fatalf("recheck = %+v, want qg-lapses reclaimed and qg-still-held held again, read by name (2 read, no page)", recheck)
+	}
+	if _, err := store.ReadAssignment(ctx, "qg-lapses"); !errors.Is(err, ErrAssignmentAbsent) {
+		t.Fatalf("ReadAssignment(qg-lapses) after the recheck = %v, want absent", err)
+	}
+	for _, kept := range []execution.QueryGroupIdentity{"qg-still-held", "qg-back", "qg-unnamed"} {
+		if _, err := store.ReadAssignment(ctx, kept); err != nil {
+			t.Fatalf("ReadAssignment(%s) after the recheck = %v, want kept", kept, err)
+		}
+	}
+	// A leader whose fence lapsed rechecks nothing.
+	elapseOnRedis(t, store, "qg-still-held", time.Minute+time.Second)
+	elapseOnRedis(t, store, ControlLeaderIdentity, 11*time.Minute)
+	if _, err := store.RecheckAssignments(ctx, authority, keep, recheck.Held); !errors.Is(err, ErrStaleFence) {
+		t.Fatalf("RecheckAssignments() under a lapsed leader = %v, want ErrStaleFence", err)
+	}
+	if _, err := store.ReadAssignment(ctx, "qg-still-held"); err != nil {
+		t.Fatalf("a lapsed leader reclaimed a record: %v", err)
+	}
+}

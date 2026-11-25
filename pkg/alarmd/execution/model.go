@@ -428,7 +428,17 @@ type InputRole string
 const (
 	InputRolePrimary             InputRole = "PRIMARY"
 	InputRoleAlgorithmDependency InputRole = "ALGORITHM_DEPENDENCY"
+	// InputRoleMultiDetectInput is an input after the first of an item
+	// detected over several (MultiDetectContract): a query of its own, read
+	// over the PRIMARY's own window, step and alignment, and judged beside
+	// it - a peer of the PRIMARY, not a dependency of it.
+	InputRoleMultiDetectInput InputRole = "MULTI_DETECT_INPUT"
 )
+
+// validInputRole is whether a role is one a requirement may have.
+func validInputRole(role InputRole) bool {
+	return role == InputRolePrimary || role == InputRoleAlgorithmDependency || role == InputRoleMultiDetectInput
+}
 
 // ShardRef is a Plan's second coordinate: which piece of a strategy that
 // compilation split across Query Groups this Plan is. The zero ShardRef is a
@@ -2888,7 +2898,10 @@ func (result EvaluationResult) Validate(request EvaluationRequest) error {
 }
 
 func primaryDatasetContainsEventRecord(input InternalExecution, plan PlanIdentity, event *contract.TriggerEventV1) bool {
-	return selectedPrimaryContainsAnchor(input, plan, SeriesIdentityDigest(event.RecordRef.DimensionIdentityDigest), RecordAnchor{
+	// The PRIMARY's records only: a round another input of an item detected
+	// over several anchors is undecided - its PRIMARY lacks the point - and
+	// sends no event, so an event on such a record is one this check refuses.
+	return selectedPrimaryContainsAnchor(input, plan, false, SeriesIdentityDigest(event.RecordRef.DimensionIdentityDigest), RecordAnchor{
 		RecordID: event.RecordRef.RecordID, SourceTime: event.RecordRef.SourceTime,
 	})
 }
@@ -2896,11 +2909,16 @@ func primaryDatasetContainsEventRecord(input InternalExecution, plan PlanIdentit
 func selectedPrimaryContainsAnchor(
 	input InternalExecution,
 	plan PlanIdentity,
+	peers bool,
 	series SeriesIdentityDigest,
 	anchor RecordAnchor,
 ) bool {
 	for _, binding := range input.Inputs {
-		if binding.Consumer.Plan != plan || binding.Role != InputRolePrimary || binding.View == nil {
+		// With peers, the other inputs of an item detected over several
+		// select their records as the PRIMARY does
+		// (expectedLevelOutcomeIdentities): a round one of them anchors is
+		// the Plan's, its State written there.
+		if binding.Consumer.Plan != plan || binding.Role != InputRolePrimary && (!peers || binding.Role != InputRoleMultiDetectInput) || binding.View == nil {
 			continue
 		}
 		for index := 0; index < binding.View.Len(); index++ {
@@ -2920,7 +2938,7 @@ func primaryStateAnchorExists(
 	series SeriesIdentityDigest,
 	anchor RecordAnchor,
 ) bool {
-	if selectedPrimaryContainsAnchor(input, plan, series, anchor) {
+	if selectedPrimaryContainsAnchor(input, plan, true, series, anchor) {
 		return true
 	}
 	for _, binding := range input.Inputs {
@@ -3657,7 +3675,19 @@ func derivePrimaryInputFact(input InternalExecution, plan *PlanIdentity) (Primar
 	found := false
 	anyData := false
 	for _, binding := range input.Inputs {
-		if binding.Role != InputRolePrimary || (plan != nil && binding.Consumer.Plan != *plan) {
+		if plan != nil && binding.Consumer.Plan != *plan {
+			continue
+		}
+		// The other inputs of an item detected over several are its
+		// PRIMARY's peers: a series one of them holds is the Plan's to judge
+		// with the PRIMARY holding none of it (an undecided round, written to
+		// its State), so the Plan carries data where any of them does. Their
+		// completeness stays theirs, each guarded where it is short.
+		if binding.Role == InputRoleMultiDetectInput {
+			anyData = anyData || binding.DataState == DataStateData
+			continue
+		}
+		if binding.Role != InputRolePrimary {
 			continue
 		}
 		found = true
@@ -4964,6 +4994,8 @@ type SlotBudgetUsage struct {
 	// after it (read and decoded), summed; the Max fields the longest one's.
 	QueryWaitMillis, QueryBodyMillis       uint64
 	QueryWaitMillisMax, QueryBodyMillisMax uint64
+	// QueryBodyMicros and QueryBodyMicrosMax are the bodies in microseconds.
+	QueryBodyMicros, QueryBodyMicrosMax uint64
 	// InputSlices is the slices the Slot's input was read in (one for a Slot
 	// read whole), InputSlicesDiscarded the ones let go and split while they
 	// streamed, and FirstSeenUnseenSlices and FirstSeenUnseenSeries the
@@ -5018,6 +5050,13 @@ type SlotBudgetUsage struct {
 	// series has no tail, nor the change into it.
 	InputSliceTailMillis, InputSliceTailMillisMax     uint64
 	InputSliceChangeMillis, InputSliceChangeMillisMax uint64
+	// InputSliceHandoffMillis and Max time each kept read's end from the
+	// one before's, a read of no series too (015 O1).
+	InputSliceHandoffMillis, InputSliceHandoffMillisMax uint64
+	// InputSliceReadsInFlight is the Slot's slice reads by how many were in
+	// flight as each began, itself included: 1, 2, 3, 4, 5, more
+	// (SliceReadsInFlightBounds).
+	InputSliceReadsInFlight [6]uint64
 	// SharedFrameWaitConsumerMillis and SharedFrameWaitReaderMillis are the
 	// Slot's shared-schema answers' frame waits, summed: their frame readers
 	// waiting for the Slot to take a parsed frame, and the Slot waiting for

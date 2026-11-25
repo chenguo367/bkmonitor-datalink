@@ -1278,11 +1278,11 @@ func (adapter *seriesAdapter) ConsumeProviderSeries(ctx context.Context, batch e
 	// Kept before the target filter returns: a recheck reads the whole
 	// dimension set, and a series every Plan turned away is still data.
 	adapter.lookback.Series(batch.Dataset, batch.Delivery.Bytes)
-	// A query that feeds no PRIMARY input hands its series on without their
-	// dimensions, once the target filter and the recheck above have read
-	// them: its readers read the series' digest, times and values, and the
-	// Slot holds it, beside its PRIMARY's, from now until it is evaluated.
-	if !feedsPrimary(adapter.query) {
+	// A query that feeds no series a Plan judges hands its series on without
+	// their dimensions, once the target filter and the recheck above have
+	// read them: its readers read the series' digest, times and values, and
+	// the Slot holds it, beside its PRIMARY's, from now until it is evaluated.
+	if !feedsJudgedSeries(adapter.query) {
 		batch.Dataset = batch.Dataset.WithoutDimensions()
 	}
 	bindings, err := dataBindings(adapter.query, batch, adapter.attemptNo, admitted)
@@ -1327,10 +1327,14 @@ func (adapter *seriesAdapter) ConsumeProviderSeries(ctx context.Context, batch e
 	return nil
 }
 
-// feedsPrimary is whether any requirement query answers is a PRIMARY input.
-func feedsPrimary(query PlannedQuery) bool {
+// feedsJudgedSeries is whether any requirement query answers is an input a
+// Plan judges a series at on its own: a PRIMARY, or another input of an item
+// detected over several, whose series the PRIMARY may not hold - a round that
+// input alone anchors, judged with that series' own record and dimensions
+// (evaluation's withMultiDetectRounds).
+func feedsJudgedSeries(query PlannedQuery) bool {
 	for _, requirement := range query.Requirements {
-		if requirement.Role == execution.InputRolePrimary {
+		if requirement.Role == execution.InputRolePrimary || requirement.Role == execution.InputRoleMultiDetectInput {
 			return true
 		}
 	}

@@ -67,8 +67,12 @@ func TestAReadAheadThatEndedWithItsContextIsRefused(t *testing.T) {
 func TestTheSeriesBoundAndNotTakenUpAreCountedByFamily(t *testing.T) {
 	plan := execution.PlanIdentity{StrategyID: "7"}
 	bound := 5
-	stream := &streamedExecution{header: execution.InternalExecutionHeader{DuePlans: []execution.DuePlan{{Identity: plan}}},
-		planSeriesCounts: map[execution.PlanIdentity]*int{plan: &bound}}
+	stream := &streamedExecution{
+		slotStream: &slotStream{
+			header: execution.InternalExecutionHeader{DuePlans: []execution.DuePlan{{Identity: plan}}},
+		},
+		planSeriesCounts: map[execution.PlanIdentity]*int{plan: &bound},
+	}
 	for range 3 {
 		stream.noteTakenUp(plan)
 	}

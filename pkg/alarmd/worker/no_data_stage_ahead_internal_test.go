@@ -254,3 +254,41 @@ func TestTheNextAbsenceWindowIsReadWhileThisOneIsSaid(t *testing.T) {
 		t.Fatal("setup: the round said no absence")
 	}
 }
+
+// The groups a Slot's windows project onto are taken into the Plan's present
+// set, and staged, by one collector (collectPresent), whatever order the
+// windows hand them in - with slices consumed side by side, the order they
+// are cut in: the round's statement is the whole read's, its memory and
+// mutation digests alike, however the staged segments fell (015 C1 appendix
+// A 8).
+func TestTheGroupsTheWindowsHandAreCollectedToTheWholeReadsStatementInAnyOrder(t *testing.T) {
+	due := noDataWiredPlan(t)
+	evaluation := int64(1_788_000_000)
+	_, hosts := rosterGroups(t, 2*execution.NoDataFirstWriteSegmentGroups+500, evaluation-60)
+	half := len(hosts) / 2
+	for name, windows := range map[string][][]map[string]string{
+		"in order": {hosts[:half], hosts[half:]}, "the later window first": {hosts[half:], hosts[:half]},
+	} {
+		store := &stagingRosterStore{rosterStore: &rosterStore{}}
+		stream := rosterStream(t, due, store.rosterStore, 7)
+		stream.coordinator.ports.NoData = store
+		ctx := context.Background()
+		var kept uint64
+		for _, groups := range windows {
+			kept += stream.collectPresent(ctx, due, groups)
+		}
+		round, err := stream.decideNoDataRound(ctx, due, stream.windows.presentSet(due), execution.CompletenessFull,
+			func(completedSeries) error { return nil })
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshot := execution.NoDataMemorySnapshot{Identity: due.NoDataIdentity(), Status: execution.NoDataMemoryMissing,
+			Representation: execution.NoDataRepresentationNone}
+		want := wholeReadOf(t, stream, due, snapshot, hosts)
+		got := round.mutation
+		if kept == 0 || len(store.segments) != 2 || got == nil || want.Mutation == nil ||
+			got.MemoryDigest != want.Mutation.MemoryDigest || got.MutationDigest != want.Mutation.MutationDigest {
+			t.Fatalf("%s: %d bytes kept, segments %v, statement %+v, want the whole read's %+v", name, kept, store.segments, got, want.Mutation)
+		}
+	}
+}

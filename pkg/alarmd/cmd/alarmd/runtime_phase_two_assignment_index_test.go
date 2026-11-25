@@ -45,13 +45,27 @@ func (store *fakePhaseTwoOwnershipStore) SweepAssignments(_ context.Context, _ o
 	if store.sweepErr != nil {
 		return store.sweep, store.sweepErr
 	}
-	if store.sweep == (ownership.AssignmentSweep{}) {
+	if sweep := store.sweep; sweep.Scanned == 0 && sweep.Retired == 0 && sweep.Reclaimed == 0 && sweep.HeldByLease == 0 && sweep.Changed == 0 &&
+		sweep.Duration == 0 && len(sweep.Held) == 0 && sweep.ScanPages == 0 {
 		return ownership.AssignmentSweep{Scanned: 1}, nil
 	}
 	return store.sweep, nil
 }
 
+// RecheckAssignments records the held Query Groups each recheck was asked
+// to read again and answers store.recheck (015 O2).
+func (store *fakePhaseTwoOwnershipStore) RecheckAssignments(_ context.Context, _ ownership.PublicationAuthority, _ map[execution.QueryGroupIdentity]struct{}, held []execution.QueryGroupIdentity) (ownership.AssignmentSweep, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.rechecks = append(store.rechecks, append([]execution.QueryGroupIdentity(nil), held...))
+	return store.recheck, store.sweepErr
+}
+
 func (store *rebalanceOwnershipStore) SweepAssignments(context.Context, ownership.PublicationAuthority, map[execution.QueryGroupIdentity]struct{}) (ownership.AssignmentSweep, error) {
+	return ownership.AssignmentSweep{}, store.sweepErr
+}
+
+func (store *rebalanceOwnershipStore) RecheckAssignments(context.Context, ownership.PublicationAuthority, map[execution.QueryGroupIdentity]struct{}, []execution.QueryGroupIdentity) (ownership.AssignmentSweep, error) {
 	return ownership.AssignmentSweep{}, store.sweepErr
 }
 

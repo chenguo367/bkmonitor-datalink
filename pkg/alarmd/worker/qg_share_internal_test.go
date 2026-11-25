@@ -27,8 +27,8 @@ func TestOneQueryGroupCannotTakeTheWholePool(t *testing.T) {
 		MaxSeries: 10, MaxRetainedBytes: 100, MaxStateMutations: 10, MaxEvents: 10, MaxGapMutations: 10,
 	}}
 	// An empty pool, so nothing but the share can refuse this.
-	stream := &streamedExecution{coordinator: co, began: true, retainedByPhase: retainedSeed(60)}
-	err := co.acquireEffects(effectCounts{states: 1}, 20, stream, stream.reservationPhase("normal_output"))
+	stream := &streamedExecution{slotStream: &slotStream{coordinator: co, began: true, retainedByPhase: retainedSeed(60)}}
+	err := co.acquireEffects(effectCounts{states: 1}, stream, stream.reservationPhase("normal_output"), retainedCharges{retainPhaseOutput: 20})
 
 	var exceeded *provisionalBudgetExceededError
 	if !errors.As(err, &exceeded) {
@@ -55,8 +55,8 @@ func TestOneQueryGroupCannotTakeTheWholePool(t *testing.T) {
 
 	// Inside the share the same execution proceeds, so the case above is a
 	// share and not a refusal of everything.
-	fits := &streamedExecution{coordinator: co, began: true, retainedByPhase: retainedSeed(50)}
-	if err := co.acquireEffects(effectCounts{states: 1}, 20, fits, fits.reservationPhase("normal_output")); err != nil {
+	fits := &streamedExecution{slotStream: &slotStream{coordinator: co, began: true, retainedByPhase: retainedSeed(50)}}
+	if err := co.acquireEffects(effectCounts{states: 1}, fits, fits.reservationPhase("normal_output"), retainedCharges{retainPhaseOutput: 20}); err != nil {
 		t.Fatalf("an object inside its share was refused: %v", err)
 	}
 }
@@ -70,8 +70,8 @@ func TestTheShareIsMeasuredInBytesNotMutations(t *testing.T) {
 		MaxSeries: 1000, MaxRetainedBytes: 1000, MaxStateMutations: 1000, MaxEvents: 1000, MaxGapMutations: 1000,
 	}}
 	// Far inside every count budget, far over the byte share.
-	stream := &streamedExecution{coordinator: co, began: true, retainedByPhase: retainedSeed(600)}
-	err := co.acquireEffects(effectCounts{states: 1}, 200, stream, stream.reservationPhase("normal_output"))
+	stream := &streamedExecution{slotStream: &slotStream{coordinator: co, began: true, retainedByPhase: retainedSeed(600)}}
+	err := co.acquireEffects(effectCounts{states: 1}, stream, stream.reservationPhase("normal_output"), retainedCharges{retainPhaseOutput: 200})
 	var exceeded *provisionalBudgetExceededError
 	if !errors.As(err, &exceeded) || !exceeded.share {
 		t.Fatalf("a Slot at 1 mutation and 800 bytes of a 1000-byte pool was not refused by share: %v", err)

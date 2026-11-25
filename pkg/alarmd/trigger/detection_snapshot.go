@@ -53,10 +53,58 @@ func detectionSnapshot(request EvaluationRequestV2, event *contract.TriggerEvent
 	if len(levels) > contract.MaxDetectionSnapshotLevels {
 		levels = levels[:contract.MaxDetectionSnapshotLevels]
 	}
+	inputs := multiDetectInputs(request, levels)
 	for _, result := range levels {
-		snapshot.Levels = append(snapshot.Levels, snapshotLevel(request.Plan, result))
+		snapshot.Levels = append(snapshot.Levels, snapshotLevel(request.Plan, result, inputs != nil))
+	}
+	if inputs != nil {
+		snapshot.Version, snapshot.Inputs = contract.DetectionSnapshotVersionMultiDetect, inputs
 	}
 	return snapshot
+}
+
+// multiDetectInputs is, for an event of an item detected over several inputs
+// - its one Level joined strictly - each input at the decided record, by its
+// reference: read or missing, its value as judged and the unit it is in,
+// whether it met its threshold, and its shown name. Nil for any other event,
+// and for one whose detection did not hand each input over.
+func multiDetectInputs(request EvaluationRequestV2, levels []contract.LevelResultV1) map[string]contract.DetectionInputV2 {
+	for _, result := range levels {
+		var compiled *strategy.CompiledLevel
+		for _, candidate := range request.Plan.Levels().All() {
+			if candidate.Definition().LevelID == result.LevelID {
+				compiled = &candidate
+				break
+			}
+		}
+		if compiled == nil || compiled.Connector() != contract.LevelConnectorStrictAND {
+			continue
+		}
+		var evidence []DetectionInputEvidence
+		for _, fact := range request.Record.LevelFacts {
+			if fact.Definition.LevelID == result.LevelID {
+				evidence = fact.Evidence.Inputs
+			}
+		}
+		if len(evidence) != compiled.Algorithms().Len() {
+			return nil
+		}
+		inputs := make(map[string]contract.DetectionInputV2, len(evidence))
+		for index, algorithm := range compiled.Algorithms().All() {
+			input, unit, ok := algorithm.MultiDetectInput()
+			if !ok {
+				return nil
+			}
+			entry := contract.DetectionInputV2{State: "MISSING", Unit: unit, Hit: evidence[index].Matched, DisplayName: input.DisplayName}
+			if ordinal := int(evidence[index].ProjectedValueOrdinal); evidence[index].Decided && ordinal < len(request.Record.ProjectedValues) &&
+				request.Record.ProjectedValues[ordinal].Available {
+				entry.State, entry.Value = "SUCCESS", decimalFact(request.Record.ProjectedValues[ordinal].CanonicalDecimal)
+			}
+			inputs[input.Ref] = entry
+		}
+		return inputs
+	}
+	return nil
 }
 
 // encodeDetectionSnapshot is the encoder snapshots are held to their bounds
@@ -127,7 +175,10 @@ func refValues(table *execution.NamedOutputRecords, recordID string, current jso
 	return refs
 }
 
-func snapshotLevel(plan *strategy.CompiledPlan, result contract.LevelResultV1) contract.DetectionLevelV1 {
+// snapshotLevel is one decided level of the snapshot; with inputs - a version
+// 2 snapshot of an item detected over several - each input's algorithm is
+// named the Threshold it judges that input by, with the input.
+func snapshotLevel(plan *strategy.CompiledPlan, result contract.LevelResultV1, inputs bool) contract.DetectionLevelV1 {
 	trigger := result.DecisionWindow.Trigger
 	level := contract.DetectionLevelV1{Level: result.LevelID, Algorithms: []contract.DetectionAlgorithmV1{},
 		Window:           contract.DetectionWindowV1{Required: trigger.RequiredAnomalies, Observed: trigger.ObservedAnomalies, Size: trigger.WindowSize},
@@ -158,9 +209,20 @@ func snapshotLevel(plan *strategy.CompiledPlan, result contract.LevelResultV1) c
 	}
 	for index, algorithm := range compiled.Algorithms().All() {
 		entry := contract.DetectionAlgorithmV1{Type: algorithm.Kind()}
+		// An input's algorithm of an item detected over several is, to a
+		// reader, the Threshold it judges that input by.
+		multiDetectSpec := (*strategy.DetectorSpec)(nil)
+		if input, _, ok := algorithm.MultiDetectInput(); ok && inputs {
+			entry.Type, entry.InputRef = strategy.DetectorKindThreshold, input.Ref
+			if _, spec, _, found := algorithm.MultiDetectThreshold(); found {
+				multiDetectSpec = &spec
+			}
+		}
 		if index == decided {
 			var detector *strategy.DetectorSpec
-			if index < len(detectors) {
+			if multiDetectSpec != nil {
+				detector = multiDetectSpec
+			} else if index < len(detectors) {
 				detector = &detectors[index]
 				if normalizer, ok := plan.Normalizer(detector.NormalizerRef()); ok && normalizer.TargetUnit() != "" {
 					level.Unit = normalizer.TargetUnit()
@@ -211,4 +273,19 @@ func decimalFact(decimal string) json.RawMessage {
 	}
 	encoded, _ := json.Marshal(decimal)
 	return encoded
+}
+
+// multiDetectPlan is whether the Plan is an item detected over several
+// inputs: a Level joined strictly, which the compiler allows such a Plan
+// alone.
+func multiDetectPlan(plan *strategy.CompiledPlan) bool {
+	if plan == nil {
+		return false
+	}
+	for _, level := range plan.Levels().All() {
+		if level.Connector() == contract.LevelConnectorStrictAND {
+			return true
+		}
+	}
+	return false
 }

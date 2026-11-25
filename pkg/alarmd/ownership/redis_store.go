@@ -226,8 +226,9 @@ const workerReadBatch = 512
 func (store *RedisStore) ListReadyWorkers(
 	ctx context.Context,
 	at time.Time,
-) ([]WorkerRegistration, ControlReadStats, error) {
-	stats := ControlReadStats{}
+) (_ []WorkerRegistration, stats ControlReadStats, _ error) {
+	// stats is the named result: the deferred Duration below is set on what
+	// the caller gets, not on a copy taken by the return.
 	if at.IsZero() {
 		return nil, stats, errors.New("alarmd ownership: worker listing time is required")
 	}
@@ -601,11 +602,12 @@ const assignmentReadBatch = 512
 func (store *RedisStore) ReadAssignments(
 	ctx context.Context,
 	queryGroups []execution.QueryGroupIdentity,
-) (map[execution.QueryGroupIdentity]AssignmentRecord, ControlReadStats, error) {
+) (_ map[execution.QueryGroupIdentity]AssignmentRecord, stats ControlReadStats, _ error) {
+	// Named, as ListReadyWorkers' is, for the deferred Duration.
 	if store == nil || store.client == nil {
 		return nil, ControlReadStats{}, errors.New("alarmd ownership: initialized store is required")
 	}
-	stats := ControlReadStats{Keys: len(queryGroups)}
+	stats = ControlReadStats{Keys: len(queryGroups)}
 	records := make(map[execution.QueryGroupIdentity]AssignmentRecord, len(queryGroups))
 	if len(queryGroups) == 0 {
 		return records, stats, nil

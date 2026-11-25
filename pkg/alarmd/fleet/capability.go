@@ -133,6 +133,9 @@ var capabilityByReason = map[string]CapabilityClass{
 	"HISTORY_OFF_GRID":               {Area: CapabilityAlgorithm, Outcome: CapabilityNotYetSupported},
 	"EVALUATION_STEP_INCONSISTENT":   {Area: CapabilityAlgorithm, Outcome: CapabilityNotYetSupported, Reversible: true},
 	"NO_DATA_TRIGGER_BEYOND_HORIZON": {Area: CapabilityAlgorithm, Outcome: CapabilityNotYetSupported},
+	// A build that reads and checks an item detected over several inputs and
+	// does not yet detect it: the build that turns it on lifts it.
+	"MULTI_DETECT_NOT_ENABLED": {Area: CapabilityAlgorithm, Outcome: CapabilityNotYetSupported, Reversible: true},
 
 	"EFFECTIVE_TIME_SCHEMA_UNSUPPORTED": {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported},
 	"SNAPSHOT_RETENTION_INSUFFICIENT":   {Area: CapabilityConfig, Outcome: CapabilityNotYetSupported, Reversible: true},

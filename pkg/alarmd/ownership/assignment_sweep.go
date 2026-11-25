@@ -28,6 +28,13 @@ type AssignmentSweep struct {
 	// the sweep.
 	Retired, Reclaimed, HeldByLease, Changed int
 	Duration                                 time.Duration
+	// Held names the retired Query Groups whose record a live lease kept,
+	// HeldByLease of them: the next round reads these again
+	// (RecheckAssignments) rather than walk the key space for them.
+	Held []execution.QueryGroupIdentity
+	// ScanPages is how many SCAN calls the sweep made: one a page of the
+	// key space for a full sweep, none for a recheck.
+	ScanPages int
 }
 
 // reclaimAssignmentScript deletes one retired Query Group's Assignment
@@ -124,8 +131,9 @@ func (store *RedisStore) SweepAssignments(
 	ctx context.Context,
 	authority PublicationAuthority,
 	keep map[execution.QueryGroupIdentity]struct{},
-) (AssignmentSweep, error) {
-	sweep := AssignmentSweep{}
+) (sweep AssignmentSweep, _ error) {
+	// sweep is the named result: the deferred Duration below is set on what
+	// the caller gets, not on a copy taken by the return.
 	if store == nil || store.client == nil {
 		return sweep, errors.New("alarmd ownership: initialized store is required")
 	}
@@ -142,6 +150,7 @@ func (store *RedisStore) SweepAssignments(
 	var cursor uint64
 	for {
 		keys, next, err := store.client.Scan(ctx, cursor, pattern, assignmentSweepScan).Result()
+		sweep.ScanPages++
 		if err != nil {
 			return sweep, fmt.Errorf("alarmd ownership: assignment sweep scan: %w", err)
 		}
@@ -177,26 +186,8 @@ func (store *RedisStore) SweepAssignments(
 					continue
 				}
 				sweep.Retired++
-				holder, err := store.client.HGet(ctx, store.ownershipKey(queryGroup), "owner_id").Result()
-				if err != nil && !errors.Is(err, redis.Nil) {
-					return sweep, fmt.Errorf("alarmd ownership: assignment sweep holder %s: %w", queryGroup, err)
-				}
-				result, err := reclaimAssignmentScript.Run(ctx, store.client,
-					[]string{leaderKey, key, store.ownershipKey(queryGroup), store.workerSessionKey(holder)},
-					authority.Fence.OwnerID, authority.Fence.OwnerEpoch, authority.Fence.LeaseToken, named,
-					store.epochRetention.Milliseconds(), holder).Text()
-				if err != nil {
-					return sweep, fmt.Errorf("alarmd ownership: assignment sweep reclaim %s: %w", queryGroup, err)
-				}
-				switch result {
-				case "RECLAIMED":
-					sweep.Reclaimed++
-				case "HELD":
-					sweep.HeldByLease++
-				case "STALE":
-					return sweep, ErrStaleFence
-				default:
-					sweep.Changed++
+				if err := store.reclaimRetired(ctx, authority, leaderKey, key, queryGroup, &sweep); err != nil {
+					return sweep, err
 				}
 			}
 		}
@@ -205,4 +196,84 @@ func (store *RedisStore) SweepAssignments(
 		}
 		cursor = next
 	}
+}
+
+// reclaimRetired runs the reclaim script on one retired Query Group's
+// record, at key, and counts what it answered on sweep: reclaimed, held by a
+// live lease (and named in Held for the next round's recheck), or changed
+// under the sweep. A fence the leader no longer holds stops the sweep.
+func (store *RedisStore) reclaimRetired(
+	ctx context.Context, authority PublicationAuthority, leaderKey, key string, queryGroup execution.QueryGroupIdentity, sweep *AssignmentSweep,
+) error {
+	holder, err := store.client.HGet(ctx, store.ownershipKey(queryGroup), "owner_id").Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return fmt.Errorf("alarmd ownership: assignment sweep holder %s: %w", queryGroup, err)
+	}
+	result, err := reclaimAssignmentScript.Run(ctx, store.client,
+		[]string{leaderKey, key, store.ownershipKey(queryGroup), store.workerSessionKey(holder)},
+		authority.Fence.OwnerID, authority.Fence.OwnerEpoch, authority.Fence.LeaseToken, string(queryGroup),
+		store.epochRetention.Milliseconds(), holder).Text()
+	if err != nil {
+		return fmt.Errorf("alarmd ownership: assignment sweep reclaim %s: %w", queryGroup, err)
+	}
+	switch result {
+	case "RECLAIMED":
+		sweep.Reclaimed++
+	case "HELD":
+		sweep.HeldByLease++
+		sweep.Held = append(sweep.Held, queryGroup)
+	case "STALE":
+		return ErrStaleFence
+	default:
+		sweep.Changed++
+	}
+	return nil
+}
+
+// RecheckAssignments reads again only the records a sweep found a live
+// lease holding (AssignmentSweep.Held) and reclaims those whose lease has
+// lapsed, the same way the full sweep does, with no SCAN. A sweep that
+// found one held record used to walk the whole key space again every round
+// until that lease lapsed: a retirement on a deployment of half a million
+// keys cost eight or nine walks of about a thousand SCAN pages each. A
+// Query Group back in keep is left alone, as the full sweep leaves it; a
+// record gone or renamed since is not counted. Scanned is the records read.
+func (store *RedisStore) RecheckAssignments(
+	ctx context.Context,
+	authority PublicationAuthority,
+	keep map[execution.QueryGroupIdentity]struct{},
+	held []execution.QueryGroupIdentity,
+) (sweep AssignmentSweep, _ error) {
+	// Named, as SweepAssignments' is, for the deferred Duration.
+	if store == nil || store.client == nil {
+		return sweep, errors.New("alarmd ownership: initialized store is required")
+	}
+	if authority.Fence.QueryGroup != ControlLeaderIdentity || validateFence(authority.Fence) != nil {
+		return sweep, errors.New("alarmd ownership: assignment sweep needs the control leader authority")
+	}
+	if store.epochRetention <= 0 {
+		return sweep, errors.New("alarmd ownership: assignment sweep needs the owner epoch retention")
+	}
+	started := time.Now()
+	defer func() { sweep.Duration = time.Since(started) }()
+	leaderKey := store.ownershipKey(ControlLeaderIdentity)
+	for _, queryGroup := range held {
+		if _, kept := keep[queryGroup]; kept {
+			continue
+		}
+		key := store.assignmentKey(queryGroup)
+		named, err := store.client.HGet(ctx, key, "query_group").Result()
+		if errors.Is(err, redis.Nil) || (err == nil && named != string(queryGroup)) {
+			continue
+		}
+		if err != nil {
+			return sweep, fmt.Errorf("alarmd ownership: assignment recheck read: %w", err)
+		}
+		sweep.Scanned++
+		sweep.Retired++
+		if err := store.reclaimRetired(ctx, authority, leaderKey, key, queryGroup, &sweep); err != nil {
+			return sweep, err
+		}
+	}
+	return sweep, nil
 }

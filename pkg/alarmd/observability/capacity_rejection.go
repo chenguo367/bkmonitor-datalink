@@ -110,6 +110,10 @@ type SlotBudgetUsageFacts struct {
 	QueryBodyMillis    uint64 `json:"query_body_millis"`
 	QueryWaitMillisMax uint64 `json:"query_wait_millis_max"`
 	QueryBodyMillisMax uint64 `json:"query_body_millis_max"`
+	// QueryBodyMicros and QueryBodyMicrosMax are the bodies in microseconds:
+	// a near-empty answer's body is under a millisecond and reads 0 above.
+	QueryBodyMicros    uint64 `json:"query_body_micros"`
+	QueryBodyMicrosMax uint64 `json:"query_body_micros_max"`
 	// InputSlices is the slices the Slot's input was read in, one for a Slot
 	// read whole, and InputSlicesDiscarded the ones let go and split while
 	// they streamed. FirstSeenUnseenSlices and FirstSeenUnseenSeries are the
@@ -157,12 +161,19 @@ type SlotBudgetUsageFacts struct {
 	// InputSliceTail* and InputSliceChange* time the seams of the Slot's
 	// reads, summed and the longest; SharedFrameWait* are its shared-schema
 	// answers' frame waits, summed (execution.SlotBudgetUsage).
-	InputSliceTailMillis          uint64 `json:"input_slice_tail_millis,omitempty"`
-	InputSliceTailMillisMax       uint64 `json:"input_slice_tail_millis_max,omitempty"`
-	InputSliceChangeMillis        uint64 `json:"input_slice_change_millis,omitempty"`
-	InputSliceChangeMillisMax     uint64 `json:"input_slice_change_millis_max,omitempty"`
-	SharedFrameWaitConsumerMillis uint64 `json:"shared_frame_wait_consumer_millis,omitempty"`
-	SharedFrameWaitReaderMillis   uint64 `json:"shared_frame_wait_reader_millis,omitempty"`
+	InputSliceTailMillis      uint64 `json:"input_slice_tail_millis,omitempty"`
+	InputSliceTailMillisMax   uint64 `json:"input_slice_tail_millis_max,omitempty"`
+	InputSliceChangeMillis    uint64 `json:"input_slice_change_millis,omitempty"`
+	InputSliceChangeMillisMax uint64 `json:"input_slice_change_millis_max,omitempty"`
+	// InputSliceHandoff* time each kept read's end from the one before's, a
+	// read of no series too, summed and the longest; InputSliceReadsInFlight
+	// is the Slot's slice reads by how many were in flight as each began,
+	// itself included - 1, 2, 3, 4, 5, more (015 O1).
+	InputSliceHandoffMillis       uint64    `json:"input_slice_handoff_millis,omitempty"`
+	InputSliceHandoffMillisMax    uint64    `json:"input_slice_handoff_millis_max,omitempty"`
+	InputSliceReadsInFlight       [6]uint64 `json:"input_slice_reads_in_flight"`
+	SharedFrameWaitConsumerMillis uint64    `json:"shared_frame_wait_consumer_millis,omitempty"`
+	SharedFrameWaitReaderMillis   uint64    `json:"shared_frame_wait_reader_millis,omitempty"`
 	// InputSliceTimeouts is the slices that ran out of time and were split
 	// and read again, the Slot completing: at most one a Slot.
 	InputSliceTimeouts uint64 `json:"input_slice_timeouts,omitempty"`
@@ -474,3 +485,18 @@ var InputSliceCutOnSources = [3]string{InputSliceCutOnRootSplit, InputSliceCutOn
 
 // InputSliceTimeoutOutcomes is every outcome.
 var InputSliceTimeoutOutcomes = []string{InputSliceTimeoutSplitSucceeded, InputSliceTimeoutSplitFailed, InputSliceTimeoutNotSplit}
+
+// Who timed a slice's read out, closed (015 O1): provider, the provider
+// answering a timeout before alarmd's deadline (504 or 408, or its own
+// status saying so) - the only one a slice is split for; deadline, alarmd's
+// own deadline for the read passing first - the window short, not the slice
+// large, never split; other, neither of them, which no path writes today: a
+// rise is a timeout read here that names neither.
+const (
+	InputSliceTimeoutCauseProvider = "provider"
+	InputSliceTimeoutCauseDeadline = "deadline"
+	InputSliceTimeoutCauseOther    = "other"
+)
+
+// InputSliceTimeoutCauses is every cause.
+var InputSliceTimeoutCauses = []string{InputSliceTimeoutCauseProvider, InputSliceTimeoutCauseDeadline, InputSliceTimeoutCauseOther}

@@ -156,7 +156,12 @@ type levelOutcomeIdentity struct {
 func expectedLevelOutcomeIdentities(input InternalExecution, plan DuePlan) (map[levelOutcomeIdentity]struct{}, error) {
 	wanted := make(map[levelOutcomeIdentity]struct{})
 	for _, binding := range input.Inputs {
-		if binding.Consumer.Plan != plan.Identity || binding.Role != InputRolePrimary {
+		// An item detected over several inputs is judged wherever any of
+		// them holds a point of a series (evaluation's withMultiDetectRounds),
+		// so its other inputs' records are selected as the PRIMARY's are. A
+		// record of one series at one time is the same anchor whichever input
+		// holds it: its id derives from the two.
+		if binding.Consumer.Plan != plan.Identity || binding.Role != InputRolePrimary && binding.Role != InputRoleMultiDetectInput {
 			continue
 		}
 		add := func(series SeriesIdentityDigest, anchor RecordAnchor) {
@@ -180,6 +185,11 @@ func expectedLevelOutcomeIdentities(input InternalExecution, plan DuePlan) (map[
 					RecordID: record.RecordID(), SourceTime: record.SourceTime(),
 				})
 			}
+		}
+		// A record the PRIMARY could not use is still the PRIMARY's round;
+		// the other inputs' rounds are their records alone.
+		if binding.Role != InputRolePrimary {
+			continue
 		}
 		for _, fact := range binding.QualityFacts {
 			if fact.ImpactScope == ImpactSeries {

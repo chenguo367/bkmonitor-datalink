@@ -19,6 +19,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/segment"
 )
 
 // slotApply is what one attempt carries across the writes of a Slot: the
@@ -730,6 +731,10 @@ func (apply *slotApply) noteLeftMembers(due execution.DuePlan, landing, accepted
 		}
 	}
 	apply.frozenRenewals.RecordNotWritten(observability.StateNotWrittenSegmentMemberSkipped, len(leaving))
+	// The same members by the family they were left in (015 O1).
+	for _, mutation := range leaving {
+		apply.frozenRenewals.RecordMembersLeft(seriesKindLabel(decided[mutation.Identity].family == segment.FamilyNoData), 1)
+	}
 }
 
 // noteRetryPending keeps the first Plan reason a retry is pending on.

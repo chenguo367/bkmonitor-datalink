@@ -2345,6 +2345,10 @@ type fakePhaseTwoOwnershipStore struct {
 	decisions []ownership.AssignmentDecision
 	// sweeps is the keep set of every Assignment sweep asked of the store.
 	sweeps []map[execution.QueryGroupIdentity]struct{}
+	// rechecks is the held Query Groups of every recheck asked of the store,
+	// and recheck what each answers (015 O2).
+	rechecks [][]execution.QueryGroupIdentity
+	recheck  ownership.AssignmentSweep
 }
 
 func (store *fakePhaseTwoOwnershipStore) renewCount() int {

@@ -12,6 +12,9 @@ type AlgorithmReadinessClass string
 const (
 	AlgorithmInputPrimary    AlgorithmInputRole = "PRIMARY"
 	AlgorithmInputDependency AlgorithmInputRole = "ALGORITHM_DEPENDENCY"
+	// AlgorithmInputMultiDetect is an input after the first of an item
+	// detected over several (execution.InputRoleMultiDetectInput).
+	AlgorithmInputMultiDetect AlgorithmInputRole = "MULTI_DETECT_INPUT"
 
 	AlgorithmReadinessEager             AlgorithmReadinessClass = "EAGER"
 	AlgorithmReadinessFinalizedRequired AlgorithmReadinessClass = "FINALIZED_REQUIRED"
@@ -66,7 +69,7 @@ type AlgorithmInputRequirement struct {
 
 func (requirement AlgorithmInputRequirement) validate() error {
 	if len(requirement.RequirementID) != 64 || requirement.DatasetName == "" || requirement.ConsumerLevelID == 0 || requirement.LogicalQueryRef == "" ||
-		(requirement.Role != AlgorithmInputPrimary && requirement.Role != AlgorithmInputDependency) ||
+		(requirement.Role != AlgorithmInputPrimary && requirement.Role != AlgorithmInputDependency && requirement.Role != AlgorithmInputMultiDetect) ||
 		!requirement.RelativeWindow.HalfOpen || requirement.RelativeWindow.StartOffsetSeconds >= requirement.RelativeWindow.EndOffsetSeconds ||
 		requirement.StepMillis <= 0 || requirement.AlignmentMillis <= 0 ||
 		(requirement.ReadinessClass != AlgorithmReadinessEager && requirement.ReadinessClass != AlgorithmReadinessFinalizedRequired) {
@@ -169,6 +172,7 @@ type compiledAlgorithmConfig struct {
 	SimpleRingRatio       *SimpleRingRatioConfig       `json:"simple_ring_ratio,omitempty"`
 	OsRestart             *OsRestartConfig             `json:"os_restart,omitempty"`
 	ProcPort              *ProcPortConfig              `json:"proc_port,omitempty"`
+	MultiDetectThreshold  *MultiDetectThresholdConfig  `json:"multi_detect_threshold,omitempty"`
 	SourceProvenance      *AlgorithmSourceProvenance   `json:"source_provenance,omitempty"`
 }
 
@@ -204,6 +208,50 @@ func (plan CompiledAlgorithmPlan) InputProjection() AlgorithmInputProjection {
 func (plan CompiledAlgorithmPlan) InputRequirements() []AlgorithmInputRequirement {
 	return cloneAlgorithmInputRequirements(plan.inputRequirements)
 }
+
+// MultiDetectThresholdConfig is the threshold of an input of an item
+// detected over several: the named input it reads ("primary" for the first
+// input), and the
+// threshold its point is judged by, as a Threshold would judge the PRIMARY's
+// - its semantic form, which the plan's digests read, beside the detector
+// and normalizer it runs with.
+type MultiDetectThresholdConfig struct {
+	DatasetName string            `json:"dataset_name"`
+	Input       MultiDetectInput  `json:"input"`
+	Threshold   *detectorSemantic `json:"threshold"`
+	detector    DetectorSpec
+	normalizer  NumericNormalizerSpec
+}
+
+// MultiDetectInput is the input of an item detected over several that a
+// MultiDetectThreshold judges, as its events name it: its reference - the
+// key of its value and of its snapshot entry - and the name a reader is
+// shown.
+type MultiDetectInput struct {
+	Ref         string `json:"ref"`
+	DisplayName string `json:"display_name"`
+}
+
+// MultiDetectInput is the input a MultiDetectThreshold judges, and the unit
+// its judged values are in, by the platform's unit id (ValueUnit).
+func (plan CompiledAlgorithmPlan) MultiDetectInput() (MultiDetectInput, string, bool) {
+	config := plan.config.MultiDetectThreshold
+	if config == nil {
+		return MultiDetectInput{}, "", false
+	}
+	return config.Input, config.normalizer.ValueUnit(), true
+}
+
+// MultiDetectThreshold is the named input a MultiDetectThreshold reads and
+// the detector and normalizer it judges that input's point by.
+func (plan CompiledAlgorithmPlan) MultiDetectThreshold() (string, DetectorSpec, NumericNormalizerSpec, bool) {
+	config := plan.config.MultiDetectThreshold
+	if config == nil {
+		return "", DetectorSpec{}, NumericNormalizerSpec{}, false
+	}
+	return config.DatasetName, config.detector, config.normalizer, true
+}
+
 func (plan CompiledAlgorithmPlan) SimpleRingRatioConfig() (SimpleRingRatioConfig, bool) {
 	if plan.config.SimpleRingRatio == nil {
 		return SimpleRingRatioConfig{}, false

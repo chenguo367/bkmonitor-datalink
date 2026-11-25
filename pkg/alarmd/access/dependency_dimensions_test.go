@@ -75,3 +75,54 @@ func TestADependencysSeriesIsHandedOnWithoutItsDimensionsAndThePrimarysWithThem(
 		}
 	}
 }
+
+// The other input of an item detected over several is judged at its own
+// series where the PRIMARY holds none of them, so its query hands them on
+// with their dimensions as the PRIMARY's does: a round that input alone
+// anchors carries the series' dimensions to its decision.
+func TestAnInputOfAnItemDetectedOverSeveralIsHandedOnWithItsDimensions(t *testing.T) {
+	contractRef, frozen := frozenExecution(t)
+	primaryFacts := frozen.QueryFacts[frozen.Requirements[0].LogicalQueryRef]
+	memoryFacts, err := primaryFacts.WithMetricMerge("a + 0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	memory := frozen.Requirements[0]
+	memory.RequirementID, memory.DatasetName = "memory", "input:memory"
+	memory.Role = execution.InputRoleMultiDetectInput
+	memory.LogicalQueryRef = execution.LogicalQueryRef(memoryFacts.QueryRevision)
+	frozen.Requirements = append(frozen.Requirements, memory)
+	frozen.QueryFacts[memory.LogicalQueryRef] = memoryFacts
+	contractRef = bindFrozenDueDigest(t, contractRef, frozen)
+	slotEnd := int64(contractRef.Slot.EvaluationTime)
+
+	source, err := NewSource(staticFrozenPlan{plan: frozen}, &windowedHostProvider{hosts: []string{"192.0.2.10"}},
+		&recordingQueryPermits{}, Config{MinReadyDelay: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Past both queries' readiness: the window's end and the delay after it.
+	source.now = func() time.Time { return time.Unix(slotEnd+2, 0) }
+	source.wait = func(context.Context, time.Duration) error { return nil }
+	consumer := &recordingConsumer{}
+	if _, err := source.Execute(context.Background(), execution.QueryExecutionRequest{
+		Contract: contractRef, Operation: execution.OperationNormal, AttemptNo: 1}, consumer); err != nil {
+		t.Fatal(err)
+	}
+	var peer *execution.SeriesExecutionBatch
+	for index, batch := range consumer.batches {
+		for _, binding := range batch.Inputs {
+			if binding.Role == execution.InputRoleMultiDetectInput {
+				peer = &consumer.batches[index]
+			}
+		}
+	}
+	if peer == nil {
+		t.Fatalf("batches %d, want the other input's series handed on", len(consumer.batches))
+	}
+	record, _ := peer.Dataset.Record(0)
+	if dimensions := record.Dimensions(); len(dimensions) != 3 || len(record.DimensionIdentity().Fields) != 1 {
+		t.Fatalf("the other input's series kept dimensions %v and identity %+v, want every dimension and its field",
+			dimensions, record.DimensionIdentity())
+	}
+}

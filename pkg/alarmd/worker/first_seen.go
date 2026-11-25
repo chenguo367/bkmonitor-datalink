@@ -49,13 +49,31 @@ func unseenPlansFrom(ctx context.Context) map[execution.PlanKey]struct{} {
 // no no-data memory. A record the store could not read is something: the
 // judgement errs toward warming up.
 func (stream *streamedExecution) unseenPlans() map[execution.PlanKey]struct{} {
+	return stream.unseenPlansBy(stream.windows.seen)
+}
+
+// unseenPlansAtRead is unseenPlans as a slice's head judges it: by what the
+// windows cut and handed before the slice began to be read found, and what
+// its own pre-pass found (seenAtRead) - a subset of what the Slot finds by
+// its end, so a Plan is judged first-seen no less often, and never by what
+// a slice read beside this one found after. A Slot not read in slices
+// judges by everything so far.
+func (stream *streamedExecution) unseenPlansAtRead() map[execution.PlanKey]struct{} {
+	if stream.seenAtRead == nil {
+		return stream.unseenPlans()
+	}
+	return stream.unseenPlansBy(stream.seenAtRead)
+}
+
+// unseenPlansBy is unseenPlans with seen the Plans the Slot's windows found.
+func (stream *streamedExecution) unseenPlansBy(seen map[execution.PlanIdentity]struct{}) map[execution.PlanKey]struct{} {
 	unseen := make(map[execution.PlanKey]struct{}, len(stream.header.DuePlans))
 	for _, due := range stream.header.DuePlans {
 		version, err := execution.BuildApplyVersion(stream.header.Contract, due.StateApplyEpoch)
 		if err != nil {
 			continue
 		}
-		if !stream.seenSoFar(due, version) {
+		if !stream.seenSoFarBy(seen, due, version) {
 			unseen[due.Key()] = struct{}{}
 		}
 	}
@@ -67,9 +85,15 @@ func (stream *streamedExecution) unseenPlans() map[execution.PlanKey]struct{} {
 // and the first-seen pre-pass said (windows.seen), the views it holds, and
 // its no-data memory.
 func (stream *streamedExecution) seenSoFar(due execution.DuePlan, version execution.ApplyVersion) bool {
+	return stream.seenSoFarBy(stream.windows.seen, due, version)
+}
+
+// seenSoFarBy is seenSoFar with seen the Plans the Slot's windows found.
+func (stream *streamedExecution) seenSoFarBy(seen map[execution.PlanIdentity]struct{}, due execution.DuePlan,
+	version execution.ApplyVersion) bool {
 	// The views of a Slot's landed windows are gone; what they said of the
 	// Plan was kept as they went (noteSeenViews).
-	if _, seen := stream.windows.seen[due.Identity]; seen {
+	if _, found := seen[due.Identity]; found {
 		return true
 	}
 	if viewsSeenBefore(due, version, stream.state.Items) {
@@ -193,7 +217,7 @@ func (stream *streamedExecution) firstSeenPrepass(ctx context.Context, candidate
 		if err != nil {
 			return err
 		}
-		if stream.seenSoFar(due, version) {
+		if stream.seenSoFarBy(stream.headSeen(), due, version) {
 			continue
 		}
 		seen := false
@@ -224,9 +248,21 @@ func (stream *streamedExecution) firstSeenPrepass(ctx context.Context, candidate
 				stream.windows.seen = make(map[execution.PlanIdentity]struct{})
 			}
 			stream.windows.seen[due.Identity] = struct{}{}
+			if stream.seenAtRead != nil {
+				stream.seenAtRead[due.Identity] = struct{}{}
+			}
 		}
 	}
 	return nil
+}
+
+// headSeen is what a head's first-seen judgement reads the windows found
+// by: as the slice began to be read, for a Slot read in slices.
+func (stream *streamedExecution) headSeen() map[execution.PlanIdentity]struct{} {
+	if stream.seenAtRead != nil {
+		return stream.seenAtRead
+	}
+	return stream.windows.seen
 }
 
 // prepassBatch reads one batch of a candidate Plan's State and reports

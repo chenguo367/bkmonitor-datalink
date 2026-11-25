@@ -58,7 +58,7 @@ func (coordinator *SlotExecutionCoordinator) executeSupplement(
 	ctx context.Context,
 	request execution.SlotExecutionRequest,
 ) (execution.SlotExecutionResult, error) {
-	stream := &streamedExecution{coordinator: coordinator, request: request, supplement: newSupplementRun(*request.Supplement)}
+	stream := &streamedExecution{slotStream: &slotStream{coordinator: coordinator, request: request, supplement: newSupplementRun(*request.Supplement)}}
 	defer stream.releaseProvisional()
 	ctx = withRetainedOwner(ctx, stream)
 	started := time.Now()
@@ -338,10 +338,10 @@ func (stream *streamedExecution) readSupplementNoDataGroups(ctx context.Context,
 	if held == 0 || stream.coordinator.budget.MaxRetainedBytes == 0 {
 		return nil
 	}
-	if err := stream.reserveProvisionalAt(ctx, 0, held, stream.reservationPhase(noDataReservationPhase)); err != nil {
+	if err := stream.reserveProvisionalAt(ctx, 0, held, stream.reservationPhase(noDataReservationPhase), retainPhaseState); err != nil {
 		return err
 	}
-	stream.retainBytes(retainPhaseState, held)
+	stream.retainedCharged(retainPhaseState, held)
 	return nil
 }
 

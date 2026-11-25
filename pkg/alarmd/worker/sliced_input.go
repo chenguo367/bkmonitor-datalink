@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"sort"
@@ -97,24 +98,32 @@ type sliceReading struct {
 	dimensions []string
 	leaf       inputslice.Leaf
 	// index is how many slices have completed; last is whether the slice
-	// being read is the last one pending.
-	index int
-	last  bool
+	// being read is the last one pending. finish is what the Slot finishes
+	// on once every slice is read (finishSlices), from the slice read last.
+	index  int
+	last   bool
+	finish sliceFinish
 	// input is what the slice being read holds of the input phase, largest
 	// the most one of its series did, and sample its values on the
 	// dimensions.
 	input, largest uint64
-	// series is the series the slice being read reserved of the pool, and
-	// read the input every slice that landed held, in all; seriesRead the
-	// series every slice that landed held, in all. timedOutTook is how long
-	// the slice that ran out of time took: when the provider said it ran out
-	// (timedOutByProvider, a providerTimeoutError), counted at no less than
-	// twice a slice's target, the backend's own limit; when alarmd's deadline
-	// ended it, as long as it took.
-	series, read, seriesRead, timedOutTook uint64
-	sample                                 inputslice.Sample
-	seen                                   map[string]map[string]int
-	keeps                                  map[string]*sampleKeep
+	// series is the most series one physical query of the slice being read
+	// delivered (byQuery, by its digest), the size a slice is judged by: a
+	// slice's queries - a ring ratio's PRIMARY and its dependency - are each
+	// one request, answered side by side, and their sum is no request's
+	// size. reserved is every series the slice reserved of the pool, all its
+	// queries' together. read is the input every slice that landed held, in
+	// all; seriesRead the series every slice that landed held, in all, each
+	// counted as its series. timedOutTook is how long the slice that ran out
+	// of time took: when the provider said it ran out (timedOutByProvider, a
+	// providerTimeoutError), counted at no less than twice a slice's target,
+	// the backend's own limit; when alarmd's deadline ended it, as long as it
+	// took.
+	series, reserved, read, seriesRead, timedOutTook uint64
+	byQuery                                          map[execution.PhysicalQueryDigest]uint64
+	sample                                           inputslice.Sample
+	seen                                             map[string]map[string]int
+	keeps                                            map[string]*sampleKeep
 	// unsliceable is a Slot found, at its first overflow, to have nothing it
 	// can be sliced on: it is read whole and judged by its share alone, as
 	// before slicing.
@@ -123,9 +132,9 @@ type sliceReading struct {
 	unsupported string
 	// leaveInput ends the input phase of a slice after the first.
 	leaveInput func()
-	// landed is how many series of each Plan the slices written so far held,
-	// and landedSlices how many of those slices held any.
-	landed, landedSlices map[execution.PlanIdentity]uint64
+	// dispatched is how many slices were dispatched to be read, the number
+	// the next one is given (sliceLedger).
+	dispatched int
 	// sliceSeries is the series of each Plan the slice being read holds,
 	// counted when its series are prepared: a window cut halfway through the
 	// slice lets go of the series it wrote (letGoWindowInputs), and what is
@@ -426,8 +435,14 @@ func (stream *streamedExecution) noteSliceInput(batch execution.SeriesExecutionB
 	if !stream.slicing() || stream.slices.unsliceable {
 		return
 	}
-	stream.slices.input += retained
-	stream.slices.series += batch.Delivery.Series
+	reading := stream.slices
+	reading.input += retained
+	reading.reserved += batch.Delivery.Series
+	if reading.byQuery == nil {
+		reading.byQuery = make(map[execution.PhysicalQueryDigest]uint64)
+	}
+	reading.byQuery[batch.PhysicalQuery] += batch.Delivery.Series
+	reading.series = max(reading.series, reading.byQuery[batch.PhysicalQuery])
 	stream.sampleSlice(batch)
 }
 
@@ -497,7 +512,16 @@ func sliceValue(raw json.RawMessage) string {
 func (stream *streamedExecution) beginSlice(leaf inputslice.Leaf, last bool) {
 	reading := stream.slices
 	reading.leaf, reading.last = leaf, last
+	stream.sliceNumber, reading.dispatched = reading.dispatched, reading.dispatched+1
+	// What the windows cut and handed so far found of the due Plans: the
+	// slice's head judges first-seen by it, whatever the windows of slices
+	// read beside it find later (015 C1 Q3).
+	stream.seenAtRead = maps.Clone(stream.windows.seen)
+	if stream.seenAtRead == nil {
+		stream.seenAtRead = make(map[execution.PlanIdentity]struct{})
+	}
 	reading.input, reading.largest, reading.series, reading.sample, reading.seen, reading.keeps = 0, 0, 0, nil, nil, nil
+	reading.reserved, reading.byQuery = 0, nil
 	reading.sliceSeries = nil
 	if reading.index > 0 {
 		reading.leaveInput = stream.enter(slotPhaseInput)
@@ -514,11 +538,12 @@ func (stream *streamedExecution) abandonSlice() inputslice.Sample {
 		reading.leaveInput = nil
 	}
 	stream.unretainInput(reading.input)
-	stream.coordinator.releaseProvisional(reading.series, 0)
-	stream.series -= min(stream.series, reading.series)
+	stream.coordinator.releaseProvisional(reading.reserved, 0)
+	stream.series -= min(stream.series, reading.reserved)
 	stream.resetSliceStream()
 	sample := reading.sample
 	reading.input, reading.series, reading.sample, reading.seen, reading.keeps = 0, 0, nil, nil, nil
+	reading.reserved, reading.byQuery = 0, nil
 	reading.sliceSeries = nil
 	return sample
 }
@@ -666,6 +691,8 @@ func (trees *sliceTrees) start(group execution.QueryGroupIdentity, now time.Time
 type SliceMemoryReading struct {
 	Remembered, Unswept          uint64
 	Leaves, LeafSeries, Deferred uint64
+	// LeavesMax is the leaves of the largest shape remembered.
+	LeavesMax uint64
 }
 
 // SliceMemory reads the coordinator's sliced-input memory, at the scrape.
@@ -685,7 +712,9 @@ func (trees *sliceTrees) reading() SliceMemoryReading {
 		if last, walked := trees.started[group]; !walked || last.period <= 0 {
 			reading.Unswept++
 		}
-		reading.Leaves += uint64(remembered.shape.Leaves())
+		leaves := uint64(remembered.shape.Leaves())
+		reading.Leaves += leaves
+		reading.LeavesMax = max(reading.LeavesMax, leaves)
 		reading.LeafSeries += uint64(len(remembered.leafSeries))
 		reading.Deferred += uint64(len(remembered.deferred))
 	}
@@ -854,6 +883,8 @@ func slicesByTime(queryMillis uint64) int {
 type sliceTimeoutError struct {
 	err     error
 	outcome string
+	// cause is who timed the slice's read out (InputSliceTimeoutCauses).
+	cause string
 }
 
 func (failure *sliceTimeoutError) Error() string { return failure.err.Error() }
@@ -889,7 +920,7 @@ func (stream *streamedExecution) splitsOnTimeout(ctx context.Context, took uint6
 	// The children read what the slice did, at least that slice's time,
 	// read width at a time beside the slices left.
 	if deadline, bounded := ctx.Deadline(); bounded {
-		width := uint64(max(stream.coordinator.sliceReadWidth(), 1))
+		width := uint64(max(stream.coordinator.sliceReadWidth(judgedRequests(stream.header)), 1))
 		estimate := max(took, reading.plannedSliceMillis)
 		if time.Until(deadline) < time.Duration(estimate/width)*time.Millisecond {
 			return false
@@ -1058,14 +1089,7 @@ func slowestQueryMillis(completion execution.QueryExecutionCompletion) uint64 {
 // its activations unread - cannot be read in slices and is retried.
 func (stream *streamedExecution) landSlice(ctx context.Context) error {
 	reading := stream.slices
-	if reading.landed == nil {
-		reading.landed = make(map[execution.PlanIdentity]uint64)
-		reading.landedSlices = make(map[execution.PlanIdentity]uint64)
-	}
-	for plan, series := range reading.sliceSeries {
-		reading.landed[plan] += series
-		reading.landedSlices[plan]++
-	}
+	stream.ledger.land(stream.sliceNumber, reading.sliceSeries)
 	reading.sliceSeries = nil
 	stream.windows.reached = len(stream.windows.prepared)
 	if err := stream.cutWindow(ctx); err != nil {
@@ -1122,20 +1146,22 @@ func (coordinator *SlotExecutionCoordinator) applySliceHead(ctx context.Context,
 	return coordinator.ports.Sequencer.Sequence(ctx, sequencingScope(stream.header, nil, stream.gapItems), func(sequenceCtx context.Context) error {
 		defer stream.enter(slotPhaseCut)()
 		if candidates := firstSeenCandidates(apply.forced, stream.gaps); len(candidates) != 0 {
-			before := stream.unseenPlans()
+			before := stream.unseenPlansAtRead()
 			if err := stream.firstSeenPrepass(sequenceCtx, candidates); err != nil {
 				return err
 			}
-			after := stream.unseenPlans()
+			after := stream.unseenPlansAtRead()
 			if len(after) != len(before) {
+				// The slices numbered below this one that wrote series of it.
+				landed, landedSlices := stream.ledger.landedBefore(stream.sliceNumber)
 				for key := range before {
 					if _, still := after[key]; still {
 						continue
 					}
 					for _, due := range stream.header.DuePlans {
-						if due.Key() == key && stream.slices.landed[due.Identity] > 0 {
-							stream.slices.unseenSlices += stream.slices.landedSlices[due.Identity]
-							stream.slices.unseenSeries += stream.slices.landed[due.Identity]
+						if due.Key() == key && landed[due.Identity] > 0 {
+							stream.slices.unseenSlices += landedSlices[due.Identity]
+							stream.slices.unseenSeries += landed[due.Identity]
 						}
 					}
 				}
@@ -1519,6 +1545,52 @@ func (reading *sliceReading) notePrepared(prepared []preparedSeries) {
 		}
 		reading.sliceSeries[entry.due.Identity]++
 	}
+}
+
+// sliceFinish is what the slice read last completed with, which the Slot
+// finishes on (finishSlices): its completion and completion bindings, its
+// prepared series - absence is decided after them - and whether its own
+// series took the Slot past its budget, the replacement having answered
+// every Plan not passed. set is whether that slice completed.
+type sliceFinish struct {
+	set        bool
+	completion execution.QueryExecutionCompletion
+	bindings   map[struct {
+		consumer    execution.ConsumerRef
+		requirement execution.RequirementID
+	}]execution.NamedInputBinding
+	prepared []preparedSeries
+	replaced bool
+}
+
+// finishSlices is the Slot's step once every slice of it is read: what needs
+// every series - the exact sets of the Plans no slice held a series of,
+// absence, the Plans without series - on what the slice read last completed
+// with, and then the no-data partition reported. The Slot's step and not a
+// slice's: which slice is read last is the reading's to know, not the
+// slice's own. A Slot read whole - one read, no tree - is finished here too,
+// its exact sets validated as it completed.
+func (stream *streamedExecution) finishSlices(ctx context.Context) error {
+	finish := stream.slices.finish
+	stream.slices.finish = sliceFinish{}
+	if !finish.set {
+		return errors.New("alarmd worker: a Slot read in slices finished without the slice read last")
+	}
+	// A Slot read whole validated them as it completed, before anything
+	// was loaded or evaluated.
+	if stream.readInSlices() {
+		if err := stream.validateCompletionOnlyPlans(finish.bindings, finish.completion.PhysicalQueries); err != nil {
+			return err
+		}
+	}
+	if !finish.replaced {
+		err := stream.finishEvaluation(ctx, finish.completion, finish.prepared)
+		if _, err := stream.replaceBeyondSlotBudget(ctx, err); err != nil {
+			return err
+		}
+	}
+	stream.observeFinished(ctx)
+	return nil
 }
 
 // landSliceRead counts the slice just completed as landed and reports

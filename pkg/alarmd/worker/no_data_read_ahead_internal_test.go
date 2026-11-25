@@ -300,14 +300,16 @@ func (rig *readAheadRig) round(ctx context.Context, batchLimit int, stateStore e
 	evaluator execution.Evaluator) (*streamedExecution, error) {
 	rig.t.Helper()
 	stream := &streamedExecution{
-		coordinator: &SlotExecutionCoordinator{
-			ports: Ports{NoData: rig.store, Hosts: SharedHostBusiness, State: stateStore, Evaluator: evaluator,
-				Observer: observability.ObserverFunc(func(context.Context, observability.Observation) {})},
-			budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10,
-				MaxStateMutations: 100, MaxEvents: 100},
-			noDataSegment: rig.segment,
+		slotStream: &slotStream{
+			coordinator: &SlotExecutionCoordinator{
+				ports: Ports{NoData: rig.store, Hosts: SharedHostBusiness, State: stateStore, Evaluator: evaluator,
+					Observer: observability.ObserverFunc(func(context.Context, observability.Observation) {})},
+				budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10,
+					MaxStateMutations: 100, MaxEvents: 100},
+				noDataSegment: rig.segment,
+			},
+			header: execution.InternalExecutionHeader{ExecutionID: "no-data-read-ahead", Contract: rig.contract, DuePlans: rig.dues},
 		},
-		header: execution.InternalExecutionHeader{ExecutionID: "no-data-read-ahead", Contract: rig.contract, DuePlans: rig.dues},
 	}
 	stream.request = execution.SlotExecutionRequest{Contract: rig.contract, Operation: execution.OperationNormal}
 	stream.effective = mustPrepareAlwaysEffectiveTimeFacts(rig.t, stream.header)

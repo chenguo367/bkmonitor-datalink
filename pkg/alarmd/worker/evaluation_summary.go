@@ -10,6 +10,7 @@
 package worker
 
 import (
+	"slices"
 	"unsafe"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -39,10 +40,26 @@ type slotEvaluationSummary struct {
 	// withoutMessage counts the identities the Slot's series kept in place
 	// of events their protocol has no message for.
 	withoutMessage uint64
+	// results is where in merge order what the Slot's merged results keep
+	// came from (appendProvisionalAt), reset with them as the summary is;
+	// merged counts the batches merged, each batch's turn.
+	results evaluatedOrders
+	merged  uint64
+}
+
+// nextOrder is the place of the next batch merged, its series read in the
+// slice numbered slice.
+func (summary *slotEvaluationSummary) nextOrder(slice int) execution.MergeOrder {
+	summary.merged++
+	return execution.MergeOrder{Slice: slice, Seq: summary.merged}
 }
 
 type planEvaluationSummary struct {
 	plan execution.PlanIdentity
+	// first is the Plan's first batch's place in merge order, and
+	// noDataEndsOrder each no-data end update's batch's.
+	first           execution.MergeOrder
+	noDataEndsOrder []execution.MergeOrder
 	// coverage is the Plan's window coverage across its series, folded the
 	// way the merged result folds it: the first batch's as it is, every
 	// later one merged in.
@@ -63,22 +80,32 @@ type planEvaluationSummary struct {
 func summarizeEvaluation(result execution.EvaluationResult) slotEvaluationSummary {
 	summary := slotEvaluationSummary{completion: execution.FoldCompletionAttribution(result)}
 	for _, plan := range result.Plans {
-		summary.addPlan(plan, false, nil)
+		summary.addPlan(plan, false, nil, execution.MergeOrder{})
 	}
 	return summary
 }
 
 // add folds one merged batch in, by the rule appendProvisional merges it
-// into the results. indexed is the no-data end index the Slot read, by Plan.
+// into the results, after every batch before it. indexed is the no-data end
+// index the Slot read, by Plan.
 func (summary *slotEvaluationSummary) add(next execution.EvaluationResult, indexed map[execution.PlanIdentity]execution.NoDataEndLoaded) {
-	summary.completion.Add(next)
+	summary.addAt(next, indexed, summary.nextOrder(0))
+}
+
+// addAt folds one merged batch in at its place in merge order, by the rule
+// appendProvisionalAt merges it into the results: the Plans in order of
+// their first batches, each Plan's no-data end updates in their batches'
+// order, whatever order the batches come in.
+func (summary *slotEvaluationSummary) addAt(next execution.EvaluationResult,
+	indexed map[execution.PlanIdentity]execution.NoDataEndLoaded, order execution.MergeOrder) {
+	summary.completion.AddAt(next, order)
 	for _, plan := range next.Plans {
-		summary.addPlan(plan, true, indexed)
+		summary.addPlan(plan, true, indexed, order)
 	}
 }
 
 func (summary *slotEvaluationSummary) addPlan(next execution.PlanEvaluationResult, merge bool,
-	indexed map[execution.PlanIdentity]execution.NoDataEndLoaded) {
+	indexed map[execution.PlanIdentity]execution.NoDataEndLoaded, order execution.MergeOrder) {
 	index := -1
 	if merge {
 		for current := range summary.plans {
@@ -90,14 +117,34 @@ func (summary *slotEvaluationSummary) addPlan(next execution.PlanEvaluationResul
 	}
 	if index < 0 {
 		// Copied rather than shared: Merge rewrites the window and minute
-		// lists in place, and the results hold the same lists.
-		summary.plans = append(summary.plans, planEvaluationSummary{plan: next.Plan, coverage: copyHistoryCoverage(next.HistoryCoverage)})
-		index = len(summary.plans) - 1
+		// lists in place, and the results hold the same lists. In order of
+		// the Plans' first batches.
+		index = len(summary.plans)
+		for index > 0 && order.Before(summary.plans[index-1].first) {
+			index--
+		}
+		summary.plans = slices.Insert(summary.plans, index, planEvaluationSummary{plan: next.Plan, first: order,
+			coverage: copyHistoryCoverage(next.HistoryCoverage)})
 	} else {
 		summary.plans[index].coverage.Merge(next.HistoryCoverage)
+		if order.Before(summary.plans[index].first) {
+			// Met first in this batch: to its place among the Plans' first.
+			moved := summary.plans[index]
+			moved.first = order
+			summary.plans = slices.Delete(summary.plans, index, index+1)
+			for index > 0 && order.Before(summary.plans[index-1].first) {
+				index--
+			}
+			summary.plans = slices.Insert(summary.plans, index, moved)
+		}
 	}
 	plan := &summary.plans[index]
-	plan.noDataEnds = append(plan.noDataEnds, next.NoDataEnds...)
+	at := len(plan.noDataEnds)
+	for at > 0 && order.Before(plan.noDataEndsOrder[at-1]) {
+		at--
+	}
+	plan.noDataEnds = slices.Insert(plan.noDataEnds, at, next.NoDataEnds...)
+	plan.noDataEndsOrder = slices.Insert(plan.noDataEndsOrder, at, slices.Repeat([]execution.MergeOrder{order}, len(next.NoDataEnds))...)
 	_, read := indexed[next.Plan]
 	for _, outcome := range next.LevelOutcomes {
 		if summary.levelOutcomes == nil {

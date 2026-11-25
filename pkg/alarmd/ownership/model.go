@@ -400,6 +400,22 @@ func SegmentSkipNoDataAdmission(workers []WorkerRegistration) ShardSplitGate {
 	return capabilityGate(workers, CapabilitySegmentSkipNoData)
 }
 
+// CapabilityMultiDetect is the detection of an item over several inputs
+// (015 F1): a worker that declares it validates and binds a requirement of
+// role MULTI_DETECT_INPUT and compiles MultiDetectThreshold. A worker
+// without it refuses such a requirement in a Slot's header, and with it every
+// Plan of the Query Group the Slot runs - the single-query ones beside it
+// too - so a Leader releases such Plans into the Catalog only while every
+// ready worker declares it. The same word as strategy.MultiDetectCapability,
+// the gate the algorithm's registry capability names.
+const CapabilityMultiDetect = "multi-detect.v1"
+
+// MultiDetectAdmission decides that release for a ready set, the way
+// SegmentSkipAdmission decides the skip's.
+func MultiDetectAdmission(workers []WorkerRegistration) ShardSplitGate {
+	return capabilityGate(workers, CapabilityMultiDetect)
+}
+
 // Declares reports whether the registration names the capability.
 func (worker WorkerRegistration) Declares(capability string) bool {
 	for _, declared := range worker.Capabilities {

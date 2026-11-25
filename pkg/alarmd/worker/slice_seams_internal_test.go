@@ -38,4 +38,10 @@ func TestALetGoReadIsNoSeamAndAnEmptyOneHasNone(t *testing.T) {
 		t.Fatalf("tails %v (longest %v), changes %v (longest %v): want 3 s (2 s) and 10 s (6 s)", seams.tail, seams.tailMax,
 			seams.change, seams.changeMax)
 	}
+	// Every read's end from the one before's, the read of no series too
+	// (015 O1): 11 - 3, 12 - 11, 16 - 12.
+	if seams.handoff != 13*time.Second || seams.handoffMax != 8*time.Second {
+		t.Fatalf("handoffs %v (longest %v), want 13 s (8 s): every kept read's end from the one before's, an empty one too",
+			seams.handoff, seams.handoffMax)
+	}
 }

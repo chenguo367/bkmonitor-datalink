@@ -152,12 +152,14 @@ func TestNoDataHostsAreResolvedFromTheMemoryAsItIsRead(t *testing.T) {
 		StateGeneration: "state-v1", StateApplyEpoch: 1, ScheduleRevision: "plan-schedule-v1",
 	}}
 	stream := &streamedExecution{
-		coordinator: &SlotExecutionCoordinator{
-			ports:  Ports{NoData: store, Hosts: index},
-			budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10},
-		},
-		header: execution.InternalExecutionHeader{
-			Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans,
+		slotStream: &slotStream{
+			coordinator: &SlotExecutionCoordinator{
+				ports:  Ports{NoData: store, Hosts: index},
+				budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10},
+			},
+			header: execution.InternalExecutionHeader{
+				Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans,
+			},
 		},
 	}
 	if err := stream.loadNoDataMemory(context.Background()); err != nil {

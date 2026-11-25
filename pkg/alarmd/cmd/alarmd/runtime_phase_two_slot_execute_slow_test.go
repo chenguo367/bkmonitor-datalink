@@ -47,7 +47,9 @@ func TestASlotAttemptPastHalfItsPeriodIsSaidAndCounted(t *testing.T) {
 			now = now.Add(took)
 			return execution.SlotExecutionResult{
 				Usage: execution.SlotBudgetUsage{QueryWaitMillis: 6000, QueryBodyMillis: 1500, QueryWaitMillisMax: 4000,
-					QueryBodyMillisMax: 900, InputSlices: 3, InputSliceTailMillis: 800, InputSliceTailMillisMax: 500},
+					QueryBodyMillisMax: 900, QueryBodyMicros: 1_500_400, QueryBodyMicrosMax: 900_100, InputSlices: 3,
+					InputSliceTailMillis: 800, InputSliceTailMillisMax: 500, Series: 2, RetainedInputBytes: 3432,
+					InputSliceChangeMillis: 3900, InputSliceHandoffMillis: 6100, InputSliceReadsInFlight: [6]uint64{1, 2}},
 				Timing: execution.SlotTiming{Slot: 11000, Input: 7000, Apply: 2000},
 			}, nil
 		}),
@@ -62,7 +64,7 @@ func TestASlotAttemptPastHalfItsPeriodIsSaidAndCounted(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, operation := range []execution.Operation{execution.OperationNormal, execution.OperationRetry, execution.OperationReplay} {
+	for index, operation := range []execution.Operation{execution.OperationNormal, execution.OperationRetry, execution.OperationReplay} {
 		said = nil
 		attempt(operation, 10*time.Second-time.Millisecond)
 		attempt(operation, 11*time.Second)
@@ -82,13 +84,28 @@ func TestASlotAttemptPastHalfItsPeriodIsSaidAndCounted(t *testing.T) {
 		facts := slow[0].SlotExecuteSlow
 		want := observability.SlotExecuteSlowFacts{PeriodSeconds: 20, ThresholdMillis: 10000,
 			Timing:          observability.SlotTimingFacts{Slot: 11000, Input: 7000, Apply: 2000},
-			QueryWaitMillis: 6000, QueryBodyMillis: 1500, QueryWaitMillisMax: 4000, QueryBodyMillisMax: 900, InputSlices: 3,
+			QueryWaitMillis: 6000, QueryBodyMillis: 1500, QueryWaitMillisMax: 4000, QueryBodyMillisMax: 900,
+			QueryBodyMicros: 1_500_400, QueryBodyMicrosMax: 900_100, InputSlices: 3,
 			InputSliceTailMillis: 800, InputSliceTailMillisMax: 500, ExecutionSlotWaitMillis: 1500, QueryPermitWaitMillis: 1000,
 			QueryPermitWaitMillisMax: 700}
+		if facts == nil {
+			t.Fatalf("%s: the slow line %+v carries no facts", operation, slow[0])
+		}
+		// The usage rides the line whole, as a completion row's (015 O1):
+		// its series, bytes, seams and reads in flight, which the flat
+		// fields do not carry.
+		if usage := facts.Usage; usage == nil || slow[0].SlotBudgetUsage != usage || usage.Series != 2 || usage.RetainedInputBytes != 3432 ||
+			usage.InputSliceChangeMillis != 3900 || usage.InputSliceHandoffMillis != 6100 || usage.InputSliceReadsInFlight != [6]uint64{1, 2} ||
+			usage.QueryBodyMicros != 1_500_400 || usage.InputSlices != 3 {
+			t.Fatalf("%s: the slow line's usage %+v (observation's %p, facts' %p), want the attempt's usage on both", operation, facts.Usage,
+				slow[0].SlotBudgetUsage, facts.Usage)
+		}
+		got := *facts
+		got.Usage = nil
 		if slow[0].Operation != observability.Operation(operation) || slow[0].Duration != 11*time.Second ||
 			slow[0].Result != observability.Result(observability.ResultDegraded) || slow[0].ReasonCode != observability.ReasonSlotExecuteSlow ||
-			facts == nil || *facts != want {
-			t.Fatalf("%s: the slow line %+v (facts %+v), want an 11 s attempt of %s with %+v", operation, slow[0], facts, operation, want)
+			got != want {
+			t.Fatalf("%s: the slow line %+v (facts %+v), want an 11 s attempt of %s with %+v", operation, slow[0], got, operation, want)
 		}
 		for _, completion := range completed {
 			if completion.SlotExecuteSlow != nil || completion.Result != observability.Result(observability.ResultSuccess) {
@@ -100,6 +117,11 @@ func TestASlotAttemptPastHalfItsPeriodIsSaidAndCounted(t *testing.T) {
 		}
 		if got := counterValue(t, recorder, "alarmd_slot_execute_slow_total", map[string]string{"operation": string(operation)}); got != 1 {
 			t.Fatalf("%s: %v slow attempts counted, want the one", operation, got)
+		}
+		// The usage the slow line carries is counted from the completion
+		// alone: two completions of three slices each an operation.
+		if got := counterValue(t, recorder, "alarmd_worker_input_slices_total", map[string]string{"outcome": "landed"}); got != float64(6*(index+1)) {
+			t.Fatalf("%s: %v slices landed counted after %d operations, want %d: the slow line's usage was counted too", operation, got, index+1, 6*(index+1))
 		}
 	}
 }

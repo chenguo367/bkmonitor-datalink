@@ -141,7 +141,7 @@ func TestEveryReadAheadWaitIsCountedAsItEndsHoweverTheReadEnds(t *testing.T) {
 // one waiting is told once, as the last of them ends, from the first to begin
 // while none waited.
 func TestTheSlotTimeWithAReadAheadWaitingCountsOverlapsOnce(t *testing.T) {
-	stream := &streamedExecution{}
+	stream := &streamedExecution{slotStream: &slotStream{}}
 	start := time.Unix(1_800_000_000, 0)
 	at := func(millis int) time.Time { return start.Add(time.Duration(millis) * time.Millisecond) }
 	stream.readAheadWaitBegan(at(0))

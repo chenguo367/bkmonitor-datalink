@@ -192,9 +192,9 @@ func (stream *streamedExecution) reserveNoDataMemory(ctx context.Context) error 
 	if held == 0 {
 		return nil
 	}
-	if err := stream.reserveProvisionalAt(ctx, 0, held, stream.reservationPhase(noDataReservationPhase)); err != nil {
+	if err := stream.reserveProvisionalAt(ctx, 0, held, stream.reservationPhase(noDataReservationPhase), retainPhaseState); err != nil {
 		return err
 	}
-	stream.retainBytes(retainPhaseState, held)
+	stream.retainedCharged(retainPhaseState, held)
 	return nil
 }

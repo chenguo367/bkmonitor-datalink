@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
@@ -162,5 +163,57 @@ func TestASliceTheDeadlineEndsIsNoSliceTooLarge(t *testing.T) {
 	}
 	if got := answeredSlices(fixture.source.calls[first:]); !reflect.DeepEqual(got, before) {
 		t.Fatalf("the Slot after read %v, want the slices the one before read %v", got, before)
+	}
+}
+
+// Who timed a slice's read out is said with how it ended, on the failed
+// query's line and under worker_input_slice_timeouts_total's cause (015 O1):
+// a slice, its child and its grandchild the provider times out end the Slot
+// split_failed by the provider; a read alarmd's deadline ended while its
+// body was read ends it not_split by the deadline. A slow backend and a Slot
+// out of time read apart.
+func TestWhoTimedASlicesReadOutIsSaidWithHowItEnded(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		arm            func(*slicedFixture)
+		outcome, cause string
+	}{
+		{"by the provider", func(fixture *slicedFixture) {
+			fixture.source.answered, fixture.source.timeoutAfter, fixture.source.timeoutTimes = 0, 1, 3
+		}, observability.InputSliceTimeoutSplitFailed, observability.InputSliceTimeoutCauseProvider},
+		{"by the deadline", func(fixture *slicedFixture) {
+			fixture.source.timeoutKind = timeoutBody
+			fixture.source.answered, fixture.source.timeoutAfter, fixture.source.timeoutTimes = 0, 1, 1
+		}, observability.InputSliceTimeoutNotSplit, observability.InputSliceTimeoutCauseDeadline},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := largeSlicedFixture(t)
+			request := windowedRequest()
+			if result, err := fixture.coordinator.Execute(context.Background(), request); err != nil || !result.Completed {
+				t.Fatalf("the Slot before: result=%+v err=%v", result, err)
+			}
+			fixture.source.mu.Lock()
+			test.arm(fixture)
+			fixture.source.mu.Unlock()
+			observed := len(*fixture.observations)
+			if _, err := fixture.coordinator.Execute(context.Background(), request); err == nil {
+				t.Fatal("the Slot whose slice timed out completed")
+			}
+			recorder := metric.NewRecorder(metric.BuildInfo{})
+			var ended [][2]string
+			for _, observation := range (*fixture.observations)[observed:] {
+				recorder.Observe(context.Background(), observation)
+				if facts := observation.QueryFailure; facts != nil && facts.SliceTimeout != "" {
+					ended = append(ended, [2]string{facts.SliceTimeout, facts.SliceTimeoutCause})
+				}
+			}
+			if len(ended) != 1 || ended[0] != [2]string{test.outcome, test.cause} {
+				t.Fatalf("timed-out slices ended %v, want %s by %s once", ended, test.outcome, test.cause)
+			}
+			if got := recordedCounter(t, recorder, "alarmd_worker_input_slice_timeouts_total",
+				map[string]string{"outcome": test.outcome, "cause": test.cause}); got != 1 {
+				t.Fatalf("worker_input_slice_timeouts_total{%s,%s} = %v, want 1", test.outcome, test.cause, got)
+			}
+		})
 	}
 }

@@ -29,7 +29,7 @@ func TestAWindowAccountingThatTakesOffMoreThanTheSlotHoldsSaysWhere(t *testing.T
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			co, _, _ := gapReservationFixture()
-			stream := &streamedExecution{coordinator: co, slices: &sliceReading{}}
+			stream := &streamedExecution{slotStream: &slotStream{coordinator: co, slices: &sliceReading{}}}
 			stream.retainBytes(retainPhaseInput, 1000)
 			stream.windows.pipe = &applyPipe{stream: stream}
 			// Within what the Slot holds: nothing clamped.

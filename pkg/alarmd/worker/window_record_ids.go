@@ -84,7 +84,7 @@ func (stream *streamedExecution) materializeRecordIDs(ctx context.Context, posit
 // before.
 func (stream *streamedExecution) recordIDsWouldCut(inputs []execution.SeriesEvaluationInputRequest) bool {
 	windows := &stream.windows
-	if stream.supplement != nil || windows.single || stream.effects.states+stream.effects.events == 0 ||
+	if held := stream.heldEffects(); stream.supplement != nil || windows.single || held.states+held.events == 0 ||
 		stream.windowReleasable() == 0 {
 		return false
 	}
@@ -105,7 +105,7 @@ func (stream *streamedExecution) recordIDsWouldCut(inputs []execution.SeriesEval
 // window holds none of this one's.
 func (stream *streamedExecution) windowBeforeRecordIDs(ctx context.Context, position int, bytes uint64) error {
 	windows := &stream.windows
-	if stream.supplement != nil || windows.single || stream.effects.states+stream.effects.events == 0 ||
+	if held := stream.heldEffects(); stream.supplement != nil || windows.single || held.states+held.events == 0 ||
 		stream.windowReleasable() == 0 || windows.bytes+bytes <= stream.windowBound() {
 		return nil
 	}

@@ -29,6 +29,11 @@ const (
 
 	LevelConnectorAND = "AND"
 	LevelConnectorOR  = "OR"
+	// LevelConnectorStrictAND joins the inputs of an item detected over
+	// several: the level is anomalous when every input is, normal when every
+	// input is decided and one is not, and undecided when any input is -
+	// a miss beside an input that cannot be read is no miss.
+	LevelConnectorStrictAND = "STRICT_AND"
 
 	ReasonMalformedJSON              = "MALFORMED_JSON"
 	ReasonSchemaMajorUnsupported     = "SCHEMA_MAJOR_UNSUPPORTED"
@@ -229,8 +234,12 @@ const (
 	ReasonEffectiveTimeUnknown  = "EFFECTIVE_TIME_UNKNOWN"
 	ReasonHistoryWarming        = "HISTORY_WARMING"
 	ReasonHistoryGapped         = "HISTORY_GAPPED"
-	ReasonKafkaUnavailable      = "KAFKA_UNAVAILABLE"
-	ReasonRedisUnavailable      = "REDIS_UNAVAILABLE"
+	// ReasonMultiDetectInputMissing names an input of an item detected over
+	// several that has no point of the series at the PRIMARY's source time:
+	// the round is undecided for the series, neither an anomaly nor a miss.
+	ReasonMultiDetectInputMissing = "MULTI_DETECT_INPUT_MISSING"
+	ReasonKafkaUnavailable        = "KAFKA_UNAVAILABLE"
+	ReasonRedisUnavailable        = "REDIS_UNAVAILABLE"
 	// ReasonStateReadTimeout names a Runtime State read this process issued
 	// that did not come back inside its own timeout. It is not
 	// REDIS_UNAVAILABLE, and the difference is the whole point: the dependency

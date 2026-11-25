@@ -41,6 +41,12 @@ type Evaluator struct {
 	// observeSnapshot hears each detection snapshot an event carries: its
 	// named outputs' states and whether it was truncated (WithDetectionSnapshots).
 	observeSnapshot func(states []string, result string)
+	// observeRecoveryHeld hears the recovery windows undecided rounds held
+	// in one Level's walk (WithMultiDetectRecoveryHeld).
+	observeRecoveryHeld func(end, inside uint32)
+	// observeUndecided hears each undecided round of an item detected over
+	// several inputs, by why (WithMultiDetectUndecided).
+	observeUndecided func(reason observability.MultiDetectUndecidedReason)
 	// rebuildGuardWindow makes the first record build its own window instead
 	// of taking the guard's. It exists for the tests that hold the two to the
 	// same result, and only they set it: no constructor, option or
@@ -80,6 +86,31 @@ func (e *Evaluator) WithBusinessAttribution(lookups admission.BusinessLookups, o
 func (e *Evaluator) WithDetectionSnapshots(observe func(states []string, result string)) *Evaluator {
 	if e != nil {
 		e.observeSnapshot = observe
+	}
+	return e
+}
+
+// WithMultiDetectRecoveryHeld has the recovery windows undecided rounds held
+// heard by observe, once per Level of an item detected over several inputs
+// whose walk held any: those ending on an undecided round (end) and those
+// holding one within (inside). Heard where the walk is read rather than
+// carried on the series' result, which every series of a Slot keeps until
+// it ends. Nil hears nothing.
+func (e *Evaluator) WithMultiDetectRecoveryHeld(observe func(end, inside uint32)) *Evaluator {
+	if e != nil {
+		e.observeRecoveryHeld = observe
+	}
+	return e
+}
+
+// WithMultiDetectUndecided has each round of an item detected over several
+// inputs that could not be decided heard by observe, once per series and
+// Level, by why: an input not read whole - PARTIAL, or not read at all - or,
+// with every input whole, one holding nothing of the series. Nil hears
+// nothing.
+func (e *Evaluator) WithMultiDetectUndecided(observe func(reason observability.MultiDetectUndecidedReason)) *Evaluator {
+	if e != nil {
+		e.observeUndecided = observe
 	}
 	return e
 }
@@ -391,7 +422,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 			durableGuardOrigins[l.Definition().LevelID] = origin
 			readGapOpen = true
 		}
-		held := historyView{HistoryView: h, completeness: completeness}
+		held := historyView{HistoryView: h, completeness: completeness, undecided: undecidedTimes(l, view.History, record, facts)}
 		lastReal := int64(0)
 		if stored, found := levelState(view, l.Definition().LevelID); found {
 			lastReal = stored.LastRealPointTime
@@ -470,7 +501,11 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 			value := f.Evidence.MatchedGroupOrdinal
 			group = &value
 		}
-		tfacts[i] = trigger.DetectionFact{Definition: f.Definition, DetectFingerprint: f.DetectFingerprint, Result: f.Result, ReasonCode: f.ReasonCode, Evidence: trigger.DetectionEvidence{PredicateDigest: f.Evidence.PredicateDigest, ProjectedValueOrdinal: projection, MatchedAlgorithmOrdinal: algorithm, MatchedGroupOrdinal: group, ResultReason: f.Evidence.ResultReason}}
+		var inputs []trigger.DetectionInputEvidence
+		for _, input := range f.Evidence.Inputs {
+			inputs = append(inputs, trigger.DetectionInputEvidence{ProjectedValueOrdinal: input.ProjectedValueOrdinal, Decided: input.Decided, Matched: input.Matched})
+		}
+		tfacts[i] = trigger.DetectionFact{Definition: f.Definition, DetectFingerprint: f.DetectFingerprint, Result: f.Result, ReasonCode: f.ReasonCode, Evidence: trigger.DetectionEvidence{PredicateDigest: f.Evidence.PredicateDigest, ProjectedValueOrdinal: projection, MatchedAlgorithmOrdinal: algorithm, MatchedGroupOrdinal: group, ResultReason: f.Evidence.ResultReason, Inputs: inputs}}
 	}
 	tvalues := make([]trigger.ProjectedValue, len(projected))
 	for i, v := range projected {
@@ -514,7 +549,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 		folded, proposed := execution.RoundGuardReasonForLevel(inputs(), due.Identity, levelID)
 		return string(folded), proposed
 	}
-	tr, err := trigger.EvaluateV2(trigger.EvaluationRequestV2{TenantID: due.Identity.TenantID, BusinessID: due.Identity.BusinessID, Plan: due.CompiledPlan, Record: trigger.DetectionRecord{RecordID: record.RecordID(), SourceTime: record.SourceTime(), ProjectedValues: tvalues, LevelFacts: tfacts}, RecordRef: contract.TriggerRecordRefV1{RecordID: record.RecordID(), SourceTime: record.SourceTime(), DimensionIdentityDigest: string(series), Dimensions: alertDimensions(record.Dimensions(), request.HostOverlay)}, Observed: contract.TriggerObservedV1{Values: record.Values()}, Histories: histories, EffectiveTimeFacts: effective, EvaluationTime: int64(request.Header.Contract.Slot.EvaluationTime), DecisionTime: request.Header.DecisionTime, ReadHoldMillis: request.Header.Contract.ReadHoldMillis, ReadEnd: primaryReadEnd(request.Header, due.Identity), SeriesSeenBefore: !fresh, ExecutionID: request.Header.ExecutionID, Limits: e.limits.Trigger, OpenAlerts: request.OpenAlerts, HoldRecovery: holdRecovery, NamedOutputs: request.NamedOutputs,
+	tr, err := trigger.EvaluateV2(trigger.EvaluationRequestV2{TenantID: due.Identity.TenantID, BusinessID: due.Identity.BusinessID, Plan: due.CompiledPlan, Record: trigger.DetectionRecord{RecordID: record.RecordID(), SourceTime: record.SourceTime(), ProjectedValues: tvalues, LevelFacts: tfacts}, RecordRef: contract.TriggerRecordRefV1{RecordID: record.RecordID(), SourceTime: record.SourceTime(), DimensionIdentityDigest: string(series), Dimensions: alertDimensions(record.Dimensions(), request.HostOverlay)}, Observed: contract.TriggerObservedV1{Values: observedValues(due.CompiledPlan, inputs(), record)}, Histories: histories, EffectiveTimeFacts: effective, EvaluationTime: int64(request.Header.Contract.Slot.EvaluationTime), DecisionTime: request.Header.DecisionTime, ReadHoldMillis: request.Header.Contract.ReadHoldMillis, ReadEnd: primaryReadEnd(request.Header, due.Identity), SeriesSeenBefore: !fresh, ExecutionID: request.Header.ExecutionID, Limits: e.limits.Trigger, OpenAlerts: request.OpenAlerts, HoldRecovery: holdRecovery, NamedOutputs: request.NamedOutputs,
 		ZeroCountIsNoObservation: zeroCountIsNoObservation(request.Header.Requirements, due.Identity),
 		NoDataEndSource:          e.noDataEndSource(request.Header, due.Identity, series, record.SourceTime())})
 	if err != nil {
@@ -530,7 +565,9 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 		if outcome.UnavailableReason == "" {
 			continue
 		}
-		if _, guarded := durableGuardReasons[outcome.LevelID]; guarded {
+		// A Level of an item detected over several inputs is written below,
+		// once its outcome's reason is known.
+		if _, guarded := durableGuardReasons[outcome.LevelID]; guarded || strictLevel(due.CompiledPlan, outcome.LevelID) {
 			continue
 		}
 		for _, fact := range facts {
@@ -595,6 +632,21 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 					carried, origin = false, execution.ReasonOrigin{}
 				}
 			}
+			// A Level of an item detected over several inputs: its detection
+			// names an undecided round by the first input it met unread, in
+			// algorithm order - a point the PRIMARY lacks beside an input that
+			// came back PARTIAL, say - and the guard this round proposes for
+			// it folds the reasons of its incomplete inputs, which the result
+			// contract compares with the outcome's: a Plan that could not
+			// finish its round for as long as that lasted. The fold, when the
+			// round proposes one, guarded or not. MULTI_DETECT_INPUT_MISSING -
+			// a point missing from inputs that all completed - is no input's
+			// reason and is in no fold: it stays only where nothing is.
+			if !carried && o.UnavailableReason != "" && strictLevel(due.CompiledPlan, o.LevelID) {
+				if folded, proposed := execution.RoundGuardReasonForLevel(inputs(), due.Identity, o.LevelID); proposed {
+					reason = folded
+				}
+			}
 		}
 		outcomes[i] = execution.LevelOutcome{Plan: due.Identity, LevelID: o.LevelID, SeriesIdentityDigest: series, Record: execution.RecordAnchor{RecordID: record.RecordID(), SourceTime: record.SourceTime()}, Outcome: kind, ReasonCode: reason,
 			// The result contract expects one envelope per record with a
@@ -609,6 +661,31 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 			EventOmitted: kind == execution.LevelOutcomeRecovery && slices.Contains(tr.OmittedRecoveryLevels, o.LevelID),
 			GuardTail:    guardTail, ReasonCarried: carried,
 			RecoveryWithheld: normalWithheld(kind, o, alertOpen)}.WithReasonOrigin(origin)
+	}
+	// A Level of an item detected over several inputs writes every round it
+	// could not decide as a point it could not use, under a standing guard
+	// too, where any other Level writes only the round that raises its guard
+	// and freezes after: its recovery walk reads that point as neither quiet
+	// nor anomalous, while a round left unwritten is a hole, and a hole a
+	// read has covered is a quiet minute - an input missing for as many
+	// rounds as the recovery asks for would have closed the alert on them.
+	// The guard is written with the reason the round's outcome carries: the
+	// fold of its incomplete inputs, the standing guard's, or the missing
+	// point's.
+	for i, outcome := range tr.LevelOutcomes {
+		if outcome.UnavailableReason == "" || outcomes[i].Outcome != execution.LevelOutcomeUnknown ||
+			!strictLevel(due.CompiledPlan, outcome.LevelID) {
+			continue
+		}
+		for _, fact := range facts {
+			if fact.Definition.LevelID == outcome.LevelID && fact.Result == detect.FactResultUnavailable && fact.ReasonCode == outcome.UnavailableReason {
+				missingInputGuards[outcome.LevelID] = outcomes[i].ReasonCode
+				if e.observeUndecided != nil {
+					e.observeUndecided(undecidedReason(inputs(), due.Identity, outcome.LevelID))
+				}
+				break
+			}
+		}
 	}
 	// A Level the trigger would advance while its outcome is UNKNOWN records
 	// a business fact into a history the guard has not yet released. The
@@ -643,6 +720,10 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 			if historyCompleteness[outcome.LevelID] != execution.HistoryFull {
 				coverage.AbnormalOnIncomplete++
 			}
+		}
+		// The recovery windows undecided rounds held, beside the verdicts.
+		if held := outcome.UndecidedHeld; e.observeRecoveryHeld != nil && (held.End > 0 || held.Inside > 0) {
+			e.observeRecoveryHeld(held.End, held.Inside)
 		}
 	}
 	e.attributeBusiness(tr.TriggerEvent, due.CompiledPlan)
@@ -1076,6 +1157,10 @@ func commonPrimaryRecords(inputs []execution.SeriesEvaluationInputRequest) ([]ex
 			}
 			records[index] = record
 		}
+		records, err := withMultiDetectRounds(input, records)
+		if err != nil {
+			return nil, err
+		}
 		sort.Slice(records, func(i, j int) bool {
 			if records[i].SourceTime() == records[j].SourceTime() {
 				return records[i].RecordID() < records[j].RecordID()
@@ -1218,6 +1303,51 @@ func (e *Evaluator) constrainedRecord(request execution.EvaluationRequest, due e
 type historyView struct {
 	state.HistoryView
 	completeness string
+	// undecided are the source times, rising, at which the stored history or
+	// this record holds a point the Level could not use: the undecided rounds
+	// of a Level joined strictly, the one Level that reads them
+	// (CountUnusable). Empty for every other Level.
+	undecided []int64
+}
+
+// CountUnusable counts the positions in the range holding a point the Level
+// could not use and no point it could. Read off the stored history and the
+// record, not the window: the window keeps only points some Level could use,
+// and a Plan of one Level - every item detected over several inputs is one -
+// has none at an undecided round, so the window holds a hole there.
+func (h historyView) CountUnusable(fromTime, untilTime int64) uint32 {
+	var count uint32
+	for index := sort.Search(len(h.undecided), func(i int) bool { return h.undecided[i] >= fromTime }); index < len(h.undecided) && h.undecided[index] <= untilTime; index++ {
+		if h.HistoryView.CountObserved(h.undecided[index], h.undecided[index]) == 0 {
+			count++
+		}
+	}
+	return count
+}
+
+// undecidedTimes is the source times at which the stored history or the
+// record's own facts hold a point of the Level it could not use, rising, for a
+// Level joined strictly; nil for any other.
+func undecidedTimes(level strategy.CompiledLevel, history []execution.StateHistoryPoint, record execution.RecordView, facts []detect.LevelFact) []int64 {
+	if level.Connector() != contract.LevelConnectorStrictAND {
+		return nil
+	}
+	levelID := level.Definition().LevelID
+	var times []int64
+	for _, point := range history {
+		for _, fact := range point.Levels {
+			if fact.LevelID == levelID && fact.Result == execution.LevelFactUnavailable {
+				times = append(times, point.SourceTime)
+			}
+		}
+	}
+	for _, fact := range facts {
+		if fact.Definition.LevelID == levelID && fact.Result == detect.FactResultUnavailable {
+			times = append(times, record.SourceTime())
+		}
+	}
+	slices.Sort(times)
+	return slices.Compact(times)
 }
 
 func (h historyView) Summarize(t int64, n uint32) trigger.HistorySummary {
@@ -1334,6 +1464,86 @@ func endsOnNoData(plan *strategy.CompiledPlan, levelID uint32) bool {
 	for _, level := range plan.Levels().All() {
 		if level.Definition().LevelID == levelID {
 			return level.Recovery().MissingData == contract.RecoveryMissingDataEvaluateAsZero
+		}
+	}
+	return false
+}
+
+// observedValues is what a record's event observed: the record's own values,
+// or for an item detected over several inputs each input's value at the
+// record's time, by the input's reference, read off that input's own record
+// (015 F1 section 7). Such an event carries no value under "value": a reader
+// that would compare one value against every input's threshold finds none
+// and words the decision from the event's content instead. An input with no
+// point there is left out - its round is undecided and sends no event.
+func observedValues(plan *strategy.CompiledPlan, bindings []execution.NamedInputBinding, record execution.RecordView) map[string]json.RawMessage {
+	if plan == nil {
+		return record.Values()
+	}
+	for _, level := range plan.Levels().All() {
+		if level.Connector() != contract.LevelConnectorStrictAND {
+			continue
+		}
+		values := make(map[string]json.RawMessage, level.Algorithms().Len())
+		for _, algorithm := range level.Algorithms().All() {
+			input, _, ok := algorithm.MultiDetectInput()
+			dataset, spec, _, found := algorithm.MultiDetectThreshold()
+			if !ok || !found {
+				continue
+			}
+			// The field the algorithm judges the input's point by.
+			field := spec.ValueRef()
+			if field == "" {
+				field = "value"
+			}
+			for _, binding := range bindings {
+				if string(binding.DatasetName) != dataset || binding.View == nil {
+					continue
+				}
+				for index := 0; index < binding.View.Len(); index++ {
+					point, exists := binding.View.Record(index)
+					if !exists || point.SourceTime() != record.SourceTime() {
+						continue
+					}
+					if value, has := point.Value(field); has {
+						values[input.Ref] = value
+					}
+				}
+			}
+		}
+		return values
+	}
+	return record.Values()
+}
+
+// undecidedReason is why a round of an item detected over several inputs
+// could not be decided: an input the round did not read whole - PARTIAL, or
+// not at all, the fold of the Level's incomplete inputs naming which - or,
+// all of them whole, one holding nothing of the series. The round's inputs
+// decide it, not the first one detection met unread: an input back PARTIAL
+// is the round's reason whatever else is missing (015 F1 D3).
+func undecidedReason(bindings []execution.NamedInputBinding, plan execution.PlanIdentity, levelID uint32) observability.MultiDetectUndecidedReason {
+	folded, proposed := execution.RoundGuardReasonForLevel(bindings, plan, levelID)
+	switch {
+	case !proposed:
+		return observability.MultiDetectUndecidedInputMissing
+	case folded == execution.ReasonCode(contract.ReasonQueryPartial):
+		return observability.MultiDetectUndecidedInputPartial
+	default:
+		return observability.MultiDetectUndecidedInputError
+	}
+}
+
+// strictLevel says whether the Level is one of an item detected over several
+// inputs: joined strictly, which the strategy compiler allows such a Level
+// alone and requires of it.
+func strictLevel(plan *strategy.CompiledPlan, levelID uint32) bool {
+	if plan == nil {
+		return false
+	}
+	for _, level := range plan.Levels().All() {
+		if level.Definition().LevelID == levelID {
+			return level.Connector() == contract.LevelConnectorStrictAND
 		}
 	}
 	return false
@@ -1787,4 +1997,47 @@ func (source recordSource) DueNext(_ uint32, lastRealPoint, spanSeconds int64) {
 	if facts, found := source.header.PrimaryQueryFacts(source.plan); found {
 		source.judge.Ahead(facts, lastRealPoint, source.judged, spanSeconds)
 	}
+}
+
+// withMultiDetectRounds is the rounds a series of an item detected over
+// several is judged at: every source time any of its inputs has a point of
+// the series at, the PRIMARY's record where it has one and the first other
+// input's in requirement order where it has none. A round some input has no
+// point at is then judged, and undecided, rather than left a hole: a hole
+// settled is a quiet minute toward recovery, an input missing is not. The
+// record a round is judged at is only its time and identity - every input's
+// threshold reads its own point (detect's MultiDetectThreshold) - and the
+// record id is the series' and the time's, whichever input it came from
+// (contract.DeriveRecordIDV2). A series no input has is no round at all, as
+// a series of one query that does not appear.
+func withMultiDetectRounds(input execution.SeriesEvaluationInputRequest, primary []execution.RecordView) ([]execution.RecordView, error) {
+	peers := make([]execution.NamedInputBinding, 0, len(input.Inputs))
+	for _, binding := range input.Inputs {
+		if binding.Role == execution.InputRoleMultiDetectInput && binding.View != nil {
+			peers = append(peers, binding)
+		}
+	}
+	if len(peers) == 0 {
+		return primary, nil
+	}
+	sort.Slice(peers, func(i, j int) bool { return peers[i].RequirementID < peers[j].RequirementID })
+	times := make(map[int64]struct{}, len(primary))
+	for _, record := range primary {
+		times[record.SourceTime()] = struct{}{}
+	}
+	rounds := primary
+	for _, binding := range peers {
+		for index := 0; index < binding.View.Len(); index++ {
+			record, ok := binding.View.Record(index)
+			if !ok || execution.SeriesIdentityDigest(record.DimensionIdentityDigest()) != input.SeriesIdentity {
+				return nil, errors.New("alarmd evaluation: multi-detect input record differs from named-input series")
+			}
+			if _, judged := times[record.SourceTime()]; judged {
+				continue
+			}
+			times[record.SourceTime()] = struct{}{}
+			rounds = append(rounds, record)
+		}
+	}
+	return rounds, nil
 }

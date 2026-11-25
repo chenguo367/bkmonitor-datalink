@@ -23,10 +23,10 @@ func (stream *streamedExecution) retainTargetBytes(ctx context.Context, count in
 	// Covers target copies, the selected-Plan index and mutation lookup tables.
 	// No Dataset or compiled Plan graph is passed into this measurement.
 	retained := 4 * size
-	if err := stream.reserveProvisionalAt(ctx, 0, retained, stream.reservationPhase("normal_gap")); err != nil {
+	if err := stream.reserveProvisionalAt(ctx, 0, retained, stream.reservationPhase("normal_gap"), retainPhaseGap); err != nil {
 		return err
 	}
-	stream.retainBytes(retainPhaseGap, retained)
+	stream.retainedCharged(retainPhaseGap, retained)
 	return nil
 }
 
@@ -49,6 +49,7 @@ func (stream *streamedExecution) loadGapFacts(ctx context.Context, request execu
 				reservations.gapFacts++
 				reservations.retainedBytes += retained
 				stream.coordinator.noteRetainedHighLocked()
+				stream.chargeRetained(retainPhaseGap, retained)
 			}
 			reservations.mu.Unlock()
 			// A refusal the read ahead may stand behind is judged again once
@@ -65,7 +66,7 @@ func (stream *streamedExecution) loadGapFacts(ctx context.Context, request execu
 			return err
 		}
 		stream.gapFacts++
-		stream.retainBytes(retainPhaseGap, retained)
+		stream.retainedCharged(retainPhaseGap, retained)
 		stream.gaps.Items = append(stream.gaps.Items, snapshot)
 		return nil
 	})
@@ -81,15 +82,15 @@ func (stream *streamedExecution) loadGapFacts(ctx context.Context, request execu
 func (stream *streamedExecution) retainGapMutation(ctx context.Context, mutation execution.PlanGapMutation) error {
 	retained := 2 * retainedObjectBytes(mutation)
 	delta := effectCounts{gaps: 1}
-	if err := stream.coordinator.acquireEffects(delta, retained, stream, stream.reservationPhase("normal_gap")); err != nil {
+	if err := stream.coordinator.acquireEffects(delta, stream, stream.reservationPhase("normal_gap"), retainedCharges{retainPhaseGap: retained}); err != nil {
 		var exceeded *provisionalBudgetExceededError
 		if errors.As(err, &exceeded) {
 			stream.coordinator.observeCapacityRejection(ctx, stream.request.Operation, exceeded.budget, err)
 		}
 		return err
 	}
-	stream.effects.gaps++
-	stream.retainBytes(retainPhaseGap, retained)
+	stream.addEffects(delta)
+	stream.retainedCharged(retainPhaseGap, retained)
 	return nil
 }
 

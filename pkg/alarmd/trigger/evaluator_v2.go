@@ -164,9 +164,10 @@ func EvaluateV2(request EvaluationRequestV2) (EvaluationResultV2, error) {
 			return EvaluationResultV2{}, invariantV2("build TriggerEvent", 0, err)
 		}
 		result.TriggerEvent = event
-		// A Plan with named outputs carries what its detection decided on;
+		// A Plan with named outputs carries what its detection decided on, as
+		// does an item detected over several inputs - its event names each;
 		// every other Plan's event carries nothing more than it did.
-		if request.NamedOutputs != nil {
+		if request.NamedOutputs != nil || multiDetectPlan(request.Plan) {
 			// An optional field never stops detection: a snapshot that cannot
 			// be held to its bounds is left off, and the event goes without it.
 			snapshot := detectionSnapshot(request, event)
@@ -176,6 +177,13 @@ func EvaluateV2(request EvaluationRequestV2) (EvaluationResultV2, error) {
 			} else {
 				event.DetectionSnapshot = encoded
 				result.Snapshot = snapshotFacts(snapshot, truncated)
+				// An item detected over several inputs whose snapshot could
+				// not name them fell back to version 1: said, not hidden.
+				// Over truncated too - a snapshot both is counted as one
+				// without its inputs, the rarer and the one to see.
+				if multiDetectPlan(request.Plan) && snapshot.Inputs == nil {
+					result.Snapshot.Result = contract.DetectionSnapshotWithoutInputs
+				}
 			}
 		}
 		// The compatibility context is attached whenever the Plan publishes that
@@ -429,6 +437,11 @@ func evaluateLevelV2(
 	if levelHistory.ReadGapOpen {
 		settledThrough = math.MinInt64
 	}
+	// A Level of an item detected over several inputs, joined strictly, has
+	// rounds it could not decide - an input not read for the series - each
+	// written as a point it could not use (CountUnusable). The walk reads
+	// such a round as neither quiet nor anomalous.
+	strict := level.Connector() == contract.LevelConnectorStrictAND
 	if recoveryPlan.Enabled && result == "" {
 		// How far back an observed position may still count: the retained
 		// window and no further, because nothing older than that exists to be
@@ -492,6 +505,24 @@ func evaluateLevelV2(
 				outcome.RecoveryOpen = true
 				break
 			}
+			// Undecided rounds, of a strict Level only. A window ending on one
+			// is stepped over and the run kept: that round says nothing. A
+			// window ending on a decided round counts its undecided rounds as
+			// rounds that may have been anomalous, the way a hole not yet
+			// settled is counted, settled or not. Stepping over every window
+			// that holds one instead would hold the recovery for as long as
+			// undecided rounds keep coming, one round in two included; and
+			// counting them as the settled holes are, quiet, is what would
+			// recover an alert on rounds nobody could judge.
+			undecided := uint32(0)
+			if strict {
+				if history.CountUnusable(windowEnd, windowEnd) > 0 {
+					skippedWindows++
+					outcome.UndecidedHeld.End++
+					continue
+				}
+				undecided = history.CountUnusable(windowStart, windowEnd)
+			}
 			observed := history.CountObserved(windowStart, windowEnd)
 			holes := uint32(0)
 			if observed < triggerPlan.WindowSize {
@@ -532,12 +563,21 @@ func evaluateLevelV2(
 			// still arrive there, and it may be the anomaly that fires the
 			// window; counting its hole as normal would close the alert before
 			// that point could say otherwise.
-			if windowEnd <= settledThrough && (request.SeriesSeenBefore || windowStart > 0 && history.CountObserved(0, windowStart-1) > 0) {
+			//
+			// Settled is about holes only: the undecided rounds of a strict
+			// Level are counted as possible anomalies here too.
+			seenLife := request.SeriesSeenBefore || windowStart > 0 && history.CountObserved(0, windowStart-1) > 0
+			if windowEnd <= settledThrough && anomalies+undecided < triggerPlan.RequiredAnomalies && seenLife {
 				observedMisses++
 				settledHoleMisses++
 				continue
 			}
 			skippedWindows++
+			// Held by its undecided rounds: read as quiet, the window would
+			// have counted.
+			if undecided > 0 && (anomalies+holes < triggerPlan.RequiredAnomalies+undecided || windowEnd <= settledThrough && seenLife) {
+				outcome.UndecidedHeld.Inside++
+			}
 		}
 		// Whether the positions the walk read hold an anomaly: the decision
 		// does not ask, the series' class does (LevelOutcomeV2.SpanAnomalous).

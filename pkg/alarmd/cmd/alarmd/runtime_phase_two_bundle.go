@@ -685,6 +685,8 @@ func openProductionPhaseTwoBundleAssembly(
 	hostBusiness := tenantHostLookup{cmdbcache.NewHostBusinessLookup(cmdbIndex)}
 	evaluator.WithBusinessAttribution(businessAttributionLookups(hostBusiness.HostBusinessLookup), recorder.ObserveEventBusinessAttribution)
 	evaluator.WithDetectionSnapshots(recorder.ObserveDetectionSnapshot)
+	evaluator.WithMultiDetectRecoveryHeld(recorder.ObserveMultiDetectRecoveryHeld)
+	evaluator.WithMultiDetectUndecided(recorder.ObserveMultiDetectUndecided)
 	// Before a Level written to end on no data ends, its source is asked
 	// whether it is alive, by a probe that runs beside the round and is
 	// kept in this process only. The evaluator asks it for a present
@@ -916,7 +918,13 @@ func openProductionPhaseTwoBundleAssembly(
 	if err := recorder.BindSliceMemory(func() metric.SliceMemoryReading {
 		reading := worker.SliceMemory(coordinator)
 		return metric.SliceMemoryReading{Remembered: reading.Remembered, Unswept: reading.Unswept,
-			Leaves: reading.Leaves, LeafSeries: reading.LeafSeries, Deferred: reading.Deferred}
+			Leaves: reading.Leaves, LeafSeries: reading.LeafSeries, Deferred: reading.Deferred, LeavesMax: reading.LeavesMax}
+	}); err != nil {
+		return nil, err
+	}
+	if err := recorder.BindWindowedSlots(func() metric.WindowedSlotsReading {
+		reading := worker.WindowedSlots(coordinator)
+		return metric.WindowedSlotsReading{Completed: reading.Completed, Failed: reading.Failed, Retried: reading.Retried}
 	}); err != nil {
 		return nil, err
 	}
@@ -987,6 +995,7 @@ func openProductionPhaseTwoBundleAssembly(
 		Roles:                cfg.EffectiveRoles(),
 		ControlCandidate:     phaseTwoControlCandidacy(cfg) == ownership.ControlCandidacyFallback,
 		SegmentSkip:          cfg.PhaseTwo.Control.SegmentSkip,
+		MultiDetect:          core.MultiDetect,
 		SteppedDownAsLeader:  controlLeaderSteppedDown(reconciler, recorder),
 		QueryCooldowns:       newProductionQueryCooldownStore(cfg, redisForCaller(runtimeClient, redisfailure.CallerQueryCooldown), recorder, observer),
 		ReadHolds:            readHolds,

@@ -92,8 +92,13 @@ func TestCarriedEndsAreReadOnlyIntoAnEmptyIndexAndOnlyForLevelsThatEndOnNoData(t
 	other.LevelID = 9
 	index := &fakeNoDataEndIndex{held: map[execution.NoDataEndKey][]execution.NoDataEndEntry{oldKey: {ending, other}}}
 	coordinator := &SlotExecutionCoordinator{}
-	stream := &streamedExecution{coordinator: coordinator, header: execution.InternalExecutionHeader{DuePlans: []execution.DuePlan{due}},
-		noDataEnds: map[execution.PlanIdentity]execution.NoDataEndLoaded{due.Identity: {Key: newKey}}}
+	stream := &streamedExecution{
+		slotStream: &slotStream{
+			coordinator: coordinator,
+			header:      execution.InternalExecutionHeader{DuePlans: []execution.DuePlan{due}},
+			noDataEnds:  map[execution.PlanIdentity]execution.NoDataEndLoaded{due.Identity: {Key: newKey}},
+		},
+	}
 	stream.carryNoDataEnds(context.Background(), index)
 	if got := stream.noDataEnds[due.Identity].Entries; !reflect.DeepEqual(got, []execution.NoDataEndEntry{ending}) {
 		t.Fatalf("the round decides on %+v, want only the entry of the Level that ends on no data", got)
@@ -104,8 +109,13 @@ func TestCarriedEndsAreReadOnlyIntoAnEmptyIndexAndOnlyForLevelsThatEndOnNoData(t
 
 	own := noDataEndEntryFor("c", "fc", 160)
 	index.read = nil
-	stream = &streamedExecution{coordinator: coordinator, header: execution.InternalExecutionHeader{DuePlans: []execution.DuePlan{due}},
-		noDataEnds: map[execution.PlanIdentity]execution.NoDataEndLoaded{due.Identity: {Key: newKey, Entries: []execution.NoDataEndEntry{own}}}}
+	stream = &streamedExecution{
+		slotStream: &slotStream{
+			coordinator: coordinator,
+			header:      execution.InternalExecutionHeader{DuePlans: []execution.DuePlan{due}},
+			noDataEnds:  map[execution.PlanIdentity]execution.NoDataEndLoaded{due.Identity: {Key: newKey, Entries: []execution.NoDataEndEntry{own}}},
+		},
+	}
 	stream.carryNoDataEnds(context.Background(), index)
 	if len(index.read) != 0 || len(stream.noDataEndCarries) != 0 {
 		t.Fatalf("an index the new generation holds read %v and carried %+v, want neither", index.read, stream.noDataEndCarries)
@@ -203,12 +213,14 @@ func TestCarriedMemoryIsReadOnlyWhileTheNewGenerationHoldsNoRecord(t *testing.T)
 				NoDataCarry: &execution.NoDataCarry{From: "old", Memory: true},
 			}}
 			stream := &streamedExecution{
-				coordinator: &SlotExecutionCoordinator{
-					ports:  Ports{NoData: store},
-					budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10},
+				slotStream: &slotStream{
+					coordinator: &SlotExecutionCoordinator{
+						ports:  Ports{NoData: store},
+						budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10},
+					},
+					header:     execution.InternalExecutionHeader{Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans},
+					supplement: &supplementRun{},
 				},
-				header:     execution.InternalExecutionHeader{Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans},
-				supplement: &supplementRun{},
 			}
 			if err := stream.loadNoDataMemory(context.Background()); err != nil {
 				t.Fatal(err)

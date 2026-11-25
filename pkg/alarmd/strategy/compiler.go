@@ -475,9 +475,25 @@ func (c *PlanCompiler) compileLevel(
 	refused := func(reason, field string, err error) (CompiledLevel, []NumericNormalizerSpec, *Terminal, error) {
 		return CompiledLevel{}, nil, &Terminal{LevelID: levelID, ReasonCode: reason, FieldPath: field, Detail: err.Error()}, nil
 	}
-	if levelID == 0 || raw.Definition.Priority == 0 || (raw.Connector != contract.LevelConnectorAND && raw.Connector != contract.LevelConnectorOR) ||
-		len(raw.DetectPlan.Algorithms) == 0 {
+	if levelID == 0 || raw.Definition.Priority == 0 || (raw.Connector != contract.LevelConnectorAND && raw.Connector != contract.LevelConnectorOR &&
+		raw.Connector != contract.LevelConnectorStrictAND) || len(raw.DetectPlan.Algorithms) == 0 {
 		return terminal(contract.ReasonLevelInvalid, "level")
+	}
+	// The strict join is the join of the inputs of an item detected over
+	// several, and only that: a level of one reads every input, the first
+	// too, through a MultiDetectThreshold of its own, and holds nothing
+	// else. Any other algorithm beside them reads the PRIMARY's record, and
+	// on a round another input anchors that record is the other input's.
+	multiDetect, others := 0, 0
+	for _, algorithm := range raw.DetectPlan.Algorithms {
+		if algorithm.Type == DetectorKindMultiDetectThreshold {
+			multiDetect++
+		} else {
+			others++
+		}
+	}
+	if (multiDetect > 0) != (raw.Connector == contract.LevelConnectorStrictAND) || multiDetect > 0 && others > 0 {
+		return terminal(contract.ReasonLevelInvalid, "level.connector")
 	}
 	if len(raw.DetectPlan.Algorithms) > c.limits.MaxAlgorithmsPerLevel {
 		return terminal(contract.ReasonLevelBudgetExceeded, "level.detect_plan.algorithms")
@@ -749,7 +765,7 @@ func compiledConfigMatchesKind(config compiledAlgorithmConfig, kind string) bool
 	count := 0
 	for _, configured := range []bool{
 		config.Threshold != nil, config.SimpleRingRatio != nil, config.OsRestart != nil,
-		config.ProcPort != nil, config.TraditionalComparison != nil,
+		config.ProcPort != nil, config.TraditionalComparison != nil, config.MultiDetectThreshold != nil,
 	} {
 		if configured {
 			count++
@@ -770,6 +786,8 @@ func compiledConfigMatchesKind(config compiledAlgorithmConfig, kind string) bool
 		return config.OsRestart != nil
 	case DetectorKindProcPort:
 		return config.ProcPort != nil
+	case DetectorKindMultiDetectThreshold:
+		return config.MultiDetectThreshold != nil
 	default:
 		return false
 	}

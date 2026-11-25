@@ -187,12 +187,16 @@ func TestAnAbsenceAlreadyStoppedIsReportedAsSuppressedNotExpired(t *testing.T) {
 // Plan with no groups.
 func TestARoundThatDidNotJudgeEmitsNoAbsenceLine(t *testing.T) {
 	recorded := []observability.Observation{}
-	stream := &streamedExecution{coordinator: &SlotExecutionCoordinator{
-		ports: Ports{Observer: observability.ObserverFunc(
-			func(_ context.Context, observation observability.Observation) {
-				recorded = append(recorded, observation)
-			})},
-	}}
+	stream := &streamedExecution{
+		slotStream: &slotStream{
+			coordinator: &SlotExecutionCoordinator{
+				ports: Ports{Observer: observability.ObserverFunc(
+					func(_ context.Context, observation observability.Observation) {
+						recorded = append(recorded, observation)
+					})},
+			},
+		},
+	}
 	for _, outcome := range nodata.SlotOutcomes {
 		if outcome == nodata.OutcomeEvaluated {
 			continue
@@ -223,14 +227,16 @@ func TestTheAbsenceLineComesOutOfTheRoundsOwnPass(t *testing.T) {
 	duePlans := []execution.DuePlan{first, second}
 	recorded := []observability.Observation{}
 	stream := &streamedExecution{
-		coordinator: &SlotExecutionCoordinator{
-			ports: Ports{NoData: &emptyNoDataStore{}, Hosts: SharedHostBusiness, State: failingStatePort{},
-				Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
-					recorded = append(recorded, observation)
-				})},
-			budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 1, MaxEvents: 1},
+		slotStream: &slotStream{
+			coordinator: &SlotExecutionCoordinator{
+				ports: Ports{NoData: &emptyNoDataStore{}, Hosts: SharedHostBusiness, State: failingStatePort{},
+					Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+						recorded = append(recorded, observation)
+					})},
+				budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 1, MaxEvents: 1},
+			},
+			header: execution.InternalExecutionHeader{Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans},
 		},
-		header: execution.InternalExecutionHeader{Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans},
 	}
 	if err := stream.loadNoDataMemory(context.Background()); err != nil {
 		t.Fatal(err)
@@ -296,14 +302,16 @@ func TestASlotBeyondItsBudgetSettlesEveryNoDataPlanOnce(t *testing.T) {
 	for _, decidedFirst := range []bool{true, false} {
 		recorded := []observability.Observation{}
 		stream := &streamedExecution{
-			coordinator: &SlotExecutionCoordinator{
-				ports: Ports{NoData: &emptyNoDataStore{}, Hosts: SharedHostBusiness, State: failingStatePort{},
-					Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
-						recorded = append(recorded, observation)
-					})},
-				budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 1, MaxEvents: 1},
+			slotStream: &slotStream{
+				coordinator: &SlotExecutionCoordinator{
+					ports: Ports{NoData: &emptyNoDataStore{}, Hosts: SharedHostBusiness, State: failingStatePort{},
+						Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+							recorded = append(recorded, observation)
+						})},
+					budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 1, MaxEvents: 1},
+				},
+				header: execution.InternalExecutionHeader{Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans},
 			},
-			header: execution.InternalExecutionHeader{Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans},
 		}
 		if err := stream.loadNoDataMemory(context.Background()); err != nil {
 			t.Fatal(err)
@@ -371,8 +379,12 @@ func TestASlotBeyondItsBudgetEveryRoundIsReportedAsAStall(t *testing.T) {
 	}
 	contract := noDataPreflightContract(t, duePlans)
 	for round := 1; round <= 4; round++ {
-		stream := &streamedExecution{coordinator: coordinator,
-			header: execution.InternalExecutionHeader{Contract: contract, DuePlans: duePlans}}
+		stream := &streamedExecution{
+			slotStream: &slotStream{
+				coordinator: coordinator,
+				header:      execution.InternalExecutionHeader{Contract: contract, DuePlans: duePlans},
+			},
+		}
 		stream.request.Contract = contract
 		stream.request.Contract.Slot.EvaluationTime += execution.EvaluationTime(60 * round)
 		if err := stream.loadNoDataMemory(context.Background()); err != nil {

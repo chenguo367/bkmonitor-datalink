@@ -34,7 +34,7 @@ func namedOutputStream(maxRetained, own uint64) (*SlotExecutionCoordinator, *str
 		MaxSeries: 10, MaxRetainedBytes: maxRetained, MaxStateMutations: 10, MaxEvents: 10, MaxGapMutations: 10,
 	}}
 	co.reservations.retainedBytes = own
-	return co, &streamedExecution{coordinator: co, began: true, retainedByPhase: retainedSeed(own)}
+	return co, &streamedExecution{slotStream: &slotStream{coordinator: co, began: true, retainedByPhase: retainedSeed(own)}}
 }
 
 // The named outputs a Slot's queries aligned are input it retains: charged
@@ -113,7 +113,7 @@ func TestTwoNamedQueriesOfASlotCannotExceedTheShareBetweenThem(t *testing.T) {
 // would pass the pool, and that refusal is the pool's, not the share's.
 func TestNamedQueriesOfTwoSlotsCannotExceedThePool(t *testing.T) {
 	co, first := namedOutputStream(1000, 0)
-	second := &streamedExecution{coordinator: co, began: true}
+	second := &streamedExecution{slotStream: &slotStream{coordinator: co, began: true}}
 	if err := first.ReserveRetainedBytes(context.Background(), 600); err != nil {
 		t.Fatal(err)
 	}

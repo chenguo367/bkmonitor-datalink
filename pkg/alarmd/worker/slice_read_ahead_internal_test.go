@@ -183,6 +183,15 @@ func TestTheSlicesAfterTheSlotsAreReadAheadUpToTheWidth(t *testing.T) {
 	if got := stream.readAheadEnds[readAheadOtherLeaf]; got != 2 {
 		t.Fatalf("reads ahead let go for another slice = %d, want 4's and 5's", got)
 	}
+	// Each read is counted as it began by the reads in flight with it, itself
+	// included (015 O1): 2, 3 and 4 began as the first, second and third;
+	// 5 beside 3 and 4; 7 and 8, the reads let go no longer among them, as
+	// the first and second, 3 kept beside them uncounted again. The Slot's
+	// own read, beside the three, is a fourth.
+	stream.noteReadBegan(1)
+	if got := stream.readsInFlight; got != [6]uint64{2, 2, 2, 1} {
+		t.Fatalf("reads by how many were in flight as each began %v, want [2 2 2 1 0 0]", got)
+	}
 }
 
 // answeringQuery is a query source whose every read waits for answer, then

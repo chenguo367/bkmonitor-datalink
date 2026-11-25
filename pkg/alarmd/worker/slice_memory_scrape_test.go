@@ -91,3 +91,43 @@ func TestTheSliceMemoryScrapeCountsTheSlicesACompletedShapeLanded(t *testing.T) 
 		}
 	}
 }
+
+// The largest shape's leaves are scraped beside the sum (015 O1), read at the
+// scrape through the reading the bundle binds: a Slot that failed out of
+// time keeps its split shape, and the gauge reads that shape's leaves - with
+// one Query Group remembered, the same as the sum.
+func TestTheLargestShapesLeavesAreScraped(t *testing.T) {
+	fixture := newSlicedFixture(t, slicedHosts(8, 1<<10), sliceableFacts(), 200)
+	fixture.source.timeoutWhole = true
+	request := windowedRequest()
+	readWholeTimedOut(t, fixture, request)
+	fixture.source.mu.Lock()
+	fixture.source.timeoutWhole, fixture.source.queryMillis = false, 1_000
+	fixture.source.timeoutAfter, fixture.source.timeoutTimes = 1, 3
+	fixture.source.mu.Unlock()
+	if _, err := fixture.coordinator.Execute(context.Background(), request); err == nil {
+		t.Fatal("the slice and its child out of time, the Slot completed")
+	}
+	recorder := metric.NewRecorder(metric.BuildInfo{})
+	if err := recorder.BindSliceMemory(func() metric.SliceMemoryReading {
+		reading := worker.SliceMemory(fixture.coordinator)
+		return metric.SliceMemoryReading{Remembered: reading.Remembered, Unswept: reading.Unswept,
+			Leaves: reading.Leaves, LeafSeries: reading.LeafSeries, Deferred: reading.Deferred, LeavesMax: reading.LeavesMax}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	families, err := recorder.ScrapeGatherer().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var leavesMax float64 = -1
+	for _, family := range families {
+		if family.GetName() == "alarmd_worker_slice_shape_leaves_max" && len(family.GetMetric()) == 1 {
+			leavesMax = family.GetMetric()[0].GetGauge().GetValue()
+		}
+	}
+	leaves := scrapedSliceMemory(t, fixture.coordinator)["leaves"]
+	if leavesMax <= 1 || leavesMax != leaves {
+		t.Fatalf("scraped worker_slice_shape_leaves_max %v beside leaves %v, want the kept shape's leaves", leavesMax, leaves)
+	}
+}

@@ -310,7 +310,7 @@ func TestARoundWhoseJoinsThePoolRefusesJoinsNobody(t *testing.T) {
 func TestTheJoinsARoundTakesInAreReservedAsItsBooksAre(t *testing.T) {
 	for _, room := range []uint64{1 << 30, 10*segment.BookMemberBytes - 1} {
 		coordinator := &SlotExecutionCoordinator{budget: ProvisionalBudget{MaxSeries: 1000, MaxRetainedBytes: room}}
-		stream := &streamedExecution{coordinator: coordinator, request: shadowRequest(execution.OperationNormal, 1260), began: true}
+		stream := &streamedExecution{slotStream: &slotStream{coordinator: coordinator, request: shadowRequest(execution.OperationNormal, 1260), began: true}}
 		admit := coordinator.segmentJoinAdmission(withRetainedOwner(context.Background(), stream))
 		taken := admit(10)
 		want := uint64(10 * segment.BookMemberBytes)

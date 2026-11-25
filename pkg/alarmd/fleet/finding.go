@@ -994,6 +994,10 @@ var codeChecks = map[string]verdict{
 	// Coarse readings for a window reason without counts.
 	"HISTORY_GAPPED":  lands(CheckSeriesDataMissing),
 	"HISTORY_WARMING": lands(CheckWindowUndecided),
+	// An input of an item detected over several with no point of the
+	// series: the series' data is missing from that input, and the round is
+	// undecided for it.
+	"MULTI_DETECT_INPUT_MISSING": lands(CheckSeriesDataMissing),
 
 	// The strategy's own configuration, or a change to it. Outside its own
 	// effective time is the configuration doing what it was written to do.

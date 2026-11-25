@@ -147,7 +147,7 @@ func (template DataRequirementTemplate) validateFacts() error {
 	if template.DatasetName == "" || template.ConsumerLevelID == 0 || template.LogicalQueryRef == "" {
 		return errors.New("alarmd execution: complete DataRequirement template identity is required")
 	}
-	if template.Role != InputRolePrimary && template.Role != InputRoleAlgorithmDependency {
+	if !validInputRole(template.Role) {
 		return errors.New("alarmd execution: invalid DataRequirement template role")
 	}
 	if !template.RelativeWindow.HalfOpen || template.RelativeWindow.StartOffsetSeconds >= template.RelativeWindow.EndOffsetSeconds ||
@@ -255,7 +255,7 @@ func (requirement DataRequirement) Validate(plans map[PlanIdentity]DuePlan) erro
 	if requirement.RequirementID == "" || requirement.DatasetName == "" || requirement.LogicalQueryRef == "" {
 		return errors.New("alarmd execution: complete DataRequirement identity is required")
 	}
-	if requirement.Role != InputRolePrimary && requirement.Role != InputRoleAlgorithmDependency {
+	if !validInputRole(requirement.Role) {
 		return errors.New("alarmd execution: invalid DataRequirement role")
 	}
 	if !requirement.RelativeWindow.HalfOpen || requirement.RelativeWindow.StartOffsetSeconds >= requirement.RelativeWindow.EndOffsetSeconds {

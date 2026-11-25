@@ -24,12 +24,16 @@ import (
 func TestABatchSaysItsRoutineEvaluationsAsOneLineAndTheOthersEach(t *testing.T) {
 	var mu sync.Mutex
 	var said []observability.Observation
-	stream := &streamedExecution{coordinator: &SlotExecutionCoordinator{ports: Ports{
-		Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
-			mu.Lock()
-			said = append(said, observation)
-			mu.Unlock()
-		})}}}
+	stream := &streamedExecution{
+		slotStream: &slotStream{
+			coordinator: &SlotExecutionCoordinator{ports: Ports{
+				Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+					mu.Lock()
+					said = append(said, observation)
+					mu.Unlock()
+				})}},
+		},
+	}
 	due := execution.DuePlan{Identity: execution.PlanIdentity{TenantID: "t", BusinessID: "2", StrategyID: "7"}}
 	line := func(series string, reason observability.ReasonCode) observability.Observation {
 		return observability.Observation{Component: observability.ComponentEvaluation,

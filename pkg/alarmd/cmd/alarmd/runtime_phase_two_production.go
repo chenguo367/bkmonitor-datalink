@@ -1250,6 +1250,7 @@ type productionPhaseTwoOwnershipStore interface {
 	AcquireControlLeader(context.Context, string, time.Time, time.Duration) (ownership.PublicationAuthority, error)
 	RenewControlLeader(context.Context, ownership.PublicationAuthority, time.Time, time.Duration) (ownership.PublicationAuthority, error)
 	SweepAssignments(context.Context, ownership.PublicationAuthority, map[execution.QueryGroupIdentity]struct{}) (ownership.AssignmentSweep, error)
+	RecheckAssignments(context.Context, ownership.PublicationAuthority, map[execution.QueryGroupIdentity]struct{}, []execution.QueryGroupIdentity) (ownership.AssignmentSweep, error)
 	Close() error
 }
 
@@ -1280,6 +1281,10 @@ type productionPhaseTwoOwnershipDependencies struct {
 	// (phase_two.control.segment_skip): the Leader sets it on the records
 	// while every ready worker declares the contract (reconcileSegmentSkip).
 	SegmentSkip bool
+	// MultiDetect records each round's ready set for the release of items
+	// detected over several inputs, which the source round reads
+	// (multiDetectGate). Nil records nothing.
+	MultiDetect *multiDetectGate
 	// QueryCooldowns keeps each owned Query Group's place in the query
 	// cooldown pool across restarts and owners. Nil keeps it in the Runner
 	// alone, which is what every runtime did before.
@@ -1457,9 +1462,16 @@ type productionPhaseTwoOwnership struct {
 	// for good. And owed, because a record a lease still held is reclaimed
 	// only by a later sweep, which nothing else asked for once the set was
 	// remembered as swept.
+	//
+	// sweepOwed is a full sweep owed by one that failed; sweepHeld the
+	// retired Query Groups whose records a live lease kept, which the next
+	// round reads again by name (RecheckAssignments) instead of walking the
+	// key space for them: one retirement with its lease still live walked
+	// it eight or nine rounds in a row on a deployment (015 O2).
 	sweptEpoch uint64
 	lastSet    map[execution.QueryGroupIdentity]struct{}
 	sweepOwed  bool
+	sweepHeld  []execution.QueryGroupIdentity
 }
 
 // rebalanceStabilisation is how long the ready set must have been unchanged
@@ -1636,6 +1648,7 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 		return err
 	}
 	round.done(fleet.LeaderRoundStageReadyWorkers)
+	runtime.dependencies.MultiDetect.record(workers)
 	runtime.collectUnreadableTimelines(workers, ordered)
 	// The content contract's gate, decided once per round on the same ready
 	// set the placements use: every ready worker declares it, and the round
@@ -1864,28 +1877,49 @@ func (runtime *productionPhaseTwoOwnership) sweepRetiredAssignments(
 		keep[queryGroup] = struct{}{}
 	}
 	runtime.mu.Lock()
-	due := runtime.sweptEpoch != authority.Fence.OwnerEpoch || runtime.lastSet == nil || runtime.sweepOwed
-	if !due {
+	// Why this round sweeps, in the order the counter names them: a term's
+	// first round, a Query Group gone since the last round, or a sweep owed
+	// (one that failed, or records a live lease held). Only the last of
+	// these with nothing else due is a recheck of the held records by name.
+	trigger := ""
+	switch {
+	case runtime.sweptEpoch != authority.Fence.OwnerEpoch || runtime.lastSet == nil:
+		trigger = observability.AssignmentSweepTriggerTerm
+	default:
 		for queryGroup := range runtime.lastSet {
 			if _, still := keep[queryGroup]; !still {
-				due = true
+				trigger = observability.AssignmentSweepTriggerRetired
 				break
 			}
 		}
+		if trigger == "" && (runtime.sweepOwed || len(runtime.sweepHeld) > 0) {
+			trigger = observability.AssignmentSweepTriggerOwed
+		}
 	}
+	recheck := trigger == observability.AssignmentSweepTriggerOwed && !runtime.sweepOwed
+	held := runtime.sweepHeld
 	// Remembered every round, swept or not, so the next round measures
 	// what left against what this round ran.
 	runtime.sweptEpoch, runtime.lastSet = authority.Fence.OwnerEpoch, keep
 	runtime.mu.Unlock()
-	if !due {
+	if trigger == "" {
 		return
 	}
-	sweep, err := runtime.dependencies.Store.SweepAssignments(ctx, authority, keep)
+	var (
+		sweep ownership.AssignmentSweep
+		err   error
+	)
+	if recheck {
+		sweep, err = runtime.dependencies.Store.RecheckAssignments(ctx, authority, keep, held)
+	} else {
+		sweep, err = runtime.dependencies.Store.SweepAssignments(ctx, authority, keep)
+	}
 	// Whatever the sweep removed is out of the population; one that comes
 	// back is read as it enters.
 	runtime.records.retain(keep)
 	facts := &observability.AssignmentSweepFacts{Scanned: sweep.Scanned, Retired: sweep.Retired,
-		Reclaimed: sweep.Reclaimed, HeldByLease: sweep.HeldByLease, Changed: sweep.Changed}
+		Reclaimed: sweep.Reclaimed, HeldByLease: sweep.HeldByLease, Changed: sweep.Changed,
+		Trigger: trigger, ScanPages: sweep.ScanPages}
 	// The same numbers for the fleet snapshot, success or failure: a sweep
 	// that ran and reclaimed six records on a live deployment was known
 	// only to the Pod's own memory.
@@ -1919,9 +1953,9 @@ func (runtime *productionPhaseTwoOwnership) sweepRetiredAssignments(
 	}
 	runtime.mu.Lock()
 	// Records a lease still held are not reclaimed until it lapses, and no
-	// set change will ask for the sweep that does it: the next round is
-	// asked here.
-	runtime.sweepOwed = sweep.HeldByLease > 0
+	// set change will ask for the sweep that does it: the next round
+	// rechecks them by name.
+	runtime.sweepOwed, runtime.sweepHeld = false, sweep.Held
 	runtime.lastAssignmentSweep = published
 	runtime.mu.Unlock()
 	observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{
@@ -3305,8 +3339,9 @@ func slotExecuteSlowFacts(period int64, result execution.SlotExecutionResult,
 	facts := observability.SlotExecuteSlowFacts{PeriodSeconds: period,
 		QueryWaitMillis: usage.QueryWaitMillis, QueryBodyMillis: usage.QueryBodyMillis,
 		QueryWaitMillisMax: usage.QueryWaitMillisMax, QueryBodyMillisMax: usage.QueryBodyMillisMax,
+		QueryBodyMicros: usage.QueryBodyMicros, QueryBodyMicrosMax: usage.QueryBodyMicrosMax,
 		InputSlices: usage.InputSlices, InputSliceTailMillis: usage.InputSliceTailMillis,
-		InputSliceTailMillisMax: usage.InputSliceTailMillisMax}
+		InputSliceTailMillisMax: usage.InputSliceTailMillisMax, Usage: slotBudgetUsageFacts(usage)}
 	if timing := slotTimingFacts(result.Timing); timing != nil {
 		facts.Timing = *timing
 	}
@@ -3724,6 +3759,7 @@ func slotBudgetUsageFacts(usage execution.SlotBudgetUsage) *observability.SlotBu
 		PointsDropped:             usage.PointsDropped,
 		QueryWaitMillis:           usage.QueryWaitMillis, QueryBodyMillis: usage.QueryBodyMillis,
 		QueryWaitMillisMax: usage.QueryWaitMillisMax, QueryBodyMillisMax: usage.QueryBodyMillisMax,
+		QueryBodyMicros: usage.QueryBodyMicros, QueryBodyMicrosMax: usage.QueryBodyMicrosMax,
 		InputSlices: usage.InputSlices, InputSlicesDiscarded: usage.InputSlicesDiscarded,
 		FirstSeenUnseenSlices: usage.FirstSeenUnseenSlices, FirstSeenUnseenSeries: usage.FirstSeenUnseenSeries,
 		InputSlicesReadAhead: usage.InputSlicesReadAhead, InputSlicesReadAheadOtherLeaf: usage.InputSlicesReadAheadOtherLeaf,
@@ -3734,6 +3770,8 @@ func slotBudgetUsageFacts(usage execution.SlotBudgetUsage) *observability.SlotBu
 		ReadAheadWaitMillisMax: usage.ReadAheadWaitMillisMax,
 		InputSliceTailMillis:   usage.InputSliceTailMillis, InputSliceTailMillisMax: usage.InputSliceTailMillisMax,
 		InputSliceChangeMillis: usage.InputSliceChangeMillis, InputSliceChangeMillisMax: usage.InputSliceChangeMillisMax,
+		InputSliceHandoffMillis: usage.InputSliceHandoffMillis, InputSliceHandoffMillisMax: usage.InputSliceHandoffMillisMax,
+		InputSliceReadsInFlight:       usage.InputSliceReadsInFlight,
 		SharedFrameWaitConsumerMillis: usage.SharedFrameWaitConsumerMillis, SharedFrameWaitReaderMillis: usage.SharedFrameWaitReaderMillis,
 		InputSliceTimeouts:                  usage.InputSliceTimeouts,
 		InputSliceShapeStarted:              usage.InputSliceShapeStarted,

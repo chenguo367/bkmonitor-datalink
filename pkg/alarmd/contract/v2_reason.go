@@ -154,14 +154,15 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	// Coverage for the same reason as the two beside it: Slots passed without
 	// being evaluated. The cause is a timeline that would not decode, which
 	// the fleet files as a defect; the word itself only says the Slots went.
-	ReasonScheduleRepaired:      {ReasonScheduleRepaired, ReasonClassCoverage, ReasonDomainObservation},
-	ReasonScheduleReopened:      {ReasonScheduleReopened, ReasonClassCoverage, ReasonDomainObservation},
-	ReasonEffectiveTimeInactive: {ReasonEffectiveTimeInactive, ReasonClassCoverage, ReasonDomainReceipt | ReasonDomainObservation},
-	ReasonEffectiveTimeUnknown:  {ReasonEffectiveTimeUnknown, ReasonClassCoverage, ReasonDomainReceipt | ReasonDomainObservation},
-	ReasonHistoryWarming:        {ReasonHistoryWarming, ReasonClassCoverage, ReasonDomainReceipt | ReasonDomainObservation},
-	ReasonHistoryGapped:         {ReasonHistoryGapped, ReasonClassCoverage, ReasonDomainReceipt | ReasonDomainObservation},
-	ReasonRecordTooLarge:        {ReasonRecordTooLarge, ReasonClassCoverage, ReasonDomainSummary | ReasonDomainObservation},
-	ReasonAuditDrop:             {ReasonAuditDrop, ReasonClassCoverage, ReasonDomainObservation},
+	ReasonScheduleRepaired:        {ReasonScheduleRepaired, ReasonClassCoverage, ReasonDomainObservation},
+	ReasonScheduleReopened:        {ReasonScheduleReopened, ReasonClassCoverage, ReasonDomainObservation},
+	ReasonEffectiveTimeInactive:   {ReasonEffectiveTimeInactive, ReasonClassCoverage, ReasonDomainReceipt | ReasonDomainObservation},
+	ReasonEffectiveTimeUnknown:    {ReasonEffectiveTimeUnknown, ReasonClassCoverage, ReasonDomainReceipt | ReasonDomainObservation},
+	ReasonHistoryWarming:          {ReasonHistoryWarming, ReasonClassCoverage, ReasonDomainReceipt | ReasonDomainObservation},
+	ReasonHistoryGapped:           {ReasonHistoryGapped, ReasonClassCoverage, ReasonDomainReceipt | ReasonDomainObservation},
+	ReasonMultiDetectInputMissing: {ReasonMultiDetectInputMissing, ReasonClassCoverage, ReasonDomainReceipt | ReasonDomainObservation},
+	ReasonRecordTooLarge:          {ReasonRecordTooLarge, ReasonClassCoverage, ReasonDomainSummary | ReasonDomainObservation},
+	ReasonAuditDrop:               {ReasonAuditDrop, ReasonClassCoverage, ReasonDomainObservation},
 
 	ReasonKafkaUnavailable: {ReasonKafkaUnavailable, ReasonClassRetryable, ReasonDomainSummary | ReasonDomainObservation},
 	ReasonRedisUnavailable: {ReasonRedisUnavailable, ReasonClassRetryable, ReasonDomainObservation},

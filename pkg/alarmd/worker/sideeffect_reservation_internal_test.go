@@ -18,8 +18,8 @@ func TestProcessSideEffectBudgetCapsTwoLiveSlotAggregates(t *testing.T) {
 	for _, kind := range []string{"state", "event", "gap"} {
 		t.Run(kind, func(t *testing.T) {
 			coordinator := &SlotExecutionCoordinator{budget: sideEffectTestBudget(kind)}
-			first := &streamedExecution{coordinator: coordinator}
-			second := &streamedExecution{coordinator: coordinator}
+			first := &streamedExecution{slotStream: &slotStream{coordinator: coordinator}}
+			second := &streamedExecution{slotStream: &slotStream{coordinator: coordinator}}
 			defer first.releaseProvisional()
 			defer second.releaseProvisional()
 			firstResult := sideEffectTestResult(kind, "qg-first")
@@ -83,7 +83,7 @@ func TestSideEffectBudgetRejectionDoesNotMutateAcceptedAggregate(t *testing.T) {
 
 func TestSharedEffectRejectionIsAtomicAcrossCountsAndBytes(t *testing.T) {
 	coordinator := &SlotExecutionCoordinator{budget: sideEffectTestBudget("event")}
-	stream := &streamedExecution{coordinator: coordinator}
+	stream := &streamedExecution{slotStream: &slotStream{coordinator: coordinator}}
 	defer stream.releaseProvisional()
 	result := sideEffectTestResult("event", "qg")
 	if err := stream.mergeProvisional(context.Background(), result, 0); err != nil {
@@ -104,7 +104,7 @@ func TestSharedEffectRejectionIsAtomicAcrossCountsAndBytes(t *testing.T) {
 
 func TestDuplicateGapDoesNotAccumulateReservations(t *testing.T) {
 	coordinator := &SlotExecutionCoordinator{budget: sideEffectTestBudget("gap")}
-	stream := &streamedExecution{coordinator: coordinator}
+	stream := &streamedExecution{slotStream: &slotStream{coordinator: coordinator}}
 	defer stream.releaseProvisional()
 	result := sideEffectTestResult("gap", "qg")
 	if err := stream.mergeProvisional(context.Background(), result, 0); err != nil {
@@ -148,5 +148,37 @@ func sideEffectTestResult(kind, qg string) execution.EvaluationResult {
 	return execution.EvaluationResult{
 		Contract: execution.FrozenExecutionContractRef{Slot: execution.SlotIdentity{QueryGroup: execution.QueryGroupIdentity(qg)}},
 		Plans:    []execution.PlanEvaluationResult{plan},
+	}
+}
+
+// A batch whose side effects the pool took and whose results the append then
+// refuses - two batches clearing one Plan's gap marker differently - is given
+// back with the Slot: once the stream releases, the pool holds none of the
+// Slot's State writes, events, gap mutations or bytes. The counts were once
+// the Slot's only after the append took the batch, and a refused one left
+// them in the pool, the process's caps the smaller for it until it restarted.
+func TestARefusedAppendGivesItsSideEffectsBackWithTheSlot(t *testing.T) {
+	coordinator := &SlotExecutionCoordinator{budget: sideEffectTestBudget("")}
+	stream := &streamedExecution{slotStream: &slotStream{coordinator: coordinator}}
+	ctx := context.Background()
+	first := sideEffectTestResult("state", "qg")
+	first.Plans[0].GuardAfterState = []execution.PlanGapMutation{gapMergeStatement(t, execution.GapClear, "", 0, execution.GapScope{})}
+	if err := stream.mergeProvisional(ctx, first, 64); err != nil {
+		t.Fatal(err)
+	}
+	next := sideEffectTestResult("event", "qg")
+	next.Plans[0].GuardAfterState = []execution.PlanGapMutation{gapMergeStatement(t, execution.GapClear, "", 0,
+		execution.GapScope{LevelID: 1, HasLevel: true})}
+	if err := stream.mergeProvisional(ctx, next, 64); err == nil {
+		t.Fatal("fixture: two batches clearing one marker differently were merged")
+	}
+	if coordinator.reservations.events == 0 {
+		t.Fatal("fixture: the refused batch's event was never taken of the pool")
+	}
+	stream.releaseProvisional()
+	left := &coordinator.reservations
+	if left.states != 0 || left.events != 0 || left.gaps != 0 || left.retainedBytes != 0 {
+		t.Fatalf("after the Slot let go the pool holds %d State writes, %d events, %d gap mutations and %d bytes of it, want none",
+			left.states, left.events, left.gaps, left.retainedBytes)
 	}
 }

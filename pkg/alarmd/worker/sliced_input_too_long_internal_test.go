@@ -38,12 +38,12 @@ func TestASliceTheStoreRefusesAsTooLongIsNamedForIt(t *testing.T) {
 	// under its own code and the slice's bytes; not read in slices, the
 	// error stays as it is.
 	coordinator, _ := shareFixture(1<<20, 0, 0)
-	sliced := &streamedExecution{coordinator: coordinator, slices: &sliceReading{}}
+	sliced := &streamedExecution{slotStream: &slotStream{coordinator: coordinator, slices: &sliceReading{}}}
 	if refusal, final := execution.ShareRefusalOf(sliced.finalSliceRefusal(err)); !final ||
 		refusal.Reason != contract.ReasonInputSliceQueryTooLong || refusal.Detail == "" || refusal.LimitBytes != coordinator.qgShareBytes() {
 		t.Fatalf("final refusal = %+v, %t; want INPUT_SLICE_QUERY_TOO_LONG with the slice's bytes", refusal, final)
 	}
-	if _, final := execution.ShareRefusalOf((&streamedExecution{coordinator: coordinator}).finalSliceRefusal(err)); final {
+	if _, final := execution.ShareRefusalOf((&streamedExecution{slotStream: &slotStream{coordinator: coordinator}}).finalSliceRefusal(err)); final {
 		t.Fatal("a refusal of a Slot not read in slices was made final")
 	}
 	if err := sliceQueryTooLong(execution.InputSlice{}, refused(execution.RejectionClassQueryTooLong)); err != nil {

@@ -12,7 +12,7 @@ import (
 func TestIncrementalEffectsKeepLoadedFactsAndRejectedMergeSeparate(t *testing.T) {
 	co, _, request := gapReservationFixture()
 	co.budget.MaxStateMutations = 2
-	stream := &streamedExecution{coordinator: co}
+	stream := &streamedExecution{slotStream: &slotStream{coordinator: co}}
 	if _, err := stream.loadGapFacts(context.Background(), request); err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestIncrementalEffectsKeepLoadedFactsAndRejectedMergeSeparate(t *testing.T)
 // the incremental one.
 func TestIncrementalEffectsFollowTheMergedGapStatement(t *testing.T) {
 	co := &SlotExecutionCoordinator{budget: sideEffectTestBudget("state")}
-	stream := &streamedExecution{coordinator: co}
+	stream := &streamedExecution{slotStream: &slotStream{coordinator: co}}
 	defer stream.releaseProvisional()
 	first := sideEffectTestResult("gap", "qg")
 	first.Plans[0].GuardBeforeEvents[0].MutationDigest = "one"
@@ -133,7 +133,7 @@ func BenchmarkStatePreflightIndex(b *testing.B) {
 // perfectly plausible set of numbers.
 func TestSlotWindowCoverageAccumulatesAcrossSeriesRatherThanBeingReplaced(t *testing.T) {
 	co := &SlotExecutionCoordinator{budget: sideEffectTestBudget("state")}
-	stream := &streamedExecution{coordinator: co}
+	stream := &streamedExecution{slotStream: &slotStream{coordinator: co}}
 	defer stream.releaseProvisional()
 
 	first := sideEffectTestResult("gap", "qg")

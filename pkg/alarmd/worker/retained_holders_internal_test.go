@@ -55,8 +55,14 @@ func TestTheRetainedPoolIsNamedBySlotAndWhatItHolds(t *testing.T) {
 	slotA := execution.SlotIdentity{QueryGroup: "group-a", EvaluationTime: 1_788_000_000}
 	slotB := execution.SlotIdentity{QueryGroup: "group-b", EvaluationTime: 1_788_000_000}
 	stream := func(slot execution.SlotIdentity) *streamedExecution {
-		return &streamedExecution{coordinator: coordinator, began: true, request: execution.SlotExecutionRequest{
-			Contract: execution.FrozenExecutionContractRef{Slot: slot}, Operation: execution.OperationNormal}}
+		return &streamedExecution{
+			slotStream: &slotStream{
+				coordinator: coordinator,
+				began:       true,
+				request: execution.SlotExecutionRequest{
+					Contract: execution.FrozenExecutionContractRef{Slot: slot}, Operation: execution.OperationNormal},
+			},
+		}
 	}
 
 	b := stream(slotB)

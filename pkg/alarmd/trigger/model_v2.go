@@ -107,6 +107,17 @@ type DetectionEvidence struct {
 	MatchedAlgorithmOrdinal *uint32
 	MatchedGroupOrdinal     *uint32
 	ResultReason            string
+	// Inputs is every input of a Level joined strictly, one per algorithm
+	// in order, as its join read it (detect.InputEvidence); nil on any other
+	// Level. Its events' detection snapshot shows each.
+	Inputs []DetectionInputEvidence
+}
+
+// DetectionInputEvidence is one input as a strict join read it: the record's
+// projected value it was judged at, whether it was read, whether it matched.
+type DetectionInputEvidence struct {
+	ProjectedValueOrdinal uint32
+	Decided, Matched      bool
 }
 
 type HistorySummary struct {
@@ -145,6 +156,17 @@ type HistoryView interface {
 	// and the recovery walk would step over a whole window of real data
 	// looking for evidence it already had.
 	CountObserved(fromTime, untilTime int64) uint32
+	// CountUnusable reports how many positions in the range hold a point the
+	// Level could not use - a record that arrived and was not judged - which
+	// CountObserved leaves out together with the positions no record
+	// reached. A Level of an item detected over several inputs writes one
+	// for every round it could not decide, and its recovery walk tells that
+	// round apart from a hole: a hole a read has covered is a quiet minute,
+	// an undecided round is not.
+	//
+	// Required for the reason CountObserved is: a view without it would read
+	// every undecided round as a hole, and a settled hole recovers.
+	CountUnusable(fromTime, untilTime int64) uint32
 }
 
 type LevelHistory struct {
@@ -307,6 +329,19 @@ type LevelOutcomeV2 struct {
 	// not say whether the series' retained history still holds anomalies;
 	// this does. Internal, as RecoveryOpen.
 	SpanAnomalous bool
+	// UndecidedHeld is the windows the recovery walk of a Level joined
+	// strictly did not count as quiet because of undecided rounds: those
+	// ending on one, stepped over, and those ending on a decided round
+	// whose undecided rounds could have been anomalies enough to fire it.
+	// Internal, as RecoveryOpen: read by the counter that says an alert's
+	// recovery is waiting on rounds nobody could judge.
+	UndecidedHeld UndecidedHeldWindows
+}
+
+// UndecidedHeldWindows is LevelOutcomeV2.UndecidedHeld: the windows held at
+// their end (End) and within (Inside).
+type UndecidedHeldWindows struct {
+	End, Inside uint32
 }
 
 type EvaluationCountsV2 struct {
