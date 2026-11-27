@@ -151,6 +151,13 @@ func (progress ScheduleProgress) SkippedPrunedRange() bool {
 		progress.CurrentOrRecentGap.Kind != CompletionGapSkipped {
 		return false
 	}
+	// A completion since the skip: the skip writes no completion summary, so
+	// one past its cursor is a Slot completed after it - a query-free one
+	// whose Slot an earlier attempt had applied whole, which leaves the gap
+	// as it was (the gap fold) and the kind GAP_SKIPPED.
+	if completed := progress.lastCompletedSlot(); completed > progress.CurrentOrRecentGap.LastSlot {
+		return false
+	}
 	return forwardSkipReason(progress.CurrentOrRecentGap.ReasonCode)
 }
 
@@ -160,6 +167,16 @@ func (progress ScheduleProgress) SkippedPrunedRange() bool {
 // anchor: the Slots before its cursor no longer exist on the timeline, so
 // deriving a successor from them can only fail, and the cursor the skip set
 // is authoritative until the first completion after it.
+//
+// The latest of the three facts that name a completed Slot: the last full
+// one, the last one of the recent gap, and the one the last completion
+// summary names. Every commit writes the summary at the Slot it completed,
+// so after any commit the anchor is that Slot and its successor is the
+// cursor the commit wrote. The other two move only with some completions: a
+// query-free completion of a Slot an earlier attempt applied whole moves
+// neither - it has no PRIMARY, and it is no gap - and with those two alone
+// the anchor stayed one Slot behind the cursor, and every commit after it
+// was refused as a conflict, for good.
 func (progress ScheduleProgress) ContinuityAnchor() (EvaluationTime, bool) {
 	if progress.SkippedPrunedRange() {
 		return 0, false
@@ -168,5 +185,22 @@ func (progress ScheduleProgress) ContinuityAnchor() (EvaluationTime, bool) {
 	if progress.CurrentOrRecentGap != nil && progress.CurrentOrRecentGap.LastSlot > completed {
 		completed = progress.CurrentOrRecentGap.LastSlot
 	}
+	if last := progress.lastCompletedSlot(); last > completed {
+		completed = last
+	}
 	return completed, completed > 0
+}
+
+// lastCompletedSlot is the Slot the last completion summary names, zero
+// when there is none or it is not before the cursor. A summary at or past
+// the cursor names no Slot the cursor follows: a cursor derived from the
+// other two facts alone, as builds before this one derived it, can stand at
+// that Slot or before it, and the Slot is then due again. The other two
+// facts are held before the cursor by Validate; the summary is not, and a
+// record is not refused for it, so such a record reads as it did.
+func (progress ScheduleProgress) lastCompletedSlot() EvaluationTime {
+	if progress.LastCompletion == nil || progress.LastCompletion.Slot <= 0 || progress.LastCompletion.Slot >= progress.NextSlot {
+		return 0
+	}
+	return progress.LastCompletion.Slot
 }

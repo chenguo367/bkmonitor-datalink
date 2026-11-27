@@ -10,6 +10,7 @@
 package worker
 
 import (
+	"context"
 	"sort"
 	"sync"
 
@@ -27,6 +28,118 @@ import (
 type sliceLedger struct {
 	mu     sync.Mutex
 	slices map[int]*sliceLedgerEntry
+	// letGone is the numbers of the slices let go before they completed
+	// (letGo); changed is closed, and replaced, as a slice completes or is
+	// let go, for those waiting on the slices below theirs (waitBelow).
+	letGone map[int]struct{}
+	changed chan struct{}
+	// headed is the numbers of the slices whose head was handed to the apply
+	// side, or that write none - the Slot's first (noteHeaded).
+	headed map[int]struct{}
+}
+
+// noteHeaded records that the slice numbered number handed its head, or
+// has none to hand.
+func (ledger *sliceLedger) noteHeaded(number int) {
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	if ledger.headed == nil {
+		ledger.headed = make(map[int]struct{})
+	}
+	ledger.headed[number] = struct{}{}
+	ledger.changedLocked()
+}
+
+// waitHeadsBelow waits until every slice numbered below number handed its
+// head, had none, or was let go: the apply side takes the tasks in the order
+// they are handed, so heads handed in slice order are written in it.
+func (ledger *sliceLedger) waitHeadsBelow(ctx context.Context, number int) error {
+	return ledger.waitFor(ctx, func() bool {
+		for below := range number {
+			_, headed := ledger.headed[below]
+			_, gone := ledger.letGone[below]
+			if !headed && !gone {
+				return false
+			}
+		}
+		return true
+	})
+}
+
+// waitFor waits until done, read under mu, holds.
+func (ledger *sliceLedger) waitFor(ctx context.Context, done func() bool) error {
+	for {
+		ledger.mu.Lock()
+		if done() {
+			ledger.mu.Unlock()
+			return nil
+		}
+		if ledger.changed == nil {
+			ledger.changed = make(chan struct{})
+		}
+		changed := ledger.changed
+		ledger.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// changedLocked wakes every waitBelow. Under mu.
+func (ledger *sliceLedger) changedLocked() {
+	if ledger.changed != nil {
+		close(ledger.changed)
+		ledger.changed = nil
+	}
+}
+
+// letGo records that the slice numbered number was let go before it
+// completed - split, or its dimensions forgotten - so no slice above it
+// waits for it.
+func (ledger *sliceLedger) letGo(number int) {
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	if ledger.letGone == nil {
+		ledger.letGone = make(map[int]struct{})
+	}
+	ledger.letGone[number] = struct{}{}
+	ledger.changedLocked()
+}
+
+// waitBelow waits until every slice numbered below number has completed or
+// been let go, and says whether none of them completed: the slice is then
+// the Slot's first. With k consumers a slice's head and what it reads so far
+// are said by number (015 C1 step 3.2): read one at a time, every slice below
+// is done by the time one completes, and it does not wait.
+func (ledger *sliceLedger) waitBelow(ctx context.Context, number int) (bool, error) {
+	for {
+		ledger.mu.Lock()
+		done, first := true, true
+		for below := range number {
+			if _, completed := ledger.slices[below]; completed {
+				first = false
+			} else if _, gone := ledger.letGone[below]; !gone {
+				done = false
+				break
+			}
+		}
+		if done {
+			ledger.mu.Unlock()
+			return first, nil
+		}
+		if ledger.changed == nil {
+			ledger.changed = make(chan struct{})
+		}
+		changed := ledger.changed
+		ledger.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+	}
 }
 
 // sliceLedgerEntry is one completed slice's part. completion is its
@@ -36,9 +149,6 @@ type sliceLedgerEntry struct {
 	series     map[execution.PlanIdentity]int
 	streamed   []execution.NamedInputBinding
 	completion []execution.NamedInputBinding
-	// landed is the series of each Plan the slice wrote, set as its last
-	// window was cut (land); nil before.
-	landed map[execution.PlanIdentity]uint64
 }
 
 // complete records a slice's part as its completion leaves it: the series it
@@ -52,15 +162,18 @@ func (ledger *sliceLedger) complete(number int, series map[execution.PlanIdentit
 		ledger.slices = make(map[int]*sliceLedgerEntry)
 	}
 	ledger.slices[number] = &sliceLedgerEntry{series: series, streamed: streamed, completion: completion}
+	ledger.changedLocked()
 }
 
-// land records the series of each Plan a completed slice wrote.
-func (ledger *sliceLedger) land(number int, landed map[execution.PlanIdentity]uint64) {
+// last is the highest number a slice completed under, -1 with none.
+func (ledger *sliceLedger) last() int {
 	ledger.mu.Lock()
 	defer ledger.mu.Unlock()
-	if entry := ledger.slices[number]; entry != nil {
-		entry.landed = landed
+	last := -1
+	for number := range ledger.slices {
+		last = max(last, number)
 	}
+	return last
 }
 
 // numbers is the completed slices' numbers up to through, in order.
@@ -116,19 +229,4 @@ func (ledger *sliceLedger) through(number int) (map[execution.PlanIdentity]int, 
 		return left.RequirementID < right.RequirementID
 	})
 	return series, bindings
-}
-
-// landedBefore is the series of each Plan the slices numbered below number
-// wrote, and how many of those slices held any of it.
-func (ledger *sliceLedger) landedBefore(number int) (series, slices map[execution.PlanIdentity]uint64) {
-	ledger.mu.Lock()
-	defer ledger.mu.Unlock()
-	series, slices = make(map[execution.PlanIdentity]uint64), make(map[execution.PlanIdentity]uint64)
-	for _, slice := range ledger.numbers(number - 1) {
-		for plan, count := range ledger.slices[slice].landed {
-			series[plan] += count
-			slices[plan]++
-		}
-	}
-	return series, slices
 }

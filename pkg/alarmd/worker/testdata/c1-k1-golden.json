@@ -362,8 +362,8 @@
     ]
   },
   "first-seen, nothing from before": {
-    "Completed": true,
-    "Kind": "FULL_COMPLETED",
+    "Completed": false,
+    "Kind": "",
     "Slices": 5,
     "Discarded": 1,
     "Reads": [
@@ -374,59 +374,9 @@
       "2e461ff275941915",
       "994d038ae50ca184"
     ],
-    "States": [
-      "7/state-v1/13c9ce70bedf46fe075c79dbfd55110105e1f612e14c7dd838856867d4a6db07 13c400d0075ac0d0976334b1d4156067a8f8d572a71bdf91b372ba423d14ea95",
-      "7/state-v1/1dfc2290c77eb75f3f012071b2bb3087f25af4b5a1f6496a2bc7ea88ae1087ac 9ed72de1eee9b2a0fe1286eb174045acefee2a708fc63b1f7da479eb14e5c470",
-      "7/state-v1/32a25159ffc94e6d819c44c58014fcbcf803e5153d445434eb139ca8212c9a1b 0b812a53efa9dc6e6a8b61a55e21c051d956cd46f39737a226a1b326654519c6",
-      "7/state-v1/4e3e5bb70196f245be05dfa2156428186787c374ebefc03095d45e8736de6e1d d57a6cf17daf7952025f94f162bb7b4c6ab703710abcde354d7dd71bf3d0a4b3",
-      "7/state-v1/5fe6bc163f3d7297a4ceb4689f929155a023fff128e97c37cb9f8b9ab351d73b 8b1d1e97257edcdebd93297838a2e70f45456f978db5140081bb6d89fba0881d",
-      "7/state-v1/6d53fe06f48d9c1f1609c476d721221276b52fd596a23ed6dfe5ac90cad7cbb2 f10ffd47f9bfbdf6bab34e2ad23bc2ed544cd85b6b06ed8c1968586069cca155",
-      "7/state-v1/6e798d54a83e4dc27f3fa1d6ae4c8f05eed244d8361a544d6c022788d56b967a 1dc21995637009aa61ab763adc3f9bdeee00c5452666feb3ffa339675e5993c9",
-      "7/state-v1/76729b2d93d65a44740cfafdd5b0c0941b889de5afb15541d6cc7566bfabbd76 9e7896945e4b8a4398e5c7967e867ed109857e1c8fd8fd004eafff7afa762e55",
-      "7/state-v1/7959badf4dd6cf628d4462768468c569ce83a1f3db9f7e26e4612af6d4517194 38784c36b50553ff467af31300abb0ddcf229f4c9aa1a6e3f266c1a8def3ee83",
-      "7/state-v1/830a975d8dfefd7e2ebed519bf26dc0d489c0e988286544083b45f5c86bdf1a9 5a4e151927e310d9ccaa16c745f2c01bd460e6d18ef4bf1a95b1c1e69dbba5da",
-      "7/state-v1/8755c8cd42ea00c6631d9b9106879d6fe175608315d692a847a2106ea05cbd7a e945a58085ea93a9bf10b9a423944c57fde63c39972f716928e18760446574f1",
-      "7/state-v1/8c77a6d90ea3377771951a90d2b773f03a9a2de151d64c59e50613d3526278b1 c7949cfd1b471ffe432f41c4cf6084371b6763abc50dd2f3e1200ae2c4574a95",
-      "7/state-v1/96281b4ccbe0d48b969627df6ac71c76f0a42f4188f5e185343694b7f36a62ac 18f16b812ad13efed092015183d6cfab1606ad578075d927641079ee5bf90076",
-      "7/state-v1/9b38662dee148a6660acc72eec85cdd9e37f885615c1b45064ef8beb54bf63b5 ed0958bfeac6d76f4556ca0f38d74b2ec6f13e551a6fef3756bf27ee18c5857a",
-      "7/state-v1/9c650d63ad9964af55507787e99c163a050d95cc1fafc338c40670a3b8ca62c3 654b821980e2e61e03af3ee791f867399dc29107804298a1d3568b846a6b9251",
-      "7/state-v1/a90671b94ca4f951e229a45c7c3b1dcffd653f09b53ab4d964cbda395ebca0ed 5c49696e79415a5968406015234c55f177c6c769164c21231aa7fde4553fdb34",
-      "7/state-v1/cdcc20917853877be8b3a669910ad82dd1ab5266aa08c2a3036306c498627749 88630537abfb5d2324428d6c7df097220a0f0479db17d0098c59e3c3dcbb5730",
-      "7/state-v1/cdf4b52f8688a43e8bb49c8249218d672eb439a2746493824908895f23ac9270 3170b246f04f6ba4e2302aafe4f5e0cb0b0543496fd247a09bb4b3251a25b4bc",
-      "7/state-v1/d260768dcbd5ceacf6abc342596802c00c785fb37cdaaf86e9d69ededa06ff0a 00839076a3983b19757e9f41f40e0d2e9f968d961a2631c9c712dc203fe0e261",
-      "7/state-v1/dd5c73cfd2a24554a45f274f6ae2d2df908abb32e59f73a74728f85fed796d60 531f9deefcfd116b3611eaf476398f0893c251bb3222ec68f1b813181ae56039",
-      "7/state-v1/e72be81c6ac5f8c6bb128765be0d932b9689b5c886bb6c3e3259701457c2a8f5 3f48b80033a0579cfe15abee3945f55b7a2ec82a3ac3e5c2e4fd296d766e230f",
-      "7/state-v1/ecc46f0bb46cfafa58e4dabff39ffb192001becf7772207f33866cca3b69d069 3039af8ff99d780204f61c3baabd65a3766159f44370255ea3357dccafe15254",
-      "7/state-v1/f4d12b59d59ac8e3938c859590c66413ac4064774aba61ae3e87a5d99fa048f9 d94efb5e306eab49577a6d21738133afc2dbc56b11940fe890707ae1b7b9c6d9",
-      "7/state-v1/fc592e2e4b812645927b636f2e23874cbf598792fac6d8a268e98e528b84c4dc 6ff5764322f1f6bd02a6eb4c110e4b18067956223c37c9f1b53f1deeb184f5c4"
-    ],
-    "EventCount": 24,
-    "Events": [
-      "13c9ce70bedf46fe075c79dbfd55110105e1f612e14c7dd838856867d4a6db07",
-      "1dfc2290c77eb75f3f012071b2bb3087f25af4b5a1f6496a2bc7ea88ae1087ac",
-      "32a25159ffc94e6d819c44c58014fcbcf803e5153d445434eb139ca8212c9a1b",
-      "4e3e5bb70196f245be05dfa2156428186787c374ebefc03095d45e8736de6e1d",
-      "5fe6bc163f3d7297a4ceb4689f929155a023fff128e97c37cb9f8b9ab351d73b",
-      "6d53fe06f48d9c1f1609c476d721221276b52fd596a23ed6dfe5ac90cad7cbb2",
-      "6e798d54a83e4dc27f3fa1d6ae4c8f05eed244d8361a544d6c022788d56b967a",
-      "76729b2d93d65a44740cfafdd5b0c0941b889de5afb15541d6cc7566bfabbd76",
-      "7959badf4dd6cf628d4462768468c569ce83a1f3db9f7e26e4612af6d4517194",
-      "830a975d8dfefd7e2ebed519bf26dc0d489c0e988286544083b45f5c86bdf1a9",
-      "8755c8cd42ea00c6631d9b9106879d6fe175608315d692a847a2106ea05cbd7a",
-      "8c77a6d90ea3377771951a90d2b773f03a9a2de151d64c59e50613d3526278b1",
-      "96281b4ccbe0d48b969627df6ac71c76f0a42f4188f5e185343694b7f36a62ac",
-      "9b38662dee148a6660acc72eec85cdd9e37f885615c1b45064ef8beb54bf63b5",
-      "9c650d63ad9964af55507787e99c163a050d95cc1fafc338c40670a3b8ca62c3",
-      "a90671b94ca4f951e229a45c7c3b1dcffd653f09b53ab4d964cbda395ebca0ed",
-      "cdcc20917853877be8b3a669910ad82dd1ab5266aa08c2a3036306c498627749",
-      "cdf4b52f8688a43e8bb49c8249218d672eb439a2746493824908895f23ac9270",
-      "d260768dcbd5ceacf6abc342596802c00c785fb37cdaaf86e9d69ededa06ff0a",
-      "dd5c73cfd2a24554a45f274f6ae2d2df908abb32e59f73a74728f85fed796d60",
-      "e72be81c6ac5f8c6bb128765be0d932b9689b5c886bb6c3e3259701457c2a8f5",
-      "ecc46f0bb46cfafa58e4dabff39ffb192001becf7772207f33866cca3b69d069",
-      "f4d12b59d59ac8e3938c859590c66413ac4064774aba61ae3e87a5d99fa048f9",
-      "fc592e2e4b812645927b636f2e23874cbf598792fac6d8a268e98e528b84c4dc"
-    ],
+    "States": null,
+    "EventCount": 0,
+    "Events": null,
     "Gaps": [
       {
         "Identity": {
@@ -445,16 +395,16 @@
           "SlotDigest": "724e897c37bf3cda235db2e730aefbf782d4b190a0262bd953f81b29f1928d87"
         },
         "ScheduleRevision": "plan-schedule-v1",
-        "MutationDigest": "e1c080731cf2ef07d741296be5043b96e415cd572ca681897b58b1863ce9d46e",
+        "MutationDigest": "97547e00f24fbecc9035bbb2352b0f814a71f822c2ff71cc60eccf4309750581",
         "Scopes": [
           {
             "Scope": {
               "LevelID": 0,
               "HasLevel": false
             },
-            "Kind": "CLEAR",
-            "ReasonCode": "",
-            "RequiredFullSlots": 0
+            "Kind": "OPEN",
+            "ReasonCode": "CONFIG_DRIFT",
+            "RequiredFullSlots": 1
           }
         ]
       }
@@ -462,29 +412,19 @@
     "Completion": {
       "Contract": {
         "Slot": {
-          "QueryGroup": "query-group",
-          "EvaluationTime": 1788000000
+          "QueryGroup": "",
+          "EvaluationTime": 0
         },
-        "SnapshotRevision": "snapshot-v1",
-        "QueryRevision": "query-v1",
-        "ScheduleRevision": "schedule-v1",
-        "ScheduleSegmentStart": 1787999940,
-        "DuePlanSetDigest": "072a412c3d653e913699077a24fab1f55cbd1ead0986e6d8d1c0973fd3724a32"
+        "SnapshotRevision": "",
+        "QueryRevision": "",
+        "ScheduleRevision": "",
+        "ScheduleSegmentStart": 0,
+        "DuePlanSetDigest": ""
       },
-      "Kind": "FULL_COMPLETED",
-      "Primary": {
-        "Completeness": "FULL",
-        "DataState": "DATA",
-        "EmptiedByTarget": false,
-        "Identity": null,
-        "QuietWhenEmpty": false,
-        "UnfilledWhenEmpty": false,
-        "FilteredWhenEmpty": false,
-        "ValueFiltered": false,
-        "WitnessData": ""
-      },
-      "Result": "success",
-      "ReasonCode": "none",
+      "Kind": "",
+      "Primary": null,
+      "Result": "",
+      "ReasonCode": "",
       "Evidence": null,
       "TargetResolutions": null
     },
@@ -528,39 +468,9 @@
       "2e461ff275941915",
       "994d038ae50ca184"
     ],
-    "States": [
-      "7/state-v1/4e3e5bb70196f245be05dfa2156428186787c374ebefc03095d45e8736de6e1d d57a6cf17daf7952025f94f162bb7b4c6ab703710abcde354d7dd71bf3d0a4b3",
-      "7/state-v1/5fe6bc163f3d7297a4ceb4689f929155a023fff128e97c37cb9f8b9ab351d73b 8b1d1e97257edcdebd93297838a2e70f45456f978db5140081bb6d89fba0881d",
-      "7/state-v1/6d53fe06f48d9c1f1609c476d721221276b52fd596a23ed6dfe5ac90cad7cbb2 f10ffd47f9bfbdf6bab34e2ad23bc2ed544cd85b6b06ed8c1968586069cca155",
-      "7/state-v1/6e798d54a83e4dc27f3fa1d6ae4c8f05eed244d8361a544d6c022788d56b967a 1dc21995637009aa61ab763adc3f9bdeee00c5452666feb3ffa339675e5993c9",
-      "7/state-v1/76729b2d93d65a44740cfafdd5b0c0941b889de5afb15541d6cc7566bfabbd76 9e7896945e4b8a4398e5c7967e867ed109857e1c8fd8fd004eafff7afa762e55",
-      "7/state-v1/7959badf4dd6cf628d4462768468c569ce83a1f3db9f7e26e4612af6d4517194 38784c36b50553ff467af31300abb0ddcf229f4c9aa1a6e3f266c1a8def3ee83",
-      "7/state-v1/8c77a6d90ea3377771951a90d2b773f03a9a2de151d64c59e50613d3526278b1 c7949cfd1b471ffe432f41c4cf6084371b6763abc50dd2f3e1200ae2c4574a95",
-      "7/state-v1/96281b4ccbe0d48b969627df6ac71c76f0a42f4188f5e185343694b7f36a62ac 18f16b812ad13efed092015183d6cfab1606ad578075d927641079ee5bf90076",
-      "7/state-v1/a90671b94ca4f951e229a45c7c3b1dcffd653f09b53ab4d964cbda395ebca0ed 5c49696e79415a5968406015234c55f177c6c769164c21231aa7fde4553fdb34",
-      "7/state-v1/cdcc20917853877be8b3a669910ad82dd1ab5266aa08c2a3036306c498627749 88630537abfb5d2324428d6c7df097220a0f0479db17d0098c59e3c3dcbb5730",
-      "7/state-v1/cdf4b52f8688a43e8bb49c8249218d672eb439a2746493824908895f23ac9270 3170b246f04f6ba4e2302aafe4f5e0cb0b0543496fd247a09bb4b3251a25b4bc",
-      "7/state-v1/d260768dcbd5ceacf6abc342596802c00c785fb37cdaaf86e9d69ededa06ff0a 00839076a3983b19757e9f41f40e0d2e9f968d961a2631c9c712dc203fe0e261",
-      "7/state-v1/dd5c73cfd2a24554a45f274f6ae2d2df908abb32e59f73a74728f85fed796d60 531f9deefcfd116b3611eaf476398f0893c251bb3222ec68f1b813181ae56039",
-      "7/state-v1/f4d12b59d59ac8e3938c859590c66413ac4064774aba61ae3e87a5d99fa048f9 d94efb5e306eab49577a6d21738133afc2dbc56b11940fe890707ae1b7b9c6d9"
-    ],
-    "EventCount": 14,
-    "Events": [
-      "4e3e5bb70196f245be05dfa2156428186787c374ebefc03095d45e8736de6e1d",
-      "5fe6bc163f3d7297a4ceb4689f929155a023fff128e97c37cb9f8b9ab351d73b",
-      "6d53fe06f48d9c1f1609c476d721221276b52fd596a23ed6dfe5ac90cad7cbb2",
-      "6e798d54a83e4dc27f3fa1d6ae4c8f05eed244d8361a544d6c022788d56b967a",
-      "76729b2d93d65a44740cfafdd5b0c0941b889de5afb15541d6cc7566bfabbd76",
-      "7959badf4dd6cf628d4462768468c569ce83a1f3db9f7e26e4612af6d4517194",
-      "8c77a6d90ea3377771951a90d2b773f03a9a2de151d64c59e50613d3526278b1",
-      "96281b4ccbe0d48b969627df6ac71c76f0a42f4188f5e185343694b7f36a62ac",
-      "a90671b94ca4f951e229a45c7c3b1dcffd653f09b53ab4d964cbda395ebca0ed",
-      "cdcc20917853877be8b3a669910ad82dd1ab5266aa08c2a3036306c498627749",
-      "cdf4b52f8688a43e8bb49c8249218d672eb439a2746493824908895f23ac9270",
-      "d260768dcbd5ceacf6abc342596802c00c785fb37cdaaf86e9d69ededa06ff0a",
-      "dd5c73cfd2a24554a45f274f6ae2d2df908abb32e59f73a74728f85fed796d60",
-      "f4d12b59d59ac8e3938c859590c66413ac4064774aba61ae3e87a5d99fa048f9"
-    ],
+    "States": null,
+    "EventCount": 0,
+    "Events": null,
     "Gaps": [
       {
         "Identity": {

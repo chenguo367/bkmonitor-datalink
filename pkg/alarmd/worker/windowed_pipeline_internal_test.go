@@ -107,7 +107,7 @@ func TestAPlanPassedWhileTheNextWindowIsFilledIsDecidedByTheWindowCutAfter(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	stream.windows.passed = map[execution.PlanIdentity]struct{}{plan: {}}
+	stream.fill.passed = map[execution.PlanIdentity]struct{}{plan: {}}
 	stream.decideLanding(ctx, cut)
 	if _, decided := stream.windows.decided[plan]; decided {
 		t.Fatal("the window cut before the Plan was passed decided it")

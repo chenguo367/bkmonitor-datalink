@@ -49,8 +49,7 @@ import (
 //     (takeWindow); a landing hands back what the window wrote and the
 //     observations its applies made; and a drain waits until the apply
 //     goroutine is idle, for the rare paths that touch both sides: a Slot
-//     over its per-Slot caps, a slice's head with first-seen candidates, and
-//     the tail.
+//     over its per-Slot caps, and the tail.
 //
 // A landing's error stops the Slot at its next safe point; no window is
 // handed after it. Every return of Execute joins the apply goroutine first
@@ -62,25 +61,27 @@ type applyPipe struct {
 	stream *streamedExecution
 	// ctx is the apply goroutine's: the Slot's completion context, with this
 	// pipe as the retained owner in place of the stream.
-	ctx      context.Context
-	tasks    chan applyTask
-	landings chan applyResult
-	yields   chan yieldRequest
-	done     chan struct{}
+	ctx    context.Context
+	tasks  chan applyTask
+	yields chan yieldRequest
+	done   chan struct{}
 
-	// The Slot's goroutine's alone.
-	inflight int
-	// inflightEffects is the State and event counts of the windows handed
-	// and not yet landed.
-	inflightEffects effectCounts
-	// inflightRelease is what those windows give back when they land, by
-	// phase as they were cut (windowTask.release), and at retainPhaseWitness
-	// the witnesses among their state.
-	inflightRelease [retainPhaseCount + 1]uint64
-	seq             uint64
-	failed          error
-	panicked        *sideBySidePanic
-	closed          bool
+	// pipeLane is producer 0's lane: the stream that dispatches the Slot's
+	// slices, the one stream with one. lanes is the other producers', each a
+	// stream consuming the Slot's slices side by side (015 C1), added as it
+	// first hands a task (laneOf); lanesMu guards it, the apply goroutine
+	// finding a task's lane by its producer.
+	pipeLane
+	lanesMu sync.Mutex
+	lanes   map[uint64]*pipeLane
+
+	// failMu guards failed and panicked: the first error a landing came back
+	// with and the first panic, whichever lane landed it.
+	failMu   sync.Mutex
+	failed   error
+	panicked *sideBySidePanic
+	// closed is the Slot's goroutine's, set as it joins the apply goroutine.
+	closed bool
 
 	// writingWindow is set while the apply goroutine writes a window
 	// (judgeHeldLocked).
@@ -102,9 +103,135 @@ type applyPipe struct {
 	peakByPhase [retainPhaseCount]uint64
 }
 
+// pipeLane is one producer's side of the apply pipe: the order of its tasks,
+// what they hold in flight, and their landings, which only that producer
+// takes, landing them on its own stream (landResult). The landings wait in a
+// queue of their own, unbounded: the apply goroutine never waits on a
+// producer to take one, so a producer waiting on another stream of the Slot
+// never holds up the others' tasks.
+type pipeLane struct {
+	// stream is the producer.
+	stream *streamedExecution
+
+	// The producer's alone.
+	inflight int
+	// inflightEffects is the State and event counts of the windows handed
+	// and not yet written, under the producer's effectsMu: the apply side
+	// gives a window's counts back as it is written (writtenEffects), not
+	// as its producer lands it.
+	inflightEffects effectCounts
+	// inflightRelease is what those windows give back when they land, by
+	// phase as they were cut (windowTask.release), and at retainPhaseWitness
+	// the witnesses among their state.
+	inflightRelease [retainPhaseCount + 1]uint64
+	seq             uint64
+
+	// landed is the lane's landings not yet taken, under landedMu; a value on
+	// landedNote says it holds one.
+	landedMu   sync.Mutex
+	landed     []applyResult
+	landedNote chan struct{}
+}
+
+// writtenEffects gives back the State and event counts of window, written or
+// not written for a failure before it, the moment the apply side is done
+// with it: to the pool, and from the Slot's and its producer's, kept as
+// spent. A merge judged against the per-Slot caps sees them back however
+// long its producer takes to land the window - with k consumers, one may be
+// reading its next slice (015 C1 section 6, C1). On the apply goroutine.
+func (lane *pipeLane) writtenEffects(window *windowTask) {
+	if window == nil {
+		return
+	}
+	producer := lane.stream
+	producer.coordinator.releaseEffects(window.effects)
+	given := effectCounts{states: window.effects.states, events: window.effects.events}
+	producer.effectsMu.Lock()
+	defer producer.effectsMu.Unlock()
+	lane.inflightEffects = lessEffects(lane.inflightEffects, given)
+	producer.effectsSpent = producer.effectsSpent.plus(given)
+	producer.effects, producer.ownEffects = lessEffects(producer.effects, given), lessEffects(producer.ownEffects, given)
+}
+
+// land queues a landing for the lane's producer. On the apply goroutine.
+func (lane *pipeLane) land(result applyResult) {
+	lane.landedMu.Lock()
+	lane.landed = append(lane.landed, result)
+	lane.landedMu.Unlock()
+	select {
+	case lane.landedNote <- struct{}{}:
+	default:
+	}
+}
+
+// take is the lane's landings queued so far, in the order they landed.
+func (lane *pipeLane) take() []applyResult {
+	lane.landedMu.Lock()
+	defer lane.landedMu.Unlock()
+	taken := lane.landed
+	lane.landed = nil
+	return taken
+}
+
+// lane is the lane of producer, nil before it handed a task.
+func (pipe *applyPipe) lane(producer uint64) *pipeLane {
+	if producer == 0 {
+		return &pipe.pipeLane
+	}
+	pipe.lanesMu.Lock()
+	defer pipe.lanesMu.Unlock()
+	return pipe.lanes[producer]
+}
+
+// laneOf is stream's lane, added as it first hands a task.
+func (pipe *applyPipe) laneOf(stream *streamedExecution) *pipeLane {
+	if stream.producer == 0 {
+		return &pipe.pipeLane
+	}
+	pipe.lanesMu.Lock()
+	defer pipe.lanesMu.Unlock()
+	lane := pipe.lanes[stream.producer]
+	if lane == nil {
+		if pipe.lanes == nil {
+			pipe.lanes = make(map[uint64]*pipeLane)
+		}
+		lane = &pipeLane{stream: stream, landedNote: make(chan struct{}, 1)}
+		pipe.lanes[stream.producer] = lane
+	}
+	return lane
+}
+
+// everyLane is producer 0's lane and every other, in no order.
+func (pipe *applyPipe) everyLane() []*pipeLane {
+	pipe.lanesMu.Lock()
+	defer pipe.lanesMu.Unlock()
+	lanes := []*pipeLane{&pipe.pipeLane}
+	for _, lane := range pipe.lanes {
+		lanes = append(lanes, lane)
+	}
+	return lanes
+}
+
+// fail keeps err as the pipe's failure unless it has one.
+func (pipe *applyPipe) fail(err error) {
+	pipe.failMu.Lock()
+	defer pipe.failMu.Unlock()
+	if pipe.failed == nil {
+		pipe.failed = err
+	}
+}
+
+// failure is the first error a landing came back with.
+func (pipe *applyPipe) failure() error {
+	pipe.failMu.Lock()
+	defer pipe.failMu.Unlock()
+	return pipe.failed
+}
+
 // applyTask is one task of the apply goroutine: a window, or a slice's head
 // or the tail. producer and seq order it: tasks of one producer run in the
-// order it handed them. There is one producer, the Slot's goroutine.
+// order it handed them. The producer is the handing stream's lane: 0 with
+// one stream, one a consumer with several.
 type applyTask struct {
 	producer, seq uint64
 	window        *windowTask
@@ -143,9 +270,20 @@ var applyGoroutines atomic.Int64
 // by phase as it landed, on the Slot's goroutine.
 var windowLandedForTest atomic.Pointer[func(given [retainPhaseCount]uint64)]
 
+// applyPipeNow is the Slot's apply goroutine, nil before the first handover:
+// read under pipeMu, as with k consumers any of them may be the one starting
+// it (applyPipeline) while another reads it.
+func (stream *streamedExecution) applyPipeNow() *applyPipe {
+	stream.pipeMu.Lock()
+	defer stream.pipeMu.Unlock()
+	return stream.windows.pipe
+}
+
 // applyPipeline is the Slot's apply goroutine, started at the first
 // handover on the Slot's completion context.
 func (stream *streamedExecution) applyPipeline(ctx context.Context) *applyPipe {
+	stream.pipeMu.Lock()
+	defer stream.pipeMu.Unlock()
 	if pipe := stream.windows.pipe; pipe != nil {
 		return pipe
 	}
@@ -153,8 +291,10 @@ func (stream *streamedExecution) applyPipeline(ctx context.Context) *applyPipe {
 	if base == nil {
 		base = ctx
 	}
-	pipe := &applyPipe{stream: stream, tasks: make(chan applyTask), landings: make(chan applyResult, 4),
-		yields: make(chan yieldRequest), done: make(chan struct{})}
+	// Producer 0's lane is the stream that dispatches, whichever stream
+	// hands the first task.
+	pipe := &applyPipe{stream: stream, tasks: make(chan applyTask), yields: make(chan yieldRequest), done: make(chan struct{}),
+		pipeLane: pipeLane{stream: stream.holder(), landedNote: make(chan struct{}, 1)}}
 	pipe.ctx = context.WithValue(base, retainedOwnerKey{}, retainedOwner(pipe))
 	stream.windows.pipe = pipe
 	applyGoroutines.Add(1)
@@ -165,7 +305,7 @@ func (stream *streamedExecution) applyPipeline(ctx context.Context) *applyPipe {
 func (pipe *applyPipe) run() {
 	defer close(pipe.done)
 	defer applyGoroutines.Add(-1)
-	var last [1]uint64
+	last := map[uint64]uint64{}
 	// stopped is the first failure a task came back with. A task handed
 	// after it is not run and comes back with it: nothing of a window after
 	// the one that failed is written, whenever the Slot's goroutine handed
@@ -178,18 +318,21 @@ func (pipe *applyPipe) run() {
 			panic("alarmd worker: an apply task ran out of its producer's order")
 		}
 		last[task.producer] = task.seq
+		lane := pipe.lane(task.producer)
 		if stopped != nil {
-			pipe.landings <- applyResult{task: task, err: stopped}
+			lane.writtenEffects(task.window)
+			lane.land(applyResult{task: task, err: stopped})
 			continue
 		}
 		result := pipe.execute(task)
+		lane.writtenEffects(task.window)
 		switch {
 		case result.panicked != nil:
 			stopped = result.panicked
 		case result.err != nil:
 			stopped = result.err
 		}
-		pipe.landings <- result
+		lane.land(result)
 	}
 }
 
@@ -225,26 +368,36 @@ func (pipe *applyPipe) execute(task applyTask) (result applyResult) {
 // landing came back with an error.
 func (stream *streamedExecution) handOver(ctx context.Context, task applyTask) error {
 	pipe := stream.applyPipeline(ctx)
+	lane := pipe.laneOf(stream)
 	if err := stream.takeLandings(ctx); err != nil {
 		return err
 	}
-	pipe.seq++
-	task.seq = pipe.seq
+	lane.seq++
+	task.producer, task.seq = stream.producer, lane.seq
 	leave := stream.enter(slotPhaseApplyWait)
 	defer leave()
+	// In flight before it is sent: the apply side may write it, and give its
+	// counts back (writtenEffects), the moment it takes it.
+	var counts effectCounts
+	if window := task.window; window != nil {
+		counts = effectCounts{states: window.effects.states, events: window.effects.events}
+		stream.effectsMu.Lock()
+		lane.inflightEffects = lane.inflightEffects.plus(counts)
+		stream.effectsMu.Unlock()
+	}
 	for {
 		select {
 		case pipe.tasks <- task:
-			pipe.inflight++
+			lane.inflight++
 			if window := task.window; window != nil {
+				stream.pipeMu.Lock()
 				stream.windows.handed++
-				pipe.inflightEffects.states += window.effects.states
-				pipe.inflightEffects.events += window.effects.events
+				stream.pipeMu.Unlock()
 				for phase, bytes := range window.release {
-					pipe.inflightRelease[phase] += bytes
+					lane.inflightRelease[phase] += bytes
 					pipe.stream.inflightHeld.Add(bytes)
 				}
-				pipe.inflightRelease[retainPhaseWitness] += window.release[retainPhaseState] - min(window.stateBytes, window.release[retainPhaseState])
+				lane.inflightRelease[retainPhaseWitness] += window.release[retainPhaseState] - min(window.stateBytes, window.release[retainPhaseState])
 			}
 			if applySerially.Load() {
 				return stream.drainApply(ctx)
@@ -252,10 +405,14 @@ func (stream *streamedExecution) handOver(ctx context.Context, task applyTask) e
 			return nil
 		case request := <-pipe.yields:
 			stream.serveYield(request)
-		case result := <-pipe.landings:
-			stream.landResult(ctx, result)
-			if pipe.failed != nil {
-				return pipe.failed
+		case <-lane.landedNote:
+			stream.landTaken(ctx, lane)
+			if err := pipe.failure(); err != nil {
+				// Not sent: not in flight.
+				stream.effectsMu.Lock()
+				lane.inflightEffects = lessEffects(lane.inflightEffects, counts)
+				stream.effectsMu.Unlock()
+				return err
 			}
 		}
 	}
@@ -264,19 +421,30 @@ func (stream *streamedExecution) handOver(ctx context.Context, task applyTask) e
 // takeLandings takes back every landing that is there, not waiting for one,
 // and returns the first error a landing came back with.
 func (stream *streamedExecution) takeLandings(ctx context.Context) error {
-	pipe := stream.windows.pipe
+	pipe := stream.applyPipeNow()
 	if pipe == nil {
 		return nil
 	}
+	lane := pipe.lane(stream.producer)
+	if lane == nil {
+		return pipe.failure()
+	}
 	for {
 		select {
-		case result := <-pipe.landings:
-			stream.landResult(ctx, result)
+		case <-lane.landedNote:
+			stream.landTaken(ctx, lane)
 		case request := <-pipe.yields:
 			stream.serveYield(request)
 		default:
-			return pipe.failed
+			return pipe.failure()
 		}
+	}
+}
+
+// landTaken lands every landing queued on lane, in the order they landed.
+func (stream *streamedExecution) landTaken(ctx context.Context, lane *pipeLane) {
+	for _, result := range lane.take() {
+		stream.landResult(ctx, result)
 	}
 }
 
@@ -284,54 +452,55 @@ func (stream *streamedExecution) takeLandings(ctx context.Context) error {
 // error a landing came back with: the apply goroutine is idle then, and the
 // Slot's goroutine may touch what is the apply side's.
 func (stream *streamedExecution) drainApply(ctx context.Context) error {
-	pipe := stream.windows.pipe
+	pipe := stream.applyPipeNow()
 	if pipe == nil {
 		return nil
 	}
-	if pipe.inflight > 0 {
+	if lane := pipe.lane(stream.producer); lane != nil && lane.inflight > 0 {
 		leave := stream.enter(slotPhaseApplyWait)
-		for pipe.inflight > 0 {
+		for lane.inflight > 0 {
 			select {
-			case result := <-pipe.landings:
-				stream.landResult(ctx, result)
+			case <-lane.landedNote:
+				stream.landTaken(ctx, lane)
 			case request := <-pipe.yields:
 				stream.serveYield(request)
 			}
 		}
 		leave()
 	}
-	return pipe.failed
+	return pipe.failure()
 }
 
 // landResult takes one task's result back on the Slot's goroutine: the
 // observations its applies made are said, and a window gives back what it
 // held (landWindow), whatever its error.
 func (stream *streamedExecution) landResult(ctx context.Context, result applyResult) {
-	pipe := stream.windows.pipe
-	pipe.inflight--
+	pipe := stream.applyPipeNow()
+	lane := pipe.lane(result.task.producer)
+	lane.inflight--
 	defer stream.enter(slotPhaseLand)()
 	stream.coordinator.sayDeferred(result.observations)
 	err := result.err
 	if result.panicked != nil {
+		pipe.failMu.Lock()
 		if pipe.panicked == nil {
 			pipe.panicked = result.panicked
 		}
+		pipe.failMu.Unlock()
 		err = result.panicked
 	}
 	if window := result.task.window; window != nil {
-		pipe.inflightEffects.states -= window.effects.states
-		pipe.inflightEffects.events -= window.effects.events
 		for phase, bytes := range window.release {
-			pipe.inflightRelease[phase] -= bytes
+			lane.inflightRelease[phase] -= bytes
 			pipe.stream.inflightHeld.Add(^(bytes - 1))
 		}
-		pipe.inflightRelease[retainPhaseWitness] -= window.release[retainPhaseState] - min(window.stateBytes, window.release[retainPhaseState])
+		lane.inflightRelease[retainPhaseWitness] -= window.release[retainPhaseState] - min(window.stateBytes, window.release[retainPhaseState])
 		landing := result.landing
 		landing.task, landing.err = window, err
 		err = stream.landWindow(ctx, landing)
 	}
-	if err != nil && pipe.failed == nil {
-		pipe.failed = err
+	if err != nil {
+		pipe.fail(err)
 	}
 }
 
@@ -349,29 +518,27 @@ func (stream *streamedExecution) serveYield(request yieldRequest) {
 // the Slot's usage and timing run it first. A panic on the apply goroutine is
 // raised again here.
 func (stream *streamedExecution) joinApply(ctx context.Context) {
-	pipe := stream.windows.pipe
+	pipe := stream.applyPipeNow()
 	if pipe == nil || pipe.closed {
 		return
 	}
 	pipe.closed = true
 	close(pipe.tasks)
+	own := pipe.laneOf(stream)
 	for ended := false; !ended; {
 		select {
-		case result := <-pipe.landings:
-			stream.landResult(ctx, result)
+		case <-own.landedNote:
+			stream.landTaken(ctx, own)
 		case request := <-pipe.yields:
 			stream.serveYield(request)
 		case <-pipe.done:
 			ended = true
 		}
 	}
-	for taken := false; !taken; {
-		select {
-		case result := <-pipe.landings:
-			stream.landResult(ctx, result)
-		default:
-			taken = true
-		}
+	// Every lane's landings left, each landed on its producer: the streams
+	// consuming the Slot's slices have ended by now.
+	for _, lane := range pipe.everyLane() {
+		lane.stream.landTaken(ctx, lane)
 	}
 	// The apply side's holds become the Slot's once its goroutine has ended:
 	// the pool took them as they were judged, and they are charged the one
@@ -379,17 +546,22 @@ func (stream *streamedExecution) joinApply(ctx context.Context) {
 	if held := pipe.stream.applyHeldBytes.Swap(0); held > 0 {
 		stream.chargeRetained(retainPhaseState, held)
 	}
+	stream.peakMu.Lock()
 	if pipe.peak > stream.peakRetained {
 		stream.peakRetained, stream.peakByPhase = pipe.peak, pipe.peakByPhase
 	}
-	if pipe.panicked != nil {
-		panic(pipe.panicked)
+	stream.peakMu.Unlock()
+	pipe.failMu.Lock()
+	panicked := pipe.panicked
+	pipe.failMu.Unlock()
+	if panicked != nil {
+		panic(panicked)
 	}
 }
 
 // applyBusy is how long the apply goroutine ran tasks, once joined.
 func (stream *streamedExecution) applyBusy() time.Duration {
-	if pipe := stream.windows.pipe; pipe != nil && pipe.closed {
+	if pipe := stream.applyPipeNow(); pipe != nil && pipe.closed {
 		return pipe.busy
 	}
 	return 0

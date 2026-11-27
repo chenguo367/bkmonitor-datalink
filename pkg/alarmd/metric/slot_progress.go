@@ -13,6 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/progress"
 )
 
@@ -23,7 +24,7 @@ import (
 // of an unfinished Slot's projection a later attempt of it changed. Every
 // cell of every family exists from the start, so a zero is a reading.
 type slotProgressMetrics struct {
-	reads, begins, notCommitted, superseded *prometheus.CounterVec
+	reads, begins, notCommitted, superseded, conflicts, appliedWhole *prometheus.CounterVec
 }
 
 func newSlotProgressMetrics() slotProgressMetrics {
@@ -74,6 +75,28 @@ func newSlotProgressMetrics() slotProgressMetrics {
 				"progress_committed line, degraded CONFIG_DRIFT, naming the fields, is written as every supersede's " +
 				"is. A BeginSlot made again on a conflict counts once, from the pass its write ended on.",
 		}, []string{"field"}),
+		conflicts: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Subsystem: metricSubsystem, Name: "progress_conflicts_total",
+			Help: "Progress writes the record refused as a conflict, once a call, by operation - begin (a Slot's " +
+				"BeginSlot), commit, range (an expired range's begin or commit) - and by the fact that refused it: " +
+				"RANGE_IN_FLIGHT (an expired range is being written, or another range than this one), CURSOR_MOVED " +
+				"(the record's cursor is not at the Slot or range - a commit's progress_committed line says the Slot " +
+				"its completed facts derive as next and the cursor it stores), PROGRESS_MISSING (no record for a Slot " +
+				"or range that began), CAS_CONFLICT (the record changed under the write), IDENTITY_MISMATCH (the " +
+				"record names another Query Group), SEGMENT_OLDER (the Slot asked through an older Segment than its " +
+				"unfinished projection's), SLOT_IN_FLIGHT (an unfinished Slot where a range would begin), " +
+				"RANGE_MISSING (a range committed that was never begun), GRID_MOVED (the timeline's successor of a " +
+				"range's last Slot is no longer its proof's); UNNAMED, a conflict its path returned without a word, and OTHER, " +
+				"a word this build does not know - neither should be anything but zero. A conflict met on the owner's " +
+				"record and written again counts once, from the pass the write ended on.",
+		}, []string{"operation", "reason"}),
+		appliedWhole: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Subsystem: metricSubsystem, Name: "progress_query_free_applied_total",
+			Help: "Query-free completions (GAP_SKIPPED, SNAPSHOT_UNAVAILABLE) committed for a Slot an earlier " +
+				"attempt had applied whole - every Plan evaluated, its events sent and its State written - and " +
+				"ended before writing its Slot down, by kind, once the commit applied. Such a completion records " +
+				"no gap. It is how often an attempt ends between its apply and its commit.",
+		}, []string{"kind"}),
 	}
 	for _, caller := range progress.ProgressReadCallers {
 		for _, source := range progress.ProgressReadSources {
@@ -89,11 +112,19 @@ func newSlotProgressMetrics() slotProgressMetrics {
 	for _, field := range progress.SupersededProjectionFields {
 		metrics.superseded.WithLabelValues(field)
 	}
+	for _, operation := range progress.ProgressConflictOperations {
+		for _, reason := range progressConflictReasons() {
+			metrics.conflicts.WithLabelValues(operation, reason)
+		}
+	}
+	for _, kind := range progress.QueryFreeAppliedKinds {
+		metrics.appliedWhole.WithLabelValues(kind)
+	}
 	return metrics
 }
 
 func (m slotProgressMetrics) collectors() []prometheus.Collector {
-	return []prometheus.Collector{m.reads, m.begins, m.notCommitted, m.superseded}
+	return []prometheus.Collector{m.reads, m.begins, m.notCommitted, m.superseded, m.conflicts, m.appliedWhole}
 }
 
 // RecordProgressRead counts one read of a Progress record by its owner; a
@@ -135,4 +166,35 @@ func (r *Recorder) RecordProgressProjectionSuperseded(field string) {
 		return
 	}
 	r.phaseTwo.slotProgress.superseded.WithLabelValues(field).Inc()
+}
+
+// RecordProgressConflict counts one Progress write the record refused as a
+// conflict, by operation and the fact that refused it. A reason outside
+// execution.ProgressConflicts is counted under OTHER, not dropped: a word a
+// path learns later is still a conflict counted. An operation outside
+// progress.ProgressConflictOperations is dropped.
+func (r *Recorder) RecordProgressConflict(operation, reason string) {
+	if r == nil || !knownLabel(progress.ProgressConflictOperations, operation) {
+		return
+	}
+	if !knownLabel(execution.ProgressConflicts, reason) {
+		reason = observability.CursorRefusalOther
+	}
+	r.phaseTwo.slotProgress.conflicts.WithLabelValues(operation, reason).Inc()
+}
+
+// progressConflictReasons is the conflicts family's reason cells: every
+// word, and OTHER.
+func progressConflictReasons() []string {
+	return append(append([]string(nil), execution.ProgressConflicts...), observability.CursorRefusalOther)
+}
+
+// RecordProgressQueryFreeApplied counts one query-free completion committed
+// for a Slot an earlier attempt had applied whole, by its kind; a kind
+// outside progress.QueryFreeAppliedKinds is dropped.
+func (r *Recorder) RecordProgressQueryFreeApplied(kind string) {
+	if r == nil || !knownLabel(progress.QueryFreeAppliedKinds, kind) {
+		return
+	}
+	r.phaseTwo.slotProgress.appliedWhole.WithLabelValues(kind).Inc()
 }

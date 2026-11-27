@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"slices"
 	"sort"
 	"sync/atomic"
 	"time"
@@ -81,15 +82,6 @@ import (
 // their bytes back; what is read of the Slot as a whole after that is in the
 // summary (slotEvaluationSummary) and in the few derived facts kept here.
 type slotWindows struct {
-	// prepared is every series the completion handed the evaluation, for the
-	// head's open statements (headOpenStatements). It is the same slice the
-	// evaluation walks, not a copy; a window landed zeroes the entries of its
-	// series, from dropped up to reached, so their inputs go with it.
-	prepared []preparedSeries
-	// reached is where the series being merged sits in prepared: every one
-	// before it is merged, so a window applied now holds none of the later
-	// ones. dropped is how far landed windows have let prepared go.
-	reached, dropped int
 	// present is, by no-data Plan, the groups of the series a landed window
 	// let go of (nodata.PresentSet): the absence is judged after every Plan's
 	// own series, from which groups reported, and that is all it reads of
@@ -103,9 +95,14 @@ type slotWindows struct {
 	// before the Slot, for unseenPlans in the tail: the views themselves are
 	// gone by then.
 	seen map[execution.PlanIdentity]struct{}
-	// streamedPeak is the most bindings stream.streamed held since it was
-	// last rebuilt (compactStreamed).
-	streamedPeak int
+	// perWindow is s_min, the fewest series a window holds, fixed with the
+	// ceiling; ceilingWindows is how many windows the ceiling allows, and
+	// raisedWindows how many of them a no-data round's synthetic series
+	// added - its absences after its scan, the rest of what it says after it
+	// finished (raiseWindowCeiling). Both are on the completion row. The
+	// Slot's, as the ceiling is: fixed by its first slice, which any of its
+	// consumers may complete, and read by every slice after.
+	perWindow, ceilingWindows, raisedWindows atomic.Uint64
 	// started is set once the head has run: from then on the Slot is applied
 	// window by window, and its tail runs after the evaluation in place of
 	// the one Sequence a Slot that fits a window runs.
@@ -125,19 +122,6 @@ type slotWindows struct {
 	// for a later slice to extend (applySliceHead): the marker takes one
 	// statement per Plan per Slot, grown, never a second one.
 	headStatements map[execution.PlanIdentity]execution.PlanGapMutation
-	// bytes is what the output and state phases have retained for the
-	// window's results and views since the last window landed, and the input
-	// phase for its record id buffers: the window's own share of the Slot.
-	// stateBytes is the state phase's part of it, the views, which go back
-	// whole; the output phase gives back all it holds but what the Plan
-	// results and the summary keep (takeWindow).
-	bytes, stateBytes uint64
-	// recordIDs is the record id buffers the window's series were read
-	// through (materializeRecordIDs), by Dataset: the last prepared position
-	// that read each, and what it holds. A buffer goes when the window of
-	// that position lands (dropWindowRecordIDs); one a later series of the
-	// next window also reads stays, and moves to that window.
-	recordIDs map[*execution.Dataset]*windowRecordIDs
 	// blocked is the Plans whose output was not written in a window -
 	// deferred, its ACK unknown, or refused whole (planOutputWithheld). None
 	// of their later windows is written and their tail writes nothing, as a
@@ -155,20 +139,59 @@ type slotWindows struct {
 	// (completeWindowsBeyondSlotBudget): their results past the cursors are
 	// not written, and their tail writes the budget's open statement.
 	replaced map[execution.PlanIdentity]struct{}
+	landing  planLanding
+	decided  map[execution.PlanIdentity]struct{}
+	// count is the windows landed - taken back on the Slot's goroutine
+	// (landWindow); handed the windows handed to the apply goroutine
+	// (handOver). The last one handed lands at the next take-back, which an
+	// attempt whose read fails after it reaches only in joinApply.
+	count  int
+	handed int
+	// pipe is the Slot's apply goroutine, started at the first window handed
+	// to it (windowed_pipeline.go); nil before.
+	pipe *applyPipe
+}
+
+// sliceWindow is the window a stream is filling: the series it prepared and
+// how far its windows reached, what the window being filled holds, its
+// record ids, ceiling and the Plans it passed - the stream's own, as the
+// slice it consumes is (015 C1 step 3.1). The Slot's windows - what is
+// handed, written and landed, and what the Slot keeps of them - are
+// slotWindows.
+type sliceWindow struct {
+	// prepared is every series the completion handed the evaluation, for the
+	// head's open statements (headOpenStatements). It is the same slice the
+	// evaluation walks, not a copy; a window landed zeroes the entries of its
+	// series, from dropped up to reached, so their inputs go with it.
+	prepared []preparedSeries
+	// reached is where the series being merged sits in prepared: every one
+	// before it is merged, so a window applied now holds none of the later
+	// ones. dropped is how far landed windows have let prepared go.
+	reached, dropped int
+	// streamedPeak is the most bindings stream.streamed held since it was
+	// last rebuilt (compactStreamed).
+	streamedPeak int
+	// bytes is what the output and state phases have retained for the
+	// window's results and views since the last window landed, and the input
+	// phase for its record id buffers: the window's own share of the Slot.
+	// stateBytes is the state phase's part of it, the views, which go back
+	// whole; the output phase gives back all it holds but what the Plan
+	// results and the summary keep (takeWindow).
+	bytes, stateBytes uint64
+	// recordIDs is the record id buffers the window's series were read
+	// through (materializeRecordIDs), by Dataset: the last prepared position
+	// that read each, and what it holds. A buffer goes when the window of
+	// that position lands (dropWindowRecordIDs); one a later series of the
+	// next window also reads stays, and moves to that window.
+	recordIDs map[*execution.Dataset]*windowRecordIDs
 	// largestSeries is the most input one series was charged while the
 	// Slot's records arrived. The latest its windows may move its deadline to
 	// is the stream's windowCeiling, fixed at the completion
 	// (fixWindowCeiling).
 	largestSeries uint64
-	// perWindow is s_min, the fewest series a window holds, fixed with the
-	// ceiling; ceilingWindows is how many windows the ceiling allows, and
-	// raisedWindows how many of them a no-data round's synthetic series
-	// added - its absences after its scan, the rest of what it says after it
-	// finished (raiseWindowCeiling). Both are on the completion row.
-	perWindow                     uint64
-	ceilingWindows, raisedWindows uint64
 	// evaluating is the Plan whose result the evaluation is producing, and
-	// passed the Plans whose series it has moved past.
+	// passed the Plans whose series it has moved past: in a Slot read in
+	// slices, the slice's series (beginSlice).
 	evaluating    execution.PlanIdentity
 	evaluatingSet bool
 	passed        map[execution.PlanIdentity]struct{}
@@ -183,17 +206,6 @@ type slotWindows struct {
 	// keys are handed to the store in.
 	readBeside []execution.StateKeyIdentity
 	releasing  []execution.StateKeyIdentity
-	landing    planLanding
-	decided    map[execution.PlanIdentity]struct{}
-	// count is the windows landed - taken back on the Slot's goroutine
-	// (landWindow); handed the windows handed to the apply goroutine
-	// (handOver). The last one handed lands at the next take-back, which an
-	// attempt whose read fails after it reaches only in joinApply.
-	count  int
-	handed int
-	// pipe is the Slot's apply goroutine, started at the first window handed
-	// to it (windowed_pipeline.go); nil before.
-	pipe *applyPipe
 	// zeroBoundCuts is the windows cut while the window bound was zero, by
 	// the retained phase holding the most outside the window
 	// (observability.WindowZeroBoundReasons).
@@ -203,6 +215,61 @@ type slotWindows struct {
 	// than it holds, in that order (observability.WindowAccountingClamps):
 	// never, unless a window's give-back is counted twice.
 	clamped [2]bool
+	// results is what the window holds of the Slot's results: each Plan's
+	// level outcomes, State results and no-data end updates merged since
+	// the window was last cut, in the order merged. The Plans themselves -
+	// their disposition, gap statements and coverage - are the Slot's
+	// (evaluated), merged under mergeMu.
+	results []execution.PlanEvaluationResult
+}
+
+// addResults keeps what next holds for the window: each Plan's lists after
+// those the window already holds of it, a Plan first met here taking next's
+// as they are.
+func (window *sliceWindow) addResults(next execution.EvaluationResult) {
+	for _, plan := range next.Plans {
+		index := slices.IndexFunc(window.results, func(held execution.PlanEvaluationResult) bool { return held.Plan == plan.Plan })
+		if index < 0 {
+			window.results = append(window.results, execution.PlanEvaluationResult{Plan: plan.Plan,
+				LevelOutcomes: plan.LevelOutcomes, StateResults: plan.StateResults, NoDataEnds: plan.NoDataEnds})
+			continue
+		}
+		held := &window.results[index]
+		held.LevelOutcomes = append(held.LevelOutcomes, plan.LevelOutcomes...)
+		held.StateResults = append(held.StateResults, plan.StateResults...)
+		held.NoDataEnds = append(held.NoDataEnds, plan.NoDataEnds...)
+	}
+}
+
+// withoutWindowLists is next as the Slot's results keep it: its Plans
+// without what a window holds of them (sliceWindow.results).
+func withoutWindowLists(next execution.EvaluationResult) execution.EvaluationResult {
+	plans := make([]execution.PlanEvaluationResult, len(next.Plans))
+	for index, plan := range next.Plans {
+		plan.LevelOutcomes, plan.StateResults, plan.NoDataEnds = nil, nil, nil
+		plans[index] = plan
+	}
+	next.Plans = plans
+	return next
+}
+
+// withWindow is the Slot's results with what the window being filled holds
+// of them: what a Slot written in one window applies, and what a supplement
+// reads, both once the Slot's series are merged.
+func (stream *streamedExecution) withWindow() execution.EvaluationResult {
+	stream.mergeMu.Lock()
+	defer stream.mergeMu.Unlock()
+	merged := stream.evaluated
+	merged.Plans = slices.Clone(stream.evaluated.Plans)
+	for _, held := range stream.fill.results {
+		for index := range merged.Plans {
+			if plan := &merged.Plans[index]; plan.Plan == held.Plan {
+				plan.LevelOutcomes, plan.StateResults, plan.NoDataEnds = held.LevelOutcomes, held.StateResults, held.NoDataEnds
+				break
+			}
+		}
+	}
+	return merged
 }
 
 // beginEvaluating notes the Plan the next result is for. The Plan before it
@@ -210,37 +277,36 @@ type slotWindows struct {
 // progress again, which a no-data Plan is when its synthetic series come
 // after every Plan's own.
 func (stream *streamedExecution) beginEvaluating(plan execution.PlanIdentity) {
-	windows := &stream.windows
-	if windows.evaluatingSet && windows.evaluating == plan {
+	if stream.fill.evaluatingSet && stream.fill.evaluating == plan {
 		return
 	}
-	if windows.passed == nil {
-		windows.passed = make(map[execution.PlanIdentity]struct{})
+	if stream.fill.passed == nil {
+		stream.fill.passed = make(map[execution.PlanIdentity]struct{})
 	}
-	if windows.evaluatingSet {
-		windows.passed[windows.evaluating] = struct{}{}
+	if stream.fill.evaluatingSet {
+		stream.fill.passed[stream.fill.evaluating] = struct{}{}
 	}
-	delete(windows.passed, plan)
-	windows.evaluating, windows.evaluatingSet = plan, true
+	delete(stream.fill.passed, plan)
+	stream.fill.evaluating, stream.fill.evaluatingSet = plan, true
 }
 
 // noteResumed counts a series this attempt resumed rather than evaluated.
 func (stream *streamedExecution) noteResumed(plan execution.PlanIdentity) {
-	if stream.windows.resumed == nil {
-		stream.windows.resumed = make(map[execution.PlanIdentity]int)
+	if stream.fill.resumed == nil {
+		stream.fill.resumed = make(map[execution.PlanIdentity]int)
 	}
-	stream.windows.resumed[plan]++
+	stream.fill.resumed[plan]++
 }
 
 // windowReleasable is what landing the window gives back of what the Slot
 // holds, as far as the window check counts it: its results and views
-// (windows.bytes). Landing gives back more - the inputs of its series, and
+// (stream.fill.bytes). Landing gives back more - the inputs of its series, and
 // the witnesses its writes consumed - which the check leaves outside the
 // window, so it cuts a window no later than the share needs; and a little
 // less - the Plan results' own fields, which stay - which a window only
 // counts once per Plan.
 func (stream *streamedExecution) windowReleasable() uint64 {
-	return stream.windows.bytes
+	return stream.fill.bytes
 }
 
 // windowBoundPercent, between 1 and 99, bounds windows at that percent of
@@ -279,7 +345,8 @@ func (stream *streamedExecution) windowBound() uint64 {
 	if percent := windowBoundPercent.Load(); percent > 0 && percent < 100 {
 		share = stream.coordinator.qgShareBytes() / 100 * uint64(percent)
 	}
-	return boundLess(share, stream.windowOutside())
+	// Each of k consumers fills its windows within its own S/(2k).
+	return boundLess(share/stream.consumerCount(), stream.windowOutside())
 }
 
 // windowOutside is what the Slot holds outside the window being filled, as
@@ -299,13 +366,13 @@ func (stream *streamedExecution) windowBound() uint64 {
 // at all) - no longer stays with the Slot after it lands, so what the Slot
 // holds outside its windows does not grow by the keys its rounds leave.
 func (stream *streamedExecution) windowOutside() uint64 {
-	total := stream.retainedTotal()
+	total := stream.boundTotal()
 	inside := stream.windowReleasable() + stream.applyHeld()
 	for phase := range retainPhaseCount {
 		inside += stream.inflightRelease(phase)
 	}
 	if inside > total {
-		stream.windows.clamped[0] = true
+		stream.fill.clamped[0] = true
 	}
 	return total - min(inside, total)
 }
@@ -318,8 +385,10 @@ const retainPhaseWitness = retainPhaseCount
 // phase when they land, as they were cut; for retainPhaseWitness, the
 // witnesses among their state.
 func (stream *streamedExecution) inflightRelease(phase retainPhase) uint64 {
-	if pipe := stream.windows.pipe; pipe != nil {
-		return pipe.inflightRelease[phase]
+	if pipe := stream.applyPipeNow(); pipe != nil {
+		if lane := pipe.lane(stream.producer); lane != nil {
+			return lane.inflightRelease[phase]
+		}
 	}
 	return 0
 }
@@ -334,10 +403,31 @@ func boundLess(share, outside uint64) uint64 {
 // inflightEffects is the State and event counts of the windows handed to
 // the apply goroutine and not yet landed: still the Slot's, in hand.
 func (stream *streamedExecution) inflightEffects() effectCounts {
-	if pipe := stream.windows.pipe; pipe != nil {
-		return pipe.inflightEffects
+	if pipe := stream.applyPipeNow(); pipe != nil {
+		if lane := pipe.lane(stream.producer); lane != nil {
+			stream.effectsMu.Lock()
+			defer stream.effectsMu.Unlock()
+			return lane.inflightEffects
+		}
 	}
 	return effectCounts{}
+}
+
+// fillingEffects is the State and event counts of the window this stream
+// fills: what it holds of the Slot's less its windows handed and not yet
+// written, read together.
+func (stream *streamedExecution) fillingEffects() effectCounts {
+	var inflight effectCounts
+	var lane *pipeLane
+	if pipe := stream.applyPipeNow(); pipe != nil {
+		lane = pipe.lane(stream.producer)
+	}
+	stream.effectsMu.Lock()
+	defer stream.effectsMu.Unlock()
+	if lane != nil {
+		inflight = lane.inflightEffects
+	}
+	return stream.ownEffects.minus(inflight)
 }
 
 // windowCap is the most State mutations or events one window holds of a
@@ -350,6 +440,13 @@ func windowCap(slotCap uint64) uint64 {
 	return max(slotCap/2, 1)
 }
 
+// windowCapOf is windowCap for one of k consumers: each fills its windows
+// within its own half of the cap's k-th part, so the k windows filled and
+// those in flight hold the cap at most (015 C1 4.2).
+func (stream *streamedExecution) windowCapOf(slotCap uint64) uint64 {
+	return max(slotCap/2/stream.consumerCount(), 1)
+}
+
 // windowBeforeMerge applies the window being filled when the evaluated
 // series next would overfill it: past its half of the per-Slot State
 // mutation or event cap (windowCap), or past the window's bytes bound - what the window holds and what the
@@ -359,14 +456,16 @@ func windowCap(slotCap uint64) uint64 {
 // alone does not fit is refused by name, as it always was.
 func (stream *streamedExecution) windowBeforeMerge(ctx context.Context, next execution.EvaluationResult, measured mergeBytes) error {
 	windows := &stream.windows
-	own := stream.heldEffects().minus(stream.inflightEffects())
+	own := stream.fillingEffects()
 	if stream.supplement != nil || windows.single || own.states+own.events == 0 {
 		return nil
 	}
+	stream.mergeMu.Lock()
 	delta := addedEffectCounts(stream.evaluated, next)
+	stream.mergeMu.Unlock()
 	budget := stream.coordinator.slotBudget()
-	full := own.states+delta.states > windowCap(budget.MaxStateMutations) ||
-		own.events+delta.events > windowCap(budget.MaxEvents)
+	full := own.states+delta.states > stream.windowCapOf(budget.MaxStateMutations) ||
+		own.events+delta.events > stream.windowCapOf(budget.MaxEvents)
 	if !full && stream.windowReleasable() > 0 {
 		// A series that alone would not fit the window the read ahead leaves
 		// it is judged again once the read ahead has yielded. No refusal was
@@ -376,13 +475,13 @@ func (stream *streamedExecution) windowBeforeMerge(ctx context.Context, next exe
 		if measured.total() > stream.windowBound() {
 			stream.yieldReadAhead(readAheadYieldWindowBound)
 		}
-		full = stream.windows.bytes+measured.total() > stream.windowBound()
+		full = stream.fill.bytes+measured.total() > stream.windowBound()
 	}
 	if !full {
 		return nil
 	}
 	if stream.windowBound() == 0 {
-		windows.zeroBoundCuts[stream.zeroBoundReason()]++
+		stream.fill.zeroBoundCuts[stream.zeroBoundReason()]++
 	}
 	return stream.cutWindow(ctx)
 }
@@ -390,17 +489,16 @@ func (stream *streamedExecution) windowBeforeMerge(ctx context.Context, next exe
 // zeroBoundReason is the retained phase holding the most of what the Slot
 // holds outside the window being filled, as the window bound reads it
 // (windowOutside): the input with the reads ahead; the gap facts; the output
-// and the State less the window's own share of them (windows.bytes,
-// windows.stateBytes), the windows in flight and what the apply side holds.
+// and the State less the window's own share of them (stream.fill.bytes,
+// stream.fill.stateBytes), the windows in flight and what the apply side holds.
 func (stream *streamedExecution) zeroBoundReason() int {
-	windows := &stream.windows
 	byPhase := stream.retainedByPhase
 	less := func(held, inside uint64) uint64 { return held - min(inside, held) }
 	outside := [4]uint64{
 		less(byPhase[retainPhaseInput]+stream.aheadBytes.Load(), stream.inflightRelease(retainPhaseInput)),
 		byPhase[retainPhaseGap],
-		less(byPhase[retainPhaseOutput], less(windows.bytes, windows.stateBytes)+stream.inflightRelease(retainPhaseOutput)),
-		less(byPhase[retainPhaseState], windows.stateBytes+stream.inflightRelease(retainPhaseState)),
+		less(byPhase[retainPhaseOutput], less(stream.fill.bytes, stream.fill.stateBytes)+stream.inflightRelease(retainPhaseOutput)),
+		less(byPhase[retainPhaseState], stream.fill.stateBytes+stream.inflightRelease(retainPhaseState)),
 	}
 	most := 0
 	for reason := range outside {
@@ -412,20 +510,15 @@ func (stream *streamedExecution) zeroBoundReason() int {
 }
 
 // cutWindow cuts the window being filled, every series before
-// windows.reached, and hands it to the apply goroutine to be written,
+// stream.fill.reached, and hands it to the apply goroutine to be written,
 // running the head first if no window has been cut.
 func (stream *streamedExecution) cutWindow(ctx context.Context) error {
 	defer stream.enter(slotPhaseCut)()
-	windows := &stream.windows
-	if !windows.started {
-		started, err := stream.coordinator.applyWindowHead(ctx, stream)
-		if err != nil {
-			return err
-		}
-		if !started {
-			windows.single = true
-			return nil
-		}
+	if err := stream.safePoint(ctx); err != nil {
+		return err
+	}
+	if started, err := stream.startWindows(ctx); err != nil || !started {
+		return err
 	}
 	// A safe point: the windows landed give their bytes back before this one
 	// is taken off (takeWindow reads what the output phase holds).
@@ -453,7 +546,7 @@ func (stream *streamedExecution) cutWindow(ctx context.Context) error {
 // State, and the statement has to be out before the first window's events.
 func (stream *streamedExecution) headOpenStatements() (map[execution.PlanIdentity]execution.PlanGapMutation, error) {
 	incomplete := make(map[execution.PlanIdentity][]execution.NamedInputBinding)
-	for _, prepared := range stream.windows.prepared {
+	for _, prepared := range stream.fill.prepared {
 		if prepared.due == nil {
 			continue
 		}
@@ -510,7 +603,8 @@ func (stream *streamedExecution) headOpenStatements() (map[execution.PlanIdentit
 // cannot be cut.
 //
 // A Plan that could be first-seen is judged here from every one of its
-// series' State, read ahead of the windows (firstSeenPrepass). The marker
+// series' State, read ahead of the windows (firstSeenPrepass); in a Slot read
+// in slices it is not judged and warms up (first_seen.go). The marker
 // recording that a first-seen Plan ran is not written here but in the tail,
 // and only when no other statement of the Plan is written this Slot
 // (windowedTail): a Plan the budget cuts after some of its windows gets its
@@ -542,14 +636,15 @@ func (coordinator *SlotExecutionCoordinator) applyWindowHead(ctx context.Context
 		}
 		// Only the candidates' answer depends on unseen; every other forced
 		// Plan is warmed up whatever it is.
+		judging := stream.judgingFirstSeen()
 		var unseen map[execution.PlanKey]struct{}
-		if candidates := firstSeenCandidates(apply.forced, stream.gaps); len(candidates) != 0 {
+		if candidates := firstSeenCandidates(apply.forced, stream.gaps); len(candidates) != 0 && !judging.sliced {
 			if err := stream.firstSeenPrepass(sequenceCtx, candidates); err != nil {
 				return err
 			}
-			unseen = stream.unseenPlansAtRead()
+			unseen = stream.unseenPlans()
 		}
-		apply.judgeForced(unseen)
+		apply.judgeForced(unseen, judging)
 		apply.keys = make(slotStateKeys)
 		headOpened := make(map[execution.PlanIdentity]struct{}, len(opens))
 		headStatements := make(map[execution.PlanIdentity]execution.PlanGapMutation, len(opens))
@@ -557,6 +652,11 @@ func (coordinator *SlotExecutionCoordinator) applyWindowHead(ctx context.Context
 			if apply.changed(due) {
 				apply.withheldNoData[due.Identity] = struct{}{}
 				continue
+			}
+			// Replaced past the budget before the windows began: its
+			// no-data is withheld as a replacement in the windows withholds it.
+			if _, replaced := stream.windows.replaced[due.Identity]; replaced {
+				apply.withheldNoData[due.Identity] = struct{}{}
 			}
 			open, found := opens[due.Identity]
 			if !found {
@@ -605,8 +705,8 @@ func (stream *streamedExecution) windowParts(views []execution.RuntimeStateView)
 		parts[plan] = part
 		return part, nil
 	}
-	for index := range stream.evaluated.Plans {
-		plan := &stream.evaluated.Plans[index]
+	for index := range stream.fill.results {
+		plan := &stream.fill.results[index]
 		if len(plan.StateResults) == 0 {
 			continue
 		}
@@ -729,19 +829,20 @@ func (stream *streamedExecution) fixWindowCeiling(ctx context.Context, series in
 		return
 	}
 	perWindow := uint64(series)
-	if largest := stream.windows.largestSeries; largest > 0 {
+	if largest := stream.fill.largestSeries; largest > 0 {
 		perWindow = stream.windowBound() / largest
 	}
 	budget := stream.coordinator.slotBudget()
 	if limit := budget.MaxStateMutations; limit > 0 {
-		perWindow = min(perWindow, windowCap(limit))
+		perWindow = min(perWindow, stream.windowCapOf(limit))
 	}
 	if limit := budget.MaxEvents; limit > 0 {
-		perWindow = min(perWindow, windowCap(limit)/stream.eventsPerSeries())
+		perWindow = min(perWindow, stream.windowCapOf(limit)/stream.eventsPerSeries())
 	}
 	perWindow = max(perWindow, 1)
 	windows := (uint64(series) + perWindow - 1) / perWindow
-	stream.windows.perWindow, stream.windows.ceilingWindows = perWindow, windows
+	stream.windows.perWindow.Store(perWindow)
+	stream.windows.ceilingWindows.Store(windows)
 	stream.windowCeiling.Store(deadline.Add(time.Duration(windows*stream.sliceCeilingFactor()) * windowStepBound).UnixMilli())
 }
 
@@ -749,11 +850,11 @@ func (stream *streamedExecution) fixWindowCeiling(ctx context.Context, series in
 // the first slice's windows once for every slice read or let go so far,
 // never past 2*K_max-1 of them (§7.5).
 func (stream *streamedExecution) raiseSliceCeiling(ctx context.Context) {
-	deadline := execution.ExecutionDeadline(ctx)
-	if deadline.IsZero() || stream.windows.ceilingWindows == 0 {
+	deadline, windows := execution.ExecutionDeadline(ctx), stream.windows.ceilingWindows.Load()
+	if deadline.IsZero() || windows == 0 {
 		return
 	}
-	stream.windowCeiling.Store(deadline.Add(time.Duration(stream.windows.ceilingWindows*stream.sliceCeilingFactor()) * windowStepBound).UnixMilli())
+	stream.windowCeiling.Store(deadline.Add(time.Duration(windows*stream.sliceCeilingFactor()) * windowStepBound).UnixMilli())
 }
 
 // eventsPerSeries is the most events one prepared series can send in this
@@ -774,7 +875,7 @@ func (stream *streamedExecution) raiseSliceCeiling(ctx context.Context) {
 // writes.
 func (stream *streamedExecution) eventsPerSeries() uint64 {
 	most := max(stream.primaryRecords, 1)
-	for _, prepared := range stream.windows.prepared {
+	for _, prepared := range stream.fill.prepared {
 		for _, input := range prepared.inputs {
 			for _, binding := range input.Inputs {
 				if binding.Role == execution.InputRolePrimary && binding.View != nil {
@@ -793,15 +894,14 @@ func (stream *streamedExecution) eventsPerSeries() uint64 {
 // ceil(synthetic / s_min) windows. Still bounded: a round says at most one
 // series a group, and a memory holds at most its Plan's max_groups groups.
 func (stream *streamedExecution) raiseWindowCeiling(synthetic int) {
-	windows := &stream.windows
-	ceiling := stream.windowCeiling.Load()
-	if ceiling == 0 || synthetic == 0 || windows.perWindow == 0 {
+	ceiling, perWindow := stream.windowCeiling.Load(), stream.windows.perWindow.Load()
+	if ceiling == 0 || synthetic == 0 || perWindow == 0 {
 		return
 	}
-	more := (uint64(synthetic) + windows.perWindow - 1) / windows.perWindow
+	more := (uint64(synthetic) + perWindow - 1) / perWindow
 	stream.windowCeiling.Store(time.UnixMilli(ceiling).Add(time.Duration(more) * windowStepBound).UnixMilli())
-	windows.ceilingWindows += more
-	windows.raisedWindows += more
+	stream.windows.ceilingWindows.Add(more)
+	stream.windows.raisedWindows.Add(more)
 }
 
 // windowBoundary is a window landed: the Slot's deadline moved to T_w past
@@ -913,7 +1013,7 @@ type windowLanding struct {
 // 2.2 step 4, 2.6; 014 next9 4):
 //
 //   - State: its views, from stream.state.Items and stream.stateItems, and
-//     their charge (windows.stateBytes), given back when it lands with the
+//     their charge (stream.fill.stateBytes), given back when it lands with the
 //     witnesses of every key it read, one per key: the ones its writes
 //     consumed and the ones it lets go of unwritten. Whether a Plan saw
 //     anything written before the Slot is kept now (noteSeenViews), for
@@ -934,42 +1034,49 @@ type windowLanding struct {
 //
 // Its State and event counts stay held until it lands (landWindow).
 func (stream *streamedExecution) takeWindow(ctx context.Context, final bool) (*windowTask, error) {
-	windows := &stream.windows
 	views := stream.state.Items
 	parts, err := stream.windowParts(views)
 	if err != nil {
 		return nil, err
 	}
-	task := &windowTask{final: final, parts: parts, views: views, items: stream.stateItems, readBeside: windows.readBeside,
-		absenceStarts: stream.windowAbsenceStarts(parts), passed: maps.Clone(windows.passed), resumed: maps.Clone(windows.resumed),
-		moreSlices: stream.readInSlices() && !stream.slices.last,
-		stateBytes: windows.stateBytes, effects: stream.heldEffects().minus(stream.inflightEffects())}
+	task := &windowTask{final: final, parts: parts, views: views, items: stream.stateItems, readBeside: stream.fill.readBeside,
+		absenceStarts: stream.windowAbsenceStarts(parts), passed: maps.Clone(stream.fill.passed), resumed: maps.Clone(stream.fill.resumed),
+		moreSlices: stream.readInSlices() && !stream.slice.last,
+		stateBytes: stream.fill.stateBytes, effects: stream.fillingEffects()}
 	stream.noteSeenViews(views)
-	stream.state.Items, stream.stateItems, windows.readBeside = nil, nil, nil
+	stream.state.Items, stream.stateItems, stream.fill.readBeside = nil, nil, nil
 	var kept uint64
+	stream.fill.results = nil
+	several := stream.consumerCount() > 1
+	stream.mergeMu.Lock()
 	for index := range stream.evaluated.Plans {
-		plan := &stream.evaluated.Plans[index]
-		plan.StateResults, plan.LevelOutcomes, plan.NoDataEnds = nil, nil, nil
+		// With several consumers, the Plans whose first result this stream
+		// merged: what the Slot keeps of a Plan was charged to the stream that
+		// merged it first.
+		if _, first := stream.firstMerged[stream.evaluated.Plans[index].Plan]; several && !first {
+			continue
+		}
 		// Counted as newEffectBytes counts a Plan result's first series.
-		kept += 2 * retainedObjectBytes(*plan)
+		kept += 2 * retainedObjectBytes(stream.evaluated.Plans[index])
 	}
+	stream.mergeMu.Unlock()
 	// Less the output of a window still in flight: it gives its own back as
 	// it lands.
 	if held, keep := stream.retainedByPhase[retainPhaseOutput], kept+stream.summaryHeld+stream.inflightRelease(retainPhaseOutput); held > keep {
 		task.outputBytes = held - keep
 	}
-	through := windows.reached
+	through := stream.fill.reached
 	if final {
-		through = len(windows.prepared)
+		through = len(stream.fill.prepared)
 	}
 	if note := windowSizesForMeasurement.Load(); note != nil {
-		(*note)(windows.bytes, through-windows.dropped)
+		(*note)(stream.fill.bytes, through-stream.fill.dropped)
 	}
-	windows.bytes, windows.stateBytes = 0, 0
+	stream.fill.bytes, stream.fill.stateBytes = 0, 0
 	stream.dropWindowRecordIDs(through, final)
-	if through = min(through, len(windows.prepared)); through > windows.dropped {
-		task.series = windows.prepared[windows.dropped:through]
-		windows.dropped = through
+	if through = min(through, len(stream.fill.prepared)); through > stream.fill.dropped {
+		task.series = stream.fill.prepared[stream.fill.dropped:through]
+		stream.fill.dropped = through
 	}
 	inputs, err := stream.letGoWindowInputs(ctx, task.series)
 	if err != nil {
@@ -1040,22 +1147,20 @@ func (stream *streamedExecution) landWindow(ctx context.Context, landing windowL
 	// attempt's end, they were what the Slot holds beside its slices
 	// growing as it read, and the slice limit falling with it (014 next9,
 	// ④ §7 item 4).
-	if keys := task.keysReadInto(stream.windows.releasing[:0]); len(keys) > 0 {
+	if keys := task.keysReadInto(stream.fill.releasing[:0]); len(keys) > 0 {
 		stream.coordinator.ports.State.ReleaseRuntimeWitnesses(stream.request.Contract.Slot, keys)
 		consumed := min(uint64(len(keys))*stateWitnessHeldBytes, stream.keysHeld)
 		stream.keysHeld -= consumed
 		stream.unretain(retainPhaseState, consumed)
 		// The buffer is kept for the next window, not the keys' strings.
 		clear(keys)
-		stream.windows.releasing = keys[:0]
+		stream.fill.releasing = keys[:0]
 	}
 	stream.unretain(retainPhaseOutput, task.outputBytes)
 	stream.unretainInput(task.release[retainPhaseInput])
-	stream.coordinator.releaseEffects(task.effects)
-	stream.effectsSpent.states += task.effects.states
-	stream.effectsSpent.events += task.effects.events
-	stream.giveBackEffects(effectCounts{states: task.effects.states, events: task.effects.events})
-	stream.windows.count++
+	// Its State and event counts were given back as it was written
+	// (pipeLane.writtenEffects).
+	stream.addShared(func() { stream.windows.count++ })
 	return landing.err
 }
 
@@ -1065,6 +1170,8 @@ func (stream *streamedExecution) noteSeenViews(views []execution.RuntimeStateVie
 	if len(views) == 0 {
 		return
 	}
+	stream.seenMu.Lock()
+	defer stream.seenMu.Unlock()
 	windows := &stream.windows
 	for _, due := range stream.header.DuePlans {
 		if _, seen := windows.seen[due.Identity]; seen {
@@ -1075,12 +1182,32 @@ func (stream *streamedExecution) noteSeenViews(views []execution.RuntimeStateVie
 			continue
 		}
 		if viewsSeenBefore(due, version, views) {
-			if windows.seen == nil {
-				windows.seen = make(map[execution.PlanIdentity]struct{})
-			}
-			windows.seen[due.Identity] = struct{}{}
+			stream.noteSeenLocked(due.Identity)
 		}
 	}
+}
+
+// noteSeenLocked keeps that the Slot read something of plan written before
+// it. windows.seen changes only under seenMu: a window cut on any stream and
+// the first-seen pre-pass note into it, and a slice beginning to be read takes
+// a copy of it (seenSnapshot).
+func (stream *streamedExecution) noteSeenLocked(plan execution.PlanIdentity) {
+	if stream.windows.seen == nil {
+		stream.windows.seen = make(map[execution.PlanIdentity]struct{})
+	}
+	stream.windows.seen[plan] = struct{}{}
+}
+
+// seenSnapshot is a copy of what the Slot has noted it read written before
+// it (windows.seen), never nil.
+func (stream *streamedExecution) seenSnapshot() map[execution.PlanIdentity]struct{} {
+	stream.seenMu.Lock()
+	defer stream.seenMu.Unlock()
+	seen := maps.Clone(stream.windows.seen)
+	if seen == nil {
+		seen = make(map[execution.PlanIdentity]struct{})
+	}
+	return seen
 }
 
 // seriesInputHold is what one series' batches were charged to the input
@@ -1102,7 +1229,7 @@ func (stream *streamedExecution) holdInput(series execution.SeriesIdentityDigest
 		stream.inputHolds[series] = hold
 	}
 	hold.bytes += bytes
-	stream.windows.largestSeries = max(stream.windows.largestSeries, hold.bytes)
+	stream.fill.largestSeries = max(stream.fill.largestSeries, hold.bytes)
 	return hold
 }
 
@@ -1127,8 +1254,7 @@ func (stream *streamedExecution) letGoWindowInputs(ctx context.Context, series [
 	if len(series) == 0 {
 		return 0, nil
 	}
-	windows := &stream.windows
-	windows.streamedPeak = max(windows.streamedPeak, len(stream.streamed))
+	stream.fill.streamedPeak = max(stream.fill.streamedPeak, len(stream.streamed))
 	var released, kept uint64
 	for index := range series {
 		entry := series[index]
@@ -1155,6 +1281,10 @@ func (stream *streamedExecution) letGoWindowInputs(ctx context.Context, series [
 // in slice order (015 C1 appendix A 8); a Slot read one slice at a time
 // collects them as its windows are cut.
 func (stream *streamedExecution) collectPresent(ctx context.Context, due execution.DuePlan, groups []map[string]string) uint64 {
+	// One collector for the Slot's streams: the present sets and their
+	// staging are the Slot's (015 C1, appendix A 8).
+	stream.presentMu.Lock()
+	defer stream.presentMu.Unlock()
 	var kept uint64
 	present := stream.windows.presentSet(due)
 	for _, dimensions := range groups {
@@ -1202,15 +1332,14 @@ func (stream *streamedExecution) dropSeriesInputs(plan execution.PlanIdentity, s
 // gave back would otherwise stay held by the map. Rebuilt at each halving,
 // it costs a copy of what is left, which sums to the map once over the Slot.
 func (stream *streamedExecution) compactStreamed() {
-	windows := &stream.windows
-	if stream.streamed == nil || len(stream.streamed)*2 > windows.streamedPeak {
+	if stream.streamed == nil || len(stream.streamed)*2 > stream.fill.streamedPeak {
 		return
 	}
 	rebuilt := make(map[streamedInputKey]streamedInput, len(stream.streamed))
 	for key, entry := range stream.streamed {
 		rebuilt[key] = entry
 	}
-	stream.streamed, windows.streamedPeak = rebuilt, len(rebuilt)
+	stream.streamed, stream.fill.streamedPeak = rebuilt, len(rebuilt)
 }
 
 // finishWindowedSlot hands the last window to the apply goroutine and, once
@@ -1299,7 +1428,7 @@ func (apply *slotApply) windowedTail(ctx context.Context, stream *streamedExecut
 	}
 	// Series an earlier attempt applied, resumed before evaluation: the
 	// segment shadow cannot tell their Plans' membership this round.
-	for plan, resumed := range stream.windows.resumed {
+	for plan, resumed := range stream.fill.resumed {
 		if due, ok := duePlan(apply.header.DuePlans, plan); ok && resumed > 0 {
 			apply.shadow.retried(due)
 		}
@@ -1384,13 +1513,14 @@ func (stream *streamedExecution) completeWindowsBeyondSlotBudget(ctx context.Con
 	}
 	held := stream.takeEffects()
 	stream.coordinator.releaseEffects(held)
-	stream.effectsSpent.states += held.states
-	stream.effectsSpent.events += held.events
-	stream.effectsSpent.gaps += held.gaps
+	stream.effectsMu.Lock()
+	stream.effectsSpent = stream.effectsSpent.plus(held)
+	stream.effectsMu.Unlock()
 	windows := &stream.windows
-	landed := make(map[execution.PlanIdentity]struct{}, len(windows.passed))
+	passed := stream.plansPassed()
+	landed := make(map[execution.PlanIdentity]struct{}, len(passed))
 	for _, due := range stream.header.DuePlans {
-		if _, passed := windows.passed[due.Identity]; passed {
+		if _, past := passed[due.Identity]; past {
 			landed[due.Identity] = struct{}{}
 			continue
 		}
@@ -1419,6 +1549,24 @@ func (stream *streamedExecution) completeWindowsBeyondSlotBudget(ctx context.Con
 		}
 	}
 	return nil
+}
+
+// plansPassed is the Plans the Slot's evaluation has got past: passed by a
+// stream of it (beginEvaluating) and in progress on none. With one stream,
+// its own passed; with k consumers, read behind the barrier, each stopped.
+func (stream *streamedExecution) plansPassed() map[execution.PlanIdentity]struct{} {
+	passed := make(map[execution.PlanIdentity]struct{})
+	for _, each := range stream.slotStreams() {
+		for plan := range each.fill.passed {
+			passed[plan] = struct{}{}
+		}
+	}
+	for _, each := range stream.slotStreams() {
+		if each.fill.evaluatingSet {
+			delete(passed, each.fill.evaluating)
+		}
+	}
+	return passed
 }
 
 // decideLanding records, for every Plan whose windows are all applied, whether

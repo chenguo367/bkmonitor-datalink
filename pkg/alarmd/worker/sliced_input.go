@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"net/http"
 	"slices"
 	"sort"
@@ -93,56 +92,34 @@ const sliceSampleValues = 4096
 
 // sliceReading is the Slot read slice by slice.
 type sliceReading struct {
-	tree *inputslice.Tree
+	// treeMu guards the tree's leaves as the dispatch splits and lands them
+	// and the consumers count them, with k consumers (015 C1 step 3.2).
+	treeMu sync.Mutex
+	tree   *inputslice.Tree
 	// dimensions are the ones the tree splits on, in the order it takes them.
 	dimensions []string
-	leaf       inputslice.Leaf
-	// index is how many slices have completed; last is whether the slice
-	// being read is the last one pending. finish is what the Slot finishes
-	// on once every slice is read (finishSlices), from the slice read last.
+	// index is how many slices have completed. finish is what the Slot
+	// finishes on once every slice is read (finishSlices), from the slice
+	// read last.
 	index  int
-	last   bool
 	finish sliceFinish
-	// input is what the slice being read holds of the input phase, largest
-	// the most one of its series did, and sample its values on the
-	// dimensions.
-	input, largest uint64
-	// series is the most series one physical query of the slice being read
-	// delivered (byQuery, by its digest), the size a slice is judged by: a
-	// slice's queries - a ring ratio's PRIMARY and its dependency - are each
-	// one request, answered side by side, and their sum is no request's
-	// size. reserved is every series the slice reserved of the pool, all its
-	// queries' together. read is the input every slice that landed held, in
-	// all; seriesRead the series every slice that landed held, in all, each
-	// counted as its series. timedOutTook is how long the slice that ran out
-	// of time took: when the provider said it ran out (timedOutByProvider, a
+	// read is the input every slice that landed held, in all; seriesRead
+	// the series every slice that landed held, in all, each counted as its
+	// series. timedOutTook is how long the slice that ran out of time took:
+	// when the provider said it ran out (timedOutByProvider, a
 	// providerTimeoutError), counted at no less than twice a slice's target,
 	// the backend's own limit; when alarmd's deadline ended it, as long as it
 	// took.
-	series, reserved, read, seriesRead, timedOutTook uint64
-	byQuery                                          map[execution.PhysicalQueryDigest]uint64
-	sample                                           inputslice.Sample
-	seen                                             map[string]map[string]int
-	keeps                                            map[string]*sampleKeep
+	read, seriesRead, timedOutTook uint64
 	// unsliceable is a Slot found, at its first overflow, to have nothing it
 	// can be sliced on: it is read whole and judged by its share alone, as
 	// before slicing.
 	unsliceable bool
 	// unsupported is why it cannot be sliced (execution.InputSliceReason*).
 	unsupported string
-	// leaveInput ends the input phase of a slice after the first.
-	leaveInput func()
 	// dispatched is how many slices were dispatched to be read, the number
 	// the next one is given (sliceLedger).
 	dispatched int
-	// sliceSeries is the series of each Plan the slice being read holds,
-	// counted when its series are prepared: a window cut halfway through the
-	// slice lets go of the series it wrote (letGoWindowInputs), and what is
-	// left at the slice's end is not what it held.
-	sliceSeries map[execution.PlanIdentity]uint64
-	// unseenSlices and unseenSeries are the slices, and their series, a Plan
-	// judged first-seen wrote before a later slice found it had run.
-	unseenSlices, unseenSeries uint64
 	// queryMillis is the time this Slot's slices' queries took on their
 	// critical path so far (slowestQueryMillis, summed over the slices read).
 	queryMillis uint64
@@ -226,6 +203,37 @@ type sliceReading struct {
 	startDiscarded bool
 }
 
+// sliceRead is the slice a stream is reading and consuming: its leaf and
+// what it holds as it streams. The stream's own, as the window it fills is
+// (015 C1 step 3.2); the Slot's slices - the tree, what is pending, read
+// and remembered - are sliceReading.
+type sliceRead struct {
+	leaf inputslice.Leaf
+	// last is whether the slice is the last one pending as it was dispatched.
+	last bool
+	// replaced is whether the slice's own series took the Slot past its
+	// budget, its results replaced as it completed: a Slot finishing on it
+	// evaluates nothing more (finishSlices).
+	replaced bool
+	// input is what the slice being read holds of the input phase, largest
+	// the most one of its series did, and sample its values on the
+	// dimensions.
+	input, largest uint64
+	// series is the most series one physical query of the slice delivered
+	// (byQuery, by its digest), the size a slice is judged by: a slice's
+	// queries - a ring ratio's PRIMARY and its dependency - are each one
+	// request, answered side by side, and their sum is no request's size.
+	// reserved is every series the slice reserved of the pool, all its
+	// queries' together.
+	series, reserved uint64
+	byQuery          map[execution.PhysicalQueryDigest]uint64
+	sample           inputslice.Sample
+	seen             map[string]map[string]int
+	keeps            map[string]*sampleKeep
+	// leaveInput ends the input phase of a slice after the first.
+	leaveInput func()
+}
+
 // sliceShapeUsage is what one Slot did with its Query Group's shape: read
 // in it, kept a split in it, merged a split of it back, or dropped it, why
 // (one of voided and refused at most, the words of
@@ -235,16 +243,16 @@ type sliceShapeUsage struct {
 	dropped                             string
 }
 
-func (reading *sliceReading) noteLeafRead(leaf inputslice.Leaf, took uint64) {
+func (reading *sliceReading) noteLeafRead(slice *sliceRead, leaf inputslice.Leaf, took uint64) {
 	if reading.leafMillis == nil {
 		reading.leafMillis, reading.leafSeries = map[int]uint64{}, map[string]uint64{}
 		reading.leafSeriesByID, reading.leafBytesByID = map[int]uint64{}, map[int]uint64{}
 	}
 	reading.leafMillis[leaf.ID] = took
-	reading.leafSeries[leaf.Slice.Digest()] = reading.series
-	reading.leafSeriesByID[leaf.ID] = reading.series
-	reading.leafBytesByID[leaf.ID] = reading.input
-	reading.keepSizedSplit(leaf)
+	reading.leafSeries[leaf.Slice.Digest()] = slice.series
+	reading.leafSeriesByID[leaf.ID] = slice.series
+	reading.leafBytesByID[leaf.ID] = slice.input
+	reading.keepSizedSplit(slice, leaf)
 }
 
 // keepSizedSplit cuts a slice read whole that held more series than a slice
@@ -255,11 +263,11 @@ func (reading *sliceReading) noteLeafRead(leaf inputslice.Leaf, took uint64) {
 // the slice's series, by the sample, so the next Slot times it as a slice it
 // read (leafPlanned) rather than at the target. A split the bounds refuse
 // keeps nothing, and is counted as refused by its reason (sizedSplitRefusal).
-func (reading *sliceReading) keepSizedSplit(leaf inputslice.Leaf) {
-	if reading.tree == nil || reading.series <= sizedSplitSeries() || len(reading.sample) == 0 {
+func (reading *sliceReading) keepSizedSplit(slice *sliceRead, leaf inputslice.Leaf) {
+	if reading.tree == nil || slice.series <= sizedSplitSeries() || len(slice.sample) == 0 {
 		return
 	}
-	children, sampled, err := reading.tree.KeepSizedSplit(leaf.ID, reading.sample)
+	children, sampled, err := reading.tree.KeepSizedSplit(leaf.ID, slice.sample)
 	if err != nil {
 		if reading.shape.dropped == "" {
 			reading.shape.dropped = sizedSplitRefusal(err)
@@ -269,7 +277,7 @@ func (reading *sliceReading) keepSizedSplit(leaf inputslice.Leaf) {
 	reading.sizedKept = true
 	for _, child := range children {
 		if sampled > 0 {
-			reading.leafSeries[child.Slice.Digest()] = reading.series * uint64(child.Sampled) / uint64(sampled)
+			reading.leafSeries[child.Slice.Digest()] = slice.series * uint64(child.Sampled) / uint64(sampled)
 		}
 	}
 }
@@ -297,8 +305,8 @@ func sizedSplitRefusal(err error) string {
 // is expected to take: its series the round before at the time a series
 // took then, a slice's target when that is not known - a leaf the round
 // before did not read whole.
-func (reading *sliceReading) plannedLeafMillis() uint64 {
-	if planned, known := reading.leafPlanned[reading.leaf.Slice.Digest()]; known {
+func (reading *sliceReading) plannedLeafMillis(slice *sliceRead) uint64 {
+	if planned, known := reading.leafPlanned[slice.leaf.Slice.Digest()]; known {
 		return planned
 	}
 	return sliceQueryTargetMillis
@@ -340,20 +348,20 @@ func (stream *streamedExecution) sliceLimit() uint64 {
 	if share == 0 {
 		return ^uint64(0)
 	}
-	return boundLess(share/2, stream.sliceOthers()) / 2
+	return boundLess(share/2/stream.consumerCount(), stream.sliceOthers()) / 2
 }
 
 // sliceOthers is what the Slot's side holds beside the slice being read:
 // not the slice's input, nor what the windows in flight give back as they
 // land, nor what the apply side holds.
 func (stream *streamedExecution) sliceOthers() uint64 {
-	total := stream.retainedTotal()
-	inside := stream.slices.input + stream.applyHeld()
+	total := stream.boundTotal()
+	inside := stream.slice.input + stream.applyHeld()
 	for phase := range retainPhaseCount {
 		inside += stream.inflightRelease(phase)
 	}
 	if inside > total {
-		stream.windows.clamped[1] = true
+		stream.fill.clamped[1] = true
 	}
 	return total - min(inside, total)
 }
@@ -368,8 +376,9 @@ func (stream *streamedExecution) serialSliceLimit() uint64 {
 	if share == 0 {
 		return ^uint64(0)
 	}
-	others := stream.retainedTotal() - min(stream.retainedTotal(), stream.slices.input)
-	return boundLess(share, others) / 2
+	total := stream.boundTotal()
+	others := total - min(total, stream.slice.input)
+	return boundLess(share/stream.consumerCount(), others) / 2
 }
 
 // admitSliceInput judges one series batch of retained bytes against the
@@ -389,9 +398,9 @@ func (stream *streamedExecution) admitSliceInput(ctx context.Context, batch exec
 		return nil
 	}
 	reading := stream.slices
-	reading.largest = max(reading.largest, retained)
+	stream.slice.largest = max(stream.slice.largest, retained)
 	limit := stream.sliceLimit()
-	if reading.input+retained <= limit {
+	if stream.slice.input+retained <= limit {
 		return nil
 	}
 	if reading.tree == nil {
@@ -401,18 +410,18 @@ func (stream *streamedExecution) admitSliceInput(ctx context.Context, batch exec
 			return nil
 		}
 	}
-	if reading.largest > limit {
+	if stream.slice.largest > limit {
 		// A series alone past the Slot's half: judged again as a Slot with no
 		// window in flight judges it, once the windows in flight have landed
 		// - rare, a series near a quarter of its Query Group's share.
 		if err := stream.drainApply(ctx); err != nil {
 			return err
 		}
-		if limit = stream.serialSliceLimit(); reading.input+retained <= limit {
+		if limit = stream.serialSliceLimit(); stream.slice.input+retained <= limit {
 			return nil
 		}
 	}
-	if reading.largest > limit {
+	if stream.slice.largest > limit {
 		coordinator := stream.coordinator
 		err := shareRejection(stream.reservationPhase("normal_input"), stream.retainedTotal(), retained,
 			coordinator.qgShareBytes(), stream.ownBudgetUsage(coordinator.budget))
@@ -435,14 +444,13 @@ func (stream *streamedExecution) noteSliceInput(batch execution.SeriesExecutionB
 	if !stream.slicing() || stream.slices.unsliceable {
 		return
 	}
-	reading := stream.slices
-	reading.input += retained
-	reading.reserved += batch.Delivery.Series
-	if reading.byQuery == nil {
-		reading.byQuery = make(map[execution.PhysicalQueryDigest]uint64)
+	stream.slice.input += retained
+	stream.slice.reserved += batch.Delivery.Series
+	if stream.slice.byQuery == nil {
+		stream.slice.byQuery = make(map[execution.PhysicalQueryDigest]uint64)
 	}
-	reading.byQuery[batch.PhysicalQuery] += batch.Delivery.Series
-	reading.series = max(reading.series, reading.byQuery[batch.PhysicalQuery])
+	stream.slice.byQuery[batch.PhysicalQuery] += batch.Delivery.Series
+	stream.slice.series = max(stream.slice.series, stream.slice.byQuery[batch.PhysicalQuery])
 	stream.sampleSlice(batch)
 }
 
@@ -473,22 +481,22 @@ func (stream *streamedExecution) sampleSlice(batch execution.SeriesExecutionBatc
 		reading.dimensions = sliceable
 	}
 	dimensions := record.Dimensions()
-	if reading.sample == nil {
-		reading.sample = make(inputslice.Sample, len(reading.dimensions))
-		reading.seen = make(map[string]map[string]int, len(reading.dimensions))
-		reading.keeps = make(map[string]*sampleKeep, len(reading.dimensions))
+	if stream.slice.sample == nil {
+		stream.slice.sample = make(inputslice.Sample, len(reading.dimensions))
+		stream.slice.seen = make(map[string]map[string]int, len(reading.dimensions))
+		stream.slice.keeps = make(map[string]*sampleKeep, len(reading.dimensions))
 	}
 	// Each value once, counted for every series sampled that carries it -
 	// a split is judged by the series its parts hold - and sliceSampleValues
 	// of them at most, the ones of the smallest hash (sampleKeep): a sample
 	// over the whole stream, not its start.
 	for _, dimension := range reading.dimensions {
-		seen, keep := reading.seen[dimension], reading.keeps[dimension]
+		seen, keep := stream.slice.seen[dimension], stream.slice.keeps[dimension]
 		if seen == nil {
 			seen, keep = make(map[string]int), &sampleKeep{}
-			reading.seen[dimension], reading.keeps[dimension] = seen, keep
+			stream.slice.seen[dimension], stream.slice.keeps[dimension] = seen, keep
 		}
-		keep.note(&reading.sample, dimension, seen, sliceValue(dimensions[dimension]))
+		keep.note(&stream.slice.sample, dimension, seen, sliceValue(dimensions[dimension]))
 	}
 }
 
@@ -511,40 +519,37 @@ func sliceValue(raw json.RawMessage) string {
 // what is left of it is the Slot's.
 func (stream *streamedExecution) beginSlice(leaf inputslice.Leaf, last bool) {
 	reading := stream.slices
-	reading.leaf, reading.last = leaf, last
+	stream.slice.leaf, stream.slice.last, stream.slice.replaced = leaf, last, false
+	// The Plans the evaluation got past are this slice's: a read evaluates
+	// its Plans one after another, so getting past a Plan in a slice says
+	// only that the slice's series of it are done. Carried into the next,
+	// a Plan not yet reached there was taken for done - landed whole by the
+	// slice's replacement past the budget, its series there left unwritten
+	// with no gap, and decided applied by a window cut before them.
+	stream.fill.passed, stream.fill.evaluating, stream.fill.evaluatingSet = nil, execution.PlanIdentity{}, false
 	stream.sliceNumber, reading.dispatched = reading.dispatched, reading.dispatched+1
-	// What the windows cut and handed so far found of the due Plans: the
-	// slice's head judges first-seen by it, whatever the windows of slices
-	// read beside it find later (015 C1 Q3).
-	stream.seenAtRead = maps.Clone(stream.windows.seen)
-	if stream.seenAtRead == nil {
-		stream.seenAtRead = make(map[execution.PlanIdentity]struct{})
-	}
-	reading.input, reading.largest, reading.series, reading.sample, reading.seen, reading.keeps = 0, 0, 0, nil, nil, nil
-	reading.reserved, reading.byQuery = 0, nil
-	reading.sliceSeries = nil
+	stream.slice.input, stream.slice.largest, stream.slice.series, stream.slice.sample, stream.slice.seen, stream.slice.keeps = 0, 0, 0, nil, nil, nil
+	stream.slice.reserved, stream.slice.byQuery = 0, nil
 	if reading.index > 0 {
-		reading.leaveInput = stream.enter(slotPhaseInput)
+		stream.slice.leaveInput = stream.enter(slotPhaseInput)
 	}
 }
 
 // abandonSlice lets go everything the slice being read streamed, for its
 // children to read again, and returns the sample it kept.
 func (stream *streamedExecution) abandonSlice() inputslice.Sample {
-	reading := stream.slices
 	stream.seams.readLetGo()
-	if reading.leaveInput != nil {
-		reading.leaveInput()
-		reading.leaveInput = nil
+	if stream.slice.leaveInput != nil {
+		stream.slice.leaveInput()
+		stream.slice.leaveInput = nil
 	}
-	stream.unretainInput(reading.input)
-	stream.coordinator.releaseProvisional(reading.reserved, 0)
-	stream.series -= min(stream.series, reading.reserved)
+	stream.unretainInput(stream.slice.input)
+	stream.coordinator.releaseProvisional(stream.slice.reserved, 0)
+	stream.addSeries(-int64(stream.slice.reserved))
 	stream.resetSliceStream()
-	sample := reading.sample
-	reading.input, reading.series, reading.sample, reading.seen, reading.keeps = 0, 0, nil, nil, nil
-	reading.reserved, reading.byQuery = 0, nil
-	reading.sliceSeries = nil
+	sample := stream.slice.sample
+	stream.slice.input, stream.slice.series, stream.slice.sample, stream.slice.seen, stream.slice.keeps = 0, 0, nil, nil, nil
+	stream.slice.reserved, stream.slice.byQuery = 0, nil
 	return sample
 }
 
@@ -566,6 +571,9 @@ func (stream *streamedExecution) resetSliceStream() {
 // deliveries summed.
 func foldSliceCompletion(slot, slice execution.QueryExecutionCompletion) (execution.QueryExecutionCompletion, error) {
 	if len(slot.PhysicalQueries) == 0 {
+		// Its own copy: the slices folded after are folded into it in place,
+		// and the slice's completion is its consumer's to read as they are.
+		slice.PhysicalQueries = slices.Clone(slice.PhysicalQueries)
 		return slice, nil
 	}
 	index := make(map[execution.PhysicalQueryDigest]int, len(slot.PhysicalQueries))
@@ -914,7 +922,7 @@ func (stream *streamedExecution) splitsOnTimeout(ctx context.Context, took uint6
 	if reading == nil || reading.unsliceable || reading.timeoutSplit || stream.cooldownHeld() {
 		return false
 	}
-	if !reading.timedOutForSize(took, stream.cooldownHeld()) {
+	if !reading.timedOutForSize(&stream.slice, took, stream.cooldownHeld()) {
 		return false
 	}
 	// The children read what the slice did, at least that slice's time,
@@ -941,7 +949,7 @@ func (stream *streamedExecution) splitsOnTimeout(ctx context.Context, took uint6
 // times a first read out at the 30 s it is counted at whatever its plan,
 // and the cooldown is there for that backend; a Query Group in it is not
 // split deeper on one read's word.
-func (reading *sliceReading) timedOutForSize(took uint64, cooldown bool) bool {
+func (reading *sliceReading) timedOutForSize(slice *sliceRead, took uint64, cooldown bool) bool {
 	if len(reading.sliceMillis) > 0 {
 		sorted := append([]uint64(nil), reading.sliceMillis...)
 		sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
@@ -954,7 +962,7 @@ func (reading *sliceReading) timedOutForSize(took uint64, cooldown bool) bool {
 		// A slice of a shape is the first read of the Slot: put on its size
 		// when it took twice what it was planned to, as a slice is against
 		// the median of those before it.
-		return took >= 2*reading.plannedLeafMillis()
+		return took >= 2*reading.plannedLeafMillis(slice)
 	}
 	return reading.plannedSliceMillis > sliceQueryTargetMillis
 }
@@ -1038,7 +1046,7 @@ func (stream *streamedExecution) providerTimeout(took uint64, answered *executio
 		}
 		return nil
 	}
-	if !reading.timedOutForSize(took, false) {
+	if !reading.timedOutForSize(&stream.slice, took, false) {
 		return nil
 	}
 	return &providerTimeoutError{took: took, request: answered}
@@ -1088,10 +1096,7 @@ func slowestQueryMillis(completion execution.QueryExecutionCompletion) uint64 {
 // holds only what it keeps whole. A Slot whose windows could not begin -
 // its activations unread - cannot be read in slices and is retried.
 func (stream *streamedExecution) landSlice(ctx context.Context) error {
-	reading := stream.slices
-	stream.ledger.land(stream.sliceNumber, reading.sliceSeries)
-	reading.sliceSeries = nil
-	stream.windows.reached = len(stream.windows.prepared)
+	stream.fill.reached = len(stream.fill.prepared)
 	if err := stream.cutWindow(ctx); err != nil {
 		return err
 	}
@@ -1102,78 +1107,42 @@ func (stream *streamedExecution) landSlice(ctx context.Context) error {
 	// the next slice's limit counts only what the Slot's side holds
 	// (sliceLimit), and the prepared series are the window's, let go of as it
 	// lands (windowTask.series).
-	stream.windows.prepared, stream.windows.reached, stream.windows.dropped = nil, 0, 0
+	stream.fill.prepared, stream.fill.reached, stream.fill.dropped = nil, 0, 0
 	return nil
 }
 
 // applySliceHead is a slice's own head, after the first (§7.5): in a
 // Sequence of its own before the slice's first events, the open statements
 // its series propose are folded into each Plan's marker - grown, never
-// shrunk, so every event written is covered by a marker already down - and
-// the first-seen judgement is carried on: a Plan judged first-seen that this
-// slice finds had run is judged seen from this slice on, warming up, and the
-// slices it wrote before as first-seen - the ones that held series of it; a
-// slice that held none wrote nothing of it - and their series are counted on
-// the completion row.
-//
-// A head with no first-seen candidate - the common one - writes only what is
-// the apply side's, from statements worked out here from the slice's
-// bindings: it is handed to the apply goroutine as a task of its own, after
-// the previous slice's last window and before this slice's first, and
-// nothing waits for it. One with candidates reads the slice's prepared series
-// and State on the Slot's goroutine beside what is the apply side's, and runs
-// here once the apply goroutine is idle (drainApply).
+// shrunk, so every event written is covered by a marker already down. It
+// writes only what is the apply side's, from statements worked out here from
+// the slice's bindings: it is handed to the apply goroutine as a task of its
+// own, after the previous slice's last window and before this slice's
+// first, and nothing waits for it. A Slot read in slices judges no Plan
+// first-seen (first_seen.go), so a head has nothing to judge.
 func (coordinator *SlotExecutionCoordinator) applySliceHead(ctx context.Context, stream *streamedExecution) error {
-	windows := &stream.windows
-	if !windows.started || windows.apply == nil {
+	if stream.dispatch != nil {
+		// One of several consumers: the Slot's windows may not have been
+		// started by the slices below this one yet, and a head is written in
+		// them (startWindows).
+		if _, err := stream.startWindows(ctx); err != nil {
+			return err
+		}
+	}
+	if !stream.windowsStarted() || stream.windows.apply == nil {
 		return nil
 	}
 	opens, err := stream.headOpenStatements()
 	if err != nil {
 		return err
 	}
-	apply := windows.apply
-	// forced is read as the head left it: judgeForced splits it into new
-	// sets and leaves it as it was.
-	if len(firstSeenCandidates(apply.forced, stream.gaps)) == 0 {
-		return stream.handOver(ctx, applyTask{run: func(applyCtx context.Context) error {
-			return coordinator.writeSliceHead(applyCtx, stream, opens)
-		}})
-	}
-	if err := stream.drainApply(ctx); err != nil {
-		return err
-	}
-	return coordinator.ports.Sequencer.Sequence(ctx, sequencingScope(stream.header, nil, stream.gapItems), func(sequenceCtx context.Context) error {
-		defer stream.enter(slotPhaseCut)()
-		if candidates := firstSeenCandidates(apply.forced, stream.gaps); len(candidates) != 0 {
-			before := stream.unseenPlansAtRead()
-			if err := stream.firstSeenPrepass(sequenceCtx, candidates); err != nil {
-				return err
-			}
-			after := stream.unseenPlansAtRead()
-			if len(after) != len(before) {
-				// The slices numbered below this one that wrote series of it.
-				landed, landedSlices := stream.ledger.landedBefore(stream.sliceNumber)
-				for key := range before {
-					if _, still := after[key]; still {
-						continue
-					}
-					for _, due := range stream.header.DuePlans {
-						if due.Key() == key && landed[due.Identity] > 0 {
-							stream.slices.unseenSlices += landedSlices[due.Identity]
-							stream.slices.unseenSeries += landed[due.Identity]
-						}
-					}
-				}
-				apply.judgeForced(after)
-			}
-		}
-		return coordinator.sliceHeadStatements(sequenceCtx, stream, opens)
-	})
+	return stream.handOver(ctx, applyTask{run: func(applyCtx context.Context) error {
+		return coordinator.writeSliceHead(applyCtx, stream, opens)
+	}})
 }
 
-// writeSliceHead is a slice's head with no first-seen candidate, on the apply
-// goroutine: its own Sequence, its statements grown into each Plan's marker.
+// writeSliceHead is a slice's head, on the apply goroutine: its own
+// Sequence, its statements grown into each Plan's marker.
 func (coordinator *SlotExecutionCoordinator) writeSliceHead(
 	ctx context.Context, stream *streamedExecution, opens map[execution.PlanIdentity]execution.PlanGapMutation,
 ) error {
@@ -1396,6 +1365,8 @@ func (stream *streamedExecution) sliceDimension() string {
 	if !stream.readInSlices() {
 		return ""
 	}
+	stream.slices.treeMu.Lock()
+	defer stream.slices.treeMu.Unlock()
 	return stream.slices.tree.RootCut().Dimension
 }
 
@@ -1407,21 +1378,21 @@ func (stream *streamedExecution) sliceDimension() string {
 // wholeTimedOut) before any series reached its sample, the first dimension
 // - there is no sample to choose by, and read whole again it would run out
 // again, every round.
-func (reading *sliceReading) cutOnNext(dimensions []string, before slicedReading, timedOut bool) (inputslice.Cut, string) {
+func (reading *sliceReading) cutOnNext(slice *sliceRead, dimensions []string, before slicedReading, timedOut bool) (inputslice.Cut, string) {
 	if reading.tree != nil && slices.Equal(reading.dimensions, dimensions) {
 		if cut := reading.tree.RootCut(); !cut.IsZero() {
 			return cut, observability.InputSliceCutOnRootSplit
 		}
 	}
 	if reading.tree == nil && slices.Equal(reading.dimensions, dimensions) {
-		if cut, ok := inputslice.BestCut(dimensions, reading.sample); ok {
+		if cut, ok := inputslice.BestCut(dimensions, slice.sample); ok {
 			return cut, observability.InputSliceCutOnWholeSample
 		}
 	}
 	if slices.Equal(before.dimensions, dimensions) && slices.Contains(dimensions, before.cut.Dimension) {
 		return before.cut, before.cutFrom
 	}
-	if reading.tree == nil && len(reading.sample) == 0 && (timedOut || reading.wholeTimedOut) && len(dimensions) > 0 {
+	if reading.tree == nil && len(slice.sample) == 0 && (timedOut || reading.wholeTimedOut) && len(dimensions) > 0 {
 		return inputslice.FixedCut(dimensions[0]), observability.InputSliceCutOnFirstDimension
 	}
 	return inputslice.Cut{}, ""
@@ -1439,7 +1410,9 @@ func (reading *sliceReading) pending() []inputslice.Leaf {
 	if reading.tree == nil {
 		return []inputslice.Leaf{{}}
 	}
+	reading.treeMu.Lock()
 	pending := reading.tree.Pending()
+	reading.treeMu.Unlock()
 	if len(reading.deferred) == 0 {
 		return pending
 	}
@@ -1458,14 +1431,14 @@ func (reading *sliceReading) pending() []inputslice.Leaf {
 // noteDegradedTimeout keeps the slice being read, which the provider timed
 // out and which completes degraded, for the next Slot to read after the
 // others (deferred).
-func (reading *sliceReading) noteDegradedTimeout() {
+func (reading *sliceReading) noteDegradedTimeout(slice *sliceRead) {
 	if reading == nil || reading.tree == nil {
 		return
 	}
 	if reading.degraded == nil {
 		reading.degraded = make(map[string]bool)
 	}
-	reading.degraded[reading.leaf.Slice.Digest()] = true
+	reading.degraded[slice.leaf.Slice.Digest()] = true
 }
 
 // splitSlice lets the slice being read go and splits it, the children read
@@ -1527,24 +1500,13 @@ func (stream *streamedExecution) splitSliceAs(leaf inputslice.Leaf, kept bool) e
 	case reading.starting[leaf.ID]:
 		split, reading.sizedSplit = reading.tree.SplitSized, true
 	}
-	if _, err := split(leaf.ID, sample); err != nil {
+	reading.treeMu.Lock()
+	_, err := split(leaf.ID, sample)
+	reading.treeMu.Unlock()
+	if err != nil {
 		return fmt.Errorf("alarmd worker: split input slice: %w", err)
 	}
 	return nil
-}
-
-// notePrepared counts the series of each Plan the slice being read holds,
-// as its series are prepared (sliceSeries).
-func (reading *sliceReading) notePrepared(prepared []preparedSeries) {
-	for _, entry := range prepared {
-		if entry.due == nil {
-			continue
-		}
-		if reading.sliceSeries == nil {
-			reading.sliceSeries = make(map[execution.PlanIdentity]uint64)
-		}
-		reading.sliceSeries[entry.due.Identity]++
-	}
 }
 
 // sliceFinish is what the slice read last completed with, which the Slot
@@ -1595,12 +1557,14 @@ func (stream *streamedExecution) finishSlices(ctx context.Context) error {
 
 // landSliceRead counts the slice just completed as landed and reports
 // whether it was the last.
-func (reading *sliceReading) landSliceRead(leaf inputslice.Leaf) bool {
-	reading.read += reading.input
-	reading.seriesRead += reading.series
+func (reading *sliceReading) landSliceRead(slice *sliceRead, leaf inputslice.Leaf) bool {
+	reading.read += slice.input
+	reading.seriesRead += slice.series
 	if reading.tree == nil {
 		return true
 	}
+	reading.treeMu.Lock()
+	defer reading.treeMu.Unlock()
 	_ = reading.tree.Land(leaf.ID)
 	if reading.deferred[leaf.Slice.Digest()] {
 		reading.deferredRead++
@@ -1664,7 +1628,7 @@ func (coordinator *SlotExecutionCoordinator) rememberSlotInput(request execution
 	before := coordinator.slicedInput.lastInput(request.Contract.Slot.QueryGroup)
 	remembered := slicedReading{bytes: reading.read, series: reading.seriesRead, dimensions: dimensions,
 		revision: request.Contract.QueryRevision}
-	remembered.cut, remembered.cutFrom = reading.cutOnNext(dimensions, before, timedOut)
+	remembered.cut, remembered.cutFrom = reading.cutOnNext(&stream.slice, dimensions, before, timedOut)
 	remembered.deferred = reading.degraded
 	if timedOut {
 		remembered.bytes = max(remembered.bytes, before.bytes)
@@ -1701,7 +1665,7 @@ func (coordinator *SlotExecutionCoordinator) rememberSlotInput(request execution
 		// times out a small Query Group as it does a large one, and slicing
 		// for it would read the same slow answer once a slice; a read
 		// alarmd's deadline ended says only that the window was short.
-		if reading.timedOutByProvider && (reading.timedOutForSize(reading.timedOutTook, stream.cooldownHeld()) || before.series == 0 && before.bytes == 0) {
+		if reading.timedOutByProvider && (reading.timedOutForSize(&stream.slice, reading.timedOutTook, stream.cooldownHeld()) || before.series == 0 && before.bytes == 0) {
 			remembered.timedOutMillis = reading.queryMillis
 		}
 	} else {
@@ -1767,8 +1731,8 @@ func InputSliceRefusal(err error) (string, bool) {
 	return "", false
 }
 
-// slicesRead, slicesDiscarded, unseenSlices and unseenSeries are the
-// completion row's counts of how the Slot's input was read.
+// slicesRead and slicesDiscarded are the completion row's counts of how the
+// Slot's input was read.
 func (stream *streamedExecution) slicesRead() uint64 {
 	if !stream.slicing() {
 		return 0
@@ -1786,20 +1750,6 @@ func (stream *streamedExecution) slicesDiscarded() uint64 {
 	return uint64(stream.slices.tree.Discarded())
 }
 
-func (stream *streamedExecution) unseenSlices() uint64 {
-	if !stream.slicing() {
-		return 0
-	}
-	return stream.slices.unseenSlices
-}
-
-func (stream *streamedExecution) unseenSeries() uint64 {
-	if !stream.slicing() {
-		return 0
-	}
-	return stream.slices.unseenSeries
-}
-
 // sliceCeilingFactor is how many times its first slice's windows a Slot's
 // deadline may move: once for each slice read and each let go, at most
 // 2*K_max-1 - every query's round trips when the tree is as split as it may
@@ -1808,6 +1758,8 @@ func (stream *streamedExecution) sliceCeilingFactor() uint64 {
 	if !stream.slicing() || stream.slices.tree == nil {
 		return 1
 	}
+	stream.slices.treeMu.Lock()
+	defer stream.slices.treeMu.Unlock()
 	return min(uint64(stream.slices.tree.Leaves()+stream.slices.tree.Discarded()), 2*inputslice.MaxLeaves-1)
 }
 

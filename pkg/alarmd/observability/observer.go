@@ -251,7 +251,11 @@ const (
 	// exactly like one where none was ever needed.
 	StageExecutionEvidenceWritten = "execution_evidence_written"
 	StageResourceHard             = "resource_hard"
-	StageOther                    = "_other"
+	// StagePoolOverRelease names a release that would have taken one of the
+	// process's reservation counts below zero (PoolOverReleaseFacts): the
+	// count stops at zero, and the release is said, once a release.
+	StagePoolOverRelease = "pool_over_release"
+	StageOther           = "_other"
 
 	ResultTerminal = "terminal"
 	ResultRetrying = "retrying"
@@ -697,6 +701,29 @@ type NoDataMemoryRenewalFacts struct {
 	Renewed    bool
 	TTLSeconds int64
 }
+
+// PoolOverReleaseFacts is a release that would have taken one of the
+// process's reservation counts below zero: the count's kind
+// (PoolOverReleaseKinds), what the release gave back and what the count held
+// then. The count stopped at zero.
+type PoolOverReleaseFacts struct {
+	Kind        string
+	Asked, Held uint64
+}
+
+// The process's reservation counts a release can be past, closed.
+const (
+	PoolOverReleaseSeries        = "series"
+	PoolOverReleaseRetainedBytes = "retained_bytes"
+	PoolOverReleaseStates        = "states"
+	PoolOverReleaseEvents        = "events"
+	PoolOverReleaseGaps          = "gaps"
+	PoolOverReleaseGapFacts      = "gap_facts"
+)
+
+// PoolOverReleaseKinds is every kind.
+var PoolOverReleaseKinds = []string{PoolOverReleaseSeries, PoolOverReleaseRetainedBytes, PoolOverReleaseStates,
+	PoolOverReleaseEvents, PoolOverReleaseGaps, PoolOverReleaseGapFacts}
 
 // ExecutionEvidenceFacts is how far an earlier attempt at a Slot got.
 //
@@ -2972,10 +2999,19 @@ type Observation struct {
 	// guard: a gap guard on such a Plan sits at 0 of N for as long as the
 	// Plan has no input, and read without this number that is a guard
 	// warming. Nil when the line is not a Plan's.
-	PlanSeriesMatched      *int
-	RunOutcome             string
-	Attempted              bool
-	ExecuteOutcome         string
+	PlanSeriesMatched *int
+	RunOutcome        string
+	Attempted         bool
+	ExecuteOutcome    string
+	// SlotStep is, on the slot_completed line of an attempt that returned an
+	// error, the step of Execute it failed in, as slot_not_committed_total
+	// names it (query_failed, complete_failed, apply_failed, output_failed,
+	// progress_commit_failed, query_free_failed); ProgressRefusal, for a
+	// Progress commit the store did not apply, the fact that refused it
+	// (CURSOR_MOVED, ...) or its status. The fleet reads where the row is
+	// stuck by them when no code says.
+	SlotStep               string
+	ProgressRefusal        string
 	ProgressCompletionKind string
 	// ProgressCompletionCause says which of the several conditions that all
 	// complete a Slot as UNAVAILABLE actually happened. The kind alone cannot
@@ -3072,6 +3108,7 @@ type Observation struct {
 	NoDataMemoryRead    *NoDataMemoryReadFacts
 	NoDataMemoryRenewal *NoDataMemoryRenewalFacts
 	ExecutionEvidence   *ExecutionEvidenceFacts
+	PoolOverRelease     *PoolOverReleaseFacts
 	FrozenStateRenewal  *FrozenStateRenewalFacts
 	SourceWithheld      *SourceWithheldFacts
 	NoDataCensus        *NoDataCensusFacts
@@ -4291,6 +4328,9 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentOutput, StageNewOpens},
 	{ComponentAccess, StageTargetResolved},
 	{ComponentProgress, StageExecutionEvidenceWritten},
+	// A release past zero of the process's reservations, stopped there: its
+	// own bounded metric (worker_pool_over_releases_total), no generic cell.
+	{ComponentResource, StagePoolOverRelease},
 	{ComponentState, StageNoDataMemoryRead},
 	{ComponentState, StageNoDataMemoryRenewed},
 	{ComponentState, StageFrozenStateRenewed},

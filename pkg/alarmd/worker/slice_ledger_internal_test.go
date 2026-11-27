@@ -10,12 +10,14 @@
 package worker
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"sync"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/testwait"
 )
 
 // ledgerSlice is one slice's part for the ledger cases: series of plan a and
@@ -36,10 +38,9 @@ func ledgerSlice(number, seriesA, seriesB int, complete execution.Completeness) 
 
 // What a slice reads of the Slot so far is the slices numbered up to its
 // own, whatever order they completed in: the same series, the same bindings
-// in the same order, the lowest-numbered slice's completion bindings whole
-// and every other's that did not complete, and the series written by the
-// slices numbered below it. A slice let go before it completed holds a
-// number nothing carries (015 C1 appendix A 2, 3).
+// in the same order, and the lowest-numbered slice's completion bindings
+// whole and every other's that did not complete. A slice let go before it
+// completed holds a number nothing carries (015 C1 appendix A 2, 3).
 func TestWhatASliceReadsSoFarIsTheSlicesNumberedUpToItsOwn(t *testing.T) {
 	type part struct {
 		number, a, b int
@@ -54,7 +55,6 @@ func TestWhatASliceReadsSoFarIsTheSlicesNumberedUpToItsOwn(t *testing.T) {
 			p := parts[index]
 			series, streamed, completion := ledgerSlice(p.number, p.a, p.b, p.complete)
 			ledger.complete(p.number, series, streamed, completion)
-			ledger.land(p.number, map[execution.PlanIdentity]uint64{{StrategyID: "a"}: uint64(p.a)})
 		}
 		return ledger
 	}
@@ -65,11 +65,6 @@ func TestWhatASliceReadsSoFarIsTheSlicesNumberedUpToItsOwn(t *testing.T) {
 		gotSeries, gotBindings := outOfOrder.through(through)
 		if !reflect.DeepEqual(gotSeries, wantSeries) || !reflect.DeepEqual(gotBindings, wantBindings) {
 			t.Fatalf("through %d out of order: series %v bindings %v, want %v %v", through, gotSeries, gotBindings, wantSeries, wantBindings)
-		}
-		wantLanded, wantSlices := inOrder.landedBefore(through)
-		gotLanded, gotSlices := outOfOrder.landedBefore(through)
-		if !reflect.DeepEqual(gotLanded, wantLanded) || !reflect.DeepEqual(gotSlices, wantSlices) {
-			t.Fatalf("landed before %d out of order: %v %v, want %v %v", through, gotLanded, gotSlices, wantLanded, wantSlices)
 		}
 	}
 	series, bindings := outOfOrder.through(3)
@@ -89,10 +84,6 @@ func TestWhatASliceReadsSoFarIsTheSlicesNumberedUpToItsOwn(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("bindings through 3 = %v, want %v", got, want)
 	}
-	landed, slices := outOfOrder.landedBefore(3)
-	if landed[a] != 7 || slices[a] != 2 {
-		t.Fatalf("landed before 3 = %v over %v slices, want a 4+3 over slices 0 and 2", landed, slices)
-	}
 }
 
 // Slices completing side by side record into the ledger and read it at
@@ -107,12 +98,54 @@ func TestSlicesRecordAndReadTheLedgerSideBySide(t *testing.T) {
 			series, streamed, completion := ledgerSlice(number, 1, 1, execution.CompletenessFull)
 			ledger.complete(number, series, streamed, completion)
 			_, _ = ledger.through(number)
-			ledger.land(number, map[execution.PlanIdentity]uint64{{StrategyID: "a"}: 1})
-			_, _ = ledger.landedBefore(number)
 		}()
 	}
 	wait.Wait()
 	if series, _ := ledger.through(7); series[execution.PlanIdentity{StrategyID: "a"}] != 8 {
 		t.Fatalf("series through 7 = %v, want every slice's", series)
+	}
+}
+
+// A slice's head waits until every slice numbered below it handed its own,
+// had none, or was let go, and the Slot's first slice is the one none below
+// completed: so heads go to the apply side in slice order whichever
+// consumer gets to its head first (015 C1 section 5, step 3.2).
+func TestASlicesHeadWaitsForTheHeadsBelowItAndTheFirstIsSaidByNumber(t *testing.T) {
+	// A wait that would block ends at once on a context already ended.
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	var ledger sliceLedger
+	ledger.noteHeaded(0)
+	if err := ledger.waitHeadsBelow(ended, 2); err == nil {
+		t.Fatal("slice 2's head went on with slice 1 neither headed nor let go")
+	}
+	ledger.letGo(1)
+	if err := ledger.waitHeadsBelow(ended, 2); err != nil {
+		t.Fatalf("slice 2's head waits (%v) with slice 0 headed and slice 1 let go", err)
+	}
+
+	var later sliceLedger
+	waited := make(chan error, 1)
+	go func() { waited <- later.waitHeadsBelow(testwait.Context(t), 1) }()
+	later.noteHeaded(0)
+	select {
+	case err := <-waited:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-testwait.Expired(t):
+		t.Fatal("a head waiting on slice 0 was not woken as slice 0 handed its own")
+	}
+
+	var below sliceLedger
+	below.complete(0, nil, nil, nil)
+	below.letGo(1)
+	if first, err := below.waitBelow(ended, 2); err != nil || first {
+		t.Fatalf("slice 2 above a completed slice 0 judged first=%v (%v), want not first", first, err)
+	}
+	var none sliceLedger
+	none.letGo(0)
+	if first, err := none.waitBelow(ended, 1); err != nil || !first {
+		t.Fatalf("slice 1 above a slice let go judged first=%v (%v), want the Slot's first", first, err)
 	}
 }

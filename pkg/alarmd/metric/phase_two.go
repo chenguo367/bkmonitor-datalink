@@ -84,6 +84,7 @@ type phaseTwoMetrics struct {
 	noDataMemoryRenewals           *prometheus.CounterVec
 	queryFreeCompletions           *prometheus.CounterVec
 	executionEvidenceWrites        *prometheus.CounterVec
+	poolOverReleases               *prometheus.CounterVec
 	outputEventsByWireFormat       *prometheus.CounterVec
 	outputEventsWithoutMessage     *prometheus.CounterVec
 	outputEventsByKind             *prometheus.CounterVec
@@ -110,7 +111,7 @@ type phaseTwoMetrics struct {
 	slotApplyWaitSeconds           prometheus.Counter
 	slotLandSeconds                prometheus.Counter
 	slotApplyOverlapSeconds        prometheus.Counter
-	firstSeenUnseen                *prometheus.CounterVec
+	firstSeenCandidates            *prometheus.CounterVec
 	sliceReadAhead                 *prometheus.CounterVec
 	seriesNotEvaluated             *prometheus.CounterVec
 	sliceReadAheadYields           *prometheus.CounterVec
@@ -1041,10 +1042,13 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.slicedSlots = prometheus.NewCounter(prometheus.CounterOpts{Subsystem: metricSubsystem,
 		Name: "worker_sliced_slots_total", Help: "Completed Slots whose input was read in more than one slice or had a slice let go: the Slots slicing " +
 			"reached. Which Query Group is not a label here."})
-	metrics.firstSeenUnseen = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem,
-		Name: "worker_first_seen_unseen_total", Help: "What completed Slots wrote as first-seen before a later slice found the Plan had run, by unit: " +
-			"slices and series. Those series were written without warming up; a rate above zero says the " +
-			"first-seen judgement changed within Slots read in slices."}, []string{"unit"})
+	metrics.firstSeenCandidates = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem,
+		Name: "worker_first_seen_candidates_total", Help: "Plans new to their activation without a gap marker - the ones that could be " +
+			"first-seen - by what the Slot that read them made of them: first_seen, judged never to have run and written " +
+			"that Slot without warming up; ran_before, found to have run, warmed up; sliced_read, warmed up unjudged because " +
+			"the Slot was read in slices, its first window written before every series' State is read. A Plan counts on " +
+			"the attempt that judges it: the one warmed up writes its marker and is no candidate on the retry. sliced_read " +
+			"is the new strategies a Query Group read in slices starts detecting a period late."}, []string{"verdict"})
 	metrics.sliceReadAhead = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem,
 		Name: "worker_slice_read_ahead_total", Help: "How the slices read ahead - read while the slice before completed - ended, by outcome: replayed, " +
 			"handed to the Slot; other_leaf, let go because the next slice was another; yielded, let go for a " +
@@ -1065,8 +1069,8 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, outcome := range []string{"landed", "discarded"} {
 		metrics.inputSlices.WithLabelValues(outcome)
 	}
-	for _, unit := range []string{"slices", "series"} {
-		metrics.firstSeenUnseen.WithLabelValues(unit)
+	for _, verdict := range observability.FirstSeenVerdicts {
+		metrics.firstSeenCandidates.WithLabelValues(verdict)
 	}
 	for _, outcome := range observability.SliceReadAheadOutcomes {
 		metrics.sliceReadAhead.WithLabelValues(outcome)
@@ -1262,6 +1266,18 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"exists for; during a rollout NONE_FOUND also covers Slots an older build wrote, so it " +
 			"says nothing until every replica is on this version.",
 	}, []string{"kind", "evidence"})
+	metrics.poolOverReleases = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: metricSubsystem, Name: "worker_pool_over_releases_total",
+		Help: "Releases that would have taken one of the process's reservation counts below zero, by kind: series, " +
+			"retained_bytes, states, events, gaps and gap_facts. Each is a release of more than the count held - " +
+			"given back twice, or by a stream holding none - and a fault of this build's own: the count stops at " +
+			"zero instead of wrapping, which would refuse every Slot of the process until it restarts, and the " +
+			"release is said with RESOURCE_POOL_OVER_RELEASE, what it gave back and what the count held. Above " +
+			"zero, the counts the pool judges by are low by as much, until the process restarts.",
+	}, []string{"kind"})
+	for _, kind := range observability.PoolOverReleaseKinds {
+		metrics.poolOverReleases.WithLabelValues(kind)
+	}
 	metrics.executionEvidenceWrites = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: metricSubsystem, Name: "execution_evidence_written_total",
 		Help: "Marks left by an attempt that wrote state and then could not write its Slot down, by " +
@@ -2565,7 +2581,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.queryAdmission, m.queryDownstreamDistress,
 		m.noDataSlotPlans, m.noDataAbsences, m.noDataManualCloseDropped, m.noDataManualCloseReadFailures, m.targetPlanResolutions, m.targetSelectorResolutions, m.targetExcludedAbsentMembers, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.inPlaceWaits, m.inPlaceHeldInputBytes, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetRedis,
-		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.retainedShareApproaching, m.inputSlices, m.slicedSlots, m.slotApplyWaitSeconds, m.slotLandSeconds, m.slotApplyOverlapSeconds, m.firstSeenUnseen, m.sliceReadAhead, m.seriesNotEvaluated, m.sliceReadAheadYields, m.windowZeroBoundCuts, m.windowAccountingClamped, m.sliceReadAheadWaits, m.sliceReadAheadWaitSeconds, m.sliceReadsInFlight, m.sliceReadAheadWaitingSeconds, m.inputSliceTimeouts, m.inputSliceShapes, m.noDataStagesAhead, m.noDataStageAheadDiffers, m.noDataGroupsStagedAhead, m.schedulePruneSkipped, m.scheduleCutoverDuration,
+		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.retainedShareApproaching, m.inputSlices, m.slicedSlots, m.slotApplyWaitSeconds, m.slotLandSeconds, m.slotApplyOverlapSeconds, m.firstSeenCandidates, m.sliceReadAhead, m.seriesNotEvaluated, m.sliceReadAheadYields, m.windowZeroBoundCuts, m.windowAccountingClamped, m.sliceReadAheadWaits, m.sliceReadAheadWaitSeconds, m.sliceReadsInFlight, m.sliceReadAheadWaitingSeconds, m.inputSliceTimeouts, m.inputSliceShapes, m.noDataStagesAhead, m.noDataStageAheadDiffers, m.noDataGroupsStagedAhead, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
 		m.scheduleCutoverQueryGroups, m.scheduleCutoverReadHoldLinks, m.fleetOverdueEpisodes, m.fleetRestoreUnread, m.scheduleCutoverTimelinesRead, m.scheduleCutoverFirstDuration,
 		m.scheduleCutoverFirstTimelines, m.replayExpiries, m.replayTakeovers, m.slotDiversions, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
@@ -2581,7 +2597,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.fleetSnapshotBytes, m.fleetViewSnapshotLoads, m.fleetViewSnapshotBytes,
 		m.fleetSummaryBytes, m.fleetViewSummaryLoads, m.fleetViewSummaryBytes, m.fleetViewOwnedLoads, m.fleetViewOwnedBytes, m.retainedPeakCensusGroups, m.retainedPeakCensusOverflow,
 		m.cmdbIndexDegraded, m.cmdbIndexReads, m.catalogComposition, m.noDataMemoryReads, m.noDataMemoryRenewals,
-		m.queryFreeCompletions, m.executionEvidenceWrites, m.outputEventsByWireFormat, m.outputEventsWithoutMessage, m.outputEventsByKind, m.outputEventsRejected, m.outputRejectedStrategyOverflow, m.frozenStateRenewals, m.frozenStateCensus, m.inputSeriesDiscarded)...)
+		m.queryFreeCompletions, m.executionEvidenceWrites, m.poolOverReleases, m.outputEventsByWireFormat, m.outputEventsWithoutMessage, m.outputEventsByKind, m.outputEventsRejected, m.outputRejectedStrategyOverflow, m.frozenStateRenewals, m.frozenStateCensus, m.inputSeriesDiscarded)...)
 }
 
 // inputSeriesDiscardedDependencyWithoutPrimary is input_series_discarded_total's
@@ -2936,6 +2952,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	}
 	if observation.Stage == observability.StageExecutionEvidenceWritten {
 		m.executionEvidenceWrites.WithLabelValues(string(observation.Result)).Inc()
+	}
+	if facts := observation.PoolOverRelease; facts != nil && slices.Contains(observability.PoolOverReleaseKinds, facts.Kind) {
+		m.poolOverReleases.WithLabelValues(facts.Kind).Inc()
 	}
 	if observation.Stage == observability.StageEventACKed {
 		for format, count := range observation.OutputWireFormats {
@@ -3892,21 +3911,22 @@ func (m phaseTwoMetrics) observeWindowPipeline(timing *observability.SlotTimingF
 	m.slotApplyOverlapSeconds.Add(float64(timing.ApplyOverlap) / 1000)
 }
 
-// observeSlicing counts a completed Slot's slices, its first-seen writes a
-// later slice overturned, and how its reads ahead ended.
+// observeSlicing counts a completed Slot's slices, its verdicts on the Plans
+// that could be first-seen, and how its reads ahead ended.
 func (m phaseTwoMetrics) observeSlicing(usage *observability.SlotBudgetUsageFacts) {
 	if usage.InputSlices > 1 || usage.InputSlicesDiscarded > 0 {
 		m.slicedSlots.Inc()
 		m.inputSlices.WithLabelValues("landed").Add(float64(usage.InputSlices))
 		m.inputSlices.WithLabelValues("discarded").Add(float64(usage.InputSlicesDiscarded))
 	}
-	m.firstSeenUnseen.WithLabelValues("slices").Add(float64(usage.FirstSeenUnseenSlices))
+	for verdict, count := range [...]uint64{usage.FirstSeenJudged, usage.FirstSeenRanBefore, usage.FirstSeenSlicedRead} {
+		m.firstSeenCandidates.WithLabelValues(observability.FirstSeenVerdicts[verdict]).Add(float64(count))
+	}
 	for index, count := range usage.InputSliceReadsInFlight {
 		for range count {
 			m.sliceReadsInFlight.Observe(float64(index + 1))
 		}
 	}
-	m.firstSeenUnseen.WithLabelValues("series").Add(float64(usage.FirstSeenUnseenSeries))
 	for outcome, count := range [...]uint64{usage.InputSlicesReadAhead, usage.InputSlicesReadAheadOtherLeaf,
 		usage.InputSlicesReadAheadYielded, usage.InputSlicesReadAheadFailed, usage.InputSlicesReadAheadContextEnded} {
 		m.sliceReadAhead.WithLabelValues(observability.SliceReadAheadOutcomes[outcome]).Add(float64(count))

@@ -172,7 +172,7 @@ func TestAWindowHoldsTheEventCapOverTheMostRecordsOneSeriesHolds(t *testing.T) {
 		t.Fatal(err)
 	}
 	for index := range 5 {
-		stream.windows.prepared = append(stream.windows.prepared, preparedSeries{due: &fixture.due,
+		stream.fill.prepared = append(stream.fill.prepared, preparedSeries{due: &fixture.due,
 			identity: execution.SeriesIdentityDigest(fmt.Sprintf("series-%d", index)),
 			inputs: []execution.SeriesEvaluationInputRequest{{Inputs: []execution.NamedInputBinding{{
 				Role: execution.InputRolePrimary, Dataset: dataset, View: view}}}}})
@@ -185,8 +185,8 @@ func TestAWindowHoldsTheEventCapOverTheMostRecordsOneSeriesHolds(t *testing.T) {
 	marker.Begin(execution.SlotStageEvaluate)
 	marker.Extend(deadline, deadline)
 	stream.fixWindowCeiling(execution.WithStageMarker(context.Background(), marker), 5)
-	if stream.windows.perWindow != 2 || stream.windows.ceilingWindows != 3 {
-		t.Fatalf("s_min = %d over %d windows, want 2 over 3", stream.windows.perWindow, stream.windows.ceilingWindows)
+	if stream.windows.perWindow.Load() != 2 || stream.windows.ceilingWindows.Load() != 3 {
+		t.Fatalf("s_min = %d over %d windows, want 2 over 3", stream.windows.perWindow.Load(), stream.windows.ceilingWindows.Load())
 	}
 }
 
@@ -209,7 +209,7 @@ func TestAnAbsenceHeavySlotRaisesItsCeilingAndIsNotDeclinedWhileItsAbsenceWindow
 	marker.Extend(deadline, deadline)
 	ctx := execution.WithStageMarker(context.Background(), marker)
 	stream.fixWindowCeiling(ctx, 1)
-	before := stream.windows.ceilingWindows
+	before := stream.windows.ceilingWindows.Load()
 
 	present := nodata.NewPresentSet(due.CompiledPlan.NoData().AggDimension)
 	if _, err := stream.decideNoDataRound(ctx, due, present, execution.CompletenessFull,
@@ -217,7 +217,7 @@ func TestAnAbsenceHeavySlotRaisesItsCeilingAndIsNotDeclinedWhileItsAbsenceWindow
 		t.Fatal(err)
 	}
 	absent := uint64(len(groups))
-	raised := (absent + stream.windows.perWindow - 1) / stream.windows.perWindow
+	raised := (absent + stream.windows.perWindow.Load() - 1) / stream.windows.perWindow.Load()
 	usage := stream.budgetUsage()
 	if usage.WindowCeilingRaisedWindows != raised || usage.WindowCeilingWindows != before+raised {
 		t.Fatalf("usage = %+v, want the ceiling raised by %d windows to %d", usage, raised, before+raised)
@@ -256,7 +256,7 @@ func TestAPresentNoDataRoundRaisesItsCeilingByItsNormalSeries(t *testing.T) {
 	marker.Extend(deadline, deadline)
 	ctx := execution.WithStageMarker(context.Background(), marker)
 	stream.fixWindowCeiling(ctx, len(dimensions))
-	before := stream.windows.ceilingWindows
+	before := stream.windows.ceilingWindows.Load()
 
 	present := nodata.NewPresentSet(due.CompiledPlan.NoData().AggDimension)
 	for _, host := range dimensions {
@@ -273,7 +273,7 @@ func TestAPresentNoDataRoundRaisesItsCeilingByItsNormalSeries(t *testing.T) {
 	if round.facts.Absent != 0 || said == 0 {
 		t.Fatalf("facts %+v with %d series said, want every group present and its NORMAL said", round.facts, said)
 	}
-	raised := (uint64(said) + stream.windows.perWindow - 1) / stream.windows.perWindow
+	raised := (uint64(said) + stream.windows.perWindow.Load() - 1) / stream.windows.perWindow.Load()
 	usage := stream.budgetUsage()
 	if usage.WindowCeilingRaisedWindows != raised || usage.WindowCeilingWindows != before+raised {
 		t.Fatalf("usage = %+v, want the ceiling raised by %d windows for %d NORMAL series to %d",

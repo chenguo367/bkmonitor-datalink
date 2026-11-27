@@ -83,6 +83,12 @@ func productionProgressStoreOptions(cfg config.Config, control progress.ControlS
 		Reads: recorder.RecordProgressRead,
 		// Each projection field a later attempt of an unfinished Slot changed.
 		Superseded: recorder.RecordProgressProjectionSuperseded,
+		// Each BeginSlot, commit and range the record refused, by the fact
+		// that refused it.
+		Conflicts: recorder.RecordProgressConflict,
+		// Each query-free completion of a Slot an earlier attempt applied
+		// whole: an attempt that ended between its apply and its commit.
+		AppliedWhole: recorder.RecordProgressQueryFreeApplied,
 	}
 }
 

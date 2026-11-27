@@ -120,7 +120,7 @@ func runNoDataSampleRounds(t *testing.T, due execution.DuePlan, store *state.Exe
 		if err := stream.evaluateNoData(ctx, prepared, 4); err != nil {
 			t.Fatalf("round %d: %v", index+1, err)
 		}
-		round := noDataSampleRound{result: stream.evaluated, mutations: stream.noDataMutations, outcomes: stream.noDataOutcomes}
+		round := noDataSampleRound{result: stream.withWindow(), mutations: stream.noDataMutations, outcomes: stream.noDataOutcomes}
 		var events []contract.TriggerEventV1
 		var mutations []execution.StateMutation
 		for _, plan := range round.result.Plans {

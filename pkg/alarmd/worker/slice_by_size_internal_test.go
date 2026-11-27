@@ -308,7 +308,7 @@ func TestARoundThatSplitALeafOfTheLastKeptSplitForItsSizeIsNoQuickOne(t *testing
 				}
 				continue
 			}
-			reading.noteLeafRead(inputslice.Leaf{ID: leaf}, 1_000)
+			reading.noteLeafRead(&sliceRead{}, inputslice.Leaf{ID: leaf}, 1_000)
 		}
 		return reading, tree.Shape()
 	}

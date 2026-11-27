@@ -35,6 +35,10 @@ import (
 // it, naming the write and where it was sent from.
 func TestMain(m *testing.M) {
 	worker.WatchPorts(watchWrites)
+	// One stream a Slot unless a case sets k: a process of four cores or more
+	// takes two by default (015 C1 section 9), and this package's cases are
+	// one stream's but those that say otherwise.
+	worker.PinSliceConsumersForTests()
 	code := m.Run()
 	if found := unclearedWrites.take(); len(found) > 0 {
 		fmt.Fprintf(os.Stderr, "%d writes of Slot attempts were not sent as beforeWrite cleared them (014 ⑩):\n", len(found))

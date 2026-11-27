@@ -232,6 +232,9 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	ReasonCompletionOffsetBelowReserve: {
 		ReasonCompletionOffsetBelowReserve, ReasonClassDeterministic, ReasonDomainObservation},
 	ReasonResourceHardStop: {ReasonResourceHardStop, ReasonClassRetryable, ReasonDomainObservation},
+	// Deterministic: a release past zero is this build's own fault, made the
+	// same way however often it is retried.
+	ReasonResourcePoolOverRelease: {ReasonResourcePoolOverRelease, ReasonClassDeterministic, ReasonDomainObservation},
 	ReasonResourcePoolHeldByOthers: {
 		ReasonResourcePoolHeldByOthers, ReasonClassRetryable, ReasonDomainObservation},
 	// One Slot's own State, Event or Gap output exceeds the per-Slot cap the

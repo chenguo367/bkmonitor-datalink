@@ -53,24 +53,24 @@ func TestAWindowsRecordIDsAreDerivedOnceChargedAndLetGoWithIt(t *testing.T) {
 	shared := derivedDataset(t, strings.Repeat("b", 64), 3)
 	// Series a reads first; b and c both read shared, as one series digest
 	// feeding two Plans' series does.
-	stream.windows.prepared[0].inputs[0].Inputs[0].Dataset = first
-	stream.windows.prepared[1].inputs[0].Inputs[0].Dataset = shared
-	stream.windows.prepared[2].inputs[0].Inputs[0].Dataset = shared
+	stream.fill.prepared[0].inputs[0].Inputs[0].Dataset = first
+	stream.fill.prepared[1].inputs[0].Inputs[0].Dataset = shared
+	stream.fill.prepared[2].inputs[0].Inputs[0].Dataset = shared
 	firstBytes, sharedBytes := first.RecordIDWindowBytes(), shared.RecordIDWindowBytes()
 	if firstBytes == 0 || sharedBytes == 0 {
 		t.Fatal("the Datasets keep their ids; want them derived")
 	}
 	_, outsideBefore := execution.DatasetRecordIDCounts()
-	input, windowBytes := stream.retainedByPhase[retainPhaseInput], stream.windows.bytes
-	for position := range stream.windows.prepared {
-		if err := stream.materializeRecordIDs(context.Background(), position, stream.windows.prepared[position].inputs); err != nil {
+	input, windowBytes := stream.retainedByPhase[retainPhaseInput], stream.fill.bytes
+	for position := range stream.fill.prepared {
+		if err := stream.materializeRecordIDs(context.Background(), position, stream.fill.prepared[position].inputs); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if got, want := stream.retainedByPhase[retainPhaseInput]-input, firstBytes+sharedBytes; got != want {
 		t.Fatalf("the buffers were charged %d to the input phase, want %d: each Dataset once", got, want)
 	}
-	if got, want := stream.windows.bytes-windowBytes, firstBytes+sharedBytes; got != want {
+	if got, want := stream.fill.bytes-windowBytes, firstBytes+sharedBytes; got != want {
 		t.Fatalf("the window counts %d of the buffers, want %d", got, want)
 	}
 	for _, dataset := range []*execution.Dataset{first, shared} {
@@ -88,20 +88,20 @@ func TestAWindowsRecordIDsAreDerivedOnceChargedAndLetGoWithIt(t *testing.T) {
 
 	// The window of series a and b lands; c, which also read shared, is the
 	// next window's.
-	stream.windows.bytes = 0
+	stream.fill.bytes = 0
 	stream.dropWindowRecordIDs(2, false)
 	if got, want := stream.retainedByPhase[retainPhaseInput], input+sharedBytes; got != want {
 		t.Fatalf("input phase = %d after the window landed, want %d: only the buffer the next window reads", got, want)
 	}
-	if stream.windows.bytes != sharedBytes || len(stream.windows.recordIDs) != 1 || first.RecordIDWindowBytes() != firstBytes ||
+	if stream.fill.bytes != sharedBytes || len(stream.fill.recordIDs) != 1 || first.RecordIDWindowBytes() != firstBytes ||
 		shared.RecordIDWindowBytes() != 0 {
-		t.Fatalf("window bytes %d, %d buffers held after the window landed; want shared's %d alone", stream.windows.bytes,
-			len(stream.windows.recordIDs), sharedBytes)
+		t.Fatalf("window bytes %d, %d buffers held after the window landed; want shared's %d alone", stream.fill.bytes,
+			len(stream.fill.recordIDs), sharedBytes)
 	}
-	stream.windows.bytes = 0
-	stream.dropWindowRecordIDs(len(stream.windows.prepared), true)
-	if stream.retainedByPhase[retainPhaseInput] != input || stream.windows.recordIDs != nil || shared.RecordIDWindowBytes() != sharedBytes ||
-		stream.windows.bytes != 0 {
+	stream.fill.bytes = 0
+	stream.dropWindowRecordIDs(len(stream.fill.prepared), true)
+	if stream.retainedByPhase[retainPhaseInput] != input || stream.fill.recordIDs != nil || shared.RecordIDWindowBytes() != sharedBytes ||
+		stream.fill.bytes != 0 {
 		t.Fatalf("input phase = %d after the last window, want %d and no buffer held", stream.retainedByPhase[retainPhaseInput], input)
 	}
 }

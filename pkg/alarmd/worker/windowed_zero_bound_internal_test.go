@@ -47,15 +47,15 @@ func TestAWindowCutAtAZeroBoundIsCountedByThePhaseHoldingMostOutsideIt(t *testin
 			c.hold(t, fixture, bytes)
 			fixture.written("series-1")
 			fixture.startWindows(t)
-			stream.effects.states, stream.windows.bytes = 1, 1
+			stream.effects.states, stream.ownEffects.states, stream.fill.bytes = 1, 1, 1
 			next := execution.EvaluationResult{Contract: stream.header.Contract, Plans: []execution.PlanEvaluationResult{{
 				Plan: fixture.due.Identity, StateResults: []execution.StateEvaluation{{Mutation: execution.StateMutation{
 					Identity: fixture.key("series-2"), ApplyVersion: fixture.version}}}}}}
 			if err := stream.windowBeforeMerge(context.Background(), next, mergeBytes{retained: share / 4}); err != nil {
 				t.Fatal(err)
 			}
-			if stream.windows.zeroBoundCuts != c.counted {
-				t.Fatalf("windows cut at a zero bound by phase = %v, want %v (bound %d)", stream.windows.zeroBoundCuts, c.counted,
+			if stream.fill.zeroBoundCuts != c.counted {
+				t.Fatalf("windows cut at a zero bound by phase = %v, want %v (bound %d)", stream.fill.zeroBoundCuts, c.counted,
 					stream.windowBound())
 			}
 		})

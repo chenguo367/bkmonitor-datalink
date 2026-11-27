@@ -141,10 +141,11 @@ func (fixture *windowedFixture) key(series string) execution.StateKeyIdentity {
 func (fixture *windowedFixture) written(series string) {
 	stream, key := fixture.stream, fixture.key(series)
 	fixture.view(execution.RuntimeStateView{Identity: key, VersionComparison: execution.ApplyVersionPersistedOlder})
-	stream.evaluated.Plans[0].StateResults = append(stream.evaluated.Plans[0].StateResults, execution.StateEvaluation{
-		Mutation: execution.StateMutation{Identity: key, ApplyVersion: fixture.version, MutationDigest: execution.MutationDigest("digest-" + series)},
-		Events:   []contract.TriggerEventV1{{EventID: "event-" + series}},
-	})
+	stream.fill.addResults(execution.EvaluationResult{Plans: []execution.PlanEvaluationResult{{Plan: fixture.due.Identity,
+		StateResults: []execution.StateEvaluation{{
+			Mutation: execution.StateMutation{Identity: key, ApplyVersion: fixture.version, MutationDigest: execution.MutationDigest("digest-" + series)},
+			Events:   []contract.TriggerEventV1{{EventID: "event-" + series}},
+		}}}}})
 	stream.planSeries[fixture.due.Identity][key.SeriesIdentityDigest] = struct{}{}
 }
 
@@ -214,7 +215,7 @@ func TestAnIncompleteInputOnlyInTheLastWindowOpensTheMarkerBeforeTheFirstWindows
 		digest  string
 		binding execution.NamedInputBinding
 	}{{"series-1", whole}, {"series-2", whole}, {"series-3", partial}} {
-		fixture.stream.windows.prepared = append(fixture.stream.windows.prepared, preparedSeries{due: &fixture.due,
+		fixture.stream.fill.prepared = append(fixture.stream.fill.prepared, preparedSeries{due: &fixture.due,
 			identity: execution.SeriesIdentityDigest(series.digest),
 			inputs:   []execution.SeriesEvaluationInputRequest{{Inputs: []execution.NamedInputBinding{series.binding}}}})
 	}

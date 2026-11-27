@@ -80,7 +80,7 @@ func TestASlotsSummaryReadsWhatItsMergedResultsSay(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	evaluated := stream.evaluated
+	evaluated := stream.withWindow()
 	if len(evaluated.Plans) != 2 || stream.summary.planCount() != 2 {
 		t.Fatalf("results name %d Plans and the summary %d, want both A and B once", len(evaluated.Plans), stream.summary.planCount())
 	}

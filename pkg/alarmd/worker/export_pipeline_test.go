@@ -32,6 +32,15 @@ func EffectsReservedForTest(coordinator *SlotExecutionCoordinator) (states, even
 	return coordinator.reservations.states, coordinator.reservations.events, coordinator.reservations.gaps
 }
 
+// PoolHeldForTest is what the process's pool holds reserved now, by counter:
+// series, retained bytes, State mutations, events, gap mutations, gap facts.
+func PoolHeldForTest(coordinator *SlotExecutionCoordinator) [6]uint64 {
+	coordinator.reservations.mu.Lock()
+	defer coordinator.reservations.mu.Unlock()
+	held := &coordinator.reservations
+	return [6]uint64{held.series, held.retainedBytes, held.states, held.events, held.gaps, held.gapFacts}
+}
+
 // SetWindowLandedForTest has note told, until t ends, what each window gave
 // back as it landed: of its state, output and input, in that order.
 func SetWindowLandedForTest(t testing.TB, note func(state, output, input uint64)) {

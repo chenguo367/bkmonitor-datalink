@@ -10,6 +10,7 @@
 package worker_test
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -32,6 +33,9 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/worker"
 )
 
+// slicedObservationsMu guards the observations a sliced fixture keeps.
+var slicedObservationsMu sync.Mutex
+
 // The cases here run a Slot whose input does not fit half its share through
 // the coordinator's one Execute path (decision-020 batch 8, 7.3-7.6), against
 // a query source that reads a slice as the store does: a series is delivered
@@ -50,6 +54,10 @@ const slicedPool = 2 << 20
 const slicedShare = slicedPool / 4 * 3
 
 const slicedLimit = slicedShare / 2 / 2
+
+// slicedMaxSeries is the provisional series a sliced fixture's Slot may hold:
+// 200, and more for a case whose Query Group is wider (set and restored by it).
+var slicedMaxSeries uint64 = 200
 
 // slicedSeries is one series of the sliced fixture: its value on the
 // dimension the Slot is sliced on, and the padding, in a dimension outside
@@ -137,6 +145,10 @@ type slicedSource struct {
 	plans        []execution.DuePlan
 	requirements []execution.DataRequirement
 	completeness func(read, held int) execution.Completeness
+	// completenessOf, when set, answers each read that reaches its completion
+	// by the series it delivered, in place of completeness: a slice's answer
+	// that follows what it holds, not when it was read.
+	completenessOf func(delivered []string) execution.Completeness
 	// targetMissing answers every read as the provider answers a query whose
 	// table routes nowhere in the space: no series, UNAVAILABLE, its one
 	// attempt failed QUERY_TARGET_MISSING, as access/uq's
@@ -169,6 +181,17 @@ type slicedSource struct {
 	// 30 s: zero is every read, a backend slow as a whole.
 	timeoutBySize  bool
 	timeoutHolding int
+	// failSlice, when set, fails each read it returns an error for, before
+	// anything of it streams.
+	failSlice func(slice execution.InputSlice) error
+	// hold, when set, runs as each read is asked, given its context and
+	// slice: a read it holds waits as a provider's does, ending with its
+	// context.
+	hold func(ctx context.Context, slice execution.InputSlice)
+	// duplicateBinding, when set, answers each read it is true for with one
+	// of its completion bindings twice, as a provider whose answer breaks the
+	// completion contract: the Slot refuses it as it completes the slice.
+	duplicateBinding func(slice execution.InputSlice) bool
 }
 
 // holding is how many of the source's series the slice holds.
@@ -186,9 +209,23 @@ func (source *slicedSource) Execute(ctx context.Context, request execution.Query
 	if source.beforeRead != nil {
 		source.beforeRead()
 	}
+	if source.failSlice != nil {
+		if err := source.failSlice(request.Slice); err != nil {
+			return execution.QueryExecutionCompletion{}, err
+		}
+	}
 	source.started.Add(1)
 	source.ports.record("query")
 	call := slicedCall{slice: request.Slice, ctx: ctx, readAhead: fmt.Sprintf("%T", consumer) == "*worker.sliceReadAhead"}
+	if source.hold != nil {
+		if source.hold(ctx, request.Slice); ctx.Err() != nil {
+			call.err = ctx.Err()
+			source.mu.Lock()
+			source.calls = append(source.calls, call)
+			source.mu.Unlock()
+			return execution.QueryExecutionCompletion{}, ctx.Err()
+		}
+	}
 	if source.timeoutWhole && request.Slice.IsZero() || source.timeoutBySize && source.holding(request.Slice) >= source.timeoutHolding {
 		completion, err := source.timedOutRead(ctx, request, consumer, &call)
 		source.mu.Lock()
@@ -330,6 +367,8 @@ func (source *slicedSource) answer(ctx context.Context, request execution.QueryE
 	completeness := execution.CompletenessFull
 	if unavailable {
 		completeness = execution.CompletenessUnavailable
+	} else if source.completenessOf != nil {
+		completeness = source.completenessOf(call.delivered)
 	} else if source.completeness != nil {
 		held := 0
 		if len(call.delivered) != 0 {
@@ -375,6 +414,9 @@ func (source *slicedSource) answer(ctx context.Context, request execution.QueryE
 	completion := execution.QueryExecutionCompletion{AllRequiredCompleted: true,
 		PhysicalQueries: []execution.PhysicalQueryCompletion{physical}}
 	completion.CompletionBindings = accessShapedCompletionBindings(source.t, header, completion.PhysicalQueries)
+	if source.duplicateBinding != nil && source.duplicateBinding(request.Slice) && len(completion.CompletionBindings) != 0 {
+		completion.CompletionBindings = append(completion.CompletionBindings, completion.CompletionBindings[0])
+	}
 	return completion, nil
 }
 
@@ -401,6 +443,15 @@ type slicedFixture struct {
 	// queryPermits is the process's query permits build gives the
 	// coordinator: none set, two slices read at once (one ahead); two, one.
 	queryPermits int
+	// pool is the retained-byte pool build gives the coordinator, slicedPool
+	// when unset.
+	pool uint64
+	// counts, when set, is told how each Slot began and why one that began
+	// was not committed, as the bundle tells the metric recorder.
+	counts *slotCounts
+	// observe, when set, is told each observation after it is kept, from
+	// whichever stream said it.
+	observe func(observability.Observation)
 }
 
 // newSlicedFixture builds the fixture with a 1 MiB pool; maxStates is the
@@ -426,14 +477,24 @@ func (fixture *slicedFixture) build(t *testing.T, replaced worker.Ports, maxStat
 	if replaced.Evaluator == nil {
 		replaced.Evaluator = ports
 	}
+	var counts worker.SlotCounter
+	if fixture.counts != nil {
+		counts = fixture.counts
+	}
 	coordinator, err := worker.NewSlotExecutionCoordinator(worker.Ports{OpenAlerts: ports, Finalization: ports,
 		Activation: replaced.Activation, Query: fixture.source, Sequencer: ports, Evaluator: replaced.Evaluator, Admission: ports,
 		GapGuard: replaced.GapGuard, NoData: worker.SharedNoDataStore, Hosts: worker.SharedHostBusiness,
-		Events: replaced.Events, State: replaced.State, Progress: ports, ExecutionEvidence: newMemoryEvidenceStore(),
+		Events: replaced.Events, State: replaced.State, Progress: ports, ExecutionEvidence: newMemoryEvidenceStore(), SlotCounts: counts,
 		Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+			// Said from every stream of a Slot consumed side by side.
+			slicedObservationsMu.Lock()
 			*observations = append(*observations, observability.NormalizeObservation(observation))
+			slicedObservationsMu.Unlock()
+			if fixture.observe != nil {
+				fixture.observe(observation)
+			}
 		})},
-		worker.ProvisionalBudget{MaxSeries: 200, MaxRetainedBytes: slicedPool, MaxStateMutations: maxStates, MaxEvents: 200, MaxGapMutations: 10,
+		worker.ProvisionalBudget{MaxSeries: slicedMaxSeries, MaxRetainedBytes: cmp.Or(fixture.pool, slicedPool), MaxStateMutations: maxStates, MaxEvents: 200, MaxGapMutations: 10,
 			QueryPermits: fixture.queryPermits})
 	if err != nil {
 		t.Fatal(err)
@@ -1152,6 +1213,9 @@ type slicedFirstSeen struct {
 	prior  map[execution.SeriesIdentityDigest]bool
 	older  execution.ApplyVersion
 	levels []execution.RuntimeLevelStateView
+	// aheadReads is the State reads that witness nothing: the first-seen
+	// pre-pass's, ahead of the Slot's own preflight (firstSeenPrepass).
+	aheadReads atomic.Int64
 }
 
 func (ports *slicedFirstSeen) LoadActivations(ctx context.Context, request execution.PlanActivationRequest) (execution.PlanActivationResult, error) {
@@ -1163,6 +1227,9 @@ func (ports *slicedFirstSeen) LoadActivations(ctx context.Context, request execu
 }
 
 func (ports *slicedFirstSeen) LoadRuntime(ctx context.Context, request execution.StatePreflightRequest) (execution.StatePreflightResult, error) {
+	if request.Unwitnessed {
+		ports.aheadReads.Add(1)
+	}
 	result, err := ports.persistedRetryState.LoadRuntime(ctx, request)
 	if err != nil {
 		return result, err
@@ -1222,99 +1289,6 @@ func satisfiedMarkers(mutations []execution.PlanGapMutation) int {
 		}
 	}
 	return count
-}
-
-// First-seen is judged slice by slice and only ever moves toward seen
-// (7.5): a Plan new to its activation, without a marker, finds nothing from
-// before in its first two slices and writes them as first-seen, without a
-// warm-up; its third slice finds one series that ran before, and from there
-// the Plan warms up - nothing more of it is written, and the tail writes no
-// satisfied marker - while the completion row names the two slices and
-// their series that went out as first-seen. Which series a slice holds is
-// learned from a first run of the same input with nothing from before.
-func TestFirstSeenIsJudgedPerSliceAndAPlanFoundSeenWarmsUpFromThatSlice(t *testing.T) {
-	firstSeenPerSlice(t, 200)
-}
-
-// The same, every window three State mutations at most: every slice of six
-// series and more is cut into windows halfway through, and the windows it
-// wrote let go of their series before the slice ends (letGoWindowInputs).
-// The slices written as first-seen and their series are counted whole all
-// the same: a slice's series are counted as they are prepared, not by what
-// is left of them at its end (what is left depended on whether a
-// window was cut, which the reads ahead decided now and then).
-func TestFirstSeenCountsTheSeriesOfASliceCutIntoWindows(t *testing.T) {
-	firstSeenPerSlice(t, 3)
-}
-
-func firstSeenPerSlice(t *testing.T, maxStates uint64) {
-	t.Helper()
-	series := slicedHosts(24, 40<<10)
-	learn, _ := newSlicedFirstSeenFixtureOf(t, series, nil, maxStates)
-	if result, err := learn.coordinator.Execute(context.Background(), windowedRequest()); err != nil || !result.Completed {
-		t.Fatalf("learning run result=%+v err=%v", result, err)
-	}
-	// The slices that hold series, in the order they are read: a slice may
-	// hold none, and writes nothing as first-seen or otherwise.
-	var slices []slicedCall
-	seenAt := 0
-	for index, slice := range learn.source.landed() {
-		if len(slice.delivered) != 0 {
-			slices = append(slices, slice)
-			if len(slices) == 3 {
-				seenAt = index
-			}
-		}
-	}
-	if len(slices) < 3 {
-		t.Fatalf("the input lands in %d slices that hold series, want at least three", len(slices))
-	}
-	if satisfiedMarkers(learn.ports.gapMutations) != 1 || learn.ports.eventCount != len(series) {
-		t.Fatalf("a Plan never seen sent %d satisfied markers and %d events, want one and every series'", satisfiedMarkers(learn.ports.gapMutations), learn.ports.eventCount)
-	}
-
-	// The Plan found to have run is warmed up as any forced Plan is: it
-	// writes nothing more this attempt, its WARMING marker is written by the
-	// protection path, and the attempt is retried to converge.
-	fixture, _ := newSlicedFirstSeenFixtureOf(t, series, []string{slices[2].delivered[0]}, maxStates)
-	request := windowedRequest()
-	first, err := fixture.coordinator.Execute(context.Background(), request)
-	if err != nil || first.Completed || first.ReasonCode != execution.ReasonCode(contract.ReasonPlanReactivated) {
-		t.Fatalf("Execute() result=%+v err=%v, want the Plan warmed up under %s", first, err, contract.ReasonPlanReactivated)
-	}
-	written := fixture.stateWrites()
-	for index, slice := range fixture.source.landed() {
-		for _, digest := range slice.delivered {
-			if index < seenAt && written[digest] != 1 || index >= seenAt && written[digest] != 0 {
-				t.Fatalf("slice %d series written %d times, want the slices before the one found seen written once and none after", index+1, written[digest])
-			}
-		}
-	}
-	if markers := satisfiedMarkers(fixture.ports.gapMutations); markers != 0 {
-		t.Fatalf("a Plan found to have run sent %d satisfied markers", markers)
-	}
-
-	fixture.source.calls = nil
-	mutations := len(fixture.ports.gapMutations)
-	result, err := fixture.coordinator.Execute(context.Background(), request)
-	if err != nil {
-		t.Fatalf("retry result=%+v err=%v", result, err)
-	}
-	if markers := satisfiedMarkers(fixture.ports.gapMutations[mutations:]); markers != 0 {
-		t.Fatal("the retry judged the Plan unseen again and sent its satisfied marker")
-	}
-	for index, slice := range fixture.source.landed() {
-		for _, digest := range slice.delivered {
-			if index >= seenAt && fixture.stateWrites()[digest] != 0 {
-				t.Fatal("the retry wrote a series of the Plan it had found seen")
-			}
-		}
-	}
-	unseenSeries := uint64(len(slices[0].delivered) + len(slices[1].delivered))
-	if first.Usage.FirstSeenUnseenSlices != 2 || first.Usage.FirstSeenUnseenSeries != unseenSeries {
-		t.Fatalf("completion row counts %d slices and %d series written as first-seen, want 2 and %d",
-			first.Usage.FirstSeenUnseenSlices, first.Usage.FirstSeenUnseenSeries, unseenSeries)
-	}
 }
 
 // K_0 (7.4): a replica that read a Query Group's last Slot in slices starts

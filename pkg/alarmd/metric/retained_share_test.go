@@ -94,14 +94,14 @@ func TestTheShareApproachCounterCountsASlotAppliedInWindows(t *testing.T) {
 }
 
 // A completed Slot read in slices counts its slices landed and let go, once
-// as a sliced Slot, its overturned first-seen writes and how its reads
-// ahead ended; a Slot read whole counts no slice.
+// as a sliced Slot, its verdicts on the Plans that could be first-seen and
+// how its reads ahead ended; a Slot read whole counts no slice.
 func TestACompletedSlotCountsItsSlicesAndHowItsReadsAheadEnded(t *testing.T) {
 	recorder := NewRecorder(BuildInfo{})
 	m := recorder.phaseTwo
 	for _, usage := range []observability.SlotBudgetUsageFacts{
-		{InputSlices: 1},
-		{InputSlices: 4, InputSlicesDiscarded: 1, FirstSeenUnseenSlices: 1, FirstSeenUnseenSeries: 30,
+		{InputSlices: 1, FirstSeenJudged: 2, FirstSeenRanBefore: 1},
+		{InputSlices: 4, InputSlicesDiscarded: 1, FirstSeenSlicedRead: 3,
 			InputSlicesReadAhead: 2, InputSlicesReadAheadYielded: 1},
 	} {
 		usage := usage
@@ -111,15 +111,16 @@ func TestACompletedSlotCountsItsSlicesAndHowItsReadsAheadEnded(t *testing.T) {
 		})
 	}
 	for name, want := range map[string]float64{
-		"sliced":     1,
-		"landed":     4,
-		"discarded":  1,
-		"slices":     1,
-		"series":     30,
-		"replayed":   2,
-		"yielded":    1,
-		"other_leaf": 0,
-		"failed":     0,
+		"sliced":      1,
+		"landed":      4,
+		"discarded":   1,
+		"first_seen":  2,
+		"ran_before":  1,
+		"sliced_read": 3,
+		"replayed":    2,
+		"yielded":     1,
+		"other_leaf":  0,
+		"failed":      0,
 	} {
 		var got float64
 		switch name {
@@ -127,8 +128,8 @@ func TestACompletedSlotCountsItsSlicesAndHowItsReadsAheadEnded(t *testing.T) {
 			got = testutil.ToFloat64(m.slicedSlots)
 		case "landed", "discarded":
 			got = testutil.ToFloat64(m.inputSlices.WithLabelValues(name))
-		case "slices", "series":
-			got = testutil.ToFloat64(m.firstSeenUnseen.WithLabelValues(name))
+		case "first_seen", "ran_before", "sliced_read":
+			got = testutil.ToFloat64(m.firstSeenCandidates.WithLabelValues(name))
 		default:
 			got = testutil.ToFloat64(m.sliceReadAhead.WithLabelValues(name))
 		}

@@ -638,8 +638,11 @@ type queryGroupState struct {
 	// that did, however it did.
 	failingSince time.Time
 	reasonCode   string
-	degradedRuns int
-	blockedRuns  int
+	// failedStep and progressRefusal are the latest failed round's step of
+	// Execute and refused Progress commit (Anomaly.FailedStep).
+	failedStep, progressRefusal string
+	degradedRuns                int
+	blockedRuns                 int
 	// awaitingViewSince is the first round of a blocked run every round of
 	// which the view refused only for not carrying the Query Group yet: the
 	// wait every Worker's start and every move has. Zero once any round of
@@ -2270,6 +2273,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		state.degradedRuns++
 		state.currentKind = KindDegradedRun
 		state.reasonCode = executeOutcome
+		state.failedStep, state.progressRefusal = observation.SlotStep, observation.ProgressRefusal
 		// The view let the round reach execution: whatever wait there was
 		// is over.
 		state.awaitingViewSince, state.blockedNotWaiting = time.Time{}, false
@@ -2538,7 +2542,7 @@ func (tracker *Tracker) rowOf(queryGroup string, state *queryGroupState) Anomaly
 		DemotedSince:   state.demotedSince,
 		RequestTargets: state.requestTargets, CooldownOwnerEpoch: state.cooldownEpoch, PoolReason: state.poolReason,
 		Kind:       state.currentKind,
-		ReasonCode: state.reasonCode, Cause: state.cause, CauseReason: state.causeReason, CauseScope: state.causeScope,
+		ReasonCode: state.reasonCode, FailedStep: state.failedStep, ProgressRefusal: state.progressRefusal, Cause: state.cause, CauseReason: state.causeReason, CauseScope: state.causeScope,
 		CauseOrigin:      state.causeOrigin,
 		Coverage:         state.coverage,
 		CoverageRejected: state.coverageRejected,

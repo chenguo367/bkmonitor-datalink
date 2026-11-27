@@ -186,9 +186,10 @@ func seriesKindLabel(noData bool) observability.StateSeriesKind {
 }
 
 // beginSlotApply reads the activation facts the Slot's writes are guarded by
-// and judges its forced Plans with unseen. It returns false when the facts
-// could not be read, which the caller answers with an activation retry before
-// anything is written.
+// and judges its forced Plans with unseen, as the Slot's judging says
+// (firstSeenJudgingFrom). It returns false when the facts could not be read,
+// which the caller answers with an activation retry before anything is
+// written.
 func (coordinator *SlotExecutionCoordinator) beginSlotApply(
 	ctx context.Context,
 	request execution.SlotExecutionRequest,
@@ -200,7 +201,7 @@ func (coordinator *SlotExecutionCoordinator) beginSlotApply(
 	if !read {
 		return nil, false
 	}
-	apply.judgeForced(unseen)
+	apply.judgeForced(unseen, firstSeenJudgingFrom(ctx))
 	return apply, true
 }
 
@@ -250,12 +251,30 @@ func (coordinator *SlotExecutionCoordinator) readSlotActivations(
 // written with (classifyActivationChange).
 //
 // A forced Plan the Slot found nothing of from before it never ran under its
-// generation: it is not warmed up (first_seen.go).
-func (apply *slotApply) judgeForced(unseen map[execution.PlanKey]struct{}) {
+// generation: it is not warmed up (first_seen.go). A Slot read in slices
+// judges none first-seen: every forced Plan warms up. judging, when the Slot
+// judges at all, keeps the verdict of each Plan that could be first-seen.
+func (apply *slotApply) judgeForced(unseen map[execution.PlanKey]struct{}, judging *firstSeenJudging) {
+	if judging != nil && judging.sliced {
+		unseen = nil
+	}
 	forced, firstSeen := firstSeenActivations(apply.forced, apply.loadedGaps, unseen)
+	if judging != nil {
+		judging.verdicts = [firstSeenVerdicts]uint64{}
+		for _, candidate := range firstSeenCandidates(apply.forced, apply.loadedGaps) {
+			_, judged := firstSeen[candidate.Key()]
+			switch {
+			case judging.sliced:
+				judging.verdicts[firstSeenSlicedRead]++
+			case judged:
+				judging.verdicts[firstSeenJudged]++
+			default:
+				judging.verdicts[firstSeenRanBefore]++
+			}
+		}
+	}
 	for _, fact := range forced.Facts {
-		// Judged again by a later slice (applySliceHead): a Plan already
-		// forced stays as it was.
+		// A Plan already among the changed ones is not listed twice.
 		if _, already := apply.changedPlans[fact.Key()]; already {
 			continue
 		}

@@ -67,7 +67,7 @@ func (stream *streamedExecution) mergeResumedSeries(ctx context.Context, entry c
 	if err := stream.mergeMeasured(ctx, resumed, stream.measureMerge(resumed, 0, loadedKeyHeldBytes)); err != nil {
 		return err
 	}
-	stream.windows.readBeside = append(stream.windows.readBeside, entry.item.Identity)
+	stream.fill.readBeside = append(stream.fill.readBeside, entry.item.Identity)
 	stream.noteResumed(due.Identity)
 	if gapSuperseded {
 		stream.noteSupersededGap(ctx, due.GapIdentity())
@@ -94,14 +94,18 @@ func (stream *streamedExecution) prepareSeriesEvaluation(
 	// the Slot began are judged again only if a window boundary has passed
 	// since, which is when they stop holding.
 	decision := stream.coordinator.now().Unix()
-	if !effectiveFactsHoldAt(stream.effective, decision) {
-		effective, err := PrepareEffectiveTimeFacts(ctx, stream.header, stream.coordinator.ports.EffectiveTime, decision)
+	stream.sharedMu.Lock()
+	effective := stream.effective
+	stream.sharedMu.Unlock()
+	if !effectiveFactsHoldAt(effective, decision) {
+		prepared, err := PrepareEffectiveTimeFacts(ctx, stream.header, stream.coordinator.ports.EffectiveTime, decision)
 		if err != nil {
 			return nil, fmt.Errorf("alarmd worker: prepare EffectiveTime facts at the decision: %w", err)
 		}
-		stream.effective = effective
+		effective = prepared
+		stream.addShared(func() { stream.effective = prepared })
 	}
-	evaluationHeader, err := bindAlwaysEffectiveTimeFacts(stream.header, job.stateItems, stream.effective, entry.kind())
+	evaluationHeader, err := bindAlwaysEffectiveTimeFacts(stream.header, job.stateItems, effective, entry.kind())
 	if err != nil {
 		return nil, fmt.Errorf("alarmd worker: bind series EffectiveTime facts: %w", err)
 	}
@@ -282,6 +286,8 @@ type evaluatePool struct {
 
 // evaluatePool is the Slot's pool, started on first use.
 func (stream *streamedExecution) evaluatePool() *evaluatePool {
+	stream.poolMu.Lock()
+	defer stream.poolMu.Unlock()
 	if stream.evaluating == nil {
 		pool := &evaluatePool{workers: runtime.GOMAXPROCS(0), jobs: make(chan func())}
 		if pool.workers > 1 {

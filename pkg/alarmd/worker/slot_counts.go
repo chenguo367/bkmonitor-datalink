@@ -63,7 +63,7 @@ func (coordinator *SlotExecutionCoordinator) countNotCommitted(applied *appliedP
 
 // notCommittedReason is the word of execution.SlotNotCommittedReasons an
 // attempt that did not write its Slot down returned on: with an error, by
-// what the error is and then by the step it failed in (slotStepError); with
+// what the error is and then by the step it failed in (SlotStepError); with
 // none, by its finalization and its result.
 func notCommittedReason(mode execution.FinalizationMode, result execution.SlotExecutionResult, err error) string {
 	if err != nil {
@@ -146,22 +146,30 @@ func queryAdmissionFailed(err error) bool {
 	return false
 }
 
-// slotStepError is an attempt's error with the step of Execute it failed in,
+// SlotStepError is an attempt's error with the step of Execute it failed in,
 // a word of execution.SlotNotCommittedReasons; its text is the error's own.
-type slotStepError struct {
-	step string
-	err  error
+// The runtime reads the innermost step a Slot's error names (SlotStepOf).
+type SlotStepError struct {
+	Step string
+	Err  error
 }
 
-func (e *slotStepError) Error() string { return e.err.Error() }
-func (e *slotStepError) Unwrap() error { return e.err }
+func (e *SlotStepError) Error() string { return e.Err.Error() }
+func (e *SlotStepError) Unwrap() error { return e.Err }
 
 // inSlotStep is err failed in step; nil stays nil.
 func inSlotStep(step string, err error) error {
 	if err == nil {
 		return nil
 	}
-	return &slotStepError{step: step, err: err}
+	return &SlotStepError{Step: step, Err: err}
+}
+
+// SlotStepOf is the step of Execute an attempt's error failed in, the word
+// slot_not_committed_total counts it under when nothing else names it
+// (execution.SlotNotCommittedReasons); empty for an error no step named.
+func SlotStepOf(err error) string {
+	return innermostSlotStep(err)
 }
 
 // innermostSlotStep is the step the error failed in, the innermost one named:
@@ -169,8 +177,8 @@ func inSlotStep(step string, err error) error {
 func innermostSlotStep(err error) string {
 	step := ""
 	for err != nil {
-		if named, ok := err.(*slotStepError); ok {
-			step = named.step
+		if named, ok := err.(*SlotStepError); ok {
+			step = named.Step
 		}
 		err = errors.Unwrap(err)
 	}

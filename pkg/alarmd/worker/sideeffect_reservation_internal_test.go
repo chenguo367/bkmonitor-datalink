@@ -31,7 +31,7 @@ func TestProcessSideEffectBudgetCapsTwoLiveSlotAggregates(t *testing.T) {
 			if err == nil {
 				t.Fatalf("two live Slots each retain one %s under process limit 1: second merge accepted", kind)
 			}
-			if !reflect.DeepEqual(first.evaluated, firstResult) {
+			if !reflect.DeepEqual(first.withWindow(), firstResult) {
 				t.Fatal("rejection changed another Slot's accepted aggregate")
 			}
 			if len(second.evaluated.Plans) != 0 {

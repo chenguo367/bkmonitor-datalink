@@ -34,8 +34,8 @@ func TestAWindowAccountingThatTakesOffMoreThanTheSlotHoldsSaysWhere(t *testing.T
 			stream.windows.pipe = &applyPipe{stream: stream}
 			// Within what the Slot holds: nothing clamped.
 			stream.windows.pipe.inflightRelease[retainPhaseInput] = 600
-			if got := c.takeOff(stream); got != 400 || stream.windows.clamped != ([2]bool{}) {
-				t.Fatalf("taking off 600 of 1000: %d, clamped %v; want 400 and nothing said", got, stream.windows.clamped)
+			if got := c.takeOff(stream); got != 400 || stream.fill.clamped != ([2]bool{}) {
+				t.Fatalf("taking off 600 of 1000: %d, clamped %v; want 400 and nothing said", got, stream.fill.clamped)
 			}
 			// Past it, twice.
 			stream.windows.pipe.inflightRelease[retainPhaseOutput] = 700
@@ -44,8 +44,8 @@ func TestAWindowAccountingThatTakesOffMoreThanTheSlotHoldsSaysWhere(t *testing.T
 					t.Fatalf("taking off 1300 of 1000: %d, want it clamped to 0", got)
 				}
 			}
-			if stream.windows.clamped != c.set {
-				t.Fatalf("clamped %v, want %v", stream.windows.clamped, c.set)
+			if stream.fill.clamped != c.set {
+				t.Fatalf("clamped %v, want %v", stream.fill.clamped, c.set)
 			}
 			usage := stream.budgetUsage()
 			if (usage.WindowOutsideClamped == 1) != c.set[0] || (usage.SliceOthersClamped == 1) != c.set[1] {

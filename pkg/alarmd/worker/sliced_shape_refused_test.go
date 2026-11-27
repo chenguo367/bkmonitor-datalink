@@ -31,7 +31,8 @@ import (
 // Twenty-four hosts of a third of a slice's limit each, two to a slice at
 // most: twelve leaves at least for them. The shape holds them all in the few
 // leaves its first split put them in, every other leaf split, empty, until
-// it has 60 or 61: splitting those few to twelve takes the tree past its 64.
+// it has MaxLeaves-4 or -3: splitting those few to twelve takes the tree past
+// its MaxLeaves.
 // Slices counted from the Query Group's input, eight, have room for them.
 func TestASlotRefusedForTheLeavesOfItsShapeLeavesTheNextOneSlicesCounted(t *testing.T) {
 	series := slicedHosts(24, slicedLimit/3)
@@ -61,8 +62,8 @@ func TestASlotRefusedForTheLeavesOfItsShapeLeavesTheNextOneSlicesCounted(t *test
 	}
 }
 
-// crowdedShape is a shape on dimensions of 60 or 61 leaves (a Slot starts in
-// at most inputslice.MaxLeaves-3), series all in the leaves its first split
+// crowdedShape is a shape on dimensions of MaxLeaves-4 or -3 leaves (a Slot
+// starts in at most inputslice.MaxLeaves-3), series all in the leaves its first split
 // put them in: every split after is of a leaf holding none of them, kept for
 // its size as a let-go slice's is (inputslice.Tree.SplitSized).
 func crowdedShape(t *testing.T, dimensions []string, series []slicedSeries) inputslice.Shape {

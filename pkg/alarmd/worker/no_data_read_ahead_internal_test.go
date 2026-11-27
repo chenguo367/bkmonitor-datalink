@@ -329,7 +329,7 @@ func (rig *readAheadRig) round(ctx context.Context, batchLimit int, stateStore e
 func (rig *readAheadRig) commit(ctx context.Context, stream *streamedExecution) {
 	rig.t.Helper()
 	byPlan := map[execution.PlanIdentity][]execution.StateMutation{}
-	for _, plan := range stream.evaluated.Plans {
+	for _, plan := range stream.withWindow().Plans {
 		for _, result := range plan.StateResults {
 			byPlan[plan.Plan] = append(byPlan[plan.Plan], result.Mutation)
 		}
@@ -363,7 +363,7 @@ func (rig *readAheadRig) commit(ctx context.Context, stream *streamedExecution) 
 // bytes.
 func readAheadOutput(t *testing.T, stream *streamedExecution) ([]byte, []byte) {
 	t.Helper()
-	evaluated, err := json.Marshal(stream.evaluated.Plans)
+	evaluated, err := json.Marshal(stream.withWindow().Plans)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -565,7 +565,7 @@ func TestNoDataSeriesSaidBeforeAPlansOwnFailureAreEvaluatedAsBefore(t *testing.T
 	}
 	failed, other := readAhead.dues[0], readAhead.dues[1]
 	evaluatedOf := map[execution.PlanIdentity]int{}
-	for _, plan := range stream.evaluated.Plans {
+	for _, plan := range stream.withWindow().Plans {
 		evaluatedOf[plan.Plan] += len(plan.StateResults)
 	}
 	if evaluatedOf[failed.Identity] != said || evaluatedOf[other.Identity] < readAheadGroups {

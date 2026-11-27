@@ -64,3 +64,25 @@ func SetReadAheadWaitsForMeasurement(note func(waited time.Duration)) func(waite
 	}
 	return nil
 }
+
+// SetSliceConsumersForMeasurement has k streams consume the slices of a Slot
+// read in more than one slice side by side (015 C1), one or zero for the
+// Slot's own stream alone, and returns what it was. Only in the
+// alarmd_measure build, for the reading of each k.
+func SetSliceConsumersForMeasurement(k int32) int32 {
+	return sliceConsumersForTest.Swap(max(k, 0))
+}
+
+// SetSlicesBySubstreamForMeasurement has note told, as a Slot's consumers
+// end, how many slices each consumed and how many barriers they held, nil
+// for none, and returns what it was. Only in the alarmd_measure build.
+func SetSlicesBySubstreamForMeasurement(note func(consumed []int, barriers uint64)) func(consumed []int, barriers uint64) {
+	var next *func(consumed []int, barriers uint64)
+	if note != nil {
+		next = &note
+	}
+	if previous := slicesBySubstreamForTest.Swap(next); previous != nil {
+		return *previous
+	}
+	return nil
+}

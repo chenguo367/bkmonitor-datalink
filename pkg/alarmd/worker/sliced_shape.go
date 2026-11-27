@@ -209,10 +209,10 @@ func (reading *sliceReading) sizedDecay(shape inputslice.Shape, before slicedRea
 func (stream *streamedExecution) keepTimedOutSplit(leaf inputslice.Leaf) {
 	reading := stream.slices
 	if reading.tree == nil || reading.unsliceable || !reading.timedOutByProvider ||
-		!reading.timedOutForSize(reading.timedOutTook, stream.cooldownHeld()) {
+		!reading.timedOutForSize(&stream.slice, reading.timedOutTook, stream.cooldownHeld()) {
 		return
 	}
-	if _, err := reading.tree.SplitKept(leaf.ID, reading.sample); err == nil {
+	if _, err := reading.tree.SplitKept(leaf.ID, stream.slice.sample); err == nil {
 		reading.keptOnFailure = true
 	}
 }

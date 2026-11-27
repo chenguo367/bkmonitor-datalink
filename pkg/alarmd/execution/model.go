@@ -4582,10 +4582,15 @@ type ProgressBeginRequest struct {
 type ProgressBeginResult struct {
 	Status     ProgressCommitStatus
 	ReasonCode ReasonCode
+	// Conflict, RecordNext and StoredNext are a refused BeginSlot's, as a
+	// refused commit's are (ProgressCommitResult): what refused it and, for
+	// a cursor not at the requested Slot, the two cursors.
+	Conflict               ProgressSkipRefusal
+	RecordNext, StoredNext EvaluationTime
 }
 
 func (result ProgressBeginResult) Validate() error {
-	return (ProgressCommitResult(result)).Validate()
+	return ProgressCommitResult{Status: result.Status, ReasonCode: result.ReasonCode, Conflict: result.Conflict}.Validate()
 }
 
 type ProgressLoadStatus string
@@ -4737,9 +4742,57 @@ func validCompletionKind(kind CompletionKind) bool {
 type ProgressCommitResult struct {
 	Status     ProgressCommitStatus
 	ReasonCode ReasonCode
+	// Conflict is which fact refused a commit, set only when Status is
+	// ProgressConflict: an expired range in flight, the record's cursor not
+	// at the commit's Slot, no record for a Slot that began, or the record
+	// changed under the write. The words are the pruned skip's refusals, so
+	// the store, the line and the counter say the same one.
+	Conflict ProgressSkipRefusal
+	// RecordNext and StoredNext are, for a cursor that is not at the
+	// commit's Slot (SkipRefusalCursorMoved), the Slot the record's
+	// completed facts derive as next and the cursor it stores. They differ
+	// only once the record's grid moved under it; equal, another attempt
+	// moved the cursor on.
+	RecordNext, StoredNext EvaluationTime
 }
 
+// The facts only a BeginSlot or an expired range is refused by, beside the
+// pruned skip's four: the record names another Query Group; the same Slot
+// is asked through an older Segment than the one its unfinished projection
+// was frozen on; an unfinished Slot stands where a range would begin; a
+// range is committed that was never begun; the timeline's successor of the
+// range's last Slot is no longer the one its proof sealed.
+const (
+	ConflictIdentityMismatch ProgressSkipRefusal = "IDENTITY_MISMATCH"
+	ConflictSegmentOlder     ProgressSkipRefusal = "SEGMENT_OLDER"
+	ConflictSlotInFlight     ProgressSkipRefusal = "SLOT_IN_FLIGHT"
+	ConflictRangeMissing     ProgressSkipRefusal = "RANGE_MISSING"
+	ConflictGridMoved        ProgressSkipRefusal = "GRID_MOVED"
+	// ConflictUnnamed is a conflict its path returned without a word: counted
+	// and read as one, so a path that forgets its word is seen rather than
+	// dropped, and never refused as an invalid result for it.
+	ConflictUnnamed ProgressSkipRefusal = "UNNAMED"
+)
+
+// ConflictWord is refusal's word, ConflictUnnamed for none.
+func ConflictWord(refusal ProgressSkipRefusal) string {
+	if refusal == "" {
+		return string(ConflictUnnamed)
+	}
+	return string(refusal)
+}
+
+// ProgressConflicts are the words a refused BeginSlot, commit or expired
+// range is named and counted under.
+var ProgressConflicts = []string{string(SkipRefusalRangeInFlight), string(SkipRefusalCursorMoved),
+	string(SkipRefusalProgressMissing), string(SkipRefusalCASConflict), string(ConflictIdentityMismatch),
+	string(ConflictSegmentOlder), string(ConflictSlotInFlight), string(ConflictRangeMissing), string(ConflictGridMoved),
+	string(ConflictUnnamed)}
+
 func (result ProgressCommitResult) Validate() error {
+	if result.Conflict != "" && result.Status != ProgressConflict {
+		return errors.New("alarmd execution: only a Progress conflict names what refused it")
+	}
 	switch result.Status {
 	case ProgressCommitted:
 		return ValidateResultReason(observability.ResultSuccess, result.ReasonCode)
@@ -4780,6 +4833,11 @@ const (
 )
 
 type SlotExecutionResult struct {
+	// ProgressRefusal is, for an attempt whose BeginSlot the record refused
+	// as a conflict, the fact that refused it (ProgressConflicts): the
+	// attempt returns a retry, no error, and its slot_completed line carries
+	// the word as a refused commit's error does. Empty otherwise.
+	ProgressRefusal string
 	// Set only after successful Progress commit for the unchanged configuration.
 	QueryAvailability QueryAvailability
 	// QueryUnavailableReason is, with QueryAvailabilityUnavailable, why the
@@ -4997,14 +5055,15 @@ type SlotBudgetUsage struct {
 	// QueryBodyMicros and QueryBodyMicrosMax are the bodies in microseconds.
 	QueryBodyMicros, QueryBodyMicrosMax uint64
 	// InputSlices is the slices the Slot's input was read in (one for a Slot
-	// read whole), InputSlicesDiscarded the ones let go and split while they
-	// streamed, and FirstSeenUnseenSlices and FirstSeenUnseenSeries the
-	// slices, and their series, a Plan judged first-seen wrote before a later
-	// slice found it had run.
-	InputSlices           uint64
-	InputSlicesDiscarded  uint64
-	FirstSeenUnseenSlices uint64
-	FirstSeenUnseenSeries uint64
+	// read whole), and InputSlicesDiscarded the ones let go and split while
+	// they streamed.
+	InputSlices          uint64
+	InputSlicesDiscarded uint64
+	// FirstSeenJudged, FirstSeenRanBefore and FirstSeenSlicedRead are the
+	// Plans that could be first-seen - new to their activation, without a
+	// marker - the Slot judged first-seen, found to have run, and warmed up
+	// unjudged because it was read in slices.
+	FirstSeenJudged, FirstSeenRanBefore, FirstSeenSlicedRead uint64
 	// InputSlicesReadAhead is the slices read while the slice before
 	// completed and handed to the Slot (replayed); the other three are the
 	// reads ahead let go - the next slice was another, the read yielded to a

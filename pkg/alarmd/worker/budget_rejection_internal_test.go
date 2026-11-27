@@ -71,7 +71,7 @@ func TestBudgetRejectionOutputAndQueryFreeOwnership(t *testing.T) {
 		// Twenty rather than thirty: one Query Group may hold half the pool, so
 		// at thirty this execution crosses its own share and the shared-pool
 		// rejection this case is about never happens.
-		stream := &streamedExecution{slotStream: &slotStream{coordinator: co, began: normal, retainedByPhase: retainedSeed(20)}}
+		stream := &streamedExecution{slotStream: &slotStream{coordinator: co, began: normal}, retainedByPhase: retainedSeed(20)}
 		err := co.acquireEffects(effectCounts{states: 1}, stream, stream.reservationPhase("normal_output"), retainedCharges{retainPhaseOutput: 25})
 		var exceeded *provisionalBudgetExceededError
 		if !errors.As(err, &exceeded) {

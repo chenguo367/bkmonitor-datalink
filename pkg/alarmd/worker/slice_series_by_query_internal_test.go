@@ -20,7 +20,7 @@ import (
 // queries given, each delivering its count of series, through the stream's
 // own count (noteSliceInput), and its sample as the PRIMARY gave it: the
 // state noteLeafRead and landSliceRead see once the slice has landed.
-func readSliceOf(t *testing.T, sample inputslice.Sample, perQuery map[execution.PhysicalQueryDigest]uint64) (*sliceReading, inputslice.Leaf) {
+func readSliceOf(t *testing.T, sample inputslice.Sample, perQuery map[execution.PhysicalQueryDigest]uint64) (*sliceReading, *sliceRead, inputslice.Leaf) {
 	t.Helper()
 	tree, err := inputslice.New([]string{"host"}, 1, "")
 	if err != nil {
@@ -34,8 +34,8 @@ func readSliceOf(t *testing.T, sample inputslice.Sample, perQuery map[execution.
 				Delivery: execution.SeriesDelivery{PhysicalQuery: query, Series: 1}}, 0)
 		}
 	}
-	reading.sample = sample
-	return reading, tree.Pending()[0]
+	stream.slice.sample = sample
+	return reading, &stream.slice, tree.Pending()[0]
 }
 
 // A slice of a Plan whose two physical queries each read the same 80,000
@@ -52,22 +52,22 @@ func readSliceOf(t *testing.T, sample inputslice.Sample, perQuery map[execution.
 // alone.
 func TestTheSeriesOfASliceAreTheMostOneOfItsQueriesRead(t *testing.T) {
 	ringRatio := map[execution.PhysicalQueryDigest]uint64{"primary": 80_000, "previous": 80_000}
-	reading, leaf := readSliceOf(t, hostSample(80, 1000), ringRatio)
-	reading.noteLeafRead(leaf, 10_000)
+	reading, slice, leaf := readSliceOf(t, hostSample(80, 1000), ringRatio)
+	reading.noteLeafRead(slice, leaf, 10_000)
 	if !reading.tree.Shape().IsZero() {
 		t.Fatal("two queries of 80,000 series each, within a slice's 87,000 a request, were split for the next Slot")
 	}
 	if got := reading.leafSeries[leaf.Slice.Digest()]; got != 80_000 {
 		t.Fatalf("the slice is planned at %d series, want the 80,000 one request read", got)
 	}
-	reading.landSliceRead(leaf)
+	reading.landSliceRead(slice, leaf)
 	if reading.seriesRead != 80_000 {
 		t.Fatalf("the Slot remembers %d series read, want the 80,000 one request read", reading.seriesRead)
 	}
 
 	past := map[execution.PhysicalQueryDigest]uint64{"primary": 100_000, "previous": 100_000}
-	reading, leaf = readSliceOf(t, hostSample(100, 1000), past)
-	reading.noteLeafRead(leaf, 20_000)
+	reading, slice, leaf = readSliceOf(t, hostSample(100, 1000), past)
+	reading.noteLeafRead(slice, leaf, 20_000)
 	if reading.tree.Shape().IsZero() {
 		t.Fatal("two queries of 100,000 series each, past a slice's 87,000 a request, were not split for the next Slot")
 	}
@@ -95,8 +95,8 @@ func TestAnAbandonedSliceGivesBackTheSeriesOfAllItsQueries(t *testing.T) {
 				Delivery: execution.SeriesDelivery{PhysicalQuery: query, Series: 1}}, 0)
 		}
 	}
-	if reading.series != 80_000 {
-		t.Fatalf("the slice is judged at %d series, want one request's 80,000", reading.series)
+	if stream.slice.series != 80_000 {
+		t.Fatalf("the slice is judged at %d series, want one request's 80,000", stream.slice.series)
 	}
 	stream.abandonSlice()
 	if coordinator.reservations.series != 5 || stream.series != 5 {

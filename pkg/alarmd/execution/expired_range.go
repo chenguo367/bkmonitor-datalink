@@ -188,6 +188,9 @@ type ExpiredRangeResult struct {
 	Status           ProgressCommitStatus
 	ReasonCode       ReasonCode
 	AlreadyCommitted bool
+	// Conflict is what refused the range, set only when Status is
+	// ProgressConflict (ProgressConflicts).
+	Conflict ProgressSkipRefusal
 }
 
 // ExpiredRangeStore extends only range-aware coordinators; existing single

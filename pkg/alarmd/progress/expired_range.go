@@ -30,11 +30,21 @@ func (store *Store) changeRange(ctx context.Context, request execution.ExpiredRa
 	if err != nil {
 		return execution.ExpiredRangeResult{}, err
 	}
-	return fencedWrite(ctx, store, ProgressReadRange, identity.QueryGroup, name, request.OwnerFence, rangeIO(),
+	result, err := fencedWrite(ctx, store, ProgressReadRange, identity.QueryGroup, name, request.OwnerFence, rangeIO(),
 		func(result execution.ExpiredRangeResult) bool { return result.Status == execution.ProgressConflict },
 		func(raw []byte, missing bool) (execution.ExpiredRangeResult, error) {
 			return store.changeRangeOn(ctx, request, commit, identity, name, raw, missing)
 		})
+	// Counted once, from the pass the write ended on, as a commit is.
+	if err == nil && result.Status == execution.ProgressConflict && store.options.Conflicts != nil {
+		store.options.Conflicts(ProgressConflictRange, execution.ConflictWord(result.Conflict))
+	}
+	return result, err
+}
+
+// rangeConflict is an expired range refused by the fact refusal names.
+func rangeConflict(refusal execution.ProgressSkipRefusal) execution.ExpiredRangeResult {
+	return execution.ExpiredRangeResult{Status: execution.ProgressConflict, Conflict: refusal}
 }
 
 // changeRangeOn is changeRange on the record raw (missing when there is
@@ -46,22 +56,28 @@ func (store *Store) changeRangeOn(ctx context.Context, request execution.Expired
 	// A range only starts from an actually persisted NextSlot; cold starts
 	// retain the existing single Slot path.
 	if missing {
-		return execution.ExpiredRangeResult{Status: execution.ProgressConflict}, nil
+		return rangeConflict(execution.SkipRefusalProgressMissing), nil
 	}
 	current, err := decode(raw)
 	if err != nil {
 		return execution.ExpiredRangeResult{}, &DeterministicInvalidError{Err: err}
 	}
-	if current.Identity != identity || current.UnfinishedSlot != nil {
-		return execution.ExpiredRangeResult{Status: execution.ProgressConflict}, nil
+	if current.Identity != identity {
+		return rangeConflict(execution.ConflictIdentityMismatch), nil
+	}
+	if current.UnfinishedSlot != nil {
+		return rangeConflict(execution.ConflictSlotInFlight), nil
 	}
 	if current.UnfinishedRange == nil && current.NextSlot >= p.Next {
 		return execution.ExpiredRangeResult{Status: execution.ProgressCommitted, AlreadyCommitted: true}, nil
 	}
-	if current.NextSlot != p.First.Contract.Slot.EvaluationTime ||
-		(current.UnfinishedRange != nil && !current.UnfinishedRange.Equal(p)) ||
-		(commit && current.UnfinishedRange == nil) {
-		return execution.ExpiredRangeResult{Status: execution.ProgressConflict}, nil
+	switch {
+	case current.NextSlot != p.First.Contract.Slot.EvaluationTime:
+		return rangeConflict(execution.SkipRefusalCursorMoved), nil
+	case current.UnfinishedRange != nil && !current.UnfinishedRange.Equal(p):
+		return rangeConflict(execution.SkipRefusalRangeInFlight), nil
+	case commit && current.UnfinishedRange == nil:
+		return rangeConflict(execution.ConflictRangeMissing), nil
 	}
 	// Recheck the actual successor on both Begin and Commit. A later cutover
 	// cannot silently turn the stored proof into a different range.
@@ -70,7 +86,7 @@ func (store *Store) changeRangeOn(ctx context.Context, request execution.Expired
 		return execution.ExpiredRangeResult{}, err
 	}
 	if next != p.Next {
-		return execution.ExpiredRangeResult{Status: execution.ProgressConflict}, nil
+		return rangeConflict(execution.ConflictGridMoved), nil
 	}
 	if prior := current.CurrentOrRecentGap; prior != nil && current.LastCompletionKind == kind &&
 		prior.Kind == kind && prior.ReasonCode == reason && prior.Count > math.MaxUint32-p.Count {
@@ -123,7 +139,7 @@ func (store *Store) changeRangeOn(ctx context.Context, request execution.Expired
 	case ownership.FencedCASApplied:
 		return execution.ExpiredRangeResult{Status: execution.ProgressCommitted}, nil
 	case ownership.FencedCASConflict:
-		return execution.ExpiredRangeResult{Status: execution.ProgressConflict}, nil
+		return rangeConflict(execution.SkipRefusalCASConflict), nil
 	case ownership.FencedCASStaleOwner:
 		return execution.ExpiredRangeResult{Status: execution.ProgressStaleOwner}, nil
 	case ownership.FencedCASContentMoved:

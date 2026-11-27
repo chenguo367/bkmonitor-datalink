@@ -14,7 +14,6 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/inputslice"
 )
 
 func firstSeenDue() execution.DuePlan {
@@ -175,39 +174,5 @@ func TestAMarkerAtTheSlotsOwnVersionKeepsTheWordItWasWrittenUnder(t *testing.T) 
 				t.Fatalf("change %v, want %v", change, testCase.want)
 			}
 		})
-	}
-}
-
-// A slice's head judges first-seen by what the windows cut and handed before
-// the slice began to be read found, and by its own pre-pass: a window of a
-// slice read beside it that finds the Plan written before the Slot after it
-// began does not change its judgement, while the Slot's end, judging the
-// whole Slot, reads every window's (015 C1 Q3, appendix A 9). The windows
-// found so far are a subset of what the Slot finds by its end, so the head
-// judges first-seen no less often than the Slot would.
-func TestASlicesHeadJudgesFirstSeenByWhatWasHandedBeforeItsRead(t *testing.T) {
-	due := firstSeenDue()
-	stream := &streamedExecution{
-		slotStream: &slotStream{
-			header: execution.InternalExecutionHeader{Contract: frozenRenewalContract(), DuePlans: []execution.DuePlan{due}},
-		},
-	}
-	stream.slices = &sliceReading{}
-	// The Slot's windows found something already: the set is there.
-	stream.windows.seen = map[execution.PlanIdentity]struct{}{}
-	stream.beginSlice(inputslice.Leaf{}, false)
-	// A window of another slice, cut after this one began to be read, notes
-	// the Plan in the Slot's set as noteSeenViews does.
-	stream.windows.seen[due.Identity] = struct{}{}
-	if _, unseen := stream.unseenPlansAtRead()[due.Key()]; !unseen {
-		t.Fatal("the head judged the Plan seen by a window cut after its slice began to be read")
-	}
-	if _, unseen := stream.unseenPlans()[due.Key()]; unseen {
-		t.Fatal("the Slot's own judgement left out a window it cut")
-	}
-	// The next slice begins after that window was handed: it is seen.
-	stream.beginSlice(inputslice.Leaf{}, false)
-	if _, unseen := stream.unseenPlansAtRead()[due.Key()]; unseen {
-		t.Fatal("the next slice's head judged the Plan unseen though a window handed before its read found it")
 	}
 }

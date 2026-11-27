@@ -116,13 +116,17 @@ type SlotBudgetUsageFacts struct {
 	QueryBodyMicrosMax uint64 `json:"query_body_micros_max"`
 	// InputSlices is the slices the Slot's input was read in, one for a Slot
 	// read whole, and InputSlicesDiscarded the ones let go and split while
-	// they streamed. FirstSeenUnseenSlices and FirstSeenUnseenSeries are the
-	// slices, and their series, a Plan judged first-seen wrote before a later
-	// slice found it had run: they were written without warming up.
-	InputSlices           uint64 `json:"input_slices"`
-	InputSlicesDiscarded  uint64 `json:"input_slices_discarded"`
-	FirstSeenUnseenSlices uint64 `json:"first_seen_unseen_slices"`
-	FirstSeenUnseenSeries uint64 `json:"first_seen_unseen_series"`
+	// they streamed.
+	InputSlices          uint64 `json:"input_slices"`
+	InputSlicesDiscarded uint64 `json:"input_slices_discarded"`
+	// FirstSeenJudged, FirstSeenRanBefore and FirstSeenSlicedRead are the
+	// Plans that could be first-seen - new to their activation, without a
+	// marker - the Slot judged first-seen, found to have run, and warmed up
+	// unjudged because it was read in slices (FirstSeenVerdicts, in this
+	// order).
+	FirstSeenJudged     uint64 `json:"first_seen_judged"`
+	FirstSeenRanBefore  uint64 `json:"first_seen_ran_before"`
+	FirstSeenSlicedRead uint64 `json:"first_seen_sliced_read"`
 	// InputSlicesReadAhead is the slices read while the slice before
 	// completed and handed to the Slot; the other three the reads ahead let
 	// go, by why: the next slice was another, the read yielded to the Slot's
@@ -340,6 +344,12 @@ type SlotTimingFacts struct {
 	NoDataWrite  uint64 `json:"no_data_write_millis"`
 	Unattributed uint64 `json:"unattributed_millis"`
 }
+
+// FirstSeenVerdicts are the verdicts a Slot gives a Plan that could be
+// first-seen, the label of the counter that counts them:
+// SlotBudgetUsageFacts.FirstSeenJudged, FirstSeenRanBefore and
+// FirstSeenSlicedRead, in this order.
+var FirstSeenVerdicts = [3]string{"first_seen", "ran_before", "sliced_read"}
 
 // SliceReadAheadOutcomes are the words for how a slice read ahead ended, in
 // the order of the SlotBudgetUsageFacts fields that count them: replayed

@@ -71,7 +71,7 @@ var sliceReadWidthForMeasurement atomic.Int32
 var readAheadWaitsForMeasurement atomic.Pointer[func(waited time.Duration)]
 
 // windowSizesForMeasurement, set only by the alarmd_measure build, is told
-// each window's bytes (windows.bytes) and series as it is let go: the
+// each window's bytes (stream.fill.bytes) and series as it is let go: the
 // measurement's reading of the windows' sizes.
 var windowSizesForMeasurement atomic.Pointer[func(bytes uint64, series int)]
 
@@ -200,7 +200,9 @@ func (stream *streamedExecution) noteReadBegan(own int) {
 			flying++
 		}
 	}
+	stream.sharedMu.Lock()
 	stream.readsInFlight[min(max(flying, 1), len(stream.readsInFlight))-1]++
+	stream.sharedMu.Unlock()
 }
 
 func (ahead *sliceReadAhead) Begin(ctx context.Context, header execution.InternalExecutionHeader) error {
@@ -517,10 +519,20 @@ const readAheadYieldWindowBound = "window_bound"
 // stand in the way of, and whether the far ones would have been enough.
 func (stream *streamedExecution) yieldReadAhead(phase string) bool {
 	if stream != nil && stream.yieldTo != nil {
-		// Asked of the stream that dispatches, as the apply side asks.
+		// Asked of the stream that dispatches, as the apply side asks; a
+		// Slot ending meanwhile answers nothing let go.
 		reply := make(chan bool, 1)
-		stream.yieldTo <- yieldRequest{phase: phase, reply: reply}
-		return <-reply
+		select {
+		case stream.yieldTo <- yieldRequest{phase: phase, reply: reply}:
+		case <-stream.yieldDone:
+			return false
+		}
+		select {
+		case yielded := <-reply:
+			return yielded
+		case <-stream.yieldDone:
+			return false
+		}
 	}
 	if stream == nil || len(stream.aheads) == 0 {
 		return false
@@ -558,15 +570,27 @@ func (stream *streamedExecution) yieldReadAhead(phase string) bool {
 // goroutine; otherwise the read's completion and error are the slice's, a
 // slice overflow among them, handled as a read the Slot made would be.
 func (stream *streamedExecution) replayReadAhead(ctx context.Context, leaf inputslice.Leaf) (execution.QueryExecutionCompletion, error, bool) {
-	if len(stream.aheads) == 0 {
+	ahead := stream.takeReadAhead(leaf)
+	if ahead == nil {
 		return execution.QueryExecutionCompletion{}, nil, false
+	}
+	return stream.replayAhead(ctx, ahead)
+}
+
+// takeReadAhead takes the read ahead of leaf off the Slot's, nil when none
+// is there or the one there failed or ran out of its context - let go and
+// counted. On the stream that dispatches the Slot's slices: a consumer is
+// handed the read ahead of the slice it consumes (replayAhead).
+func (stream *streamedExecution) takeReadAhead(leaf inputslice.Leaf) *sliceReadAhead {
+	if len(stream.aheads) == 0 {
+		return nil
 	}
 	// None for leaf: the slices pending changed - a split - or its read
 	// ahead yielded. The reads ahead of the slices after it are kept for
 	// startSliceReadAheads to judge once leaf is read.
 	index := slices.IndexFunc(stream.aheads, func(ahead *sliceReadAhead) bool { return ahead.leaf.ID == leaf.ID })
 	if index < 0 {
-		return execution.QueryExecutionCompletion{}, nil, false
+		return nil
 	}
 	ahead := stream.aheads[index]
 	ahead.mu.Lock()
@@ -579,10 +603,17 @@ func (stream *streamedExecution) replayReadAhead(ctx context.Context, leaf input
 		if ended {
 			end = readAheadContextEnded
 		}
-		stream.readAheadEnds[end]++
-		return execution.QueryExecutionCompletion{}, nil, false
+		stream.addShared(func() { stream.readAheadEnds[end]++ })
+		return nil
 	}
-	stream.readAheadEnds[readAheadReplayed]++
+	return ahead
+}
+
+// replayAhead consumes a read ahead taken off the Slot's into this stream:
+// the series it read so far, then the rest as it reads them, and comes back
+// with its completion.
+func (stream *streamedExecution) replayAhead(ctx context.Context, ahead *sliceReadAhead) (execution.QueryExecutionCompletion, error, bool) {
+	stream.addShared(func() { stream.readAheadEnds[readAheadReplayed]++ })
 	replayErr := func() error {
 		ahead.mu.Lock()
 		defer ahead.mu.Unlock()
@@ -615,19 +646,26 @@ func (stream *streamedExecution) replayReadAhead(ctx context.Context, leaf input
 		return execution.QueryExecutionCompletion{}, replayErr, true
 	}
 	// The Slot waits for the rest of the read here: the watchdog reads it as
-	// the input the Slot is reading.
+	// the input the Slot is reading. Its context is the Slot's, not the
+	// stream's: a consumer stopped as the Slot stops its consumers lets the
+	// read go, as the read it made itself would end with it.
 	execution.MarkStage(ctx, execution.SlotStageQuery)
-	<-ahead.done
+	select {
+	case <-ahead.done:
+	case <-ctx.Done():
+		ahead.stop()
+		return execution.QueryExecutionCompletion{}, ctx.Err(), true
+	}
 	// Its context ends with the Slot (letGoReadAhead), as a read the Slot
 	// made itself ends with the Slot's: what the read handed on is the
 	// Slot's now, and nothing of it is judged against a context that ended
 	// before the Slot did.
-	stream.replayedCancels = append(stream.replayedCancels, ahead.cancel)
+	stream.addShared(func() { stream.replayedCancels = append(stream.replayedCancels, ahead.cancel) })
 	ahead.mu.Lock()
 	defer ahead.mu.Unlock()
 	ahead.give(ahead.held)
 	if ahead.err == nil && ahead.contextEnded {
-		stream.readAheadEnds[readAheadContextEnded]++
+		stream.addShared(func() { stream.readAheadEnds[readAheadContextEnded]++ })
 		return execution.QueryExecutionCompletion{}, ErrReadAheadContextEnded, true
 	}
 	return ahead.completion, ahead.err, true

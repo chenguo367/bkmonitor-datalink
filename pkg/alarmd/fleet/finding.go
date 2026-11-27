@@ -814,6 +814,9 @@ var codeChecks = map[string]verdict{
 	// invariant is on the line as a field; that it failed at all is this
 	// deployment's.
 	"TRIGGER_INVARIANT": lands(CheckDefect),
+	// A release past zero of the process's reservations: this build's own
+	// fault, the count stopped at zero rather than wrapped.
+	"RESOURCE_POOL_OVER_RELEASE": lands(CheckDefect),
 	// The store this deployment routed to cannot do what the write needs. It is
 	// wiring rather than weather: retrying reaches the same backend and gets the
 	// same answer. It used to arrive as REDIS_UNAVAILABLE, which sent the reader

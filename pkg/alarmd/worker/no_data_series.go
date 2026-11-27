@@ -288,8 +288,9 @@ func (stream *streamedExecution) evaluateNoData(
 		// only -- which is where a write is a write -- they put written above
 		// read on a live deployment by exactly their number, and the census
 		// read as a renewal covering a negative population.
-		stream.seriesCensus.Due++
-		stream.seriesCensus.Read++
+		stream.addShared(func() {
+			stream.seriesCensus.Due, stream.seriesCensus.Read = stream.seriesCensus.Due+1, stream.seriesCensus.Read+1
+		})
 		pending = append(pending, entry)
 		if len(pending) >= batchLimit {
 			return next()
@@ -364,6 +365,8 @@ func (stream *streamedExecution) noteAnswerTruncation(binding execution.NamedInp
 	if binding.Role != execution.InputRolePrimary || route.Truncation == nil {
 		return
 	}
+	stream.sharedMu.Lock()
+	defer stream.sharedMu.Unlock()
 	if stream.answerTruncated == nil {
 		stream.answerTruncated = map[execution.PlanIdentity]bool{}
 	}

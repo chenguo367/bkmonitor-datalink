@@ -1697,11 +1697,23 @@ Labels: `completion_kind`, `cause`, `reason`, `origin`
 
 Acknowledged Slots that completed short of whole - COMPLETED_WITH_UNAVAILABLE, COMPLETED_WITH_PARTIAL_GAP - by the cause the completion carried (the most actionable of what the round hit) and that cause's reason: which Plan, Level or query it was and when are on the progress_committed line (completion_strategy, completion_level, completion_query). NONE is a completion that carried no cause. origin says whose the reason is: physical for what the round met itself - a primary input's reason always is - and carried for a stored guard's reason a Level outcome repeated on a later round (LEVEL_OUTCOME_UNKNOWN, GAP_GUARD_WARMING); the guard's origin Slot is on the progress_committed line (evaluation_reason_origin_slot). reason=QUERY_TIMEOUT,origin=physical is a timeout this round. A Slot is filed here by its cause, so one that ended PLAN_NOT_ACTIVE while its primary input was unavailable is under PRIMARY_INPUT_UNAVAILABLE: how many Slots ended PLAN_NOT_ACTIVE is slot_completed_reasons_total{reason="PLAN_NOT_ACTIVE"}, and the two families are not summed.
 
+## alarmd_progress_conflicts_total
+
+Labels: `operation`, `reason`
+
+Progress writes the record refused as a conflict, once a call, by operation - begin (a Slot's BeginSlot), commit, range (an expired range's begin or commit) - and by the fact that refused it: RANGE_IN_FLIGHT (an expired range is being written, or another range than this one), CURSOR_MOVED (the record's cursor is not at the Slot or range - a commit's progress_committed line says the Slot its completed facts derive as next and the cursor it stores), PROGRESS_MISSING (no record for a Slot or range that began), CAS_CONFLICT (the record changed under the write), IDENTITY_MISMATCH (the record names another Query Group), SEGMENT_OLDER (the Slot asked through an older Segment than its unfinished projection's), SLOT_IN_FLIGHT (an unfinished Slot where a range would begin), RANGE_MISSING (a range committed that was never begun), GRID_MOVED (the timeline's successor of a range's last Slot is no longer its proof's); UNNAMED, a conflict its path returned without a word, and OTHER, a word this build does not know - neither should be anything but zero. A conflict met on the owner's record and written again counts once, from the pass the write ended on.
+
 ## alarmd_progress_projection_superseded_total
 
 Labels: `field`
 
 Fields of an unfinished Slot's projection that a later attempt's fenced BeginSlot replaced, counted once the write applied, a field each: contract, deadline (the earliest query deadline), keep_until, due_plan_targets. A supersede that changed two fields counts in both. A write refused (stale_owner, content_moved) or of unknown outcome replaced nothing and counts none, though its progress_committed line, degraded CONFIG_DRIFT, naming the fields, is written as every supersede's is. A BeginSlot made again on a conflict counts once, from the pass its write ended on.
+
+## alarmd_progress_query_free_applied_total
+
+Labels: `kind`
+
+Query-free completions (GAP_SKIPPED, SNAPSHOT_UNAVAILABLE) committed for a Slot an earlier attempt had applied whole - every Plan evaluated, its events sent and its State written - and ended before writing its Slot down, by kind, once the commit applied. Such a completion records no gap. It is how often an attempt ends between its apply and its commit.
 
 ## alarmd_progress_reads_total
 
@@ -2927,11 +2939,11 @@ Labels: `band`
 
 The Query Groups this worker owns, counted by the band of their compute cost (worker_compute_cost): how many carry the whole, and how many have no rate yet.
 
-## alarmd_worker_first_seen_unseen_total
+## alarmd_worker_first_seen_candidates_total
 
-Labels: `unit`
+Labels: `verdict`
 
-What completed Slots wrote as first-seen before a later slice found the Plan had run, by unit: slices and series. Those series were written without warming up; a rate above zero says the first-seen judgement changed within Slots read in slices.
+Plans new to their activation without a gap marker - the ones that could be first-seen - by what the Slot that read them made of them: first_seen, judged never to have run and written that Slot without warming up; ran_before, found to have run, warmed up; sliced_read, warmed up unjudged because the Slot was read in slices, its first window written before every series' State is read. A Plan counts on the attempt that judges it: the one warmed up writes its marker and is no candidate on the retry. sliced_read is the new strategies a Query Group read in slices starts detecting a period late.
 
 ## alarmd_worker_frozen_state_census_total
 
@@ -3047,6 +3059,12 @@ Labels: `worker_role`
 
 Query groups currently owned by this complete worker role.
 
+## alarmd_worker_pool_over_releases_total
+
+Labels: `kind`
+
+Releases that would have taken one of the process's reservation counts below zero, by kind: series, retained_bytes, states, events, gaps and gap_facts. Each is a release of more than the count held - given back twice, or by a stream holding none - and a fault of this build's own: the count stops at zero instead of wrapping, which would refuse every Slot of the process until it restarts, and the release is said with RESOURCE_POOL_OVER_RELEASE, what it gave back and what the count held. Above zero, the counts the pool judges by are low by as much, until the process restarts.
+
 ## alarmd_worker_query_admission_total
 
 Labels: `operation`, `result`
@@ -3133,7 +3151,7 @@ Slice reads of completed Slots read in slices, by how many of their Slot's reads
 
 ## alarmd_worker_slice_shape_leaves_max
 
-The leaves of the largest shape this worker's sliced-input memories keep, at the scrape: the slices the next Slot of its Query Group starts in, whichever Query Group it is (none is named). worker_slice_memory_entries{kind=leaves} sums every shape's; this is the one that nears the tree's 64 leaves first, which a Slot started in its shape is refused at (INPUT_SLICE_LEAVES_EXHAUSTED). Rising over rounds is a shape kept split again and again; falling, a split merged back. 0 with no shape remembered.
+The leaves of the largest shape this worker's sliced-input memories keep, at the scrape: the slices the next Slot of its Query Group starts in, whichever Query Group it is (none is named). worker_slice_memory_entries{kind=leaves} sums every shape's; this is the one that nears the tree's 128 leaves first, which a Slot started in its shape is refused at (INPUT_SLICE_LEAVES_EXHAUSTED). Rising over rounds is a shape kept split again and again; falling, a split merged back. 0 with no shape remembered.
 
 ## alarmd_worker_sliced_slots_total
 

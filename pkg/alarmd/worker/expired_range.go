@@ -109,7 +109,12 @@ func (coordinator *SlotExecutionCoordinator) commitExpiredRange(ctx context.Cont
 		return execution.SlotExecutionResult{}, err
 	}
 	if result.Status != execution.ProgressCommitted {
-		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: range %w", progressNotCommitted(result.Status))
+		// A conflict names the fact that refused the range, as a commit's does.
+		refused := progressNotCommitted(result.Status)
+		if result.Conflict != "" {
+			refused = fmt.Errorf("%w: %s", refused, result.Conflict)
+		}
+		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: range %w", refused)
 	}
 	completed := expiredRangeCompletedFor(request)
 	if !result.AlreadyCommitted {

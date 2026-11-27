@@ -65,7 +65,7 @@ func newSliceMemoryCollector(source SliceMemorySource) *sliceMemoryCollector {
 			"The leaves of the largest shape this worker's sliced-input memories keep, at the scrape: the slices "+
 				"the next Slot of its Query Group starts in, whichever Query Group it is (none is named). "+
 				"worker_slice_memory_entries{kind=leaves} sums every shape's; this is the one that nears the "+
-				"tree's 64 leaves first, which a Slot started in its shape is refused at "+
+				"tree's 128 leaves first, which a Slot started in its shape is refused at "+
 				"(INPUT_SLICE_LEAVES_EXHAUSTED). Rising over rounds is a shape kept split again and again; "+
 				"falling, a split merged back. 0 with no shape remembered.",
 			nil, nil),

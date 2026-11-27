@@ -38,7 +38,7 @@ func (stream *streamedExecution) ownBudgetUsage(budget ProvisionalBudget) []obse
 		{Budget: observability.CapacityBudgetEvents, OwnUsed: held.events, Limit: budget.MaxEvents},
 		{Budget: observability.CapacityBudgetGapMutations, OwnUsed: held.gaps, Limit: budget.MaxGapMutations},
 		{Budget: observability.CapacityBudgetRetainedBytes, OwnUsed: stream.retainedTotal(), Limit: budget.MaxRetainedBytes},
-		{Budget: observability.CapacityBudgetSeries, OwnUsed: stream.series, Limit: budget.MaxSeries},
+		{Budget: observability.CapacityBudgetSeries, OwnUsed: stream.seriesNow(), Limit: budget.MaxSeries},
 	}
 }
 
@@ -89,7 +89,7 @@ func (stream *streamedExecution) ownBudget(kind observability.CapacityBudget) *u
 	var value uint64
 	switch kind {
 	case observability.CapacityBudgetSeries:
-		value = stream.series
+		value = stream.seriesNow()
 	case observability.CapacityBudgetRetainedBytes:
 		value = stream.retainedTotal()
 	case observability.CapacityBudgetStateMutations:

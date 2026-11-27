@@ -69,15 +69,20 @@ type shadowRig struct {
 	// wiring and budget are what the coordinator was made with, owners
 	// the ownership store its Query Group is leased in and address its
 	// Redis: for a rig that wires a port otherwise (fence_fixed_cost_e2e_test.go).
-	wiring   worker.Ports
-	budget   worker.ProvisionalBudget
-	owners   *ownership.RedisStore
-	address  string
-	source   *access.Source
-	base     execution.SlotExecutionRequest
-	readAt   time.Time
-	readMu   sync.Mutex
-	observed *shadowObserved
+	wiring  worker.Ports
+	budget  worker.ProvisionalBudget
+	owners  *ownership.RedisStore
+	address string
+	// noData, when set, is the rig's own no-data store, wired in place of
+	// the shared one (steppedRig).
+	noData     *recordingNoData
+	gapsSeen   *recordingGaps
+	eventsSent *recordingEvents
+	source     *access.Source
+	base       execution.SlotExecutionRequest
+	readAt     time.Time
+	readMu     sync.Mutex
+	observed   *shadowObserved
 }
 
 // shadowReplay is how a replay was judged: its distance and its age past its
@@ -305,6 +310,23 @@ type shadowProvider struct {
 	// are, so a read ahead and its read again both fail.
 	failSlicesAfter int
 	seen, failing   map[string]bool
+	// stepped answers each PRIMARY window with a point at every minute of
+	// it, from its start, in place of one at its start: a Plan over a window
+	// of several points decides each. reads is every PRIMARY read, in the
+	// order they were asked - a read ahead's when it began, before the read
+	// it is ahead of completes: its slice, the hosts it delivered and the
+	// points.
+	stepped bool
+	reads   []shadowRead
+}
+
+// shadowRead is one PRIMARY read the provider answered: of a slice, or of
+// the whole Query Group.
+type shadowRead struct {
+	slice   string
+	whole   bool
+	hosts   []string
+	records int
 }
 
 // errShadowProviderDown is the provider refusing a read, failing the Slot's
@@ -322,7 +344,8 @@ func (provider *shadowProvider) round(evaluation int64, absent []string, value m
 
 func (provider *shadowProvider) Execute(ctx context.Context, attempt execution.QueryAttempt, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
 	provider.mu.Lock()
-	evaluation, absent, value, partial := provider.evaluation, provider.absent, provider.value, provider.partial
+	evaluation, absent, value, partial, stepped := provider.evaluation, provider.absent, provider.value, provider.partial,
+		provider.stepped
 	if provider.failSlicesAfter > 0 && !attempt.Slice.IsZero() {
 		digest := attempt.Slice.Digest()
 		if provider.seen == nil {
@@ -340,9 +363,17 @@ func (provider *shadowProvider) Execute(ctx context.Context, attempt execution.Q
 	provider.mu.Unlock()
 	window := attempt.Spec.LogicalWindow
 	primary := window.End > evaluation-60
+	read := -1
+	if primary {
+		provider.mu.Lock()
+		read = len(provider.reads)
+		provider.reads = append(provider.reads, shadowRead{slice: attempt.Slice.Digest(), whole: attempt.Slice.IsZero()})
+		provider.mu.Unlock()
+	}
 	ref := execution.ProviderResultRef("shadow-result-" + string(attempt.Spec.Digest))
 	var delivery execution.SeriesDelivery
-	delivered := 0
+	delivered, records := 0, 0
+	var hosts []string
 	for _, host := range provider.hosts {
 		if absent[host] {
 			continue
@@ -363,28 +394,45 @@ func (provider *shadowProvider) Execute(ctx context.Context, attempt execution.Q
 		if err != nil {
 			return execution.ProviderCompletion{}, err
 		}
-		recordID, err := contract.DeriveRecordIDV2(dimension, window.Start)
-		if err != nil {
-			return execution.ProviderCompletion{}, err
+		times := []int64{window.Start}
+		if stepped && primary {
+			times = times[:0]
+			for at := window.Start; at < window.End; at += 60 {
+				times = append(times, at)
+			}
 		}
-		records := []contract.CanonicalRecordV2{{RecordID: recordID, SourceTime: window.Start, BusinessID: "2",
-			DimensionIdentity: contract.DimensionIdentityV2{Fields: fields, Digest: dimension},
-			Values:            map[string]json.RawMessage{"value": json.RawMessage(raw)},
-			Dimensions:        shadowDimensions(host, primary, provider.padding), ReceivedTime: evaluation}}
-		digest, err := contract.DeriveCanonicalDigestV2("shadow-delivery", records)
+		var points []contract.CanonicalRecordV2
+		for _, at := range times {
+			recordID, err := contract.DeriveRecordIDV2(dimension, at)
+			if err != nil {
+				return execution.ProviderCompletion{}, err
+			}
+			points = append(points, contract.CanonicalRecordV2{RecordID: recordID, SourceTime: at, BusinessID: "2",
+				DimensionIdentity: contract.DimensionIdentityV2{Fields: fields, Digest: dimension},
+				Values:            map[string]json.RawMessage{"value": json.RawMessage(raw)},
+				Dimensions:        shadowDimensions(host, primary, provider.padding), ReceivedTime: evaluation})
+		}
+		digest, err := contract.DeriveCanonicalDigestV2("shadow-delivery", points)
 		if err != nil {
 			return execution.ProviderCompletion{}, err
 		}
 		batch := execution.SeriesDelivery{PhysicalQuery: attempt.Spec.Digest, QueryRevision: attempt.Spec.PlanFacts.QueryRevision,
-			Series: 1, Records: 1, Digest: digest}
+			Series: 1, Records: uint64(len(points)), Digest: digest}
 		if err := sink.ConsumeProviderSeries(ctx, execution.ProviderSeriesBatch{PhysicalQuery: attempt.Spec.Digest,
-			CompletionRef: ref, Dataset: execution.NewDataset(records), Delivery: batch}); err != nil {
+			CompletionRef: ref, Dataset: execution.NewDataset(points), Delivery: batch}); err != nil {
 			return execution.ProviderCompletion{}, err
 		}
 		if delivery, err = execution.AccumulateSeriesDelivery(delivery, batch); err != nil {
 			return execution.ProviderCompletion{}, err
 		}
 		delivered++
+		records += len(points)
+		hosts = append(hosts, host)
+	}
+	if read >= 0 {
+		provider.mu.Lock()
+		provider.reads[read].hosts, provider.reads[read].records = hosts, records
+		provider.mu.Unlock()
 	}
 	completeness := execution.CompletenessFull
 	if partial && primary {
@@ -393,7 +441,7 @@ func (provider *shadowProvider) Execute(ctx context.Context, attempt execution.Q
 	completion := execution.ProviderCompletion{Ref: ref, PhysicalQuery: attempt.Spec.Digest, Completeness: completeness,
 		DataState: execution.DataStateData, Delivery: delivery,
 		RouteFacts: execution.ProviderRouteFacts{ProviderRouteRef: attempt.Spec.PlanFacts.ProviderRouteRef},
-		Stats:      execution.ProviderStats{Series: uint64(delivered), Records: uint64(delivered)}}
+		Stats:      execution.ProviderStats{Series: uint64(delivered), Records: uint64(records)}}
 	if delivered == 0 {
 		completion.DataState, completion.Delivery = execution.DataStateEmpty, execution.SeriesDelivery{}
 	}

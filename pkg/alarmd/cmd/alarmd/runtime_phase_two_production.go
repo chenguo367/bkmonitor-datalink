@@ -3305,7 +3305,10 @@ func (executor observedProductionSlotExecutor) Execute(
 		CarriedReason:        result.CompletionCause.CarriedReason(),
 		ReadinessDeferral:    readiness,
 		ExecuteOutcome:       executeReturnOutcome(result, err),
-		Result:               observedResult, ReasonCode: reason,
+		// Where an error stopped the attempt: the step of Execute, and a
+		// Progress commit the store refused by the fact that refused it.
+		SlotStep: worker.SlotStepOf(err), ProgressRefusal: progressRefusalOf(result, err),
+		Result: observedResult, ReasonCode: reason,
 		Duration: elapsed, DurationKnown: true, Trace: trace, Err: observedErr,
 		SlotBudgetUsage: slotBudgetUsageFacts(result.Usage),
 		SlotTiming:      slotTimingFacts(result.Timing),
@@ -3647,6 +3650,16 @@ func observeProductionOwnership(
 	})
 }
 
+// progressRefusalOf is the word of a Progress write the store refused: a
+// commit's, on its error (worker.ProgressRefusalOf), or a BeginSlot's, on
+// the retry it returned; empty for anything else.
+func progressRefusalOf(result execution.SlotExecutionResult, err error) string {
+	if word, refused := worker.ProgressRefusalOf(err); refused {
+		return word
+	}
+	return result.ProgressRefusal
+}
+
 func executeReturnOutcome(result execution.SlotExecutionResult, err error) string {
 	if err != nil {
 		if _, ok := access.ReadinessDeferredAt(err); ok {
@@ -3761,7 +3774,7 @@ func slotBudgetUsageFacts(usage execution.SlotBudgetUsage) *observability.SlotBu
 		QueryWaitMillisMax: usage.QueryWaitMillisMax, QueryBodyMillisMax: usage.QueryBodyMillisMax,
 		QueryBodyMicros: usage.QueryBodyMicros, QueryBodyMicrosMax: usage.QueryBodyMicrosMax,
 		InputSlices: usage.InputSlices, InputSlicesDiscarded: usage.InputSlicesDiscarded,
-		FirstSeenUnseenSlices: usage.FirstSeenUnseenSlices, FirstSeenUnseenSeries: usage.FirstSeenUnseenSeries,
+		FirstSeenJudged: usage.FirstSeenJudged, FirstSeenRanBefore: usage.FirstSeenRanBefore, FirstSeenSlicedRead: usage.FirstSeenSlicedRead,
 		InputSlicesReadAhead: usage.InputSlicesReadAhead, InputSlicesReadAheadOtherLeaf: usage.InputSlicesReadAheadOtherLeaf,
 		InputSlicesReadAheadYielded: usage.InputSlicesReadAheadYielded, InputSlicesReadAheadFailed: usage.InputSlicesReadAheadFailed,
 		InputSlicesReadAheadContextEnded: usage.InputSlicesReadAheadContextEnded, SeriesNotEvaluated: usage.SeriesNotEvaluated,

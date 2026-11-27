@@ -413,10 +413,10 @@ func TestTheSeriesOfALandedWindowStayInThePresentSet(t *testing.T) {
 	for index, host := range dimensions {
 		prepared = append(prepared, preparedHost(t, due, host, index))
 	}
-	stream.windows.prepared = prepared
+	stream.fill.prepared = prepared
 	// The first window, of three series, landed: its inputs go, its groups
 	// stay in the set.
-	released, err := stream.letGoWindowInputs(context.Background(), stream.windows.prepared[:3])
+	released, err := stream.letGoWindowInputs(context.Background(), stream.fill.prepared[:3])
 	if err != nil {
 		t.Fatal(err)
 	}

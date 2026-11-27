@@ -515,7 +515,8 @@ func TestConcentratedOnEveryDimensionIsNamed(t *testing.T) {
 }
 
 // TestMaxLeavesIsNamed splits without samples until the tree would pass
-// MaxLeaves.
+// MaxLeaves, a leaf no split separates - cut to its end on both dimensions -
+// landed as it comes.
 func TestMaxLeavesIsNamed(t *testing.T) {
 	tree, err := inputslice.New([]string{"pod", "zone"}, 1, "pod")
 	if err != nil {
@@ -523,7 +524,17 @@ func TestMaxLeavesIsNamed(t *testing.T) {
 	}
 	for {
 		pending := tree.Pending()
+		if len(pending) == 0 {
+			t.Fatal("every leaf landed before the tree passed MaxLeaves")
+		}
 		_, err := tree.Split(pending[0].ID, nil)
+		var concentrated *inputslice.ValueConcentratedError
+		if errors.As(err, &concentrated) && concentrated.Reason == inputslice.ReasonSingleValue {
+			if err := tree.Land(pending[0].ID); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
 		if err != nil {
 			assertConcentrated(t, err, inputslice.ReasonMaxLeaves)
 			break
@@ -564,9 +575,9 @@ func TestInitialTreeReachesK0(t *testing.T) {
 		assertPartition(t, (&tracker{tree: tree}).leaves(), probe)
 	}
 	// Each split without a sample replaces one leaf by five, so the largest
-	// tree reachable within 64 leaves has 1 + 4·15 = 61.
-	if reachable != 61 {
-		t.Fatalf("largest K_0 reached is %d, want 61", reachable)
+	// tree reachable within 128 leaves has 1 + 4·31 = 125.
+	if reachable != 125 {
+		t.Fatalf("largest K_0 reached is %d, want 125", reachable)
 	}
 }
 

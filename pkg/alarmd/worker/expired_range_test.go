@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -181,6 +182,10 @@ func testRangeTailGuardCommitConflict(t *testing.T, distance, committedFirst, po
 	result, err := newCoordinator(store).Execute(ctx, request)
 	if err == nil || result.Completed || len(fixture.ports.mutations) != 1 {
 		t.Fatalf("first result=%+v err=%v guards=%d", result, err, len(fixture.ports.mutations))
+	}
+	// The refusal says which fact refused it.
+	if want := "range progress not committed: CONFLICT: CAS_CONFLICT"; !strings.Contains(err.Error(), want) {
+		t.Fatalf("first err=%v, want it to say %q", err, want)
 	}
 	if fixture.ports.mutations[0].ApplyVersion.EvaluationTime != request.Contract.Slot.EvaluationTime {
 		t.Fatal("Guard did not use actual last Slot")

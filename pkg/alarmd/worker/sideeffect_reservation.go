@@ -3,7 +3,10 @@ package worker
 import (
 	"context"
 	"errors"
+	"math"
+	"slices"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
@@ -33,7 +36,7 @@ func (stream *streamedExecution) admitEffects(delta effectCounts, budget Provisi
 	if err := checkEffectCounts(count, budget); err != nil {
 		return count, err
 	}
-	stream.effects = count
+	stream.effects, stream.ownEffects = count, stream.ownEffects.plus(delta)
 	return count, nil
 }
 
@@ -41,7 +44,7 @@ func (stream *streamedExecution) admitEffects(delta effectCounts, budget Provisi
 func (stream *streamedExecution) addEffects(delta effectCounts) {
 	stream.effectsMu.Lock()
 	defer stream.effectsMu.Unlock()
-	stream.effects = stream.effects.plus(delta)
+	stream.effects, stream.ownEffects = stream.effects.plus(delta), stream.ownEffects.plus(delta)
 }
 
 // giveBackEffects takes off what a window that landed, or a reservation the
@@ -49,8 +52,22 @@ func (stream *streamedExecution) addEffects(delta effectCounts) {
 func (stream *streamedExecution) giveBackEffects(held effectCounts) {
 	stream.effectsMu.Lock()
 	defer stream.effectsMu.Unlock()
-	stream.effects = effectCounts{states: stream.effects.states - min(held.states, stream.effects.states),
-		events: stream.effects.events - min(held.events, stream.effects.events), gaps: stream.effects.gaps - min(held.gaps, stream.effects.gaps)}
+	stream.effects, stream.ownEffects = lessEffects(stream.effects, held), lessEffects(stream.ownEffects, held)
+}
+
+// lessEffects is counts less held, no count below zero.
+func lessEffects(counts, held effectCounts) effectCounts {
+	return effectCounts{states: counts.states - min(held.states, counts.states),
+		events: counts.events - min(held.events, counts.events), gaps: counts.gaps - min(held.gaps, counts.gaps)}
+}
+
+// ownHeldEffects is the counts this stream holds of the Slot's (ownEffects):
+// what its windows - the one it fills and those it handed - hold, the Slot's
+// with one stream.
+func (stream *streamedExecution) ownHeldEffects() effectCounts {
+	stream.effectsMu.Lock()
+	defer stream.effectsMu.Unlock()
+	return stream.ownEffects
 }
 
 // heldEffects is what the Slot holds of its counts now.
@@ -66,6 +83,12 @@ func (stream *streamedExecution) takeEffects() effectCounts {
 	defer stream.effectsMu.Unlock()
 	held := stream.effects
 	stream.effects = effectCounts{}
+	// Every stream's part goes with the Slot's: with k consumers, a window
+	// one holds would otherwise give back, as it is written, counts the
+	// pool was given back here (writtenEffects).
+	for _, each := range stream.slotStreams() {
+		each.ownEffects = effectCounts{}
+	}
 	return held
 }
 
@@ -157,6 +180,8 @@ func (bytes mergeBytes) total() uint64 {
 // It reads the results and the summary and changes neither, so the window
 // check before a merge and the merge reserve the same number.
 func (stream *streamedExecution) measureMerge(next execution.EvaluationResult, retained, held uint64) mergeBytes {
+	stream.mergeMu.Lock()
+	defer stream.mergeMu.Unlock()
 	return mergeBytes{retained: retained, held: held, effects: newEffectBytes(stream.evaluated, next),
 		summarized: stream.summary.addedBytes(next, stream.noDataEnds)}
 }
@@ -166,13 +191,60 @@ func (stream *streamedExecution) mergeProvisional(ctx context.Context, next exec
 }
 
 func (stream *streamedExecution) mergeMeasured(ctx context.Context, next execution.EvaluationResult, measured mergeBytes) error {
-	if stream.evaluated.Contract != (execution.FrozenExecutionContractRef{}) && stream.evaluated.Contract != next.Contract {
+	err := stream.mergeMeasuredOnce(ctx, next, measured, false)
+	if !errors.Is(err, errCapBehindBarrier) {
+		return err
+	}
+	// Past a per-Slot cap with k consumers: judged again behind the Slot's
+	// barrier, every other consumer stopped and every window landed (015 C1
+	// section 6, C1).
+	release, err := stream.holdBarrier(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return stream.mergeMeasuredOnce(ctx, next, measured, true)
+}
+
+// errCapBehindBarrier is a merge of one of k consumers past a per-Slot cap,
+// judged again behind the Slot's barrier (mergeMeasured).
+var errCapBehindBarrier = errors.New("alarmd worker: a merge past the Slot's caps is judged again behind its barrier")
+
+// mergeMeasuredOnce is one judgement and merge of next; behind says it is
+// taken behind the Slot's barrier.
+func (stream *streamedExecution) mergeMeasuredOnce(ctx context.Context, next execution.EvaluationResult, measured mergeBytes,
+	behind bool,
+) error {
+	if err := stream.safePoint(ctx); err != nil {
+		return err
+	}
+	stream.mergeMu.Lock()
+	contract := stream.evaluated.Contract
+	stream.mergeMu.Unlock()
+	if contract != (execution.FrozenExecutionContractRef{}) && contract != next.Contract {
 		return errors.New("alarmd worker: series evaluations changed frozen contract")
 	}
 	if err := stream.takeLandings(ctx); err != nil {
 		return err
 	}
+	// Judged and merged in one step: what next adds is counted against the
+	// Slot's results as they stand, and no other stream's merge comes
+	// between the count and the append (015 C1 step 3.1). Held across a
+	// drain: the apply side merges only in the tail, queued after the Slot's
+	// last merge and its last window.
+	stream.mergeMu.Lock()
+	defer stream.mergeMu.Unlock()
 	delta := addedEffectCounts(stream.evaluated, next)
+	// One of k consumers measures what it adds again against the results as
+	// they stand: a Plan another stream merged first since the caller
+	// measured is that stream's to keep, and this merge adds only its series
+	// to it. With one stream nothing merged in between, and the measure is
+	// the caller's: sized again it is the same number, at the cost of a
+	// second walk of every result the Slot merges.
+	if stream.sideBySide() {
+		measured.effects = newEffectBytes(stream.evaluated, next)
+		measured.summarized = stream.summary.addedBytes(next, stream.noDataEnds)
+	}
 	// The Slot's own output is checked against the per-Slot caps before the
 	// shared reservation: a Slot above them can never be applied by this
 	// process, so that rejection is deterministic and carries the Slot's own
@@ -180,6 +252,14 @@ func (stream *streamedExecution) mergeMeasured(ctx context.Context, next executi
 	// Slot's at once (admitEffects), and given back if the pool refuses.
 	slotBudget := stream.coordinator.slotBudget()
 	count, err := stream.admitEffects(delta, slotBudget)
+	if err != nil && stream.sideBySide() && !behind {
+		// The counts are every consumer's windows: the lock is let go, and
+		// the cap judged again with all of them landed.
+		var exceeded *provisionalBudgetExceededError
+		if errors.As(err, &exceeded) {
+			return errCapBehindBarrier
+		}
+	}
 	if err != nil && stream.inflightEffects() != (effectCounts{}) {
 		// The counts are the windows in hand: one written, one filled. With
 		// a window still being written, the cap is judged again once it has
@@ -220,10 +300,14 @@ func (stream *streamedExecution) mergeMeasured(ctx context.Context, next executi
 	// Loaded Gap facts remain independently accounted in stream.gapFacts.
 	// At its place among the Slot's batches: the slice its series were read
 	// in, then its turn (execution.MergeOrder).
-	order := stream.summary.nextOrder(stream.sliceNumber)
-	if err := appendProvisionalAt(&stream.evaluated, next, order, &stream.summary.results); err != nil {
+	order := stream.summary.nextOrder(stream.mergeSlice())
+	if stream.consumerCount() > 1 {
+		stream.noteFirstMerged(next)
+	}
+	if err := appendProvisionalAt(&stream.evaluated, withoutWindowLists(next), order, &stream.summary.results); err != nil {
 		return err
 	}
+	stream.fill.addResults(next)
 	// After the append and only when it took the batch, so the summary
 	// never holds a batch the results do not: every result the Slot keeps -
 	// evaluated, resumed, superseded, no-data, a Plan without series, a
@@ -232,9 +316,37 @@ func (stream *streamedExecution) mergeMeasured(ctx context.Context, next executi
 	stream.keysHeld += measured.held
 	stream.summaryHeld += measured.summarized
 	// The window's own share: what applying it gives back (applyWindow).
-	stream.windows.stateBytes += measured.retained
-	stream.windows.bytes += measured.retained + measured.effects
+	stream.fill.stateBytes += measured.retained
+	stream.fill.bytes += measured.retained + measured.effects
 	return nil
+}
+
+// noteFirstMerged keeps the Plans next is the first result of: what the Slot
+// keeps of them is charged to this stream. Under mergeMu.
+func (stream *streamedExecution) noteFirstMerged(next execution.EvaluationResult) {
+	for _, plan := range next.Plans {
+		if slices.ContainsFunc(stream.evaluated.Plans, func(held execution.PlanEvaluationResult) bool { return held.Plan == plan.Plan }) {
+			continue
+		}
+		if stream.firstMerged == nil {
+			stream.firstMerged = make(map[execution.PlanIdentity]struct{})
+		}
+		stream.firstMerged[plan.Plan] = struct{}{}
+	}
+}
+
+// afterEverySlice is the slice a merge made as the Slot finishes counts as
+// read in: after every slice the Slot read, however many streams consumed
+// them and whichever slice each consumed last.
+const afterEverySlice = math.MaxInt
+
+// mergeSlice is the slice a merge's batch counts as read in: its stream's,
+// or, once the Slot finishes, after every slice.
+func (stream *streamedExecution) mergeSlice() int {
+	if stream.finishing {
+		return afterEverySlice
+	}
+	return stream.sliceNumber
 }
 
 func newEffectBytes(current, next execution.EvaluationResult) uint64 {
@@ -351,8 +463,36 @@ func (coordinator *SlotExecutionCoordinator) acquireEffects(delta effectCounts, 
 func (coordinator *SlotExecutionCoordinator) releaseEffects(count effectCounts) {
 	reservation := &coordinator.reservations
 	reservation.mu.Lock()
-	reservation.states -= count.states
-	reservation.events -= count.events
-	reservation.gaps -= count.gaps
+	over := releaseLocked(nil, &reservation.states, count.states, observability.PoolOverReleaseStates)
+	over = releaseLocked(over, &reservation.events, count.events, observability.PoolOverReleaseEvents)
+	over = releaseLocked(over, &reservation.gaps, count.gaps, observability.PoolOverReleaseGaps)
 	reservation.mu.Unlock()
+	coordinator.observePoolOverReleases(over)
+}
+
+// releaseLocked takes count off the process's reservation count held, stopping
+// at zero: a release of more than it holds - given back twice, or by a stream
+// holding none - is a fault of this build's own, and wrapped, the count would
+// refuse every Slot of the process until it restarts. Such a release is added
+// to over, to be said once the lock is let go (observePoolOverReleases).
+// Under reservations.mu.
+func releaseLocked(over []observability.PoolOverReleaseFacts, held *uint64, count uint64, kind string) []observability.PoolOverReleaseFacts {
+	if count > *held {
+		over = append(over, observability.PoolOverReleaseFacts{Kind: kind, Asked: count, Held: *held})
+	}
+	*held -= min(count, *held)
+	return over
+}
+
+// observePoolOverReleases says each release past zero (releaseLocked), once a
+// release: on a context of its own, as a release is made where the Slot's is
+// not at hand - the apply goroutine giving a window's counts back.
+func (coordinator *SlotExecutionCoordinator) observePoolOverReleases(over []observability.PoolOverReleaseFacts) {
+	for index := range over {
+		coordinator.emitObservation(context.Background(), observability.Observation{
+			Component: observability.ComponentResource, Stage: observability.StagePoolOverRelease,
+			Result: observability.ResultDegraded, ReasonCode: observability.ReasonCode(contract.ReasonResourcePoolOverRelease),
+			PoolOverRelease: &over[index],
+		})
+	}
 }

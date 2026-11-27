@@ -42,4 +42,13 @@ func TestAConsumingStreamAsksTheDispatchToYieldTheReadsAhead(t *testing.T) {
 	if dispatch.yieldReadAhead("normal_input") {
 		t.Fatal("the dispatch, with no read ahead, says one was let go")
 	}
+
+	// A Slot ending while the consumer asks: the request no one serves ends,
+	// nothing let go, and the consumer goes on.
+	done := make(chan struct{})
+	ended := &streamedExecution{slotStream: dispatch.slotStream, yieldTo: make(chan yieldRequest), yieldDone: done}
+	close(done)
+	if ended.yieldReadAhead("normal_input") {
+		t.Fatal("a request the ended Slot never served said a read ahead was let go")
+	}
 }

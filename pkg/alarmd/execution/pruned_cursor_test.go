@@ -73,6 +73,60 @@ func TestScheduleProgressContinuityAnchorIgnoresAPrunedSkip(t *testing.T) {
 	}
 }
 
+// The last completion summary names the Slot every commit completed, and
+// the anchor reads it beside the last full Slot and the gap: a query-free
+// completion of a Slot an earlier attempt applied whole moves neither of
+// those two, and with them alone the anchor stood one Slot behind the
+// cursor, every later commit refused.
+func TestScheduleProgressContinuityAnchorReadsTheLastCompletion(t *testing.T) {
+	completed := func(kind CompletionKind, slot EvaluationTime) *LastCompletionSummary {
+		return &LastCompletionSummary{Slot: slot, Kind: kind, ReasonCode: ReasonCode(contract.ReasonGapSkipped)}
+	}
+	warming := &ProgressGapSummary{Kind: CompletionUnavailable, ReasonCode: ReasonCode(contract.ReasonHistoryWarming),
+		FirstSlot: 540, LastSlot: 540, Count: 1}
+	for _, test := range []struct {
+		name     string
+		progress ScheduleProgress
+		want     EvaluationTime
+		anchored bool
+		skipped  bool
+	}{
+		{name: "a query-free completion of a Slot applied whole anchors at its Slot", progress: ScheduleProgress{NextSlot: 720,
+			LastFullSlot: 600, CurrentOrRecentGap: warming, LastCompletionKind: CompletionGapSkipped,
+			LastCompletion: completed(CompletionGapSkipped, 660)}, want: 660, anchored: true},
+		{name: "a summary at the cursor names no Slot it follows", progress: ScheduleProgress{NextSlot: 660, LastFullSlot: 600,
+			LastCompletionKind: CompletionGapSkipped, LastCompletion: completed(CompletionGapSkipped, 660)}, want: 600, anchored: true},
+		{name: "a summary past the cursor names no Slot it follows", progress: ScheduleProgress{NextSlot: 660, LastFullSlot: 600,
+			LastCompletionKind: CompletionGapSkipped, LastCompletion: completed(CompletionGapSkipped, 720)}, want: 600, anchored: true},
+		{name: "a Slot applied whole completed after a forward skip anchors at its Slot", progress: ScheduleProgress{NextSlot: 660,
+			LastCompletionKind: CompletionGapSkipped, CurrentOrRecentGap: skipGap("", 120, 600),
+			LastCompletion: completed(CompletionGapSkipped, 600)}, want: 600, anchored: true},
+		// Not anchored at the skip's cursor, a Slot the timeline no longer
+		// holds: its successor cannot be derived.
+		{name: "a snapshot-unavailable Slot applied whole after a forward skip anchors at its Slot", progress: ScheduleProgress{
+			NextSlot: 660, LastCompletionKind: CompletionSnapshotUnavailable, CurrentOrRecentGap: skipGap("", 120, 600),
+			LastCompletion: completed(CompletionSnapshotUnavailable, 600)}, want: 600, anchored: true},
+		{name: "a forward skip nothing completed since has no anchor", progress: ScheduleProgress{NextSlot: 600,
+			LastCompletionKind: CompletionGapSkipped, CurrentOrRecentGap: skipGap("", 120, 600)}, skipped: true},
+		{name: "a summary from before a forward skip does not end it", progress: ScheduleProgress{NextSlot: 600,
+			LastCompletionKind: CompletionGapSkipped, CurrentOrRecentGap: skipGap("", 120, 600),
+			LastCompletion: completed(CompletionFull, 60)}, skipped: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			test.progress.Identity = ProgressIdentity{QueryGroup: "q"}
+			if err := test.progress.Validate(); err != nil {
+				t.Fatalf("the record does not validate: %v", err)
+			}
+			if got := test.progress.SkippedPrunedRange(); got != test.skipped {
+				t.Fatalf("on a forward skip = %v, want %v", got, test.skipped)
+			}
+			if got, ok := test.progress.ContinuityAnchor(); got != test.want || ok != test.anchored {
+				t.Fatalf("anchor = (%d, %v), want (%d, %v)", got, ok, test.want, test.anchored)
+			}
+		})
+	}
+}
+
 func TestProgressSkipPrunedRequestValidation(t *testing.T) {
 	valid := ProgressSkipPrunedRequest{Identity: ProgressIdentity{QueryGroup: "q"},
 		OwnerFence:       OwnerFence{QueryGroup: "q", OwnerID: "worker", OwnerEpoch: 1, LeaseToken: "lease"},

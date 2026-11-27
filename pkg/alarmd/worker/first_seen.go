@@ -29,6 +29,56 @@ import (
 // warm up on their own windows as any new series does, and a satisfied
 // marker records the judgement so the next Slot - which finds this Slot's
 // state - does not take the Plan for one that ran before.
+//
+// A Slot read in slices judges none of its Plans first-seen: that nothing of
+// a Plan is from before is known only once every series of it is read, and
+// a Slot read in slices writes its first window long before its last slice
+// is read. A Plan judged by the slices read so far, its State from before in
+// a later one, would write the series before it without warming. Its new
+// Plans warm up as they did before first-seen, a period late.
+
+// firstSeenVerdict is what a Slot made of a Plan that could be first-seen -
+// new to its activation, without a marker (firstSeenCandidates): judged
+// first-seen, found to have run, or warmed up unjudged because the Slot was
+// read in slices.
+type firstSeenVerdict int
+
+const (
+	firstSeenJudged firstSeenVerdict = iota
+	firstSeenRanBefore
+	firstSeenSlicedRead
+	firstSeenVerdicts
+)
+
+// firstSeenJudging is a Slot's first-seen judgement: whether it judges at
+// all (not when read in slices), and how many Plans it gave each verdict,
+// for the completion row.
+type firstSeenJudging struct {
+	sliced   bool
+	verdicts [firstSeenVerdicts]uint64
+}
+
+type firstSeenJudgingKey struct{}
+
+// withFirstSeenJudging hands the Slot's judging to its finalization, which
+// judges a Slot applied whole.
+func withFirstSeenJudging(ctx context.Context, judging *firstSeenJudging) context.Context {
+	return context.WithValue(ctx, firstSeenJudgingKey{}, judging)
+}
+
+// firstSeenJudgingFrom is the Slot's judging, nil for a finalization no
+// Slot read for (its unseen Plans are nil, and it judges none first-seen).
+func firstSeenJudgingFrom(ctx context.Context) *firstSeenJudging {
+	judging, _ := ctx.Value(firstSeenJudgingKey{}).(*firstSeenJudging)
+	return judging
+}
+
+// judgingFirstSeen is the stream's Slot's judging, as it stands at its first
+// judgement: read in slices or not.
+func (stream *streamedExecution) judgingFirstSeen() *firstSeenJudging {
+	stream.firstSeen.sliced = stream.readInSlices()
+	return &stream.firstSeen
+}
 
 type unseenPlansKey struct{}
 
@@ -49,20 +99,7 @@ func unseenPlansFrom(ctx context.Context) map[execution.PlanKey]struct{} {
 // no no-data memory. A record the store could not read is something: the
 // judgement errs toward warming up.
 func (stream *streamedExecution) unseenPlans() map[execution.PlanKey]struct{} {
-	return stream.unseenPlansBy(stream.windows.seen)
-}
-
-// unseenPlansAtRead is unseenPlans as a slice's head judges it: by what the
-// windows cut and handed before the slice began to be read found, and what
-// its own pre-pass found (seenAtRead) - a subset of what the Slot finds by
-// its end, so a Plan is judged first-seen no less often, and never by what
-// a slice read beside this one found after. A Slot not read in slices
-// judges by everything so far.
-func (stream *streamedExecution) unseenPlansAtRead() map[execution.PlanKey]struct{} {
-	if stream.seenAtRead == nil {
-		return stream.unseenPlans()
-	}
-	return stream.unseenPlansBy(stream.seenAtRead)
+	return stream.unseenPlansBy(stream.seenSnapshot())
 }
 
 // unseenPlansBy is unseenPlans with seen the Plans the Slot's windows found.
@@ -85,6 +122,8 @@ func (stream *streamedExecution) unseenPlansBy(seen map[execution.PlanIdentity]s
 // and the first-seen pre-pass said (windows.seen), the views it holds, and
 // its no-data memory.
 func (stream *streamedExecution) seenSoFar(due execution.DuePlan, version execution.ApplyVersion) bool {
+	stream.seenMu.Lock()
+	defer stream.seenMu.Unlock()
 	return stream.seenSoFarBy(stream.windows.seen, due, version)
 }
 
@@ -156,9 +195,10 @@ func firstSeenActivations(
 // the two facts firstSeenActivations reads that the Slot has before its State
 // is read. The third - nothing of the Plan read from before the Slot - is
 // known only once every series of the Plan has been read. A Slot applied
-// whole has read them all by its one Sequence; a Slot applied window by
-// window writes its first window long before, and the judgement decides
-// whether the Plan writes at all, so it reads them first (firstSeenPrepass).
+// whole has read them all by its one Sequence; a Slot read whole and applied
+// window by window writes its first window before their State is read, and
+// the judgement decides whether the Plan writes at all, so it reads them
+// first (firstSeenPrepass). A Slot read in slices does not judge them.
 func firstSeenCandidates(forced execution.PlanActivationResult, loadedGaps execution.GapLoadResult) []execution.PlanActivationFact {
 	var candidates []execution.PlanActivationFact
 	for _, fact := range forced.Facts {
@@ -217,13 +257,13 @@ func (stream *streamedExecution) firstSeenPrepass(ctx context.Context, candidate
 		if err != nil {
 			return err
 		}
-		if stream.seenSoFarBy(stream.headSeen(), due, version) {
+		if stream.seenSoFarBy(stream.seenSnapshot(), due, version) {
 			continue
 		}
 		seen := false
 		items := make([]execution.StatePreflightItem, 0, batchLimit)
-		for index := 0; index < len(stream.windows.prepared) && !seen; index++ {
-			prepared := stream.windows.prepared[index]
+		for index := 0; index < len(stream.fill.prepared) && !seen; index++ {
+			prepared := stream.fill.prepared[index]
 			if prepared.due == nil || prepared.due.Key() != due.Key() || len(primaryIncompleteIn(stream.preparedBindings(prepared))) != 0 {
 				continue
 			}
@@ -244,25 +284,12 @@ func (stream *streamedExecution) firstSeenPrepass(ctx context.Context, candidate
 			}
 		}
 		if seen {
-			if stream.windows.seen == nil {
-				stream.windows.seen = make(map[execution.PlanIdentity]struct{})
-			}
-			stream.windows.seen[due.Identity] = struct{}{}
-			if stream.seenAtRead != nil {
-				stream.seenAtRead[due.Identity] = struct{}{}
-			}
+			stream.seenMu.Lock()
+			stream.noteSeenLocked(due.Identity)
+			stream.seenMu.Unlock()
 		}
 	}
 	return nil
-}
-
-// headSeen is what a head's first-seen judgement reads the windows found
-// by: as the slice began to be read, for a Slot read in slices.
-func (stream *streamedExecution) headSeen() map[execution.PlanIdentity]struct{} {
-	if stream.seenAtRead != nil {
-		return stream.seenAtRead
-	}
-	return stream.windows.seen
 }
 
 // prepassBatch reads one batch of a candidate Plan's State and reports

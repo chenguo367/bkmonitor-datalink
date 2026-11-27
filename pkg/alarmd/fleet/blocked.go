@@ -10,9 +10,11 @@
 package fleet
 
 import (
+	"slices"
 	"strings"
 	"time"
 
+	model "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
@@ -273,6 +275,10 @@ var failureFacets = map[string]facets{
 	"GAP_GUARD_CONFLICT":            {StageEvaluate, ClassContract, DependencyNone},
 	"GAP_SCOPE_REASON_CONFLICT":     {StageEvaluate, ClassContract, DependencyNone},
 	"EVALUATION_FAILED":             {StageEvaluate, ClassContract, DependencyNone},
+	// The process's reservations released past what they held: the count is
+	// this deployment's own and is taken at the evaluation, so it is its
+	// contract with itself that broke, not a capacity.
+	"RESOURCE_POOL_OVER_RELEASE": {StageEvaluate, ClassContract, DependencyNone},
 	// The series state moved under the Slot writing it. The step is the
 	// state write -- the apply and its preflight are the commit of the
 	// round's result -- so a reader is sent to what was committing against
@@ -472,6 +478,32 @@ var failureFacets = map[string]facets{
 // them by name.
 var failureRefCodes = []string{"EVALUATION_FAILED", "GAP_SCOPE_REASON_CONFLICT", "QUERY_PERMIT_DEADLINE", "QUERY_DELIVERY_TIMEOUT"}
 
+// stepStages reads the stage from the step of Execute a round's error failed
+// in (model.SlotNotCommittedReasons' step words) when nothing else named it.
+// A query-free finalization's own step - its gap markers, its admission,
+// before any commit - is a write of the Slot's.
+var stepStages = map[string]Stage{
+	model.SlotNotCommittedQueryFailed:          StageQuery,
+	model.SlotNotCommittedCompleteFailed:       StageEvaluate,
+	model.SlotNotCommittedApplyFailed:          StageCommit,
+	model.SlotNotCommittedOutputFailed:         StageCommit,
+	model.SlotNotCommittedProgressCommitFailed: StageCommit,
+	model.SlotNotCommittedQueryFreeFailed:      StageCommit,
+}
+
+// refusalFacets reads a Progress commit the store refused: a conflict is the
+// record and this deployment's own view of the Slot in conflict, nothing it
+// depends on failing; a commit the store did not answer is the store's.
+func refusalFacets(refusal string) (facets, bool) {
+	switch {
+	case refusal == string(model.ProgressRetryableIO):
+		return facets{stage: StageCommit, class: ClassUnavailable, dependency: DependencyRedis}, true
+	case slices.Contains(model.ProgressConflicts, refusal):
+		return facets{stage: StageCommit, class: ClassContract, dependency: DependencyNone}, true
+	}
+	return facets{}, false
+}
+
 // categoryStages reads the step from a query failure's category when no
 // code named it: the categories are the pipeline's own words for where the
 // failure was raised, and they are on every failure the pipeline reports.
@@ -592,6 +624,30 @@ func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
 			if blocked.Code == "" {
 				blocked.Code = anomaly.Failure.Code
 			}
+		}
+	}
+	// A round that returned an error no code or category read: the step of
+	// Execute it failed in says where, as the worker counts it
+	// (slot_not_committed_total), and a Progress commit the store refused
+	// says what kind. The row used to say UNLOCATED on all three axes under
+	// the executor's catch-all word for an error, for a Slot whose every
+	// commit the record refused.
+	if blocked.Stage == StageUnlocated && failedExecution(anomaly.ReasonCode) {
+		if stage, known := stepStages[anomaly.FailedStep]; known {
+			blocked.Stage, blocked.Code = stage, anomaly.FailedStep
+		}
+	}
+	// A Progress write the record refused names the fact on the row, at
+	// whatever stage the row was read: a refused commit's error carries it, a
+	// refused BeginSlot's retry - no error, so no step, and read by its
+	// reason as the schedule's - carries it on its result.
+	if failedExecution(anomaly.ReasonCode) && anomaly.ProgressRefusal != "" {
+		if reading, refused := refusalFacets(anomaly.ProgressRefusal); refused {
+			if blocked.Stage == StageUnlocated {
+				blocked.Stage = reading.stage
+			}
+			blocked.Class, blocked.Dependency, blocked.DependencyEvidence = reading.class, reading.dependency, dependencyByCode
+			blocked.Code = anomaly.ProgressRefusal
 		}
 	}
 	// A backend that answered and refused named itself by answering: the

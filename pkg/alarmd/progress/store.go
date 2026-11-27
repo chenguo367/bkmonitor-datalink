@@ -64,6 +64,16 @@ type StoreOptions struct {
 	// a field, when the write applied (SupersededProjectionFields,
 	// progress_projection_superseded_total).
 	Superseded func(field string)
+	// Conflicts is optional. It is told of every BeginSlot, commit and
+	// expired range the record refused as a conflict, once a call, by the
+	// operation (ProgressConflictOperations) and the fact that refused it
+	// (execution.ProgressConflicts, progress_conflicts_total).
+	Conflicts func(operation, reason string)
+	// AppliedWhole is optional. It is told of every query-free completion
+	// committed for a Slot an earlier attempt had applied whole, by its
+	// kind, when the write applied (progress_query_free_applied_total): how
+	// often an attempt ends between its apply and its commit.
+	AppliedWhole func(kind string)
 }
 
 // The fields of an unfinished Slot's projection a later fenced attempt of
@@ -80,6 +90,22 @@ const (
 
 // SupersededProjectionFields lists them, for the metric's cells.
 var SupersededProjectionFields = []string{SupersededContract, SupersededDeadline, SupersededKeepUntil, SupersededDuePlanTargets}
+
+// The operations a conflict is counted under (StoreOptions.Conflicts): a
+// BeginSlot, a commit, an expired range's begin or commit.
+const (
+	ProgressConflictBegin  = "begin"
+	ProgressConflictCommit = "commit"
+	ProgressConflictRange  = "range"
+)
+
+// ProgressConflictOperations lists them, for the metric's cells.
+var ProgressConflictOperations = []string{ProgressConflictBegin, ProgressConflictCommit, ProgressConflictRange}
+
+// QueryFreeAppliedKinds are the completions a Slot applied whole by an
+// earlier attempt can be committed as (StoreOptions.AppliedWhole), for the
+// metric's cells.
+var QueryFreeAppliedKinds = []string{string(execution.CompletionGapSkipped), string(execution.CompletionSnapshotUnavailable)}
 
 type Store struct {
 	options StoreOptions
@@ -297,6 +323,10 @@ func (store *Store) BeginSlot(ctx context.Context, request execution.ProgressBeg
 	if superseded != nil {
 		superseded(err == nil && result.Status == execution.ProgressCommitted)
 	}
+	// Counted once, from the pass the write ended on, as a commit is.
+	if err == nil && result.Status == execution.ProgressConflict && store.options.Conflicts != nil {
+		store.options.Conflicts(ProgressConflictBegin, execution.ConflictWord(result.Conflict))
+	}
 	return result, err
 }
 
@@ -314,10 +344,10 @@ func (store *Store) beginSlotOn(ctx context.Context, request execution.ProgressB
 			return execution.ProgressBeginResult{}, &DeterministicInvalidError{Err: err}
 		}
 		if current.Identity != request.Identity {
-			return execution.ProgressBeginResult{Status: execution.ProgressConflict}, nil
+			return beginConflict(execution.ConflictIdentityMismatch, 0, 0), nil
 		}
 		if current.UnfinishedRange != nil {
-			return execution.ProgressBeginResult{Status: execution.ProgressConflict}, nil
+			return beginConflict(execution.SkipRefusalRangeInFlight, 0, 0), nil
 		}
 		if current.UnfinishedSlot != nil {
 			persisted := *current.UnfinishedSlot
@@ -337,12 +367,12 @@ func (store *Store) beginSlotOn(ctx context.Context, request execution.ProgressB
 				// A later Segment owns the unfinished Slot's time and moves the
 				// cursor: the persisted contract can never be re-frozen.
 				abandonedAt := current.NextSlot
-				conflict, abandonErr := store.abandonUnfinishedSlot(ctx, &current, requested)
+				next, abandonErr := store.abandonUnfinishedSlot(ctx, &current, requested)
 				if abandonErr != nil {
 					return execution.ProgressBeginResult{}, abandonErr
 				}
-				if conflict {
-					return execution.ProgressBeginResult{Status: execution.ProgressConflict}, nil
+				if next != requested {
+					return beginConflict(execution.SkipRefusalCursorMoved, next, abandonedAt), nil
 				}
 				if requested > abandonedAt {
 					abandoned = &persisted
@@ -350,7 +380,10 @@ func (store *Store) beginSlotOn(ctx context.Context, request execution.ProgressB
 			default:
 				// Another Slot on the same or an older Segment, or the same Slot
 				// seen through an older Segment, is not the latest view.
-				return execution.ProgressBeginResult{Status: execution.ProgressConflict}, nil
+				if current.NextSlot == requested {
+					return beginConflict(execution.ConflictSegmentOlder, 0, 0), nil
+				}
+				return beginConflict(execution.SkipRefusalCursorMoved, current.NextSlot, current.NextSlot), nil
 			}
 		} else if current.NextSlot != request.Projection.Contract.Slot.EvaluationTime {
 			// A cutover can leave the persisted cursor on the old Schedule grid.
@@ -361,7 +394,7 @@ func (store *Store) beginSlotOn(ctx context.Context, request execution.ProgressB
 				return execution.ProgressBeginResult{}, resolveErr
 			}
 			if currentNext != request.Projection.Contract.Slot.EvaluationTime {
-				return execution.ProgressBeginResult{Status: execution.ProgressConflict}, nil
+				return beginConflict(execution.SkipRefusalCursorMoved, currentNext, current.NextSlot), nil
 			}
 			current.NextSlot = currentNext
 		}
@@ -384,7 +417,7 @@ func (store *Store) beginSlotOn(ctx context.Context, request execution.ProgressB
 		}
 		return execution.ProgressBeginResult{Status: execution.ProgressCommitted}, nil
 	case ownership.FencedCASConflict:
-		return execution.ProgressBeginResult{Status: execution.ProgressConflict}, nil
+		return beginConflict(execution.SkipRefusalCASConflict, 0, 0), nil
 	case ownership.FencedCASStaleOwner:
 		return execution.ProgressBeginResult{Status: execution.ProgressStaleOwner}, nil
 	case ownership.FencedCASContentMoved:
@@ -406,11 +439,39 @@ func (store *Store) CommitProgress(ctx context.Context, request execution.Progre
 	if err != nil {
 		return execution.ProgressCommitResult{}, err
 	}
-	return fencedWrite(ctx, store, ProgressReadCommit, request.Identity.QueryGroup, name, request.OwnerFence, retryable(),
+	result, err := fencedWrite(ctx, store, ProgressReadCommit, request.Identity.QueryGroup, name, request.OwnerFence, retryable(),
 		func(result execution.ProgressCommitResult) bool { return result.Status == execution.ProgressConflict },
 		func(raw []byte, missing bool) (execution.ProgressCommitResult, error) {
 			return store.commitProgressOn(ctx, request, name, raw, missing)
 		})
+	// Counted once, from the pass the write ended on: a conflict met on the
+	// owner's record is read again and written once more (fencedWrite).
+	if err == nil && result.Status == execution.ProgressConflict && store.options.Conflicts != nil {
+		store.options.Conflicts(ProgressConflictCommit, execution.ConflictWord(result.Conflict))
+	}
+	return result, err
+}
+
+// commitConflict is a commit refused by the fact refusal names.
+func commitConflict(refusal execution.ProgressSkipRefusal) execution.ProgressCommitResult {
+	return execution.ProgressCommitResult{Status: execution.ProgressConflict, Conflict: refusal}
+}
+
+// beginConflict is a BeginSlot refused by the fact refusal names; for a
+// cursor not at the requested Slot, the Slot the record's completed facts
+// derive as next and the cursor it stores.
+func beginConflict(refusal execution.ProgressSkipRefusal, recordNext, storedNext execution.EvaluationTime) execution.ProgressBeginResult {
+	return execution.ProgressBeginResult{Status: execution.ProgressConflict, Conflict: refusal, RecordNext: recordNext, StoredNext: storedNext}
+}
+
+// queryFreeAppliedWhole is a query-free completion of a Slot an earlier
+// attempt applied whole: it evaluated every Plan, sent its events and wrote
+// its State, and ended before it wrote its Slot down - the crash window
+// between the apply and the commit. Such a completion is no gap
+// (shouldFoldRecentGap).
+func queryFreeAppliedWhole(completion execution.SlotCompletion) bool {
+	return (completion.Kind == execution.CompletionGapSkipped || completion.Kind == execution.CompletionSnapshotUnavailable) &&
+		completion.Evidence != nil && completion.Evidence.FullyApplied()
 }
 
 // commitProgressOn is CommitProgress on the record raw (missing when there
@@ -428,21 +489,23 @@ func (store *Store) commitProgressOn(ctx context.Context, request execution.Prog
 			return execution.ProgressCommitResult{}, &DeterministicInvalidError{Err: fmt.Errorf("persisted identity does not match commit identity")}
 		}
 		if current.UnfinishedRange != nil {
-			return execution.ProgressCommitResult{Status: execution.ProgressConflict}, nil
+			return commitConflict(execution.SkipRefusalRangeInFlight), nil
 		}
 		currentNext, resolveErr := store.resolveCurrentNextSlot(ctx, current)
 		if resolveErr != nil {
 			return execution.ProgressCommitResult{}, resolveErr
 		}
 		if currentNext != request.ExpectedNextSlot {
-			return execution.ProgressCommitResult{Status: execution.ProgressConflict}, nil
+			refused := commitConflict(execution.SkipRefusalCursorMoved)
+			refused.RecordNext, refused.StoredNext = currentNext, current.NextSlot
+			return refused, nil
 		}
 		if !request.Projection.IsZero() &&
 			(current.UnfinishedSlot == nil || !current.UnfinishedSlot.Equal(request.Projection)) {
 			return execution.ProgressCommitResult{}, &DeterministicInvalidError{Err: fmt.Errorf("persisted unfinished Slot projection does not match completion")}
 		}
 	} else if !request.Projection.IsZero() {
-		return execution.ProgressCommitResult{Status: execution.ProgressConflict}, nil
+		return commitConflict(execution.SkipRefusalProgressMissing), nil
 	}
 	nextSlot, err := store.options.Slots.NextSlotAfter(ctx, request.Identity.QueryGroup, request.ExpectedNextSlot)
 	if err != nil {
@@ -491,9 +554,12 @@ func (store *Store) commitProgressOn(ctx context.Context, request execution.Prog
 	store.settleWrite(request.Identity.QueryGroup, request.OwnerFence, status, missing, raw, encoded)
 	switch status {
 	case ownership.FencedCASApplied:
+		if queryFreeAppliedWhole(request.Completion) && store.options.AppliedWhole != nil {
+			store.options.AppliedWhole(string(request.Completion.Kind))
+		}
 		return execution.ProgressCommitResult{Status: execution.ProgressCommitted}, nil
 	case ownership.FencedCASConflict:
-		return execution.ProgressCommitResult{Status: execution.ProgressConflict}, nil
+		return commitConflict(execution.SkipRefusalCASConflict), nil
 	case ownership.FencedCASStaleOwner:
 		return execution.ProgressCommitResult{Status: execution.ProgressStaleOwner}, nil
 	case ownership.FencedCASContentMoved:
@@ -577,7 +643,11 @@ func shouldFoldRecentGap(
 		// fact -- no-data, expired ranges -- have to keep seeing it: the cost of
 		// one gap too many is one extra evaluation, and the cost of one too few
 		// is a miss nobody can see.
-		return completion.Evidence == nil || !completion.Evidence.FullyApplied()
+		//
+		// Not folded, the completion moves neither the last full Slot nor the
+		// gap; the continuity anchor reads it from the completion summary
+		// (ContinuityAnchor).
+		return !queryFreeAppliedWhole(completion)
 	case execution.CompletionPartialGap, execution.CompletionTerminal:
 		return true
 	case execution.CompletionUnavailable:
@@ -665,14 +735,14 @@ func (store *Store) observeSupersededProjection(
 // cursor to the successor the completed facts prove. A later requested Slot
 // means the abandoned Slot was skipped, so it is first recorded in the recent
 // gap summary exactly as a GAP_SKIPPED completion would be; an earlier one
-// means the new grid still reaches that time, so nothing is recorded. A
-// requested Slot that is not the proven successor conflicts and nothing is
-// written.
+// means the new grid still reaches that time, so nothing is recorded. It
+// returns the proven successor: a requested Slot that is not it conflicts,
+// the cursor left where it was, and nothing is written.
 func (store *Store) abandonUnfinishedSlot(
 	ctx context.Context,
 	current *execution.ScheduleProgress,
 	requested execution.EvaluationTime,
-) (bool, error) {
+) (execution.EvaluationTime, error) {
 	abandoned := current.NextSlot
 	current.UnfinishedSlot = nil
 	if requested > abandoned {
@@ -683,13 +753,12 @@ func (store *Store) abandonUnfinishedSlot(
 	}
 	next, err := store.resolveCurrentNextSlot(ctx, *current)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
-	if next != requested {
-		return true, nil
+	if next == requested {
+		current.NextSlot = next
 	}
-	current.NextSlot = next
-	return false, nil
+	return next, nil
 }
 
 func (store *Store) resolveCurrentNextSlot(

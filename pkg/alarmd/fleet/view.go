@@ -1606,6 +1606,12 @@ type Anomaly struct {
 	QueryGroup string `json:"query_group"`
 	Kind       string `json:"kind"`
 	ReasonCode string `json:"reason_code,omitempty"`
+	// FailedStep is, for a row whose latest round returned an error, the step
+	// of Execute it failed in (observability.Observation.SlotStep), and
+	// ProgressRefusal the word of a Progress commit the store refused: where
+	// the row is stuck when no code says (blockedOf).
+	FailedStep      string `json:"failed_step,omitempty"`
+	ProgressRefusal string `json:"progress_refusal,omitempty"`
 	// Cause separates the conditions that share one completion kind. Without it
 	// a page can list hundreds of objects as degraded and give the reader no
 	// way to tell which ones anyone can do something about, which is the same

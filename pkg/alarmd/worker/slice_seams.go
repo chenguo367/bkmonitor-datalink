@@ -33,6 +33,13 @@ type sliceSeams struct {
 	handoff, handoffMax time.Duration
 }
 
+// fold adds other's seams to these: their sums, and the longest of each.
+func (seams *sliceSeams) fold(other sliceSeams) {
+	seams.tail, seams.tailMax = seams.tail+other.tail, max(seams.tailMax, other.tailMax)
+	seams.change, seams.changeMax = seams.change+other.change, max(seams.changeMax, other.changeMax)
+	seams.handoff, seams.handoffMax = seams.handoff+other.handoff, max(seams.handoffMax, other.handoffMax)
+}
+
 // seriesCame notes a series of the read in hand reaching the Slot at at.
 func (seams *sliceSeams) seriesCame(at time.Time) {
 	if seams.first.IsZero() {

@@ -286,11 +286,7 @@ func (writes *slotWrites) beginLocked(ctx context.Context) error {
 			writes.failed = &slotNotBegun{err: refused}
 			return writes.failed
 		}
-		reason := begin.ReasonCode
-		if reason == "" {
-			reason = execution.ReasonCode(contract.ReasonProgressBeginRejected)
-		}
-		writes.failed = &slotNotBegun{result: activationRetry(reason)}
+		writes.failed = &slotNotBegun{result: coordinator.progressBeginNotCommitted(ctx, attempt, started, begin)}
 		return writes.failed
 	}
 	writes.owed = nil

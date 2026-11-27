@@ -30,14 +30,14 @@ func hostSample(n, per int) inputslice.Sample {
 
 // readWhole is a reading of one leaf, the root, read whole with series and
 // sample: what noteLeafRead sees once the slice has landed its last batch.
-func readWhole(t *testing.T, series uint64, sample inputslice.Sample) (*sliceReading, inputslice.Leaf) {
+func readWhole(t *testing.T, series uint64, sample inputslice.Sample) (*sliceReading, *sliceRead, inputslice.Leaf) {
 	t.Helper()
 	tree, err := inputslice.New([]string{"host"}, 1, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	reading := &sliceReading{tree: tree, dimensions: []string{"host"}, series: series, sample: sample}
-	return reading, tree.Pending()[0]
+	reading := &sliceReading{tree: tree, dimensions: []string{"host"}}
+	return reading, &sliceRead{series: series, sample: sample}, tree.Pending()[0]
 }
 
 // A slice read whole that held 150,000 series - past the 87,000 a slice is
@@ -45,8 +45,8 @@ func readWhole(t *testing.T, series uint64, sample inputslice.Sample) (*sliceRea
 // a slice's series, each planned at its share of the 150,000. One of 80,000
 // is within a slice and is not split.
 func TestASliceReadWholePastASlicesSeriesStartsInItsPartsNext(t *testing.T) {
-	reading, leaf := readWhole(t, 150_000, hostSample(150, 1000))
-	reading.noteLeafRead(leaf, 20_000)
+	reading, slice, leaf := readWhole(t, 150_000, hostSample(150, 1000))
+	reading.noteLeafRead(slice, leaf, 20_000)
 	next, err := inputslice.FromShape([]string{"host"}, reading.tree.Shape())
 	if err != nil {
 		t.Fatalf("the shape kept does not rebuild: %v", err)
@@ -70,8 +70,8 @@ func TestASliceReadWholePastASlicesSeriesStartsInItsPartsNext(t *testing.T) {
 		t.Fatalf("parts planned at %d series together, want the slice's 150,000 less rounding", planned)
 	}
 
-	within, leaf := readWhole(t, 80_000, hostSample(80, 1000))
-	within.noteLeafRead(leaf, 10_000)
+	within, slice, leaf := readWhole(t, 80_000, hostSample(80, 1000))
+	within.noteLeafRead(slice, leaf, 10_000)
 	if !within.tree.Shape().IsZero() {
 		t.Fatal("a slice of 80,000 series, within a slice's 87,000, was split for the next Slot")
 	}
@@ -93,8 +93,8 @@ func TestASizedSplitPastTheStartingLeavesIsRefused(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		reading := &sliceReading{tree: tree, dimensions: []string{"host"}, series: 150_000, sample: test.sample}
-		reading.noteLeafRead(tree.Pending()[1], 20_000)
+		reading := &sliceReading{tree: tree, dimensions: []string{"host"}}
+		reading.noteLeafRead(&sliceRead{series: 150_000, sample: test.sample}, tree.Pending()[1], 20_000)
 		if reading.sizedKept || reading.shape.dropped != test.want {
 			t.Fatalf("kept %v, shape %q: want nothing kept, refused %s", reading.sizedKept, reading.shape.dropped, test.want)
 		}
@@ -109,8 +109,8 @@ func TestASizedSplitPastTheStartingLeavesIsRefused(t *testing.T) {
 // be let go for them again - and a round that did not read every part counts
 // nothing.
 func TestASizedSplitIsTakenBackAfterThreeQuietRoundsOnly(t *testing.T) {
-	cut, leaf := readWhole(t, 150_000, hostSample(150, 1000))
-	cut.noteLeafRead(leaf, 20_000)
+	cut, slice, leaf := readWhole(t, 150_000, hostSample(150, 1000))
+	cut.noteLeafRead(slice, leaf, 20_000)
 	shape := cut.tree.Shape()
 	const limit = 384 << 10
 	partBytes := uint64(0)
@@ -232,13 +232,14 @@ func TestATimeMergeTheRoundALeafOfItIsKeptSplitKeepsEverySplit(t *testing.T) {
 		t.Fatal(err)
 	}
 	kept := tree.LastKept()
-	reading := &sliceReading{tree: tree, dimensions: dimensions, sample: hostSample(150, 1000)}
+	reading := &sliceReading{tree: tree, dimensions: dimensions}
+	slice := &sliceRead{sample: hostSample(150, 1000)}
 	for _, leaf := range tree.Pending() {
-		reading.series = 10
+		slice.series = 10
 		if leaf.ID == kept[0] {
-			reading.series = 150_000
+			slice.series = 150_000
 		}
-		reading.noteLeafRead(leaf, 1)
+		reading.noteLeafRead(slice, leaf, 1)
 	}
 	if !reading.sizedKept {
 		t.Fatal("the leaf past a slice's series was not kept split")
@@ -263,8 +264,8 @@ func TestATimeMergeTheRoundALeafOfItIsKeptSplitKeepsEverySplit(t *testing.T) {
 // the two the split before it had counted, which would take it back the
 // round it was made - to be let go again the round after.
 func TestASizedSplitMadeThisRoundStartsItsOwnCount(t *testing.T) {
-	cut, leaf := readWhole(t, 150_000, hostSample(150, 1000))
-	cut.noteLeafRead(leaf, 20_000)
+	cut, slice, leaf := readWhole(t, 150_000, hostSample(150, 1000))
+	cut.noteLeafRead(slice, leaf, 20_000)
 	shape := cut.tree.Shape()
 	tree, err := inputslice.FromShape([]string{"host"}, shape)
 	if err != nil {

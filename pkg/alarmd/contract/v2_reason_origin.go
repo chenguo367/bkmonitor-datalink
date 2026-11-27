@@ -109,6 +109,7 @@ var reasonSourcesV2 = map[string]ReasonSourceV2{
 	ReasonReadAheadContextEnded:       ReasonSourceMet,
 	ReasonResourceHardStop:            ReasonSourceMet,
 	ReasonResourcePoolHeldByOthers:    ReasonSourceMet,
+	ReasonResourcePoolOverRelease:     ReasonSourceMet,
 	ReasonSlotBudgetExceeded:          ReasonSourceMet,
 	ReasonStateBudgetExceeded:         ReasonSourceMet,
 	ReasonRecordTooLarge:              ReasonSourceMet,

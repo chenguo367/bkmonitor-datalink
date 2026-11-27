@@ -440,8 +440,14 @@ const (
 	// time to run in.
 	ReasonCompletionOffsetBelowReserve = "COMPLETION_OFFSET_BELOW_RESERVE"
 	ReasonResourceHardStop             = "RESOURCE_HARD_STOP"
-	ReasonSlotBudgetExceeded           = "SLOT_BUDGET_EXCEEDED"
-	ReasonOutputACKUnknown             = "OUTPUT_ACK_UNKNOWN"
+	// ReasonResourcePoolOverRelease names a release that would have taken one
+	// of the process's reservation counts below zero - given back more than it
+	// holds, twice or by a stream holding none: a fault of this build's own.
+	// The count stops at zero instead of wrapping, which would refuse every
+	// Slot of the process until it restarts.
+	ReasonResourcePoolOverRelease = "RESOURCE_POOL_OVER_RELEASE"
+	ReasonSlotBudgetExceeded      = "SLOT_BUDGET_EXCEEDED"
+	ReasonOutputACKUnknown        = "OUTPUT_ACK_UNKNOWN"
 	// ReasonOutputConversionRejected: the output converter would not write a
 	// decision (no frozen strategy revision, no series identity, no primary
 	// level, a business identity that is not a number, ...). Decided in this

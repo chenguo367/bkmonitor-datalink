@@ -359,6 +359,16 @@ func ringRatioCompiledPlanFor(t *testing.T, strategyID, ref, recovery string, sn
 // event each time, and a series with events is no member.
 func thresholdCompiledPlan(t *testing.T, ref string) (*strategy.CompiledPlan, []execution.DataRequirement) {
 	t.Helper()
+	return thresholdCompiledPlanOver(t, "7", ref, 1, "100", nil, shadowRecoveryOff)
+}
+
+// thresholdCompiledPlanOver is thresholdCompiledPlan for strategyID over a
+// PRIMARY window of points one-minute points, at threshold, with no-data
+// detection noData (none when nil) and the recovery plan recovery: each point
+// at or over the threshold decides an event of its own.
+func thresholdCompiledPlanOver(t *testing.T, strategyID, ref string, points int64, threshold string,
+	noData *contract.NoDataConfigV1, recovery string) (*strategy.CompiledPlan, []execution.DataRequirement) {
+	t.Helper()
 	compiler, err := strategy.NewCompiler(strategy.NewDefaultAlgorithmCompilerRegistry(), strategy.Limits{
 		MaxPlanBytes: 64 << 10, MaxLevelsPerPlan: 16, MaxAlgorithmsPerLevel: 8, MaxGroupsPerAlgorithm: 16,
 		MaxConditionsPerAlgorithm: 64, MaxASTNodesPerLevel: 256, MaxTriggerWindowSize: 4096,
@@ -369,23 +379,24 @@ func thresholdCompiledPlan(t *testing.T, ref string) (*strategy.CompiledPlan, []
 	if err != nil {
 		t.Fatal(err)
 	}
-	strategyRef := contract.StrategyRefV2{TenantID: "tenant", StrategyID: "7", Revision: "strategy-v1"}
+	strategyRef := contract.StrategyRefV2{TenantID: "tenant", StrategyID: strategyID, Revision: "strategy-v1"}
 	inputProjection := contract.InputProjectionV2{ValueFields: []string{"value"}, DimensionFields: []string{"host"},
 		BusinessIdentityField: "bk_biz_id", MultiValueAlignment: "SINGLE_VALUE", DataUnit: "percent",
 		MissingValuePolicy: contract.MissingValuePolicyRequired}
-	threshold := json.RawMessage(`{"value_field":"value","data_unit":"percent","threshold_unit_prefix":"","precision":{"decimal_places":6,"rounding":"HALF_EVEN"},"groups":[{"conditions":[{"operator":"GTE","threshold_decimal":"100"}]}]}`)
-	plan := contract.EvaluationPlanV2{PlanID: "7", StrategyRef: strategyRef, InputProjection: inputProjection,
+	detect := json.RawMessage(`{"value_field":"value","data_unit":"percent","threshold_unit_prefix":"","precision":{"decimal_places":6,"rounding":"HALF_EVEN"},"groups":[{"conditions":[{"operator":"GTE","threshold_decimal":"` +
+		threshold + `"}]}]}`)
+	plan := contract.EvaluationPlanV2{PlanID: strategyID, StrategyRef: strategyRef, InputProjection: inputProjection, NoData: noData,
 		StrategyIR: contract.StrategyIRV2{Schema: contract.Schema{Name: contract.StrategyIRSchemaV2, Major: 2},
 			StrategyRef: strategyRef, InputProjection: inputProjection,
 			ExecutionSemantics: contract.ExecutionSemanticsV2{EvaluationScope: contract.EvaluationScopeSeries,
-				QueryWindow: 300, AggregationInterval: 60, EvaluationInterval: 60, LatenessTolerance: 120},
+				QueryWindow: uint32(max(300, 60*points)), AggregationInterval: 60, EvaluationInterval: 60, LatenessTolerance: 120},
 			Levels: []contract.LevelIRV2{{Definition: contract.LevelDefinitionV2{LevelID: 5, Priority: 1},
 				Connector:  contract.LevelConnectorAND,
-				DetectPlan: contract.DetectPlanV2{Algorithms: []contract.AlgorithmIRV2{{Type: strategy.DetectorKindThreshold, Version: 1, Config: threshold}}},
+				DetectPlan: contract.DetectPlanV2{Algorithms: []contract.AlgorithmIRV2{{Type: strategy.DetectorKindThreshold, Version: 1, Config: detect}}},
 				TriggerPlan: contract.TypedPlanV1{Type: "N_OF_M", Version: 1,
 					Config: json.RawMessage(`{"window_size":3,"required_anomalies":1,"step_seconds":60}`)},
 				RecoveryPlan: contract.TypedPlanV1{Type: "CONTINUOUS_TRIGGER_MISS", Version: 1,
-					Config: json.RawMessage(shadowRecoveryOff)},
+					Config: json.RawMessage(recovery)},
 			}}}}
 	result, err := compiler.Compile(context.Background(), strategy.CompileRequest{Plan: plan,
 		DatasetContract: contract.DatasetContractV2{SchemaDigest: strings.Repeat("1", 64),
@@ -404,7 +415,7 @@ func thresholdCompiledPlan(t *testing.T, ref string) (*strategy.CompiledPlan, []
 	template, err := execution.BuildDataRequirementTemplate(execution.DataRequirementTemplate{
 		DatasetName: "primary", Role: execution.InputRole(strategy.AlgorithmInputPrimary), ConsumerLevelID: 5,
 		LogicalQueryRef: execution.LogicalQueryRef(ref),
-		RelativeWindow:  execution.RelativeQueryWindow{StartOffsetSeconds: -60, EndOffsetSeconds: 0, HalfOpen: true},
+		RelativeWindow:  execution.RelativeQueryWindow{StartOffsetSeconds: -60 * points, EndOffsetSeconds: 0, HalfOpen: true},
 		StepMillis:      60_000, AlignmentMillis: 60_000, ResultWindowPolicy: execution.ResultWindowExactHalfOpen,
 		ReadinessClass: execution.ReadinessClass(strategy.AlgorithmReadinessEager),
 		InputProjection: execution.InputProjection{ValueFields: []string{"value"}, DimensionFields: []string{"host"},

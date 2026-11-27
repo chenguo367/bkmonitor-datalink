@@ -104,6 +104,12 @@ func (source *slicedSource) timedOutRead(ctx context.Context, request execution.
 		return execution.QueryExecutionCompletion{}, err
 	}
 	done, err := gateway.Execute(ctx, attempt, discardingProviderSink{})
+	if err != nil && ctx.Err() != nil {
+		// Its context ended while the 504 was on its way: the read ends
+		// with it, as a provider's does.
+		call.err = err
+		return execution.QueryExecutionCompletion{}, err
+	}
 	if err != nil {
 		source.t.Fatalf("a 504 came back as an error: %v", err)
 	}

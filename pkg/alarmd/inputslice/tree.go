@@ -37,8 +37,14 @@ const (
 	// MaxLeaves is K_max: the most leaves one Slot's tree may have. Leaves,
 	// not slices read: a split slice is discarded and its children replace
 	// it, so at most MaxLeaves−1 slices are ever discarded and a query makes
-	// at most 2·MaxLeaves−1 round trips.
-	MaxLeaves = 64
+	// at most 2·MaxLeaves−1 round trips. 128: at 64 a Query Group of 500,000
+	// series read by two consumers at four cores (015 C1), each slice at half
+	// the share, started its second Slot capped at the 61 a Slot may start in
+	// and was refused at its first split past them (the 1.0 next release
+	// gate); and a Query Group of 8.8 million series was measured to need
+	// 87 slices cut by prefix, 109 in a round that splits two at once (015 C2
+	// section 4.7).
+	MaxLeaves = 128
 	// ConditionBudget is M, the bytes a leaf's conditions may take over all
 	// the dimensions it is cut on, charged as 10·n + 48·Σd for n dimensions
 	// cut to depths d_i. Far below the query length any store accepts, so

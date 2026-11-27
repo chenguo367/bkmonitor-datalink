@@ -74,7 +74,7 @@ func CheckASupplementLeavesARaisedNoDataAlertStanding(t *testing.T, store *state
 			t.Fatalf("round %d: %v", index+1, err)
 		}
 		var mutations []execution.StateMutation
-		for _, plan := range stream.evaluated.Plans {
+		for _, plan := range stream.withWindow().Plans {
 			for _, result := range plan.StateResults {
 				mutations = append(mutations, result.Mutation)
 				for _, event := range result.Events {

@@ -225,8 +225,8 @@ func TestEverySlotCompletedReasonIsACellFromTheStart(t *testing.T) {
 			t.Errorf("scrape lacks %s", line)
 		}
 	}
-	if len(want) != 133 || len(slotReasonCells()) != len(want) {
-		t.Fatalf("slot_completed reason cells = %d (built %d), want 133: three words and the catalogue's 130",
+	if len(want) != 134 || len(slotReasonCells()) != len(want) {
+		t.Fatalf("slot_completed reason cells = %d (built %d), want 134: three words and the catalogue's 131",
 			len(want), len(slotReasonCells()))
 	}
 }
@@ -699,7 +699,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("slot_apply_wait_seconds_total"):                1,
 		fqName("slot_land_seconds_total"):                      1,
 		fqName("slot_apply_overlap_seconds_total"):             1,
-		fqName("worker_first_seen_unseen_total"):               2,
+		fqName("worker_first_seen_candidates_total"):           len(observability.FirstSeenVerdicts),
+		fqName("worker_pool_over_releases_total"):              len(observability.PoolOverReleaseKinds),
 		fqName("worker_slice_read_ahead_total"):                len(observability.SliceReadAheadOutcomes),
 		fqName("worker_series_not_evaluated_total"):            len(observability.SeriesNotEvaluatedFamilies),
 		fqName("worker_slice_read_ahead_yields_total"):         len(observability.SliceReadAheadYieldPhases),
@@ -1078,6 +1079,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("slot_begin_total")] = len(execution.SlotBeginResults)
 	bounds[fqName("slot_not_committed_total")] = len(execution.SlotNotCommittedReasons)
 	bounds[fqName("progress_projection_superseded_total")] = len(progress.SupersededProjectionFields)
+	bounds[fqName("progress_conflicts_total")] = len(progress.ProgressConflictOperations) * (len(execution.ProgressConflicts) + 1)
+	bounds[fqName("progress_query_free_applied_total")] = len(progress.QueryFreeAppliedKinds)
 	// The segment shadow: every outcome and event by every period class and
 	// family, the outcomes in each round.
 	families := len(observability.AllSegmentFamilies())

@@ -59,18 +59,78 @@ type streamedExecution struct {
 	// sliceNumber is the number of the slice this stream consumes, the order
 	// it was dispatched in (sliceLedger); 0 for a Slot read whole.
 	sliceNumber int
-	// seenAtRead is the due Plans the Slot's windows cut and handed before
-	// this stream's slice began to be read had found written before the
-	// Slot (windows.seen as the slice began), and those its own head's
-	// first-seen pre-pass found since: what the slice's head judges
-	// first-seen by (unseenPlansAtRead). Nil for a Slot not read in slices.
-	seenAtRead map[execution.PlanIdentity]struct{}
+	// finishing is set as the Slot's evaluation finishes, every slice
+	// consumed: what it merges from then on - no-data, the Plans without
+	// series, the tail - is after every slice (mergeSlice).
+	finishing bool
 	// yieldTo is where a stream that consumes a slice beside the one that
 	// dispatches them asks for the Slot's reads ahead to yield: they are the
 	// dispatch's to let go, on its own goroutine, which serves the request
 	// while it waits (serveYield). Nil for the stream that dispatches, the
 	// one a Slot read one slice at a time has, which lets them go itself.
 	yieldTo chan<- yieldRequest
+	// yieldDone ends a request on yieldTo the dispatch will not serve: closed
+	// as the Slot ends, a consumer waiting on it judges its reservation as it
+	// stands.
+	yieldDone <-chan struct{}
+	// retainedByPhase is this stream's retained bytes split by what they
+	// were retained for. The total is the sum rather than a counter of its
+	// own: a sixth budget's worth of memory arriving with no phase attached
+	// is the failure this split exists to prevent, and a parallel total can
+	// be incremented by a site that names no phase while every assertion on
+	// the total still passes.
+	retainedByPhase [retainPhaseCount]uint64
+	// ownNow is retainedByPhase again, per phase, for the Slot's other
+	// streams to read (retainedTotal, phasesNow).
+	ownNow [retainPhaseCount]atomic.Uint64
+	// keysHeld is what this stream holds, under the state phase, for every State
+	// key it loaded and that no window gives back with its views
+	// (loadedKeyHeldBytes); summaryHeld is what the summary holds of its
+	// series, under the output phase (slotEvaluationSummary.addedBytes). Both
+	// are charged as each result merges, on either path, and stay to the
+	// Slot's end but for the witnesses a window's writes consumed.
+	keysHeld    uint64
+	summaryHeld uint64
+	// producer is the lane of the Slot's apply pipe this stream hands its
+	// tasks in (pipeLane): 0 with one stream and for the dispatch, one for
+	// each consumer with several.
+	producer uint64
+	// ownEffects is the State, event and gap counts this stream holds of the
+	// Slot's (effects), under effectsMu: what its windows hold, the one it
+	// fills judged by it (ownHeldEffects).
+	ownEffects effectCounts
+	// dispatch is the stream that dispatches the Slot's slices when it is
+	// not this one: what it holds is no consumer's, and each of the k
+	// consumers bears 1/k of it in its bounds (boundTotal). Nil when this
+	// stream dispatches and consumes, as with one stream.
+	dispatch *streamedExecution
+	// firstMerged is the Plans whose first result this stream merged, with
+	// several consumers: what the Slot keeps of them was charged to this
+	// stream, and a window it cuts keeps it (takeWindow).
+	firstMerged map[execution.PlanIdentity]struct{}
+	// fill is the window this stream is filling, its slice's (sliceWindow);
+	// the Slot's windows are slotWindows.
+	fill sliceWindow
+	// slice is the slice this stream is reading and consuming (sliceRead);
+	// the Slot's slices are sliceReading.
+	slice sliceRead
+	// seams times the seams of this stream's reads: each read's tail and the
+	// change into the next (sliceSeams); with k consumers each its own, the
+	// dispatch's their sum and longest as they end (fold).
+	seams sliceSeams
+	// bindings is the Slot's bindings as this stream reads them: those of
+	// the slices numbered up to the one it consumes (sliceLedger.through),
+	// every slice's once the Slot finishes.
+	bindings []execution.NamedInputBinding
+	// spentByPhase is this stream's wall clock split by slot phase, in
+	// nanoseconds, summed over every call of each phase: each stream of a
+	// Slot has its own clock (015 C1, C10), the Slot's row their sum
+	// (timing).
+	spentByPhase [slotPhaseCount]uint64
+	// clockPhase is the phase the clock is charging and clockSince when it
+	// last moved; zero until the completion starts it (enter).
+	clockPhase slotPhase
+	clockSince time.Time
 	// hostOverlays holds, by Plan and series, the dimensions the platform's
 	// fuller writes for a host CMDB placed by id with another address
 	// (SeriesExecutionBatch.HostOverlays). Nil until a series carries one,
@@ -125,9 +185,6 @@ type slotStream struct {
 	// first byte and after it, summed and the longest of each, and their
 	// shared-schema answers' frame waits.
 	queryPhases queryPhaseTotals
-	// seams times the seams of the Slot's reads: each read's tail and the
-	// change into the next (sliceSeams).
-	seams sliceSeams
 	// ledger is what each slice contributed to what is read of the Slot so
 	// far - its Plans' series, the bindings it kept, the series it wrote - by
 	// the slice's number (sliceLedger).
@@ -136,7 +193,6 @@ type slotStream struct {
 	// set validated by validateCompletionOnlyExactSet: one completion binding
 	// per frozen (consumer, requirement). It decides the no-series result.
 	completionOnly map[execution.PlanIdentity][]execution.NamedInputBinding
-	bindings       []execution.NamedInputBinding
 	gapItems       []execution.PlanGapLoadItem
 	noDataItems    []execution.PlanNoDataLoadItem
 	gaps           execution.GapLoadResult
@@ -194,26 +250,38 @@ type slotStream struct {
 	// the generation its activation carries it from.
 	noDataEndCarries map[execution.PlanIdentity]noDataEndCarry
 	effective        map[execution.ConsumerRef]strategy.EffectiveTimeFact
-	evaluated        execution.EvaluationResult
+	// evaluated is the Slot's results: every Plan merged, its disposition,
+	// gap statements and coverage, without what a window holds of it
+	// (sliceWindow.results). It and summary change only under mergeMu.
+	evaluated execution.EvaluationResult
 	// summary is what the Slot-wide readers after evaluation read of the
 	// Slot's results, kept beside evaluated as each batch merges
 	// (slotEvaluationSummary).
 	summary slotEvaluationSummary
-	series  uint64
-	// retainedByPhase is this execution's retained bytes split by what they
-	// were retained for. The total is the sum rather than a counter of its
-	// own: a sixth budget's worth of memory arriving with no phase attached
-	// is the failure this split exists to prevent, and a parallel total can
-	// be incremented by a site that names no phase while every assertion on
-	// the total still passes.
-	retainedByPhase [retainPhaseCount]uint64
-	// peakRetained is the most this execution held at once, and
-	// peakByPhase retainedByPhase at that moment, for the completion row: a
-	// Slot applied window by window gives bytes back as it goes, so what it
-	// holds at its end is not what it needed, and capacity is sized from
-	// what it needed.
+	mergeMu sync.Mutex
+	// seenMu guards windows.seen (noteSeenLocked).
+	seenMu sync.Mutex
+	// firstSeen is the Slot's first-seen judgement, set where it is made:
+	// the head of a Slot applied window by window, or its finalization
+	// (judgingFirstSeen).
+	firstSeen firstSeenJudging
+	series    uint64
+	// peakRetained is the most the Slot held at once, and peakByPhase its
+	// phases at that moment, for the completion row: a Slot applied window
+	// by window gives bytes back as it goes, so what it holds at its end is
+	// not what it needed, and capacity is sized from what it needed. With
+	// heldSince and holding they change only under peakMu: every stream of
+	// the Slot charges.
+	peakMu       sync.Mutex
 	peakRetained uint64
 	peakByPhase  [retainPhaseCount]uint64
+	// consumers is how many streams consume the Slot's slices side by side
+	// (k, 015 C1); none set is one. accounts is every stream holding bytes of
+	// the Slot when there are several - the dispatch and its consumers - each
+	// its own retainedByPhase, the Slot's total their sum (retainedTotal);
+	// empty with one stream, which holds them all.
+	consumers int
+	accounts  []*streamedExecution
 	// retainedInputNow is retainedByPhase's input share kept again for a
 	// reader on another goroutine: access reads it across an in-place
 	// readiness wait while the series path keeps adding.
@@ -270,13 +338,6 @@ type slotStream struct {
 	retainedNow [retainPhaseCount]atomic.Uint64
 	heldSince   time.Time
 	holding     bool
-	// spentByPhase is this execution's wall clock split the same way, in
-	// nanoseconds, summed over every call of each phase.
-	spentByPhase [slotPhaseCount]uint64
-	// clockPhase is the phase the clock is charging and clockSince when it
-	// last moved; zero until the completion starts it (enter).
-	clockPhase slotPhase
-	clockSince time.Time
 	// beganAt is when this execution started, for the total the phases are
 	// read against. Zero on an execution that never began, which reports no
 	// duration rather than the time since the epoch.
@@ -290,16 +351,26 @@ type slotStream struct {
 	effectsMu    sync.Mutex
 	effects      effectCounts
 	effectsSpent effectCounts
-	// keysHeld is what the Slot holds, under the state phase, for every State
-	// key it loaded and that no window gives back with its views
-	// (loadedKeyHeldBytes); summaryHeld is what the summary holds of its
-	// series, under the output phase (slotEvaluationSummary.addedBytes). Both
-	// are charged as each result merges, on either path, and stay to the
-	// Slot's end but for the witnesses a window's writes consumed.
-	keysHeld    uint64
-	summaryHeld uint64
-	gapFacts    uint64
-	began       bool
+	// pipeMu guards the Slot's apply pipe as it starts (applyPipeline) and
+	// the windows handed to it (windows.handed).
+	pipeMu sync.Mutex
+	// barrier is the Slot's barrier for its consumers (slotBarrier), and
+	// barriers how many were held, under sharedMu.
+	barrier  slotBarrier
+	barriers uint64
+	// beginMu has the Slot's streams begin their reads one at a time
+	// (Begin); poolMu starts its evaluation pool once (evaluatePool);
+	// windowHeadMu starts its windowed apply once (startWindows); presentMu
+	// guards the no-data groups its windows hand and their staging
+	// (collectPresent).
+	beginMu, poolMu, windowHeadMu, presentMu sync.Mutex
+	// sharedMu guards what the Slot's streams add to as they read side by
+	// side: its series (addSeries), its reads in flight (noteReadBegan), and
+	// its census, queries' facts and evidence, the series it took up and the
+	// superseded series it found (addShared).
+	sharedMu sync.Mutex
+	gapFacts uint64
+	began    bool
 	// windows is this Slot's windowed apply (windowed_apply.go); its zero
 	// value is a Slot that has not been cut.
 	windows slotWindows
@@ -505,6 +576,7 @@ func (stream *streamedExecution) retainBytes(phase retainPhase, retained uint64)
 // counts neither.
 func (stream *streamedExecution) chargeRetained(phase retainPhase, retained uint64) {
 	stream.retainedByPhase[phase] += retained
+	stream.ownNow[phase].Add(retained)
 	stream.retainedNow[phase].Add(retained)
 	if phase == retainPhaseInput {
 		stream.retainedInputNow.Add(retained)
@@ -515,13 +587,86 @@ func (stream *streamedExecution) chargeRetained(phase retainPhase, retained uint
 // reservation charged as it judged them (chargeRetained): its peak, and its
 // place among the pool's holders.
 func (stream *streamedExecution) retainedCharged(phase retainPhase, retained uint64) {
+	stream.peakMu.Lock()
+	defer stream.peakMu.Unlock()
 	if total := stream.retainedTotal(); total > stream.peakRetained {
-		stream.peakRetained, stream.peakByPhase = total, stream.retainedByPhase
+		stream.peakRetained, stream.peakByPhase = total, stream.phasesNow()
 	}
 	if retained > 0 && !stream.holding {
 		stream.holding, stream.heldSince = true, time.Now()
-		stream.coordinator.holders.add(stream)
+		stream.coordinator.holders.add(stream.holder())
 	}
+}
+
+// holder is the stream the coordinator's holder registry names for the
+// Slot: its dispatch, or this stream with one.
+func (stream *streamedExecution) holder() *streamedExecution {
+	if stream.dispatch != nil {
+		return stream.dispatch
+	}
+	return stream
+}
+
+// slotStreams is every stream holding a part of the Slot: the dispatch and
+// its k consumers (accounts), or the one stream.
+func (stream *streamedExecution) slotStreams() []*streamedExecution {
+	if len(stream.accounts) == 0 {
+		return []*streamedExecution{stream}
+	}
+	return stream.accounts
+}
+
+// phasesNow is what the Slot holds by phase: this stream's, and every other
+// stream's of the Slot (ownNow).
+func (stream *streamedExecution) phasesNow() [retainPhaseCount]uint64 {
+	phases := stream.retainedByPhase
+	for _, other := range stream.accounts {
+		if other == stream {
+			continue
+		}
+		for phase := range phases {
+			phases[phase] += other.ownNow[phase].Load()
+		}
+	}
+	return phases
+}
+
+// ownTotalNow is what this stream holds, safe to read from another stream
+// of the Slot.
+func (stream *streamedExecution) ownTotalNow() uint64 {
+	var total uint64
+	for phase := range stream.ownNow {
+		total += stream.ownNow[phase].Load()
+	}
+	return total
+}
+
+// consumerCount is k, the streams consuming the Slot's slices side by side.
+func (stream *streamedExecution) consumerCount() uint64 {
+	return uint64(max(stream.consumers, 1))
+}
+
+// boundTotal is what a consumer's window bound and slice limits count of the
+// Slot. With one stream it is everything the Slot holds (retainedTotal).
+// With k it is this consumer's own, 1/k of what is no consumer's - the reads
+// ahead and what the dispatch holds - and what the apply side holds, which
+// the bounds take back off as they do with one. The other consumers' own
+// are theirs: each consumer's bound is S/(2k) less this, so the Slot side
+// stays within S/2 however the k fill (015 C1 4.1).
+func (stream *streamedExecution) boundTotal() uint64 {
+	k := stream.consumerCount()
+	if k == 1 {
+		return stream.retainedTotal()
+	}
+	slot := stream.aheadBytes.Load()
+	if stream.dispatch != nil && stream.dispatch != stream {
+		slot += stream.dispatch.ownTotalNow()
+	}
+	total := slot/k + stream.applyHeld()
+	for _, retained := range stream.retainedByPhase {
+		total += retained
+	}
+	return total
 }
 
 // RetainedInputBytesNow is the input this execution has retained so far,
@@ -593,6 +738,7 @@ func (stream *streamedExecution) unretain(phase retainPhase, bytes uint64) {
 		return
 	}
 	stream.retainedByPhase[phase] -= bytes
+	stream.ownNow[phase].Add(^(bytes - 1))
 	stream.retainedNow[phase].Add(^(bytes - 1))
 	if phase == retainPhaseInput {
 		stream.retainedInputNow.Add(^(bytes - 1))
@@ -689,6 +835,12 @@ func (stream *streamedExecution) retainedTotal() uint64 {
 	for _, retained := range stream.retainedByPhase {
 		total += retained
 	}
+	// The Slot's other streams', each its own (accounts).
+	for _, other := range stream.accounts {
+		if other != stream {
+			total += other.ownTotalNow()
+		}
+	}
 	return total
 }
 
@@ -718,6 +870,10 @@ type preparedNamedInputIndex struct {
 }
 
 func (stream *streamedExecution) Begin(ctx context.Context, header execution.InternalExecutionHeader) error {
+	// The first Begin of the Slot sets what it holds from its header; every
+	// stream's reads begin after it, one at a time.
+	stream.beginMu.Lock()
+	defer stream.beginMu.Unlock()
 	if stream.began && stream.slicing() {
 		// Every slice's read begins again; the Slot began with the first.
 		if header.Contract != stream.request.Contract {
@@ -732,9 +888,12 @@ func (stream *streamedExecution) Begin(ctx context.Context, header execution.Int
 	if header.Contract != stream.request.Contract {
 		return errors.New("alarmd worker: execution header changed frozen contract")
 	}
-	if stream.slicing() && stream.slices.dimensionsGone(header) {
+	if stream.slicing() && (stream.slices.dimensionsGone(header) || stream.dispatch != nil && stream.slices.tree == nil) {
 		// Begun before any query is sent (access.Source): the slices go
-		// with nothing read, and the Slot begins again read whole.
+		// with nothing read, and the Slot begins again read whole - on its
+		// own stream: one of k consumers whose read begins once the slices
+		// went with their dimensions reads none of a slice the Slot no
+		// longer has.
 		return errSliceDimensionsGone
 	}
 	inputBuilder, err := execution.PrepareSeriesEvaluationInputBuilder(header)
@@ -752,10 +911,12 @@ func (stream *streamedExecution) Begin(ctx context.Context, header execution.Int
 	// holds its structures while reserving nothing reads as the oldest
 	// holder of no bytes rather than not at all. releaseProvisional removes
 	// it.
+	stream.peakMu.Lock()
 	if !stream.holding {
 		stream.holding, stream.heldSince = true, time.Now()
-		stream.coordinator.holders.add(stream)
+		stream.coordinator.holders.add(stream.holder())
 	}
+	stream.peakMu.Unlock()
 	// Started here rather than at the Slot's evaluation time: this is when
 	// this replica began working on it, and the gap between the two is the
 	// scheduler's to answer for, not the Slot's.
@@ -853,7 +1014,7 @@ func (stream *streamedExecution) ConsumeSeries(ctx context.Context, batch execut
 	if err := stream.reserveProvisional(ctx, batch.Delivery.Series, retained); err != nil {
 		return stream.nameUnsliceableRefusal(err)
 	}
-	stream.series += batch.Delivery.Series
+	stream.addSeries(int64(batch.Delivery.Series))
 	stream.retainedCharged(retainPhaseInput, retained)
 	stream.noteSliceInput(batch, retained)
 	stream.seams.seriesCame(time.Now())
@@ -956,7 +1117,7 @@ func (stream *streamedExecution) discardDependenciesWithoutPrimary() {
 			released += hold.bytes
 		}
 	}
-	stream.dependencyDiscarded += uint64(len(discarded))
+	stream.addShared(func() { stream.dependencyDiscarded += uint64(len(discarded)) })
 	stream.unretainInput(released)
 }
 
@@ -1001,21 +1162,24 @@ func (stream *streamedExecution) releaseProvisional() {
 	stream.summary = slotEvaluationSummary{}
 	stream.seriesCensus = seriesCensus{}
 	stream.coordinator.reservations.mu.Lock()
-	stream.coordinator.reservations.gapFacts -= stream.gapFacts
+	over := releaseLocked(nil, &stream.coordinator.reservations.gapFacts, stream.gapFacts, observability.PoolOverReleaseGapFacts)
 	stream.coordinator.reservations.mu.Unlock()
+	stream.coordinator.observePoolOverReleases(over)
 	stream.gapFacts = 0
 	stream.coordinator.releaseEffects(stream.takeEffects())
 	stream.effectsSpent = effectCounts{}
 	stream.dropAllRecordIDs()
 	stream.evaluating.end()
-	stream.windows = slotWindows{}
+	stream.windows, stream.fill = slotWindows{}, sliceWindow{}
 	stream.coordinator.releaseProvisional(stream.series, stream.retainedTotal())
 	stream.namedOutputs = nil
 	stream.series, stream.retainedByPhase, stream.namedReserved = 0, [retainPhaseCount]uint64{}, 0
 	stream.retainedInputNow.Store(0)
 	for phase := range stream.retainedNow {
 		stream.retainedNow[phase].Store(0)
+		stream.ownNow[phase].Store(0)
 	}
+	stream.firstMerged = nil
 	if stream.holding {
 		stream.coordinator.holders.remove(stream)
 	}
@@ -1459,6 +1623,12 @@ func resultRank(result observability.Result) int {
 }
 
 func (stream *streamedExecution) complete(ctx context.Context, completion execution.QueryExecutionCompletion) error {
+	// A safe point with k consumers: a barrier another holds is waited out
+	// here, and this one counts as stopped once out (slotBarrier).
+	if err := stream.enterCompletion(ctx); err != nil {
+		return err
+	}
+	defer stream.leaveCompletion()
 	if !stream.began {
 		return completionContractError(codeCompletionBeforeBegin, "alarmd worker: QueryExecutionSource returned completion before Begin")
 	}
@@ -1472,14 +1642,25 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 	// the Slot's own step, run once whichever slice reaches it (loadSlot);
 	// and what needs every series - the Plans without series, the no-data
 	// round - is the Slot's step once every slice is read (finishSlices).
-	first := !stream.slicing() || stream.slices.index == 0
-	last := !stream.slicing() || stream.slices.last
+	// Not read by one of several consumers: the dispatch counts the slices
+	// landed (landSliceRead) as the consumers complete theirs.
+	first := !stream.slicing() || (stream.dispatch == nil && stream.slices.index == 0)
+	if stream.dispatch != nil {
+		// One of several consumers: its clock starts at its first
+		// completion, and which slice is the Slot's first is said by number
+		// once the slices below it are done (waitBelow, below).
+		first = false
+		if stream.clockSince.IsZero() {
+			stream.clockPhase, stream.clockSince = slotPhaseOther, time.Now()
+		}
+	}
+	last := !stream.slicing() || stream.slice.last
 	if first {
 		stream.spend(slotPhaseInput, stream.beganAt)
 		stream.clockPhase, stream.clockSince = slotPhaseOther, time.Now()
-	} else if stream.slices.leaveInput != nil {
-		stream.slices.leaveInput()
-		stream.slices.leaveInput = nil
+	} else if stream.slice.leaveInput != nil {
+		stream.slice.leaveInput()
+		stream.slice.leaveInput = nil
 	}
 	if err := completion.Validate(stream.header, stream.delivered); err != nil {
 		return wrapCompletionContractError(codeCompletionInvalid, err)
@@ -1488,8 +1669,10 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 		return err
 	}
 	for _, query := range completion.PhysicalQueries {
-		stream.pointsDropped = stream.pointsDropped.Add(query.Stats.PointsDropped)
-		stream.queryPhases.add(query.Stats)
+		stream.addShared(func() {
+			stream.pointsDropped = stream.pointsDropped.Add(query.Stats.PointsDropped)
+			stream.queryPhases.add(query.Stats)
+		})
 		if query.NamedOutputs != nil {
 			if stream.namedOutputs == nil {
 				stream.namedOutputs = make(map[execution.PhysicalQueryDigest]*execution.NamedOutputRecords)
@@ -1527,8 +1710,10 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 		if _, duplicate := completionBindings[key]; duplicate {
 			return completionContractError(codeDuplicateCompletionBinding, "alarmd worker: duplicate completion binding")
 		}
-		stream.queryEvidence.observe(binding, item.PhysicalQueryCompletion, false, item.sourceBackend)
-		stream.queryEvidence.observeSentLate(binding, item.sentLate)
+		stream.addShared(func() {
+			stream.queryEvidence.observe(binding, item.PhysicalQueryCompletion, false, item.sourceBackend)
+			stream.queryEvidence.observeSentLate(binding, item.sentLate)
+		})
 		stream.noteAnswerTruncation(binding, item.RouteFacts)
 		completionBindings[key] = binding
 	}
@@ -1542,7 +1727,7 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 		if !ok || item.Ref != binding.ProviderResult {
 			return completionContractError(codeStreamedBindingMismatch, "alarmd worker: streamed binding differs from physical completion")
 		}
-		stream.queryEvidence.observe(binding, item.PhysicalQueryCompletion, true, item.sourceBackend)
+		stream.addShared(func() { stream.queryEvidence.observe(binding, item.PhysicalQueryCompletion, true, item.sourceBackend) })
 		stream.noteAnswerTruncation(binding, item.RouteFacts)
 		switch item.Completeness {
 		case execution.CompletenessFull:
@@ -1610,14 +1795,15 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 			for _, input := range inputs {
 				for _, binding := range input.Inputs {
 					if binding.Role == execution.InputRolePrimary && binding.View != nil {
-						stream.primaryRecords = max(stream.primaryRecords, uint64(binding.View.Len()))
+						records := uint64(binding.View.Len())
+						stream.addShared(func() { stream.primaryRecords = max(stream.primaryRecords, records) })
 					}
 				}
 			}
 			preparedSeriesEvaluations = append(preparedSeriesEvaluations, preparedSeries{due: due, identity: identity})
 		}
 	}
-	// The prepared series stay to the Slot's end (windows.prepared), each
+	// The prepared series stay to the Slot's end (stream.fill.prepared), each
 	// its Plan and its series.
 	if err := stream.reserveRetainedInput(ctx, uint64(cap(preparedSeriesEvaluations))*preparedSeriesBytes); err != nil {
 		return err
@@ -1654,6 +1840,19 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 		own[due.Identity] = len(stream.planSeries[due.Identity])
 	}
 	stream.ledger.complete(stream.sliceNumber, own, streamed, kept)
+	if stream.dispatch != nil {
+		// What is read so far is the slices numbered below this one, every
+		// one of them done, and the Slot's first slice is the one none of
+		// them completed below (015 C1 step 3.2).
+		var byNumber bool
+		if err := stream.stopped(ctx, func() (err error) {
+			byNumber, err = stream.ledger.waitBelow(ctx, stream.sliceNumber)
+			return err
+		}); err != nil {
+			return err
+		}
+		first = byNumber
+	}
 	series, bindings := stream.ledger.through(stream.sliceNumber)
 	counts := make(map[execution.PlanIdentity]*int, len(stream.header.DuePlans))
 	for _, due := range stream.header.DuePlans {
@@ -1673,17 +1872,24 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 	if stream.load.err != nil {
 		return stream.load.err
 	}
-	stream.windows.prepared, stream.windows.reached, stream.windows.dropped = preparedSeriesEvaluations, 0, 0
-	if stream.slicing() {
-		stream.slices.notePrepared(preparedSeriesEvaluations)
-	}
+	stream.fill.prepared, stream.fill.reached, stream.fill.dropped = preparedSeriesEvaluations, 0, 0
 	if first {
 		stream.fixWindowCeiling(ctx, len(preparedSeriesEvaluations))
 	} else {
 		stream.raiseSliceCeiling(ctx)
+		if stream.dispatch != nil {
+			// Heads are written in slice order (015 C1 section 5): this one
+			// is handed once every slice below it handed its own.
+			if err := stream.stopped(ctx, func() error { return stream.ledger.waitHeadsBelow(ctx, stream.sliceNumber) }); err != nil {
+				return err
+			}
+		}
 		if err := stream.coordinator.applySliceHead(ctx, stream); err != nil {
 			return err
 		}
+	}
+	if stream.dispatch != nil {
+		stream.ledger.noteHeaded(stream.sliceNumber)
 	}
 	err := stream.evaluateSeries(ctx, preparedSeriesEvaluations)
 	if err == nil && !stream.slicing() {
@@ -1695,6 +1901,9 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 	}
 	if stream.slicing() {
 		if !last {
+			// A consumer finishes no slice: the dispatch finishes on the one
+			// numbered last, as it was completed (finishSideBySide).
+			stream.slice.replaced = replaced
 			return stream.landSlice(ctx)
 		}
 		// The slice read last: the Slot finishes after it, on what it
@@ -1771,6 +1980,14 @@ func (stream *streamedExecution) replaceBeyondSlotBudget(ctx context.Context, er
 	if !errors.As(err, &exceeded) || !exceeded.slot || stream.supplement != nil {
 		return false, err
 	}
+	// Replacing the Slot's results takes every stream of it at once: with k
+	// consumers it is done behind the Slot's barrier, every other consumer
+	// stopped and every window landed (015 C1 section 6, C3).
+	release, err := stream.holdBarrier(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer release()
 	return true, stream.completeBeyondSlotBudget(ctx)
 }
 
@@ -1915,7 +2132,7 @@ func (stream *streamedExecution) evaluateSeries(
 	}
 	// Counted here, before the first branch that can drop a series: this is
 	// the Slot's intent, and every later count is measured against it.
-	stream.seriesCensus.Due += len(preparedSeriesEvaluations)
+	stream.addShared(func() { stream.seriesCensus.Due += len(preparedSeriesEvaluations) })
 	if stream.readInSlices() {
 		// A slice that held none of a Plan's series and whose PRIMARY did
 		// not complete may have left out series of the Plan that no other
@@ -1981,7 +2198,7 @@ func (stream *streamedExecution) evaluateSeries(
 		if err != nil {
 			return err
 		}
-		stream.seriesCensus.Read++
+		stream.addShared(func() { stream.seriesCensus.Read++ })
 		pending = append(pending, completedSeries{due: due, series: prepared.identity, inputs: inputs,
 			position: position,
 			item: execution.StatePreflightItem{Identity: execution.StateKeyIdentity{
@@ -2009,6 +2226,7 @@ func (stream *streamedExecution) finishEvaluation(
 	if stream.supplement != nil {
 		return nil
 	}
+	stream.finishing = true
 	// Absence is decided after the Slot's own series, because which groups
 	// reported is the evidence it is decided from. The synthetic series it
 	// produces then go through the same batch as everything above.
@@ -2295,7 +2513,7 @@ func (stream *streamedExecution) completeWithoutSeries(
 			if binding.Completeness != execution.CompletenessFull {
 				stream.evaluated = execution.EvaluationResult{Contract: stream.header.Contract,
 					Result: observability.ResultDegraded, ReasonCode: binding.ReasonCode}
-				stream.summary = slotEvaluationSummary{}
+				stream.summary, stream.fill.results, stream.firstMerged = slotEvaluationSummary{}, nil, nil
 				stream.observeCompletionOnlyProbe(ctx)
 				return nil
 			}
@@ -2303,7 +2521,7 @@ func (stream *streamedExecution) completeWithoutSeries(
 	}
 	stream.evaluated = execution.EvaluationResult{Contract: stream.header.Contract, Result: observability.ResultSuccess,
 		ReasonCode: observability.ReasonNone}
-	stream.summary = slotEvaluationSummary{}
+	stream.summary, stream.fill.results, stream.firstMerged = slotEvaluationSummary{}, nil, nil
 	for _, due := range stream.header.DuePlans {
 		started := time.Now()
 		planResult, err := stream.noSeriesPlanResult(due)
@@ -2616,9 +2834,16 @@ func (stream *streamedExecution) completeBeyondSlotBudget(ctx context.Context) e
 	stream.coordinator.releaseEffects(stream.takeEffects())
 	// The summary goes with the results it summarised: the replacement
 	// Plans are the Slot's results now, and nothing read after evaluation
-	// may still count a series that will not be written.
-	stream.evaluated = execution.EvaluationResult{}
-	stream.summary = slotEvaluationSummary{}
+	// may still count a series that will not be written. With k consumers,
+	// behind the barrier: every consumer's window in hand goes too.
+	stream.mergeMu.Lock()
+	stream.evaluated, stream.summary = execution.EvaluationResult{}, slotEvaluationSummary{}
+	stream.mergeMu.Unlock()
+	for _, each := range stream.slotStreams() {
+		if each.fill.results != nil || each.firstMerged != nil {
+			each.fill.results, each.firstMerged = nil, nil
+		}
+	}
 	stream.closeNoDataBeyondSlotBudget(ctx, nil)
 	reason := execution.ReasonCode(contract.ReasonExecutionBudgetExhausted)
 	for _, due := range stream.header.DuePlans {
@@ -2632,6 +2857,19 @@ func (stream *streamedExecution) completeBeyondSlotBudget(ctx context.Context) e
 				GuardBeforeEvents: []execution.PlanGapMutation{mutation}}}}
 		if err := stream.mergeProvisional(ctx, result, 0); err != nil {
 			return err
+		}
+	}
+	// A Slot read in slices reads the slices left after it, and writes them
+	// in windows: every Plan, answered for the Slot, is replaced in those as
+	// the windows' own replacement replaces the Plans it answers - none of
+	// its series written, its no-data withheld (completeWindowsBeyondSlotBudget).
+	if stream.readInSlices() {
+		windows := &stream.windows
+		if windows.replaced == nil {
+			windows.replaced = make(map[execution.PlanIdentity]struct{}, len(stream.header.DuePlans))
+		}
+		for _, due := range stream.header.DuePlans {
+			windows.replaced[due.Identity] = struct{}{}
 		}
 	}
 	return nil
@@ -2877,7 +3115,7 @@ func (stream *streamedExecution) mergeEvaluatedSeries(
 		return err
 	}
 	measured := stream.measureMerge(evaluated, retained, uint64(len(views))*loadedKeyHeldBytes)
-	stream.windows.reached = position
+	stream.fill.reached = position
 	if err := stream.windowBeforeMerge(ctx, evaluated, measured); err != nil {
 		return err
 	}
@@ -3034,6 +3272,8 @@ func (stream *streamedExecution) planSeriesCount(plan execution.PlanIdentity) in
 
 // noteTakenUp counts one real series of the Plan taken up.
 func (stream *streamedExecution) noteTakenUp(plan execution.PlanIdentity) {
+	stream.sharedMu.Lock()
+	defer stream.sharedMu.Unlock()
 	if stream.takenUp == nil {
 		stream.takenUp = make(map[execution.PlanIdentity]int)
 	}

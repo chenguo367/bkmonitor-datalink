@@ -39,7 +39,7 @@ func TestTheDimensionChosenBeforeOutlivesAReadWholeThatTimedOut(t *testing.T) {
 		{"none before, answered", slicedReading{}, false, false, "", ""},
 	} {
 		reading := &sliceReading{wholeTimedOut: test.timedOut}
-		cut, from := reading.cutOnNext(dimensions, test.before, test.failed)
+		cut, from := reading.cutOnNext(&sliceRead{}, dimensions, test.before, test.failed)
 		on := cut.Dimension
 		if on != test.wantOn || from != test.wantFrom {
 			t.Errorf("%s: cut on %q from %q, want %q from %q", test.name, on, from, test.wantOn, test.wantFrom)

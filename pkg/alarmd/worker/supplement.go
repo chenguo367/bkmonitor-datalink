@@ -431,7 +431,7 @@ func (coordinator *SlotExecutionCoordinator) finalizeSupplement(
 	for _, fact := range unsatisfiedForcedWarmingActivations(activations, stream.gaps, drifted).Facts {
 		drifted[fact.Key()] = struct{}{}
 	}
-	plans := append([]execution.PlanEvaluationResult(nil), stream.evaluated.Plans...)
+	plans := stream.withWindow().Plans
 	sort.Slice(plans, func(left, right int) bool { return lessPlanIdentity(plans[left].Plan, plans[right].Plan) })
 	stateIndex := indexStatePreflight(stream.state)
 	for _, planResult := range plans {

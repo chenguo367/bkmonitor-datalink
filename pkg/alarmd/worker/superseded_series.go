@@ -44,9 +44,9 @@ func (stream *streamedExecution) skipSupersededSeries(ctx context.Context, entry
 	if err := stream.mergeMeasured(ctx, result, stream.measureMerge(result, 0, loadedKeyHeldBytes)); err != nil {
 		return err
 	}
-	stream.windows.readBeside = append(stream.windows.readBeside, entry.item.Identity)
+	stream.fill.readBeside = append(stream.fill.readBeside, entry.item.Identity)
 	sample := execution.SupersededSample{Series: entry.series, Slot: entry.item.ApplyVersion, Stored: view.PersistedApplyVersion}
-	stream.superseded.Record(sample)
+	stream.addShared(func() { stream.superseded.Record(sample) })
 	// One line per series, as ALREADY_APPLIED has: success, under a word of
 	// its own, with the two versions it was decided on.
 	stream.coordinator.emitObservation(ctx, observability.Observation{
@@ -76,13 +76,18 @@ func supersededSeriesResult(contractRef execution.FrozenExecutionContractRef, du
 // found from a later Slot. Every resumed series of the Plan reads the same
 // marker, and the count is of markers left as they were, not of readers.
 func (stream *streamedExecution) noteSupersededGap(ctx context.Context, identity execution.PlanGapIdentity) {
-	if _, counted := stream.supersededGaps[identity]; counted {
+	stream.sharedMu.Lock()
+	_, counted := stream.supersededGaps[identity]
+	if !counted {
+		if stream.supersededGaps == nil {
+			stream.supersededGaps = make(map[execution.PlanGapIdentity]struct{})
+		}
+		stream.supersededGaps[identity] = struct{}{}
+	}
+	stream.sharedMu.Unlock()
+	if counted {
 		return
 	}
-	if stream.supersededGaps == nil {
-		stream.supersededGaps = make(map[execution.PlanGapIdentity]struct{})
-	}
-	stream.supersededGaps[identity] = struct{}{}
 	stream.coordinator.observeSupersededGaps(ctx, stream.request.Operation, 1)
 }
 

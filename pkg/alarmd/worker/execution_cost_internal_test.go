@@ -26,13 +26,13 @@ func TestIncrementalEffectsKeepLoadedFactsAndRejectedMergeSeparate(t *testing.T)
 	if err := stream.mergeProvisional(context.Background(), tooMany, 100); err == nil {
 		t.Fatal("local limit accepted")
 	}
-	if stream.effects.states != 1 || co.reservations.states != 1 || stream.retainedTotal() != beforeBytes || len(stream.evaluated.Plans[0].StateResults) != 1 {
+	if stream.effects.states != 1 || co.reservations.states != 1 || stream.retainedTotal() != beforeBytes || len(stream.withWindow().Plans[0].StateResults) != 1 {
 		t.Fatal("failed reservation mutated owner")
 	}
 	if err := stream.mergeProvisional(context.Background(), first, 0); err != nil {
 		t.Fatal(err)
 	}
-	if stream.effects != countEffects(stream.evaluated) || stream.gapFacts != 1 || co.reservations.gapFacts != 1 || co.reservations.gaps != 0 {
+	if stream.effects != countEffects(stream.withWindow()) || stream.gapFacts != 1 || co.reservations.gapFacts != 1 || co.reservations.gaps != 0 {
 		t.Fatal("facts and effects conflated")
 	}
 	stream.releaseProvisional()
@@ -73,7 +73,7 @@ func TestIncrementalEffectsFollowTheMergedGapStatement(t *testing.T) {
 		t.Fatalf("Slot carries %+v after three statements of one marker, want the one they agree on",
 			stream.evaluated.Plans[0].GuardBeforeEvents)
 	}
-	if stream.effects != countEffects(stream.evaluated) {
+	if stream.effects != countEffects(stream.withWindow()) {
 		t.Fatal("increment diverged")
 	}
 }

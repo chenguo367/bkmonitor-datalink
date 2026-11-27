@@ -46,7 +46,7 @@ func (fixture *windowedFixture) streamInput(t *testing.T, series string, bytes u
 	stream.streamed[streamedInputKey{consumer: consumer, series: digest, requirement: requirement.RequirementID}] =
 		streamedInput{shared: shared, dataset: binding.Dataset, view: binding.View}
 	stream.planSeries[fixture.due.Identity][digest] = struct{}{}
-	stream.windows.prepared = append(stream.windows.prepared, preparedSeries{due: &fixture.due, identity: digest,
+	stream.fill.prepared = append(stream.fill.prepared, preparedSeries{due: &fixture.due, identity: digest,
 		inputs: []execution.SeriesEvaluationInputRequest{{Inputs: []execution.NamedInputBinding{binding}}}})
 }
 
@@ -55,6 +55,16 @@ func (fixture *windowedFixture) streamInput(t *testing.T, series string, bytes u
 // check first.
 func (fixture *windowedFixture) mergeSeries(t *testing.T, position int, series string, viewBytes uint64) {
 	t.Helper()
+	if err := fixture.mergeSeriesOn(context.Background(), fixture.stream, position, series, viewBytes); err != nil {
+		t.Fatalf("merge %s: %v", series, err)
+	}
+}
+
+// mergeSeriesOn is mergeSeries on stream, one of the Slot's: a consumer's
+// merge with several.
+func (fixture *windowedFixture) mergeSeriesOn(ctx context.Context, stream *streamedExecution, position int, series string,
+	viewBytes uint64,
+) error {
 	key := fixture.key(series)
 	result := execution.EvaluationResult{Contract: fixture.stream.header.Contract, Result: observability.ResultSuccess,
 		ReasonCode: observability.ReasonNone, Plans: []execution.PlanEvaluationResult{{Plan: fixture.due.Identity,
@@ -64,10 +74,8 @@ func (fixture *windowedFixture) mergeSeries(t *testing.T, position int, series s
 			}}}}}
 	view := execution.RuntimeStateView{Identity: key, VersionComparison: execution.ApplyVersionPersistedOlder}
 	item := execution.StatePreflightItem{Identity: key, ApplyVersion: fixture.version}
-	if err := fixture.stream.mergeEvaluatedSeries(context.Background(), position, result, viewBytes,
-		[]execution.RuntimeStateView{view}, []execution.StatePreflightItem{item}); err != nil {
-		t.Fatalf("merge %s: %v", series, err)
-	}
+	return stream.mergeEvaluatedSeries(ctx, position, result, viewBytes,
+		[]execution.RuntimeStateView{view}, []execution.StatePreflightItem{item})
 }
 
 // A Slot whose views alone are more than its share is applied in windows
@@ -125,11 +133,11 @@ func TestASlotOverItsShareIsAppliedInWindowsThatEachGiveTheirBytesBack(t *testin
 		if len(stream.streamed) != int(remaining) || len(stream.inputHolds) != int(remaining) {
 			t.Fatalf("streamed=%d holds=%d after the window landed, want the %d series not landed", len(stream.streamed), len(stream.inputHolds), remaining)
 		}
-		if len(stream.state.Items) != 1 || len(stream.stateItems) != 1 || len(stream.evaluated.Plans[0].StateResults) != 1 {
+		if len(stream.state.Items) != 1 || len(stream.stateItems) != 1 || len(stream.withWindow().Plans[0].StateResults) != 1 {
 			t.Fatalf("views=%d items=%d results=%d after the window landed, want only %s's", len(stream.state.Items),
-				len(stream.stateItems), len(stream.evaluated.Plans[0].StateResults), name)
+				len(stream.stateItems), len(stream.withWindow().Plans[0].StateResults), name)
 		}
-		for position, prepared := range stream.windows.prepared {
+		for position, prepared := range stream.fill.prepared {
 			if landed := position < index; landed != (prepared.inputs == nil) {
 				t.Fatalf("prepared series %d inputs held=%v, want held only for the series not landed", position, prepared.inputs != nil)
 			}
@@ -161,9 +169,9 @@ func TestASlotOverItsShareIsAppliedInWindowsThatEachGiveTheirBytesBack(t *testin
 		t.Fatalf("reserved %d after the last window, %d with the inputs alone: a window kept its bytes", reserved, inputsOnly)
 	}
 	if len(stream.streamed) != 0 || len(stream.inputHolds) != 0 || len(stream.state.Items) != 0 ||
-		len(stream.stateItems) != 0 || len(stream.evaluated.Plans[0].StateResults) != 0 {
+		len(stream.stateItems) != 0 || len(stream.withWindow().Plans[0].StateResults) != 0 {
 		t.Fatalf("after the last window streamed=%d holds=%d views=%d items=%d results=%d, want none", len(stream.streamed),
-			len(stream.inputHolds), len(stream.state.Items), len(stream.stateItems), len(stream.evaluated.Plans[0].StateResults))
+			len(stream.inputHolds), len(stream.state.Items), len(stream.stateItems), len(stream.withWindow().Plans[0].StateResults))
 	}
 	// The views are gone; what they said about the Plan for the tail is not.
 	if _, unseen := stream.unseenPlans()[fixture.due.Key()]; unseen {

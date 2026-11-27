@@ -36,14 +36,13 @@ type windowRecordIDs struct {
 // window that cannot take them is applied first, as one the next merge
 // would overfill is, and the series starts the next window.
 func (stream *streamedExecution) materializeRecordIDs(ctx context.Context, position int, inputs []execution.SeriesEvaluationInputRequest) error {
-	windows := &stream.windows
 	for _, input := range inputs {
 		for _, binding := range input.Inputs {
 			dataset := binding.Dataset
 			if dataset == nil {
 				continue
 			}
-			if held := windows.recordIDs[dataset]; held != nil {
+			if held := stream.fill.recordIDs[dataset]; held != nil {
 				held.last = max(held.last, position)
 				continue
 			}
@@ -64,11 +63,11 @@ func (stream *streamedExecution) materializeRecordIDs(ctx context.Context, posit
 				stream.unretainInput(bytes - added)
 			}
 			if added > 0 {
-				if windows.recordIDs == nil {
-					windows.recordIDs = make(map[*execution.Dataset]*windowRecordIDs)
+				if stream.fill.recordIDs == nil {
+					stream.fill.recordIDs = make(map[*execution.Dataset]*windowRecordIDs)
 				}
-				windows.recordIDs[dataset] = &windowRecordIDs{last: position, bytes: added}
-				windows.bytes += added
+				stream.fill.recordIDs[dataset] = &windowRecordIDs{last: position, bytes: added}
+				stream.fill.bytes += added
 			}
 			if err != nil {
 				return fmt.Errorf("alarmd worker: derive record ids: %w", err)
@@ -84,19 +83,19 @@ func (stream *streamedExecution) materializeRecordIDs(ctx context.Context, posit
 // before.
 func (stream *streamedExecution) recordIDsWouldCut(inputs []execution.SeriesEvaluationInputRequest) bool {
 	windows := &stream.windows
-	if held := stream.heldEffects(); stream.supplement != nil || windows.single || held.states+held.events == 0 ||
+	if held := stream.ownHeldEffects(); stream.supplement != nil || windows.single || held.states+held.events == 0 ||
 		stream.windowReleasable() == 0 {
 		return false
 	}
 	var bytes uint64
 	for _, input := range inputs {
 		for _, binding := range input.Inputs {
-			if dataset := binding.Dataset; dataset != nil && windows.recordIDs[dataset] == nil {
+			if dataset := binding.Dataset; dataset != nil && stream.fill.recordIDs[dataset] == nil {
 				bytes += dataset.RecordIDWindowBytes()
 			}
 		}
 	}
-	return bytes > 0 && windows.bytes+bytes > stream.windowBound()
+	return bytes > 0 && stream.fill.bytes+bytes > stream.windowBound()
 }
 
 // windowBeforeRecordIDs applies the window being filled when the record id
@@ -105,11 +104,11 @@ func (stream *streamedExecution) recordIDsWouldCut(inputs []execution.SeriesEval
 // window holds none of this one's.
 func (stream *streamedExecution) windowBeforeRecordIDs(ctx context.Context, position int, bytes uint64) error {
 	windows := &stream.windows
-	if held := stream.heldEffects(); stream.supplement != nil || windows.single || held.states+held.events == 0 ||
-		stream.windowReleasable() == 0 || windows.bytes+bytes <= stream.windowBound() {
+	if held := stream.ownHeldEffects(); stream.supplement != nil || windows.single || held.states+held.events == 0 ||
+		stream.windowReleasable() == 0 || stream.fill.bytes+bytes <= stream.windowBound() {
 		return nil
 	}
-	windows.reached = position
+	stream.fill.reached = position
 	return stream.cutWindow(ctx)
 }
 
@@ -118,29 +117,28 @@ func (stream *streamedExecution) windowBeforeRecordIDs(ctx context.Context, posi
 // window. What they held goes back to the input phase; the buffers a series
 // of the next window read stay, and their bytes are that window's.
 func (stream *streamedExecution) dropWindowRecordIDs(through int, final bool) {
-	windows := &stream.windows
 	var released, kept uint64
-	for dataset, held := range windows.recordIDs {
+	for dataset, held := range stream.fill.recordIDs {
 		if !final && held.last >= through {
 			kept += held.bytes
 			continue
 		}
 		dataset.DropRecordIDs()
 		released += held.bytes
-		delete(windows.recordIDs, dataset)
+		delete(stream.fill.recordIDs, dataset)
 	}
-	if len(windows.recordIDs) == 0 {
-		windows.recordIDs = nil
+	if len(stream.fill.recordIDs) == 0 {
+		stream.fill.recordIDs = nil
 	}
 	stream.unretainInput(released)
-	windows.bytes += kept
+	stream.fill.bytes += kept
 }
 
 // dropAllRecordIDs lets go of every record id buffer the Slot holds as it
 // ends; its charge goes back with everything else it retained.
 func (stream *streamedExecution) dropAllRecordIDs() {
-	for dataset := range stream.windows.recordIDs {
+	for dataset := range stream.fill.recordIDs {
 		dataset.DropRecordIDs()
 	}
-	stream.windows.recordIDs = nil
+	stream.fill.recordIDs = nil
 }

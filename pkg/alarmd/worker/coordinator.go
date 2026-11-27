@@ -404,10 +404,12 @@ func (coordinator *SlotExecutionCoordinator) acquireProvisional(series, retained
 }
 
 func (coordinator *SlotExecutionCoordinator) releaseProvisional(series, retainedBytes uint64) {
-	coordinator.reservations.mu.Lock()
-	coordinator.reservations.series -= series
-	coordinator.reservations.retainedBytes -= retainedBytes
-	coordinator.reservations.mu.Unlock()
+	reservation := &coordinator.reservations
+	reservation.mu.Lock()
+	over := releaseLocked(nil, &reservation.series, series, observability.PoolOverReleaseSeries)
+	over = releaseLocked(over, &reservation.retainedBytes, retainedBytes, observability.PoolOverReleaseRetainedBytes)
+	reservation.mu.Unlock()
+	coordinator.observePoolOverReleases(over)
 }
 
 // judgeRetainedLocked judges retainedBytes more that stream asks to hold,
@@ -706,11 +708,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 			if refused := progressBeginRefused(begin.Status); refused != nil {
 				return execution.SlotExecutionResult{}, refused
 			}
-			reason := begin.ReasonCode
-			if reason == "" {
-				reason = execution.ReasonCode(contract.ReasonProgressBeginRejected)
-			}
-			return activationRetry(reason), nil
+			return coordinator.progressBeginNotCommitted(ctx, request, beginStarted, begin), nil
 		}
 	}
 	// The Slot is begun, or its BeginSlot put off: from here every return
@@ -768,9 +766,9 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	// read in slices (sliced_input.go): a slice whose input passes its limit
 	// while it streams is let go and split, its children read in its place.
 	stream.slices = coordinator.sliceReadingFor(ctx, request)
-	var completion execution.QueryExecutionCompletion
-	completionCtx, cancelCompletion := ctx, context.CancelFunc(func() {})
-	defer func() { cancelCompletion() }()
+	run := &sliceRun{request: request, started: started, queryRequest: queryRequest, completionCtx: ctx,
+		cancelCompletion: context.CancelFunc(func() {})}
+	defer func() { run.cancelCompletion() }()
 	// Registered after every release above, so it runs first, on every
 	// return: the Slot's apply goroutine ends, and every window it was
 	// writing lands, before the census is settled and what the Slot holds is
@@ -785,15 +783,29 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	// failed after its first window would count none and be taken for one
 	// applied whole.
 	defer func() { coordinator.noteWindowed(stream.windows.handed, executeResult, executeErr) }()
-	stream.applyCtx = completionCtx
-	read := false
+	stream.applyCtx = run.completionCtx
 	for {
+		if k := stream.sliceConsumers(); k > 1 {
+			// Read in slices by now - from its start, or since its first read
+			// was let go and split: the slices pending are consumed by k
+			// streams side by side (015 C1).
+			result, err, ended := coordinator.consumeSideBySide(ctx, run, stream, k)
+			if ended {
+				return result, err
+			}
+			if !stream.readInSlices() {
+				// Its slices forgotten with their dimensions: read whole
+				// from here, on this stream.
+				continue
+			}
+			break
+		}
 		var leaf inputslice.Leaf
 		if stream.slicing() {
 			pending := stream.slices.pending()
 			leaf = pending[0]
 			stream.beginSlice(leaf, len(pending) == 1)
-			queryRequest.Slice = leaf.Slice
+			run.queryRequest.Slice = leaf.Slice
 		}
 		execution.MarkStage(ctx, execution.SlotStageQuery)
 		sliceStarted := time.Now()
@@ -804,153 +816,35 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 			if stream.slicing() {
 				stream.noteReadBegan(1)
 			}
-			sliceCompletion, err = coordinator.ports.Query.Execute(ctx, queryRequest, stream)
+			sliceCompletion, err = coordinator.ports.Query.Execute(ctx, run.queryRequest, stream)
 		}
 		// Every read after this one follows it: the Slot arrived here.
-		queryRequest.FollowingRead = true
+		run.queryRequest.FollowingRead = true
 		// The read's end, its footer checked or its read ahead replayed: a
 		// seam of the Slot's reads once the read is kept (sliceSeams).
 		ended := time.Now()
 		// The provider's own timeout comes back as a completion, UNAVAILABLE:
 		// put on the slice's size it is the read out of time below, by the
 		// time its query took, read ahead or here alike.
-		if err == nil && stream.slicing() {
-			if took, answered, timedOut := providerTimedOut(sliceCompletion); timedOut {
-				if timeout := stream.providerTimeout(took, answered); timeout != nil {
-					err = timeout
-				} else {
-					stream.slices.noteDegradedTimeout()
-				}
-			}
-		}
-		if err != nil && stream.slicing() && errors.Is(err, errSliceDimensionsGone) {
-			stream.slices.forgetDimensions()
+		verdict, result, err := coordinator.judgeSliceRead(ctx, run, stream, leaf, sliceCompletion, err, sliceStarted, ended)
+		switch verdict {
+		case sliceAgain:
 			continue
+		case sliceFailed:
+			return result, err
 		}
-		if err != nil && stream.slicing() && errors.Is(err, errSliceOverflow) {
-			if refused := stream.splitSlice(leaf); refused != nil {
-				refused = stream.finalSliceRefusal(refused)
-				coordinator.voidRefusedShape(request.Contract.Slot.QueryGroup, stream.slices, refused)
-				coordinator.observeQueryFailure(ctx, request.Operation, started, "execute", refused)
-				return execution.SlotExecutionResult{}, inSlotStep(execution.SlotNotCommittedQueryFailed, fmt.Errorf("alarmd worker: query: %w", refused))
-			}
-			continue
-		}
-		if err != nil && stream.slicing() && sliceReadTimedOut(err) && !isReadinessDeferred(err) {
-			if took, provider := timedOutTook(err, time.Since(sliceStarted)); provider && stream.splitsOnTimeout(ctx, took) {
-				// Put on its size: let go and split as a slice past its
-				// limit is, its children read in its place, once a Slot. A
-				// Slot whose children complete is no timeout of its group's
-				// cooldown; one whose do not is, as before.
-				if refused := stream.splitSliceKept(leaf); refused == nil {
-					stream.slices.timeoutSplit = true
-					// Its read is no read: what the lookback captured of it
-					// is taken back, its children captured in its place.
-					if discarder, ok := coordinator.ports.Query.(sliceReadDiscarder); ok {
-						discarder.DiscardSliceRead(request.Contract, leaf.Slice)
-					}
-					continue
-				}
-			}
-			outcome := observability.InputSliceTimeoutNotSplit
-			if stream.slices.timeoutSplit {
-				outcome = observability.InputSliceTimeoutSplitFailed
-			}
-			// Who timed this slice's read out (015 O1): the provider, which
-			// alone can split a slice, or alarmd's own deadline, which never
-			// does - the window was short, not the slice large.
-			cause := observability.InputSliceTimeoutCauseDeadline
-			if _, provider := timedOutTook(err, time.Since(sliceStarted)); provider {
-				cause = observability.InputSliceTimeoutCauseProvider
-			}
-			err = &sliceTimeoutError{err: err, outcome: outcome, cause: cause}
-		} else if err != nil && stream.slicing() && stream.slices.timeoutSplit && !errors.Is(err, errSliceOverflow) {
-			// Split for its time, and failed after for another reason: the
-			// slice split ran out of time at the provider (splitsOnTimeout).
-			err = &sliceTimeoutError{err: err, outcome: observability.InputSliceTimeoutSplitFailed, cause: observability.InputSliceTimeoutCauseProvider}
-		}
-		if err != nil {
-			if isReadinessDeferred(err) {
-				// A readiness deferral is the normal pacing of a Slot whose data is
-				// not in yet, and it is the single highest-volume line alarmd emits.
-				// It has to say so: an empty reason on a non-success result
-				// normalizes to internal_unknown (observability.NormalizeReason),
-				// which made every deferral read as an unclassified internal error -
-				// in the logs and in the stage counter's reason label alike.
-				// And what it waits for: the query, its requirement, when it is
-				// ready and on what basis.
-				coordinator.emitObservation(ctx, observability.Observation{
-					Component: observability.ComponentAccess, Stage: observability.StageQueryCompleted,
-					Result: observability.ResultRetrying, Operation: observability.Operation(request.Operation),
-					ReasonCode: observability.ReasonCode(contract.ReasonQueryNotReady),
-					Duration:   time.Since(started), DurationKnown: true, ReadinessDeferral: readinessDeferralOf(err),
-				})
-			} else {
-				coordinator.observeQueryFailure(ctx, request.Operation, started, "execute", err)
-			}
-			// A read that ran out of time is remembered too: one the provider
-			// timed out at no less than the backend's 30 s, for the next Slot
-			// of the Query Group to start in slices by that time rather than
-			// read it whole to time out again; one alarmd's deadline ended at
-			// what it took, put on nothing (timedOutTook).
-			if stream.slices != nil && sliceReadTimedOut(err) {
-				stream.slices.timedOutTook, stream.slices.timedOutByProvider = timedOutTook(err, time.Since(sliceStarted))
-				stream.slices.queryMillis += stream.slices.timedOutTook
-				stream.keepTimedOutSplit(leaf)
-				coordinator.rememberSlotInput(request, stream, true)
-			}
-			return execution.SlotExecutionResult{}, inSlotStep(execution.SlotNotCommittedQueryFailed, fmt.Errorf("alarmd worker: query: %w", err))
-		}
-		stream.seams.readEnded(ended)
-		if !read {
-			execution.MarkQueryReturned(ctx, time.Now())
-			completionCtx, cancelCompletion = shortPeriodCompletionContext(ctx, request.Operation, stream.header)
-			stream.applyCtx = completionCtx
-			read = true
-		}
-		if err := completionCtx.Err(); err != nil {
-			return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: completion deadline: %w", err)
-		}
-		if tooLong := sliceQueryTooLong(queryRequest.Slice, sliceCompletion); tooLong != nil {
-			tooLong = stream.finalSliceRefusal(tooLong)
-			coordinator.observeQueryFailure(ctx, request.Operation, started, "execute", tooLong)
-			return execution.SlotExecutionResult{}, inSlotStep(execution.SlotNotCommittedQueryFailed, fmt.Errorf("alarmd worker: query: %w", tooLong))
-		}
-		if completion, err = foldSliceCompletion(completion, sliceCompletion); err != nil {
-			return execution.SlotExecutionResult{}, err
-		}
-		if stream.slices != nil {
-			// A read the provider timed out and that completed degraded took
-			// the backend's limit, whatever its answer took to come back: the
-			// slices after it are judged against that (timedOutForSize).
-			took := slowestQueryMillis(sliceCompletion)
-			if _, _, timedOut := providerTimedOut(sliceCompletion); timedOut {
-				took = max(took, 2*sliceQueryTargetMillis)
-			}
-			stream.slices.queryMillis += took
-			stream.slices.sliceMillis = append(stream.slices.sliceMillis, took)
-			stream.slices.noteLeafRead(leaf, took)
-			stream.slices.noteSliceCompletion(sliceCompletion)
-		}
-		// The next slice is read while this one completes, up to half of what
-		// the share leaves beside this slice (sliceLimit): its decode is off
-		// the Slot's path (slice_read_ahead.go).
-		if width := coordinator.sliceReadWidth(judgedRequests(stream.header)); stream.slicing() && width > 1 && !sliceReadAheadOff.Load() {
-			if pending := stream.slices.pending(); len(pending) > 1 {
-				stream.startSliceReadAheads(ctx, queryRequest, pending, width)
-			}
-		}
-		if err := stream.complete(completionCtx, sliceCompletion); err != nil {
-			coordinator.observeQueryFailure(completionCtx, request.Operation, started, "stream_complete", err)
+		if err := stream.complete(run.completionCtx, sliceCompletion); err != nil {
+			coordinator.observeQueryFailure(run.completionCtx, request.Operation, started, "stream_complete", err)
 			// Not "invalid query result": the query is only one of the things
 			// this step does, and the failure that brought 163 Slots down in a
 			// day was a state read of ours timing out, with the query fine.
 			return execution.SlotExecutionResult{}, inSlotStep(execution.SlotNotCommittedCompleteFailed, fmt.Errorf("alarmd worker: complete Slot: %w", err))
 		}
-		if !stream.slicing() || stream.slices.landSliceRead(leaf) {
+		if !stream.slicing() || stream.slices.landSliceRead(&stream.slice, leaf) {
 			break
 		}
 	}
+	completion, completionCtx := run.completion, run.completionCtx
 	if stream.slicing() {
 		// Every slice read: what needs all their series is the Slot's.
 		if err := stream.finishSlices(completionCtx); err != nil {
@@ -1003,8 +897,9 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 		err = coordinator.ports.Sequencer.Sequence(ctx, sequencingScope(stream.header, stream.stateItems, stream.gapItems), func(sequenceCtx context.Context) error {
 			var executeErr error
 			result, executeErr = coordinator.finalizeSummarized(
-				withUnseenPlans(withNoDataEnds(withNoDataAbsenceStarts(sequenceCtx, stream.noDataAbsenceStarts), stream.noDataEndRound()), stream.unseenPlans()),
-				request, stream.header, stream.bindings, stream.state, stream.gaps, stream.evaluated, &stream.summary,
+				withFirstSeenJudging(withUnseenPlans(withNoDataEnds(withNoDataAbsenceStarts(sequenceCtx, stream.noDataAbsenceStarts),
+					stream.noDataEndRound()), stream.unseenPlans()), stream.judgingFirstSeen()),
+				request, stream.header, stream.bindings, stream.state, stream.gaps, stream.withWindow(), &stream.summary,
 				stream.noDataMutations, stream.queryEvidence, stream.seriesCensus, stream.targetSummaries(),
 			)
 			return executeErr
@@ -1074,6 +969,20 @@ func (stream *streamedExecution) timing() execution.SlotTiming {
 	if !stream.clockSince.IsZero() {
 		stream.chargeClock()
 	}
+	// The Slot's other streams' clocks, each its own (015 C1, C10): their
+	// sum, every stream joined by now.
+	for _, other := range stream.accounts {
+		if other == stream {
+			continue
+		}
+		if !other.clockSince.IsZero() {
+			other.chargeClock()
+		}
+		for phase, spent := range other.spentByPhase {
+			stream.spentByPhase[phase] += spent
+		}
+		other.spentByPhase, other.clockSince = [slotPhaseCount]uint64{}, time.Time{}
+	}
 	busy := stream.applyBusy()
 	wait := time.Duration(stream.spentByPhase[slotPhaseApplyWait])
 	return execution.SlotTiming{
@@ -1095,6 +1004,21 @@ func (stream *streamedExecution) timing() execution.SlotTiming {
 	}
 }
 
+// windowAccounting is the windows the Slot cut while their bound was zero,
+// by reason, and whether its accounting was ever clamped, by clamp: every
+// stream of it put together, each consumer filling its own windows.
+func (stream *streamedExecution) windowAccounting() (cuts [4]uint64, clamped [2]bool) {
+	for _, each := range stream.slotStreams() {
+		for index, count := range each.fill.zeroBoundCuts {
+			cuts[index] += count
+		}
+		for index, was := range each.fill.clamped {
+			clamped[index] = clamped[index] || was
+		}
+	}
+	return cuts, clamped
+}
+
 // budgetUsage is what this execution took of each budget, for the completion
 // row. It reads the same counters the rejection path reports, so a completion
 // and a refusal of the same Slot describe the same quantities. The retained
@@ -1109,6 +1033,7 @@ func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 	budget := stream.coordinator.budget
 	shapes := stream.sliceShapeOutcomes()
 	held := stream.heldEffects()
+	cuts, clamped := stream.windowAccounting()
 	return execution.SlotBudgetUsage{
 		StateMutations: stream.effectsSpent.states + held.states, GapMutations: stream.effectsSpent.gaps + held.gaps,
 		Events: stream.effectsSpent.events + held.events, EventsWithoutMessage: stream.summary.withoutMessage,
@@ -1119,7 +1044,8 @@ func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 		QueryWaitMillisMax: stream.queryPhases.waitMax, QueryBodyMillisMax: stream.queryPhases.bodyMax,
 		QueryBodyMicros: stream.queryPhases.bodyMicros, QueryBodyMicrosMax: stream.queryPhases.bodyMicrosMax,
 		InputSlices: stream.slicesRead(), InputSlicesDiscarded: stream.slicesDiscarded(),
-		FirstSeenUnseenSlices: stream.unseenSlices(), FirstSeenUnseenSeries: stream.unseenSeries(),
+		FirstSeenJudged: stream.firstSeen.verdicts[firstSeenJudged], FirstSeenRanBefore: stream.firstSeen.verdicts[firstSeenRanBefore],
+		FirstSeenSlicedRead:  stream.firstSeen.verdicts[firstSeenSlicedRead],
 		InputSlicesReadAhead: stream.readAheadEnds[readAheadReplayed], InputSlicesReadAheadOtherLeaf: stream.readAheadEnds[readAheadOtherLeaf],
 		InputSlicesReadAheadYielded: stream.readAheadEnds[readAheadYielded], InputSlicesReadAheadFailed: stream.readAheadEnds[readAheadFailed],
 		InputSlicesReadAheadContextEnded: stream.readAheadEnds[readAheadContextEnded],
@@ -1163,11 +1089,11 @@ func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 		StateMutationsLimit:                budget.MaxStateMutations, GapMutationsLimit: budget.MaxGapMutations,
 		EventsLimit: budget.MaxEvents, RetainedBytesLimit: budget.MaxRetainedBytes, SeriesLimit: budget.MaxSeries,
 		RetainedShareBytes: stream.coordinator.qgShareBytes(),
-		Windows:            uint64(stream.windows.count), WindowCeilingWindows: stream.windows.ceilingWindows,
-		WindowCeilingRaisedWindows: stream.windows.raisedWindows,
-		WindowZeroBoundCutsInput:   stream.windows.zeroBoundCuts[0], WindowZeroBoundCutsGap: stream.windows.zeroBoundCuts[1],
-		WindowZeroBoundCutsOutput: stream.windows.zeroBoundCuts[2], WindowZeroBoundCutsState: stream.windows.zeroBoundCuts[3],
-		WindowOutsideClamped: oneIf(stream.windows.clamped[0]), SliceOthersClamped: oneIf(stream.windows.clamped[1]),
+		Windows:            uint64(stream.windows.count), WindowCeilingWindows: stream.windows.ceilingWindows.Load(),
+		WindowCeilingRaisedWindows: stream.windows.raisedWindows.Load(),
+		WindowZeroBoundCutsInput:   cuts[0], WindowZeroBoundCutsGap: cuts[1],
+		WindowZeroBoundCutsOutput: cuts[2], WindowZeroBoundCutsState: cuts[3],
+		WindowOutsideClamped: oneIf(clamped[0]), SliceOthersClamped: oneIf(clamped[1]),
 	}
 }
 
@@ -2173,12 +2099,18 @@ func (coordinator *SlotExecutionCoordinator) commitProgress(
 		return execution.SlotExecutionResult{}, inSlotStep(execution.SlotNotCommittedProgressCommitFailed, fmt.Errorf("alarmd worker: commit progress: %w", err))
 	}
 	if progress.Status != execution.ProgressCommitted {
-		err = progressNotCommitted(progress.Status)
+		err = progressCommitRefused(progress, request.ExpectedNextSlot)
 		reason := progress.ReasonCode
 		if refusal, refused := ownership.RefusalReason(err); refused {
 			reason = execution.ReasonCode(refusal)
 		}
-		coordinator.observe(ctx, observability.ComponentProgress, observability.StageProgressCommitted, request.Operation, started, "", reason, err)
+		// The line names the fact a conflict was refused by, as a pruned
+		// skip's refusal line does.
+		observed := reason
+		if observed == "" {
+			observed = commitConflictReason(progress.Conflict)
+		}
+		coordinator.observe(ctx, observability.ComponentProgress, observability.StageProgressCommitted, request.Operation, started, "", observed, err)
 		if unbegun {
 			// Nothing of the round was written, so it is counted and
 			// returns as its BeginSlot would have at its start: refused by
@@ -2234,6 +2166,103 @@ func progressNotCommitted(status execution.ProgressCommitStatus) error {
 		return fmt.Errorf("progress not committed: %s: %w", status, ownership.ErrContentScopeMoved)
 	}
 	return fmt.Errorf("progress not committed: %s", status)
+}
+
+// commitConflictReason is the progress_committed line's reason for a commit
+// refused as a conflict: the word of the fact that refused it, the one a
+// pruned skip's refusal line says; empty for any other commit.
+func commitConflictReason(refusal execution.ProgressSkipRefusal) observability.ReasonCode {
+	switch refusal {
+	case execution.SkipRefusalRangeInFlight:
+		return observability.CursorRefusalRangeInFlight
+	case execution.SkipRefusalCursorMoved:
+		return observability.CursorRefusalCursorMoved
+	case execution.SkipRefusalProgressMissing:
+		return observability.CursorRefusalProgressMissing
+	case execution.SkipRefusalCASConflict:
+		return observability.CursorRefusalCASConflict
+	}
+	return ""
+}
+
+// progressCommitRefused is progressNotCommitted for a commit's result. A
+// fence's refusal stays the ownership error it is; any other status is a
+// ProgressRefusalError.
+func progressCommitRefused(progress execution.ProgressCommitResult, slot execution.EvaluationTime) error {
+	switch progress.Status {
+	case execution.ProgressStaleOwner, execution.ProgressContentMoved:
+		return progressNotCommitted(progress.Status)
+	}
+	return &ProgressRefusalError{Result: progress, Slot: slot}
+}
+
+// ProgressRefusalError is a Progress commit of Slot the store did not apply
+// for a reason of the record's or of the store's, not of the fence's: its
+// text says the status and, for a conflict, the fact that refused it - and
+// for a cursor not at the Slot the two cursors, so the line says which of
+// them moved.
+type ProgressRefusalError struct {
+	Result execution.ProgressCommitResult
+	Slot   execution.EvaluationTime
+	// Begin is a BeginSlot's refusal rather than a commit's.
+	Begin bool
+}
+
+func (refusal *ProgressRefusalError) Error() string {
+	result, what, of := refusal.Result, "committed", "the commit is of"
+	if refusal.Begin {
+		what, of = "begun", "the Slot asked is"
+	}
+	switch {
+	case result.Conflict == execution.SkipRefusalCursorMoved:
+		return fmt.Sprintf("progress not %s: %s: %s: the record's completed facts derive %d as next, it stores %d, %s %d",
+			what, result.Status, result.Conflict, result.RecordNext, result.StoredNext, of, refusal.Slot)
+	case result.Status == execution.ProgressConflict:
+		return fmt.Sprintf("progress not %s: %s: %s", what, result.Status, execution.ConflictWord(result.Conflict))
+	}
+	return fmt.Sprintf("progress not %s: %s", what, result.Status)
+}
+
+// ProgressRefusalOf is the word of a Progress commit the store did not
+// apply, at whatever depth err wraps it: the fact a conflict was refused by
+// (execution.ProgressConflicts), else the commit's status. ok is false
+// for an error that is no such refusal.
+func ProgressRefusalOf(err error) (word string, ok bool) {
+	var refusal *ProgressRefusalError
+	if !errors.As(err, &refusal) {
+		return "", false
+	}
+	if refusal.Result.Status == execution.ProgressConflict {
+		return execution.ConflictWord(refusal.Result.Conflict), true
+	}
+	return string(refusal.Result.Status), true
+}
+
+// progressBeginNotCommitted is the retry an attempt whose BeginSlot did not
+// begin its Slot returns, for a status the fence did not refuse. A conflict
+// is said on a progress line - the fact that refused it and, for a cursor
+// not at the Slot, the two cursors - and its word rides the result to the
+// slot_completed line, as a refused commit's error carries it there.
+func (coordinator *SlotExecutionCoordinator) progressBeginNotCommitted(ctx context.Context, request execution.SlotExecutionRequest,
+	started time.Time, begin execution.ProgressBeginResult) execution.SlotExecutionResult {
+	reason := begin.ReasonCode
+	if reason == "" {
+		reason = execution.ReasonCode(contract.ReasonProgressBeginRejected)
+	}
+	retry := activationRetry(reason)
+	if begin.Status != execution.ProgressConflict {
+		return retry
+	}
+	refusal := &ProgressRefusalError{Begin: true, Slot: request.Contract.Slot.EvaluationTime, Result: execution.ProgressCommitResult{
+		Status: begin.Status, Conflict: begin.Conflict, RecordNext: begin.RecordNext, StoredNext: begin.StoredNext}}
+	observed := commitConflictReason(begin.Conflict)
+	if observed == "" {
+		observed = reason
+	}
+	coordinator.observe(ctx, observability.ComponentProgress, observability.StageProgressCommitted, request.Operation, started,
+		observability.ResultRetrying, observed, refusal)
+	retry.ProgressRefusal = execution.ConflictWord(begin.Conflict)
+	return retry
 }
 
 // progressBeginRefused is the error for a BeginSlot or BeginRange the owner
@@ -3582,4 +3611,176 @@ func oneIf(set bool) uint64 {
 		return 1
 	}
 	return 0
+}
+
+// sliceRun is what Execute's reading of a Slot carries from one slice to the
+// next: the read's request, the completion folded so far, the completion's
+// context once the first read returned, and whether one has.
+type sliceRun struct {
+	request          execution.SlotExecutionRequest
+	started          time.Time
+	queryRequest     execution.QueryExecutionRequest
+	completion       execution.QueryExecutionCompletion
+	completionCtx    context.Context
+	cancelCompletion context.CancelFunc
+	read             bool
+}
+
+// sliceVerdict is what the Slot makes of a slice's read (judgeSliceRead).
+type sliceVerdict int
+
+const (
+	// sliceConsume: the slice is the stream's to complete.
+	sliceConsume sliceVerdict = iota
+	// sliceAgain: the slice is gone - let go and split, or its dimensions
+	// forgotten - and what is pending is read in its place.
+	sliceAgain
+	// sliceFailed: the Slot ends with the result and error given.
+	sliceFailed
+)
+
+// judgeSliceRead is what the Slot makes of the read of leaf by stream, which
+// came back with sliceCompletion and err between sliceStarted and ended: a
+// provider's timeout put on the slice's size, a slice let go for its
+// dimensions or its size and split, a failure the Slot ends on; otherwise the
+// completion folded into the Slot's, the read noted on the slices, and the
+// next slices read ahead. On the stream that dispatches the Slot's slices;
+// the reading stream waits on it.
+func (coordinator *SlotExecutionCoordinator) judgeSliceRead(ctx context.Context, run *sliceRun, stream *streamedExecution, leaf inputslice.Leaf,
+	sliceCompletion execution.QueryExecutionCompletion, err error, sliceStarted, ended time.Time,
+) (sliceVerdict, execution.SlotExecutionResult, error) {
+	if err == nil && stream.slicing() {
+		if took, answered, timedOut := providerTimedOut(sliceCompletion); timedOut {
+			if timeout := stream.providerTimeout(took, answered); timeout != nil {
+				err = timeout
+			} else {
+				stream.slices.noteDegradedTimeout(&stream.slice)
+			}
+		}
+	}
+	if err != nil && stream.slicing() && errors.Is(err, errSliceDimensionsGone) {
+		// Under beginMu: with k consumers, another's read begins beside this
+		// (Begin), and finds the slices gone with their dimensions.
+		stream.beginMu.Lock()
+		stream.slices.forgetDimensions()
+		stream.beginMu.Unlock()
+		return sliceAgain, execution.SlotExecutionResult{}, nil
+	}
+	if err != nil && stream.slicing() && errors.Is(err, errSliceOverflow) {
+		if refused := stream.splitSlice(leaf); refused != nil {
+			refused = stream.finalSliceRefusal(refused)
+			coordinator.voidRefusedShape(run.request.Contract.Slot.QueryGroup, stream.slices, refused)
+			coordinator.observeQueryFailure(ctx, run.request.Operation, run.started, "execute", refused)
+			return sliceFailed, execution.SlotExecutionResult{}, inSlotStep(execution.SlotNotCommittedQueryFailed, fmt.Errorf("alarmd worker: query: %w", refused))
+		}
+		return sliceAgain, execution.SlotExecutionResult{}, nil
+	}
+	if err != nil && stream.slicing() && sliceReadTimedOut(err) && !isReadinessDeferred(err) {
+		if took, provider := timedOutTook(err, time.Since(sliceStarted)); provider && stream.splitsOnTimeout(ctx, took) {
+			// Put on its size: let go and split as a slice past its
+			// limit is, its children read in its place, once a Slot. A
+			// Slot whose children complete is no timeout of its group's
+			// cooldown; one whose do not is, as before.
+			if refused := stream.splitSliceKept(leaf); refused == nil {
+				stream.slices.timeoutSplit = true
+				// Its read is no read: what the lookback captured of it
+				// is taken back, its children captured in its place.
+				if discarder, ok := coordinator.ports.Query.(sliceReadDiscarder); ok {
+					discarder.DiscardSliceRead(run.request.Contract, leaf.Slice)
+				}
+				return sliceAgain, execution.SlotExecutionResult{}, nil
+			}
+		}
+		outcome := observability.InputSliceTimeoutNotSplit
+		if stream.slices.timeoutSplit {
+			outcome = observability.InputSliceTimeoutSplitFailed
+		}
+		// Who timed this slice's read out (015 O1): the provider, which
+		// alone can split a slice, or alarmd's own deadline, which never
+		// does - the window was short, not the slice large.
+		cause := observability.InputSliceTimeoutCauseDeadline
+		if _, provider := timedOutTook(err, time.Since(sliceStarted)); provider {
+			cause = observability.InputSliceTimeoutCauseProvider
+		}
+		err = &sliceTimeoutError{err: err, outcome: outcome, cause: cause}
+	} else if err != nil && stream.slicing() && stream.slices.timeoutSplit && !errors.Is(err, errSliceOverflow) {
+		// Split for its time, and failed after for another reason: the
+		// slice split ran out of time at the provider (splitsOnTimeout).
+		err = &sliceTimeoutError{err: err, outcome: observability.InputSliceTimeoutSplitFailed, cause: observability.InputSliceTimeoutCauseProvider}
+	}
+	if err != nil {
+		if isReadinessDeferred(err) {
+			// A readiness deferral is the normal pacing of a Slot whose data is
+			// not in yet, and it is the single highest-volume line alarmd emits.
+			// It has to say so: an empty reason on a non-success result
+			// normalizes to internal_unknown (observability.NormalizeReason),
+			// which made every deferral read as an unclassified internal error -
+			// in the logs and in the stage counter's reason label alike.
+			// And what it waits for: the query, its requirement, when it is
+			// ready and on what basis.
+			coordinator.emitObservation(ctx, observability.Observation{
+				Component: observability.ComponentAccess, Stage: observability.StageQueryCompleted,
+				Result: observability.ResultRetrying, Operation: observability.Operation(run.request.Operation),
+				ReasonCode: observability.ReasonCode(contract.ReasonQueryNotReady),
+				Duration:   time.Since(run.started), DurationKnown: true, ReadinessDeferral: readinessDeferralOf(err),
+			})
+		} else {
+			coordinator.observeQueryFailure(ctx, run.request.Operation, run.started, "execute", err)
+		}
+		// A read that ran out of time is remembered too: one the provider
+		// timed out at no less than the backend's 30 s, for the next Slot
+		// of the Query Group to start in slices by that time rather than
+		// read it whole to time out again; one alarmd's deadline ended at
+		// what it took, put on nothing (timedOutTook).
+		if stream.slices != nil && sliceReadTimedOut(err) {
+			stream.slices.timedOutTook, stream.slices.timedOutByProvider = timedOutTook(err, time.Since(sliceStarted))
+			stream.slices.queryMillis += stream.slices.timedOutTook
+			stream.keepTimedOutSplit(leaf)
+			coordinator.rememberSlotInput(run.request, stream, true)
+		}
+		return sliceFailed, execution.SlotExecutionResult{}, inSlotStep(execution.SlotNotCommittedQueryFailed, fmt.Errorf("alarmd worker: query: %w", err))
+	}
+	stream.seams.readEnded(ended)
+	if !run.read {
+		execution.MarkQueryReturned(ctx, time.Now())
+		run.completionCtx, run.cancelCompletion = shortPeriodCompletionContext(ctx, run.request.Operation, stream.header)
+		stream.applyCtx = run.completionCtx
+		run.read = true
+	}
+	if err := run.completionCtx.Err(); err != nil {
+		return sliceFailed, execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: completion deadline: %w", err)
+	}
+	if tooLong := sliceQueryTooLong(leaf.Slice, sliceCompletion); tooLong != nil {
+		tooLong = stream.finalSliceRefusal(tooLong)
+		coordinator.observeQueryFailure(ctx, run.request.Operation, run.started, "execute", tooLong)
+		return sliceFailed, execution.SlotExecutionResult{}, inSlotStep(execution.SlotNotCommittedQueryFailed, fmt.Errorf("alarmd worker: query: %w", tooLong))
+	}
+	if run.completion, err = foldSliceCompletion(run.completion, sliceCompletion); err != nil {
+		return sliceFailed, execution.SlotExecutionResult{}, err
+	}
+	if stream.slices != nil {
+		// A read the provider timed out and that completed degraded took
+		// the backend's limit, whatever its answer took to come back: the
+		// slices after it are judged against that (timedOutForSize).
+		took := slowestQueryMillis(sliceCompletion)
+		if _, _, timedOut := providerTimedOut(sliceCompletion); timedOut {
+			took = max(took, 2*sliceQueryTargetMillis)
+		}
+		stream.slices.queryMillis += took
+		stream.slices.sliceMillis = append(stream.slices.sliceMillis, took)
+		stream.slices.noteLeafRead(&stream.slice, leaf, took)
+		stream.slices.noteSliceCompletion(sliceCompletion)
+	}
+	// The next slice is read while this one completes, up to half of what
+	// the share leaves beside this slice (sliceLimit): its decode is off
+	// the Slot's path (slice_read_ahead.go).
+	// With k consumers no slice is read ahead yet: a read ahead's hand-over
+	// to the consumer that takes its slice is to come (015 C1 step 3.2).
+	if width := coordinator.sliceReadWidth(judgedRequests(stream.header)); stream.slicing() && width > 1 && !sliceReadAheadOff.Load() &&
+		stream.consumerCount() == 1 {
+		if pending := stream.slices.pending(); len(pending) > 1 {
+			stream.startSliceReadAheads(ctx, run.queryRequest, pending, width)
+		}
+	}
+	return sliceConsume, execution.SlotExecutionResult{}, nil
 }
