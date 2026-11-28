@@ -583,6 +583,11 @@ type Runner struct {
 	stage      execution.StageMarker
 	queryGroup execution.QueryGroupIdentity
 	session    OwnerSession
+	// local, when set, answers an attempt's ownership check from the lease
+	// and the installed view before the store is asked (local_ownership.go);
+	// countLocal counts each check.
+	local      LocalOwnership
+	countLocal func(outcome, reason string)
 	source     SlotSource
 	executor   Executor
 	flights    *FlightCoordinator
@@ -1008,7 +1013,7 @@ func (runner *Runner) runOneTracked(
 	// source failure, and the run_one return mix would stop distinguishing the
 	// two. The SlotSource opens with the same question, so the answer is
 	// carried into it instead of being asked again.
-	confirmedFence, confirmedAssignment, err := runner.session.ValidateCurrentWithAssignment(ctx, runner.now())
+	confirmedFence, confirmedAssignment, err := runner.validateOwnership(ctx)
 	if err != nil {
 		decision = "ownership_rejected"
 		return execution.SlotExecutionResult{}, false, err
@@ -1183,6 +1188,13 @@ func (runner *Runner) runOneTracked(
 	}
 	decidesPool, poolResult := runner.queryCooldownDecision(operation, result, busyUntil)
 	if err != nil {
+		// A write of the attempt the fence refused - its BeginSlot, or a
+		// write after it - is the store saying what the view did not: the
+		// next attempt checks its fence with it, and that answer ends
+		// admission as before (015 R1).
+		if fenceRefused(err) {
+			runner.noteFenceRefused()
+		}
 		// The fence refused the attempt at its first write, so nothing of the
 		// Slot was written: this is the round's ownership rejection, counted
 		// and retried as one rather than as an execution that failed. It is

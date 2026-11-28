@@ -43,7 +43,7 @@ func leavesOf(tree *inputslice.Tree) []execution.InputSlice {
 // is not in the Shape unless a kept split was made under it.
 func TestATreeBuiltFromItsShapeHasItsLeaves(t *testing.T) {
 	dimensions := []string{"host"}
-	tree, err := inputslice.New(dimensions, 4, dimensions[0])
+	tree, err := inputslice.NewCut(dimensions, 4, inputslice.SuffixCut(dimensions[0]))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestATreeBuiltFromItsShapeHasItsLeaves(t *testing.T) {
 
 // A tree is built from a shape only on the dimensions it was cut on.
 func TestAShapeIsRefusedOnOtherDimensions(t *testing.T) {
-	tree, err := inputslice.New([]string{"host"}, 4, "host")
+	tree, err := inputslice.NewCut([]string{"host"}, 4, inputslice.SuffixCut("host"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,7 @@ func TestAShapeIsRefusedOnOtherDimensions(t *testing.T) {
 // kept split under it goes with it.
 func TestAShapeMergedTakesItsLastKeptSplitBack(t *testing.T) {
 	dimensions := []string{"host"}
-	tree, err := inputslice.New(dimensions, 4, dimensions[0])
+	tree, err := inputslice.NewCut(dimensions, 4, inputslice.SuffixCut(dimensions[0]))
 	if err != nil {
 		t.Fatal(err)
 	}

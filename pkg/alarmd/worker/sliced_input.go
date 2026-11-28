@@ -96,6 +96,18 @@ type sliceReading struct {
 	// and the consumers count them, with k consumers (015 C1 step 3.2).
 	treeMu sync.Mutex
 	tree   *inputslice.Tree
+	// consumers is k, the streams this Slot's slices were consumed by side
+	// by side, set by the dispatch as they begin (consumeSideBySide) and
+	// remembered for the next Slot, whose starting slices are counted for it;
+	// zero for a Slot whose slices its own stream consumed.
+	consumers int
+	// chosen is the k this Slot was given by its room once the dispatch's
+	// own windows had landed (consumersForRoom), zero until then: chosen
+	// once a Slot, so a Slot left to its own stream does not wait on its
+	// windows before every slice.
+	chosen int
+	// choice is where chosen came from, for the Slot's usage row.
+	choice consumersChoice
 	// dimensions are the ones the tree splits on, in the order it takes them.
 	dimensions []string
 	// index is how many slices have completed. finish is what the Slot
@@ -141,6 +153,29 @@ type sliceReading struct {
 	// Query Group's shape, its usage (observability.InputSliceShapeOutcomes).
 	leafMillis map[int]uint64
 	shape      sliceShapeUsage
+	// timedOutSplits is the time the slice the provider timed out and this
+	// Slot split ran out after, by its leaf (splitsOnTimeout), and
+	// slowBounds the bounds of each slice read whole slower than
+	// sliceTimeTargetMillis, by its leaf: what a tree cut by prefix judges
+	// that split by the round after, and where it cuts a slow slice
+	// (shapeAfterPrefix).
+	timedOutSplits map[int]uint64
+	slowBounds     map[int]inputslice.Bounds
+	// timedOutLeaves is the slices the provider timed out that completed
+	// degraded, by leaf: their time is the backend's limit, and what they
+	// hold is not known (inputslice.LeafRead.TimedOut).
+	timedOutLeaves map[int]bool
+	// roomFolded is the slices this read folded into their rest to make room
+	// for a split for a timeout (makeRoom), counted folded.
+	roomFolded uint64
+	// deepeningBefore is the Slots in a row before this one that split the
+	// Query Group's tree cut by prefix deeper for a timeout
+	// (slicedReading.timeoutDeepening).
+	deepeningBefore uint64
+	// switchCut is the cut of the end of the values the sample of the slice
+	// that switched its tree from prefix makes (inputslice.BestCut): what the
+	// Query Group's next Slot starts in (rememberSlotInput).
+	switchCut inputslice.Cut
 	// leafSeries is the series each slice read held, by its digest, and
 	// leafPlanned what each slice of a Slot read in a shape is expected to
 	// take, by its digest (shapeTree): the series that slice held the round
@@ -228,10 +263,20 @@ type sliceRead struct {
 	series, reserved uint64
 	byQuery          map[execution.PhysicalQueryDigest]uint64
 	sample           inputslice.Sample
-	seen             map[string]map[string]int
-	keeps            map[string]*sampleKeep
+	// bounds is the least and greatest value of each dimension the slice
+	// delivered (inputslice.Bound), every series counted: where a tree cut
+	// by prefix splits the slice once it was read whole.
+	bounds inputslice.Bounds
+	seen   map[string]map[string]int
+	keeps  map[string]*sampleKeep
 	// leaveInput ends the input phase of a slice after the first.
 	leaveInput func()
+	// forItsSize is whether the slice, let go, held past the limit it would
+	// have with nothing held beside it (ownSliceLimit), for its let_go line
+	// alone: what it is split into is kept for the next Slot either way, as a
+	// slice the reads ahead hold short of its own limit is held short of it
+	// every round, and its split is what lets the shape settle.
+	forItsSize bool
 }
 
 // sliceShapeUsage is what one Slot did with its Query Group's shape: read
@@ -241,18 +286,128 @@ type sliceRead struct {
 type sliceShapeUsage struct {
 	started, kept, merged, mergeRefused bool
 	dropped                             string
+	// next is the round's judgement of a shape cut by prefix
+	// (inputslice.Tree.Next), and switched a tree cut by prefix that a slice
+	// let go for its size switched to its values' ends (inputslice.Tree.Switched).
+	next     inputslice.NextCounts
+	switched bool
 }
 
-func (reading *sliceReading) noteLeafRead(slice *sliceRead, leaf inputslice.Leaf, took uint64) {
+func (reading *sliceReading) noteLeafRead(slice *sliceRead, leaf inputslice.Leaf, took uint64, timedOut bool) {
 	if reading.leafMillis == nil {
 		reading.leafMillis, reading.leafSeries = map[int]uint64{}, map[string]uint64{}
 		reading.leafSeriesByID, reading.leafBytesByID = map[int]uint64{}, map[int]uint64{}
 	}
 	reading.leafMillis[leaf.ID] = took
+	if timedOut {
+		if reading.timedOutLeaves == nil {
+			reading.timedOutLeaves = map[int]bool{}
+		}
+		reading.timedOutLeaves[leaf.ID] = true
+	}
+	if took > sliceTimeTargetMillis && len(slice.bounds) > 0 {
+		// Where a tree cut by prefix splits it for its time (shapeAfterPrefix):
+		// kept for the slices slower than the target only, a few a round.
+		if reading.slowBounds == nil {
+			reading.slowBounds = map[int]inputslice.Bounds{}
+		}
+		reading.slowBounds[leaf.ID] = slice.bounds
+	}
 	reading.leafSeries[leaf.Slice.Digest()] = slice.series
 	reading.leafSeriesByID[leaf.ID] = slice.series
 	reading.leafBytesByID[leaf.ID] = slice.input
 	reading.keepSizedSplit(slice, leaf)
+}
+
+// deepenedForTimeout reports whether this read split its tree cut by prefix a
+// level deeper for a slice the provider timed out: in place
+// (splitsOnTimeout), or into its shape as the Slot failed (keepTimedOutSplit).
+func (reading *sliceReading) deepenedForTimeout() bool {
+	return reading.tree != nil && reading.tree.ByPrefix() && (reading.timeoutSplit || reading.keptOnFailure)
+}
+
+// sliceTimeoutDeepening is the Slots in a row, this completed one included,
+// that split its Query Group's tree cut by prefix deeper for a timeout; zero
+// for a Slot that did not.
+func (stream *streamedExecution) sliceTimeoutDeepening() uint64 {
+	if !stream.slicing() || !stream.slices.timeoutSplit || stream.slices.tree == nil || !stream.slices.tree.ByPrefix() {
+		return 0
+	}
+	return stream.slices.deepeningBefore + 1
+}
+
+// makeRoom is whether the split for a timeout that err refused for the leaves
+// a tree may have can be made again: a tree cut by prefix folds the slices
+// this read read empty into their rest until a split by prefix fits
+// (inputslice.Tree.MakeRoom), counted folded. Called under treeMu.
+func (reading *sliceReading) makeRoom(err error) bool {
+	var concentrated *inputslice.ValueConcentratedError
+	if !errors.As(err, &concentrated) || concentrated.Reason != inputslice.ReasonMaxLeaves || !reading.byPrefix() {
+		return false
+	}
+	folded, fits := reading.tree.MakeRoom(inputslice.PrefixSplitChildren, reading.roomReads())
+	reading.roomFolded += folded
+	return fits
+}
+
+// roomReads is this Slot's reads by leaf, as room is made by them
+// (inputslice.Tree.MakeRoom): how long each took and whether the provider
+// timed it out.
+func (reading *sliceReading) roomReads() map[int]inputslice.LeafRead {
+	reads := make(map[int]inputslice.LeafRead, len(reading.leafMillis))
+	for leaf, took := range reading.leafMillis {
+		reads[leaf] = inputslice.LeafRead{Millis: took, TimedOut: reading.timedOutLeaves[leaf]}
+	}
+	return reads
+}
+
+// compactForNext brings a tree cut by prefix that this Slot split past the
+// leaves a Slot starts in back within them before its shape is kept, by
+// folding what this Slot read empty into its rest as room is made
+// (inputslice.Tree.CompactForNext), counted folded. Kept past them, the shape
+// would be dropped as the next Slot starts in it (shapeTree), and a Query
+// Group whose slice the provider times out a level deeper every Slot would
+// start over every time. A tree it cannot bring within them is kept as it is,
+// and dropped so, counted voided_max_leaves.
+func (reading *sliceReading) compactForNext() {
+	reading.treeMu.Lock()
+	defer reading.treeMu.Unlock()
+	if reading.tree == nil || !reading.tree.ByPrefix() || reading.tree.Leaves() <= inputslice.MaxLeaves-3 {
+		return
+	}
+	folded, _ := reading.tree.CompactForNext(reading.roomReads())
+	reading.roomFolded += folded
+}
+
+// deferLeaf has the Query Group's next Slot read leaf last, after every other
+// slice, when this one did not: a split for a timeout with no room to make
+// now finds every other slice read, and those read empty folded, once it is
+// read last. False when this Slot read it last already: there is no more
+// room to make.
+func (reading *sliceReading) deferLeaf(leaf inputslice.Leaf) bool {
+	digest := leaf.Slice.Digest()
+	if reading.deferred[digest] {
+		return false
+	}
+	if reading.degraded == nil {
+		reading.degraded = make(map[string]bool)
+	}
+	reading.degraded[digest] = true
+	return true
+}
+
+// byPrefix reports whether the read's tree is cut by prefix.
+func (reading *sliceReading) byPrefix() bool { return reading.tree != nil && reading.tree.ByPrefix() }
+
+// noteTimedOutSplit keeps the time the slice the provider timed out ran out
+// after, the Slot having split it and read its children in its place
+// (splitsOnTimeout): what a tree cut by prefix judges that split by the
+// round after (shapeAfterPrefix).
+func (reading *sliceReading) noteTimedOutSplit(leaf inputslice.Leaf, took uint64) {
+	if reading.timedOutSplits == nil {
+		reading.timedOutSplits = map[int]uint64{}
+	}
+	reading.timedOutSplits[leaf.ID] = took
 }
 
 // keepSizedSplit cuts a slice read whole that held more series than a slice
@@ -267,7 +422,7 @@ func (reading *sliceReading) keepSizedSplit(slice *sliceRead, leaf inputslice.Le
 	if reading.tree == nil || slice.series <= sizedSplitSeries() || len(slice.sample) == 0 {
 		return
 	}
-	children, sampled, err := reading.tree.KeepSizedSplit(leaf.ID, slice.sample)
+	children, sampled, err := reading.tree.KeepSizedSplit(leaf.ID, slice.sample, slice.bounds)
 	if err != nil {
 		if reading.shape.dropped == "" {
 			reading.shape.dropped = sizedSplitRefusal(err)
@@ -323,15 +478,19 @@ func (stream *streamedExecution) readInSlices() bool {
 	return stream.slicing() && stream.slices.tree != nil
 }
 
-// wholeSliceLimit is sliceLimit with nothing else of the Slot held: half of
-// the Slot's half of the share, the most a slice may retain, for judging a
-// slice's size apart from any one Slot's moment (sizedDecay).
-func (coordinator *SlotExecutionCoordinator) wholeSliceLimit() uint64 {
+// wholeSliceLimit is sliceLimit with nothing else of the Slot held, for a
+// Slot whose slices k streams consume: half of the Slot's half of the share
+// over k, the most a slice may retain, for judging a slice's size apart from
+// any one Slot's moment (sizedDecay) and counting the slices a Slot starts
+// in. Counted for one stream, a Query Group two consume started in slices
+// twice the size either may hold, each of them let go (the 1.0 next release
+// gate).
+func (coordinator *SlotExecutionCoordinator) wholeSliceLimit(k int) uint64 {
 	share := coordinator.qgShareBytes()
 	if share == 0 {
 		return ^uint64(0)
 	}
-	return share / 2 / 2
+	return share / 2 / uint64(max(k, 1)) / 2
 }
 
 // sliceLimit is what the slice being read may hold of the input phase: half
@@ -348,7 +507,87 @@ func (stream *streamedExecution) sliceLimit() uint64 {
 	if share == 0 {
 		return ^uint64(0)
 	}
-	return boundLess(share/2/stream.consumerCount(), stream.sliceOthers()) / 2
+	return boundLess(share/2/stream.limitConsumers(), stream.sliceOthers()) / 2
+}
+
+// limitConsumers is the k a slice being read is held to: the consumers' k;
+// and, on the Slot's own stream before any consumer begins, the k this Slot
+// will consume with (sliceConsumers), its header known from Begin, before a
+// series of the slice arrives. The slice the dispatch reads before its
+// consumers begin is then no larger than theirs: held to one stream's limit,
+// it was the largest slice of every Slot, read before any other began
+// (45,000 series of 150,000 in the 1.0 next release gate's k = 2 cell,
+// against the consumers' 6,000 to 45,000, its reads half again as long as
+// theirs). A Slot its own stream consumes alone keeps one stream's limit,
+// whatever the Slot before consumed with.
+func (stream *streamedExecution) limitConsumers() uint64 {
+	k := stream.consumerCount()
+	if k == 1 && (stream.dispatch == nil || stream.dispatch == stream) && stream.slices != nil {
+		k = uint64(stream.sliceConsumers())
+	}
+	return k
+}
+
+// ownSliceLimit is sliceLimit with nothing held beside the slice: a quarter
+// of the share over k. A slice past it is let go for its own size; one let
+// go short of it, for what the Slot held beside it.
+func (stream *streamedExecution) ownSliceLimit() uint64 {
+	share := stream.coordinator.qgShareBytes()
+	if share == 0 {
+		return ^uint64(0)
+	}
+	return share / 2 / stream.limitConsumers() / 2
+}
+
+// sliceConsumersChosen is where the Slot's k came from, for its usage row:
+// none for a Slot read whole or one whose k was never more than one.
+func (stream *streamedExecution) sliceConsumersChosen() consumersChoice {
+	if !stream.readInSlices() {
+		return consumersChoice{}
+	}
+	return stream.slices.choice
+}
+
+// sliceConsumersUsed is k for the Slot's usage row: the streams that
+// consumed its slices side by side, one for its own stream, none for a Slot
+// read whole.
+func (stream *streamedExecution) sliceConsumersUsed() uint64 {
+	if !stream.readInSlices() {
+		return 0
+	}
+	return uint64(max(stream.slices.consumers, 1))
+}
+
+// noteSliceLetGo says the slice let go as it streamed on a line of its own
+// (observability.StageInputSliceLetGo): what it held and the batch that took
+// it past limit, and what limit counted beside it.
+func (stream *streamedExecution) noteSliceLetGo(ctx context.Context, limit, retained uint64) {
+	k := stream.consumerCount()
+	facts := &observability.InputSliceLetGoFacts{Consumers: stream.limitConsumers(), ShareBytes: stream.coordinator.qgShareBytes(), LimitBytes: limit,
+		OwnLimitBytes: stream.ownSliceLimit(), SliceBytes: stream.slice.input, BatchBytes: retained, LargestSeriesBytes: stream.slice.largest,
+		ApplyHeldBytes: stream.applyHeld(), ForItsSize: stream.slice.forItsSize}
+	if k > 1 {
+		facts.AheadBytes = stream.aheadBytes.Load() / k
+		if stream.dispatch != nil && stream.dispatch != stream {
+			for phase := range retainPhaseCount {
+				facts.Dispatch[phase] = stream.dispatch.heldForConsumers(phase) / k
+			}
+		}
+	} else {
+		facts.AheadBytes = stream.aheadBytes.Load()
+	}
+	for phase := range retainPhaseCount {
+		held := stream.retainedByPhase[phase]
+		if phase == retainPhaseInput {
+			held -= min(held, stream.slice.input)
+		}
+		facts.Own[phase] = held - min(held, stream.inflightRelease(phase))
+	}
+	stream.coordinator.emitObservation(ctx, observability.Observation{
+		Component: observability.ComponentAccess, Stage: observability.StageInputSliceLetGo,
+		Result: observability.ResultSuccess, Operation: observability.Operation(stream.request.Operation),
+		ReasonCode: observability.ReasonNone, InputSliceLetGo: facts,
+	})
 }
 
 // sliceOthers is what the Slot's side holds beside the slice being read:
@@ -428,6 +667,8 @@ func (stream *streamedExecution) admitSliceInput(ctx context.Context, batch exec
 		coordinator.observeCapacityRejection(ctx, stream.request.Operation, observability.CapacityBudgetRetainedBytes, err)
 		return err
 	}
+	stream.slice.forItsSize = stream.slice.input+retained > stream.ownSliceLimit()
+	stream.noteSliceLetGo(ctx, limit, retained)
 	stream.sampleSlice(batch)
 	return errSliceOverflow
 }
@@ -485,6 +726,7 @@ func (stream *streamedExecution) sampleSlice(batch execution.SeriesExecutionBatc
 		stream.slice.sample = make(inputslice.Sample, len(reading.dimensions))
 		stream.slice.seen = make(map[string]map[string]int, len(reading.dimensions))
 		stream.slice.keeps = make(map[string]*sampleKeep, len(reading.dimensions))
+		stream.slice.bounds = make(inputslice.Bounds, len(reading.dimensions))
 	}
 	// Each value once, counted for every series sampled that carries it -
 	// a split is judged by the series its parts hold - and sliceSampleValues
@@ -496,7 +738,13 @@ func (stream *streamedExecution) sampleSlice(batch execution.SeriesExecutionBatc
 			seen, keep = make(map[string]int), &sampleKeep{}
 			stream.slice.seen[dimension], stream.slice.keeps[dimension] = seen, keep
 		}
-		keep.note(&stream.slice.sample, dimension, seen, sliceValue(dimensions[dimension]))
+		value := sliceValue(dimensions[dimension])
+		keep.note(&stream.slice.sample, dimension, seen, value)
+		if bound, known := stream.slice.bounds[dimension]; !known {
+			stream.slice.bounds[dimension] = inputslice.Bound{Low: value, High: value}
+		} else if value < bound.Low || value > bound.High {
+			stream.slice.bounds[dimension] = inputslice.Bound{Low: min(bound.Low, value), High: max(bound.High, value)}
+		}
 	}
 }
 
@@ -529,7 +777,8 @@ func (stream *streamedExecution) beginSlice(leaf inputslice.Leaf, last bool) {
 	stream.fill.passed, stream.fill.evaluating, stream.fill.evaluatingSet = nil, execution.PlanIdentity{}, false
 	stream.sliceNumber, reading.dispatched = reading.dispatched, reading.dispatched+1
 	stream.slice.input, stream.slice.largest, stream.slice.series, stream.slice.sample, stream.slice.seen, stream.slice.keeps = 0, 0, 0, nil, nil, nil
-	stream.slice.reserved, stream.slice.byQuery = 0, nil
+	stream.slice.bounds = nil
+	stream.slice.reserved, stream.slice.byQuery, stream.slice.forItsSize = 0, nil, false
 	if reading.index > 0 {
 		stream.slice.leaveInput = stream.enter(slotPhaseInput)
 	}
@@ -549,7 +798,7 @@ func (stream *streamedExecution) abandonSlice() inputslice.Sample {
 	stream.resetSliceStream()
 	sample := stream.slice.sample
 	stream.slice.input, stream.slice.series, stream.slice.sample, stream.slice.seen, stream.slice.keeps = 0, 0, nil, nil, nil
-	stream.slice.reserved, stream.slice.byQuery = 0, nil
+	stream.slice.reserved, stream.slice.byQuery, stream.slice.forItsSize = 0, nil, false
 	return sample
 }
 
@@ -785,6 +1034,15 @@ type slicedReading struct {
 	// of the shape's last split kept for a slice's size, together under half
 	// a slice's series (sizedDecay).
 	shapeSizedRounds int
+	// history is what a shape cut by prefix carries from round to round, by
+	// node (inputslice.History, shapeAfterPrefix).
+	history inputslice.History
+	// timeoutDeepening is the Slots in a row that split the Query Group's
+	// tree cut by prefix a level deeper for a slice the provider timed out:
+	// one more for each that did, completed or failed, held by a failed one
+	// that did not, ended by a completed one that did not
+	// (observability.SlotBudgetUsageFacts.InputSliceTimeoutDeepening).
+	timeoutDeepening uint64
 	// leafSeries is the series each slice of the last completed read held,
 	// by its digest, and seriesMicros the time a series of it took on its
 	// critical path: what the next Slot read in the shape plans each slice
@@ -802,6 +1060,9 @@ type slicedReading struct {
 	// read and that completed degraded (sliceReading.deferred). Lost with
 	// this memory on a restart: such a Query Group degrades a round more.
 	deferred map[string]bool
+	// consumers is k the last read consumed its slices with, one for its
+	// own stream: what the next read's slices are counted and held for.
+	consumers int
 }
 
 // sliceDecayRounds is how many completed reads in a row, every slice under
@@ -878,6 +1139,17 @@ func slicesBySeries(series uint64) int {
 // target, a read that ran out counted at no less than twice it
 // (decision-020 throughput design 3.1, way 6).
 const sliceQueryTargetMillis = 15_000
+
+// sliceTimeTargetMillis is T, the time one slice's read of a tree cut by
+// prefix is kept under from round to round (015 C2 section 4.3): a slice
+// read slower is split a level deeper for the next Slot, when it is no
+// backend slow as a whole, and a kept split whose slices together would read
+// under half of it is taken back. Three seconds: a slice's read time measured
+// proportional to its series at about 300,000 to 400,000 a second and 0.3 s
+// of fixed cost, so about a million series, a fifth of what one query may
+// read; and at a read width of four, a round of slices that slow is well
+// inside a minute.
+const sliceTimeTargetMillis = 3_000
 
 // slicesByTime is how many slices the time of a read's queries asks for at
 // sliceQueryTargetMillis each.
@@ -1278,9 +1550,10 @@ func (coordinator *SlotExecutionCoordinator) sliceReadingFor(ctx context.Context
 	if request.QueryCooldownProbe {
 		return reading
 	}
-	limit := coordinator.wholeSliceLimit()
 	last := coordinator.slicedInput.lastInput(request.Contract.Slot.QueryGroup)
+	limit := coordinator.wholeSliceLimit(last.consumers)
 	reading.unknownSize = last.series == 0 && last.bytes == 0
+	reading.deepeningBefore = last.timeoutDeepening
 	reading.deferred = last.deferred
 	dimensions := last.dimensions
 	if len(dimensions) == 0 {
@@ -1482,6 +1755,14 @@ func (stream *streamedExecution) splitSliceAs(leaf inputslice.Leaf, kept bool) e
 		// is the first dimension cut by the fixed alphabet, and the row says
 		// so (first_dimension_fallback).
 		if cut, ok := inputslice.BestCut(dimensions, sample); ok {
+			// A read whole split for its time is cut by prefix on the
+			// dimension the sample chose, as every tree split for its time
+			// is (015 C2 section 4.8): the sample of a read cut short is of
+			// the start of its stream, which only the values' ends sample
+			// evenly, and the time is no size to cut the ends by.
+			if kept {
+				cut = inputslice.PrefixCutOn(cut)
+			}
 			if _, err := tree.SplitCut(tree.Pending()[0].ID, cut); err != nil {
 				return fmt.Errorf("alarmd worker: split input slice: %w", err)
 			}
@@ -1502,9 +1783,23 @@ func (stream *streamedExecution) splitSliceAs(leaf inputslice.Leaf, kept bool) e
 	}
 	reading.treeMu.Lock()
 	_, err := split(leaf.ID, sample)
+	if kept && reading.makeRoom(err) {
+		_, err = split(leaf.ID, sample)
+	}
+	switched := reading.tree.Switched()
 	reading.treeMu.Unlock()
 	if err != nil {
 		return fmt.Errorf("alarmd worker: split input slice: %w", err)
+	}
+	if switched && reading.switchCut.IsZero() {
+		// The cut the Query Group's next Slot starts in from its root: the
+		// one this slice's sample makes of the end of the values, or, with
+		// none, the end of its own dimension by the fixed classes.
+		if cut, ok := inputslice.BestCut(reading.dimensions, sample); ok {
+			reading.switchCut = cut
+		} else {
+			reading.switchCut = inputslice.SuffixCut(reading.dimensions[0])
+		}
 	}
 	return nil
 }
@@ -1630,6 +1925,12 @@ func (coordinator *SlotExecutionCoordinator) rememberSlotInput(request execution
 		revision: request.Contract.QueryRevision}
 	remembered.cut, remembered.cutFrom = reading.cutOnNext(&stream.slice, dimensions, before, timedOut)
 	remembered.deferred = reading.degraded
+	// The k its slices were consumed with, one on its own stream; a Slot
+	// read whole says nothing of it and keeps the one before.
+	remembered.consumers = before.consumers
+	if reading.tree != nil {
+		remembered.consumers = max(reading.consumers, 1)
+	}
 	if timedOut {
 		remembered.bytes = max(remembered.bytes, before.bytes)
 		remembered.series = max(remembered.series, before.series)
@@ -1642,7 +1943,11 @@ func (coordinator *SlotExecutionCoordinator) rememberSlotInput(request execution
 		// time in slices counted is read in more of them (slicesByTime) -
 		// until it completes or grows past a starting tree's leaves.
 		remembered.shape, remembered.shapeQuickRounds = before.shape, before.shapeQuickRounds
-		remembered.shapeSizedRounds = before.shapeSizedRounds
+		remembered.shapeSizedRounds, remembered.history = before.shapeSizedRounds, before.history
+		remembered.timeoutDeepening = before.timeoutDeepening
+		if reading.deepenedForTimeout() {
+			remembered.timeoutDeepening++
+		}
 		remembered.leafSeries, remembered.seriesMicros = before.leafSeries, before.seriesMicros
 		// A read that failed read none of its slices to the end: what the
 		// one before deferred is deferred still, with what this one did.
@@ -1653,10 +1958,30 @@ func (coordinator *SlotExecutionCoordinator) rememberSlotInput(request execution
 			remembered.deferred[digest] = true
 		}
 		if remembered.revision != before.revision {
-			remembered.shape = inputslice.Shape{}
+			remembered.shape, remembered.history = inputslice.Shape{}, nil
 		}
-		if reading.keptOnFailure {
+		// A tree that switched from prefix keeps the shape it started in for
+		// the retry: the same root slices (inputslice.Tree.RootCut), switched
+		// again at the same slice. Only a Slot that completes leaves it.
+		// A tree cut by prefix keeps the split this Slot made in place of the
+		// slice the provider timed out (splitsOnTimeout) even when the split
+		// of its child that failed the Slot was refused: a split by prefix is
+		// of up to 41 leaves, and the two of one Slot pass the leaves a tree
+		// may have far sooner than a split of the end's five - lost with the
+		// refused one, the Query Group would split the same slice the same
+		// way every Slot and never come out of it.
+		keep := reading.keptOnFailure || reading.timeoutSplit && reading.tree != nil && reading.tree.ByPrefix()
+		if keep && (reading.tree == nil || !reading.tree.Switched()) {
 			remembered.shape, remembered.shapeQuickRounds = coordinator.shapeOnFailure(reading), 0
+			// What its nodes carried goes on with the shape kept, and a split
+			// this Slot made for a slice the provider timed out is judged the
+			// Slot after against the time it ran out after, as it is when a
+			// Slot completes (inputslice.Tree.KeptHistory): cleared, a split
+			// of no help would not be taken back, nor a mark kept.
+			remembered.history = nil
+			if !remembered.shape.IsZero() {
+				remembered.history = reading.tree.KeptHistory(reading.timeoutSplitReads(), before.history)
+			}
 		}
 		// The time slices the next read only when the provider said the
 		// read ran out (timedOutByProvider) and it is put on the slice's size
@@ -1689,8 +2014,25 @@ func (coordinator *SlotExecutionCoordinator) rememberSlotInput(request execution
 			remembered.bytes = max(remembered.bytes, before.bytes)
 			remembered.series = max(remembered.series, before.series)
 		}
-		remembered.shape, remembered.shapeQuickRounds = coordinator.shapeAfter(reading, before, current, sliceable == nil)
-		remembered.shape, remembered.shapeSizedRounds = reading.sizedDecay(remembered.shape, before, coordinator.wholeSliceLimit())
+		if reading.tree != nil && reading.tree.ByPrefix() && reading.timeoutSplit {
+			remembered.timeoutDeepening = before.timeoutDeepening + 1
+		}
+		switch {
+		case reading.tree != nil && reading.tree.Switched():
+			// A tree cut by prefix a slice of which was let go for its size:
+			// its shape dropped, the next Slot cut from the end of the values
+			// from its root, by the cut the sample of that slice makes
+			// (015 C2 section 4.8).
+			reading.shape.switched = true
+			if !reading.switchCut.IsZero() {
+				remembered.cut, remembered.cutFrom = reading.switchCut, observability.InputSliceCutOnSwitchedToSuffix
+			}
+		case reading.tree != nil && reading.tree.ByPrefix():
+			remembered.shape, remembered.history = coordinator.shapeAfterPrefix(reading, before, current, sliceable == nil, stream.cooldownHeld())
+		default:
+			remembered.shape, remembered.shapeQuickRounds = coordinator.shapeAfter(reading, before, current, sliceable == nil)
+			remembered.shape, remembered.shapeSizedRounds = reading.sizedDecay(remembered.shape, before, coordinator.wholeSliceLimit(max(reading.consumers, 1)))
+		}
 		if !remembered.shape.IsZero() && reading.seriesRead > 0 {
 			remembered.leafSeries = reading.leafSeries
 			remembered.seriesMicros = reading.queryMillis * 1000 / reading.seriesRead

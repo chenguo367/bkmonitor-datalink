@@ -5124,8 +5124,13 @@ type SlotBudgetUsage struct {
 	// InputSliceTimeouts is the slices of a completed Slot that ran out of
 	// time and were split and read again (split_succeeded): at most one.
 	InputSliceTimeouts uint64
-	// InputSliceShape* is what this Slot did with its Query Group's shape,
-	// one each at most (observability.InputSliceShapeOutcomes).
+	// InputSliceTimeoutDeepening is the Slots in a row, this one included,
+	// that split the Query Group's tree cut by prefix deeper for a slice the
+	// provider timed out (observability's field of the same name).
+	InputSliceTimeoutDeepening uint64
+	// InputSliceShape* is what this Slot did with its Query Group's shape
+	// (observability.InputSliceShapeOutcomes): one each at most, but for
+	// merged and the six of the round's judgement, which count.
 	InputSliceShapeStarted              uint64
 	InputSliceShapeKept                 uint64
 	InputSliceShapeMerged               uint64
@@ -5141,6 +5146,13 @@ type SlotBudgetUsage struct {
 	InputSliceShapeRefusedSplitError    uint64
 	InputSliceShapeMergeRefused         uint64
 	InputSliceShapeSizedKept            uint64
+	InputSliceShapeSplitTime            uint64
+	InputSliceShapeSplitHeldUniform     uint64
+	InputSliceShapeSplitUnhelpful       uint64
+	InputSliceShapeSplitHeldMark        uint64
+	InputSliceShapeFolded               uint64
+	InputSliceShapeLeafCapReached       uint64
+	InputSliceShapeSwitchedToSuffix     uint64
 	// InputSliceCutOn is where the dimension this Slot's starting slices
 	// were cut on came from (observability.InputSliceCutOnSources), empty
 	// for a Slot not started in slices counted.
@@ -5154,6 +5166,19 @@ type SlotBudgetUsage struct {
 	// InputSliceStartDiscarded is 1 when a slice this Slot started in from
 	// its memory was let go for its size.
 	InputSliceStartDiscarded uint64
+	// InputSliceConsumers is k, the streams that consumed this Slot's slices
+	// side by side: one for a Slot read in slices on its own stream, zero
+	// for one read whole.
+	InputSliceConsumers uint64
+	// InputSliceConsumersFrom is where k came from
+	// (observability.InputSliceConsumersFromSources), empty for a Slot whose k
+	// was never more than one; for a k the room took down,
+	// InputSliceRoomLimitBytes the slice limit the room left the cores' k and
+	// InputSliceFloorBytes the bar it fell short of: the floor, or a quarter
+	// more to rise past the k the Query Group last consumed with.
+	InputSliceConsumersFrom  string
+	InputSliceRoomLimitBytes uint64
+	InputSliceFloorBytes     uint64
 	// NoDataStagesAhead* is how this Slot's no-data first writes staged
 	// ahead of their statements ended, a Plan each
 	// (observability.NoDataStageAheadOutcomes), NoDataStageAheadDiffers* the

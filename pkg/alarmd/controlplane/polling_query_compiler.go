@@ -170,7 +170,11 @@ func (compiler *LegacyPrimaryQueryCompiler) compilePollingQueryConfig(c legacyQu
 		if c.DataSourceLabel == "bk_data" && c.TimeField == "" {
 			c.TimeField = "dtEventTimeStamp"
 		}
-		clauses, err := compiler.compileLegacyQueryConfig(c, metricConditions)
+		dialect := metricConditions
+		if c.DataSourceLabel == "bk_data" {
+			dialect = bkdataConditions
+		}
+		clauses, err := compiler.compileLegacyQueryConfig(c, dialect)
 		if c.DataSourceLabel == "bk_data" {
 			for i := range clauses {
 				clauses[i].DataSource = "bkdata"

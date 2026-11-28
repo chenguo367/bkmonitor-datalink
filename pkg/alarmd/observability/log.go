@@ -339,6 +339,9 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if f := observation.QueryCooldown; f != nil {
 		attributes = append(attributes, slog.Any("query_cooldown", f))
 	}
+	if f := observation.InputSliceLetGo; f != nil {
+		attributes = append(attributes, slog.Any("input_slice_let_go", f))
+	}
 	// Which outcome, how old the Slot was and how long after the takeover:
 	// a Slot given up on for its age is named by its Query Group and minute
 	// only with these beside them.
@@ -879,6 +882,14 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	}
 	if observation.GapApplySite != "" {
 		attributes = append(attributes, slog.String("gap_apply_site", observation.GapApplySite))
+	}
+	if call := observation.StoreCall; call != nil {
+		attributes = append(attributes,
+			slog.String("store_call_client", call.Client), slog.String("store_call_caller", call.Caller),
+			slog.String("store_call_reason", call.Reason), slog.Int64("store_call_waited_ms", call.Waited.Milliseconds()))
+		if call.LeftKnown {
+			attributes = append(attributes, slog.Int64("store_call_left_ms", call.Left.Milliseconds()))
+		}
 	}
 	if facts := observation.GapStatements; facts != nil {
 		attributes = append(attributes,

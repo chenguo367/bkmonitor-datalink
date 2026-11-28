@@ -405,10 +405,11 @@ func boundedRedisClient(name string) string {
 // only place that sees pipelined members individually, which matters because
 // the shared Redis master is billed per command, not per round trip.
 type RedisCallHook struct {
-	metrics redisCallMetrics
-	client  string
-	now     func() time.Time
-	health  *redisClientHealthBook
+	metrics   redisCallMetrics
+	client    string
+	now       func() time.Time
+	health    *redisClientHealthBook
+	listeners *redisFailureListeners
 }
 
 // RedisHook returns the recorder's Redis instrumentation for one named client.
@@ -418,7 +419,49 @@ func (r *Recorder) RedisHook(client string) *RedisCallHook {
 		return nil
 	}
 	return &RedisCallHook{metrics: r.phaseTwo.redisCalls, client: boundedRedisClient(client), now: time.Now,
-		health: r.phaseTwo.redisHealth}
+		health: r.phaseTwo.redisHealth, listeners: r.phaseTwo.redisFailureListeners}
+}
+
+// OnRedisCallerFailure hands listener each failed call made by a named
+// caller (redisfailure.Callers) that had time to reach the store: its caller,
+// its reason (redisfailure.Reasons) and when it failed. A call its caller
+// cancelled, or issued with its deadline already past, is the caller's and
+// not the store's, and is not handed over.
+func (r *Recorder) OnRedisCallerFailure(listener func(caller, reason string, at time.Time)) {
+	if r == nil || listener == nil {
+		return
+	}
+	r.phaseTwo.redisFailureListeners.add(listener)
+}
+
+// redisFailureListeners are the OnRedisCallerFailure listeners every hook of
+// one recorder hands its failures to.
+type redisFailureListeners struct {
+	mu        sync.RWMutex
+	listeners []func(caller, reason string, at time.Time)
+}
+
+func (l *redisFailureListeners) add(listener func(caller, reason string, at time.Time)) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.listeners = append(l.listeners, listener)
+}
+
+// hear hands one failure of a named caller to every listener, unless the
+// caller cancelled it or issued it with no time left (spentAtIssue).
+func (l *redisFailureListeners) hear(ctx context.Context, caller, reason string, at time.Time) {
+	if l == nil || caller == "" || reason == redisfailure.Canceled {
+		return
+	}
+	if start, ok := ctx.Value(redisCallStartKey{}).(redisCallStart); ok && start.spent {
+		return
+	}
+	l.mu.RLock()
+	listeners := l.listeners
+	l.mu.RUnlock()
+	for _, listener := range listeners {
+		listener(caller, reason, at)
+	}
 }
 
 // RedisClientHealth reads what the hooks have recorded for one client name.
@@ -433,11 +476,22 @@ func (r *Recorder) RedisClientHealth(client string) (RedisClientHealth, bool) {
 
 type redisCallStartKey struct{}
 
-// redisCallStart is when an operation was issued, and whether its caller's
-// context gave it no time then (spentAtIssue).
+// redisCallStart is when an operation was issued, whether its caller's
+// context gave it no time then (spentAtIssue), and how much of the caller's
+// deadline it had, when the context has one.
 type redisCallStart struct {
-	at    time.Time
-	spent bool
+	at        time.Time
+	spent     bool
+	left      time.Duration
+	leftKnown bool
+}
+
+func (h *RedisCallHook) callStart(ctx context.Context) redisCallStart {
+	start := redisCallStart{at: h.now(), spent: spentAtIssue(ctx)}
+	if deadline, ok := ctx.Deadline(); ok {
+		start.left, start.leftKnown = deadline.Sub(start.at), true
+	}
+	return start
 }
 
 func (h *RedisCallHook) BeforeProcess(ctx context.Context, _ redis.Cmder) (context.Context, error) {
@@ -445,12 +499,36 @@ func (h *RedisCallHook) BeforeProcess(ctx context.Context, _ redis.Cmder) (conte
 		return ctx, nil
 	}
 	h.metrics.operations.WithLabelValues(h.client).Inc()
-	return context.WithValue(ctx, redisCallStartKey{}, redisCallStart{at: h.now(), spent: spentAtIssue(ctx)}), nil
+	return context.WithValue(ctx, redisCallStartKey{}, h.callStart(ctx)), nil
+}
+
+// mark is the CallError a failed operation carries up, nil for one that
+// does not say the store failed: no error, a reason that is not the store
+// not answering (redisfailure.StoreUnavailable), a call its caller issued
+// with no time left, or an error already marked by a hook of this client.
+// The mark is also handed to the attempt's redisfailure.Witness, for an
+// attempt whose error will not carry it.
+func (h *RedisCallHook) mark(ctx context.Context, err error, reason string, now time.Time) *redisfailure.CallError {
+	if err == nil || !redisfailure.StoreUnavailable(reason) || redisfailure.CallErrorOf(err) != nil {
+		return nil
+	}
+	start, ok := ctx.Value(redisCallStartKey{}).(redisCallStart)
+	if !ok || start.spent {
+		return nil
+	}
+	call := &redisfailure.CallError{Client: h.client, Caller: redisfailure.Caller(ctx), Reason: reason,
+		Waited: now.Sub(start.at), Left: start.left, LeftKnown: start.leftKnown, Err: err}
+	redisfailure.NoteWitnessed(ctx, call)
+	return call
 }
 
 // AfterProcess counts the operation for its caller here rather than before:
 // a client's hooks run in the order added, and a caller a later hook names
 // (the bundle's per-job clones) is in the context only from then on.
+//
+// A failure that says the store did not answer comes back marked
+// (redisfailure.CallError): go-redis gives the caller the error this returns,
+// and sets it on the command.
 func (h *RedisCallHook) AfterProcess(ctx context.Context, cmd redis.Cmder) error {
 	if h == nil {
 		return nil
@@ -471,6 +549,9 @@ func (h *RedisCallHook) AfterProcess(ctx context.Context, cmd redis.Cmder) error
 	if timed && script != "" && scriptCommand != redisscript.CommandLoad {
 		h.metrics.scriptDuration.WithLabelValues(script, "false").Observe(elapsed)
 	}
+	if call := h.mark(ctx, cmd.Err(), callFailureReason(ctx, cmd.Err()), now); call != nil {
+		return call
+	}
 	return nil
 }
 
@@ -479,13 +560,22 @@ func (h *RedisCallHook) BeforeProcessPipeline(ctx context.Context, _ []redis.Cmd
 		return ctx, nil
 	}
 	h.metrics.operations.WithLabelValues(h.client).Inc()
-	return context.WithValue(ctx, redisCallStartKey{}, redisCallStart{at: h.now(), spent: spentAtIssue(ctx)}), nil
+	return context.WithValue(ctx, redisCallStartKey{}, h.callStart(ctx)), nil
 }
 
 // AfterProcessPipeline counts every member of the batch, because the Redis
 // server executes and is limited by each of them, and records the elapsed
 // time once against the first member so the histogram keeps meaning
 // "round trip" rather than "per command inside a batch".
+//
+// A batch the store did not answer comes back marked, as one call does: each
+// member that failed so carries its redisfailure.CallError, and the batch
+// returns the first. go-redis computed what Exec returns before this runs and
+// replaces it with what this returns, setting it on every member without an
+// error of its own; when the connection failed go-redis has already given
+// every member one, so a member that had an answer keeps it. A batch with a
+// member that did not fail returns nothing here, so no answered member is
+// marked failed.
 func (h *RedisCallHook) AfterProcessPipeline(ctx context.Context, cmds []redis.Cmder) error {
 	if h == nil {
 		return nil
@@ -524,10 +614,34 @@ func (h *RedisCallHook) AfterProcessPipeline(ctx context.Context, cmds []redis.C
 	}
 	if reason != "" {
 		h.metrics.reasons.WithLabelValues(h.client, reason).Inc()
-		h.callerFailure(ctx, reason)
+		h.callerFailure(ctx, reason, now)
 	}
 	h.health.note(h.client, now, failed)
-	return nil
+	return h.markPipeline(ctx, cmds, now)
+}
+
+// markPipeline marks each member of a batch the store did not answer, and is
+// the first mark when every member failed; nil otherwise.
+func (h *RedisCallHook) markPipeline(ctx context.Context, cmds []redis.Cmder, now time.Time) error {
+	var first *redisfailure.CallError
+	everyFailed := true
+	for _, cmd := range cmds {
+		err := cmd.Err()
+		if err == nil {
+			everyFailed = false
+			continue
+		}
+		if call := h.mark(ctx, err, callFailureReason(ctx, err), now); call != nil {
+			cmd.SetErr(call)
+			if first == nil {
+				first = call
+			}
+		}
+	}
+	if first == nil || !everyFailed {
+		return nil
+	}
+	return first
 }
 
 // account counts one command's script and bytes, and says which script it is,
@@ -586,9 +700,10 @@ func (h *RedisCallHook) callerOperation(ctx context.Context) {
 	}
 }
 
-func (h *RedisCallHook) callerFailure(ctx context.Context, reason string) {
+func (h *RedisCallHook) callerFailure(ctx context.Context, reason string, now time.Time) {
 	if caller := redisfailure.Caller(ctx); caller != "" {
 		h.metrics.callerReasons.WithLabelValues(h.client, caller, reason).Inc()
+		h.listeners.hear(ctx, caller, reason, now)
 	}
 }
 
@@ -599,7 +714,7 @@ func (h *RedisCallHook) record(ctx context.Context, name, pipelined string, err 
 	}
 	if reason := callFailureReason(ctx, err); reason != "" {
 		h.metrics.reasons.WithLabelValues(h.client, reason).Inc()
-		h.callerFailure(ctx, reason)
+		h.callerFailure(ctx, reason, now)
 	}
 	h.health.note(h.client, now, err)
 	if timed {

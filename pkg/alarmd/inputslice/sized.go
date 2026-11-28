@@ -45,7 +45,9 @@ type SizedChild struct {
 }
 
 // KeepSizedSplit cuts a leaf read whole this round, by the sample of what it
-// read, for the next Slot to start in its parts: a leaf larger than a slice
+// read - for a leaf cut by prefix, by the bounds of its values instead, at
+// their common prefix (prefixChildSegments): a leaf read whole has them all -
+// for the next Slot to start in its parts: a leaf larger than a slice
 // is meant to be, within its limit, which no split this round made smaller.
 // This round's tree is unchanged - its pending leaves, what it lands - and
 // the split is in its Shape only, after the tree's own splits. The parts are
@@ -55,7 +57,7 @@ type SizedChild struct {
 //
 // Sampled is the series of the sample in each part, and sampled their sum:
 // the share of the leaf's series each part is expected to hold.
-func (tree *Tree) KeepSizedSplit(id int, sample Sample) (children []SizedChild, sampled int, err error) {
+func (tree *Tree) KeepSizedSplit(id int, sample Sample, bounds Bounds) (children []SizedChild, sampled int, err error) {
 	if id < 0 || id >= len(tree.nodes) {
 		return nil, 0, fmt.Errorf("alarmd inputslice: no slice %d", id)
 	}
@@ -63,23 +65,23 @@ func (tree *Tree) KeepSizedSplit(id int, sample Sample) (children []SizedChild, 
 	if target.state == stateDiscarded {
 		return nil, 0, fmt.Errorf("alarmd inputslice: slice %d already split", id)
 	}
-	for _, later := range tree.later {
-		if later.node == id {
-			return nil, 0, fmt.Errorf("alarmd inputslice: slice %d already kept split", id)
-		}
+	if tree.keptLater(id) {
+		return nil, 0, fmt.Errorf("alarmd inputslice: slice %d already kept split", id)
 	}
-	parts, dimension, err := tree.childSegments(target, sample)
+	var parts [][]segment
+	var dimension int
+	if last := target.segments[len(target.segments)-1]; last.byPrefix {
+		parts, dimension, err = tree.prefixChildSegments(target.segments, target.slice, bounds)
+	} else {
+		parts, dimension, err = tree.childSegments(target, sample)
+	}
 	if err != nil {
 		return nil, 0, err
 	}
 	concentrated := func(reason string) error {
 		return &ValueConcentratedError{Reason: reason, Dimension: tree.dimensions[dimension], Slice: target.slice}
 	}
-	leaves := tree.leaves
-	for _, later := range tree.later {
-		leaves += len(later.children) - 1
-	}
-	if leaves-1+len(parts) > MaxLeaves-3 {
+	if tree.leaves+tree.laterLeaves()-1+len(parts) > MaxLeaves-3 {
 		return nil, 0, concentrated(ReasonMaxLeaves)
 	}
 	values := sample[tree.dimensions[dimension]]
@@ -94,13 +96,7 @@ func (tree *Tree) KeepSizedSplit(id int, sample Sample) (children []SizedChild, 
 				held += value.Series
 			}
 		}
-		conditions := make([]execution.InputSliceCondition, 0, len(segments))
-		for _, s := range segments {
-			if s.writesCondition() {
-				conditions = append(conditions, s.condition(tree.dimensions))
-			}
-		}
-		children = append(children, SizedChild{Slice: execution.InputSlice{Conditions: conditions}, Sampled: held})
+		children = append(children, SizedChild{Slice: sliceOf(segments, tree.dimensions), Sampled: held})
 		sampled += held
 	}
 	tree.later = append(tree.later, laterSplit{node: id, children: parts})

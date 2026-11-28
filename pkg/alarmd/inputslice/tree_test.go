@@ -15,6 +15,7 @@ import (
 	"math/rand"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -54,15 +55,39 @@ func (tr *tracker) land(t *testing.T, leaf inputslice.Leaf) {
 func promMatches(t *testing.T, slice execution.InputSlice, values series) bool {
 	t.Helper()
 	for _, condition := range slice.Conditions {
-		pattern, err := regexp.Compile("^(?:" + condition.Pattern + ")$")
-		if err != nil {
-			t.Fatalf("pattern %q does not compile as a matcher: %v", condition.Pattern, err)
-		}
-		if pattern.MatchString(values[condition.Dimension]) == condition.Negated {
+		if compiled(t, "^(?:"+condition.Pattern+")$").MatchString(values[condition.Dimension]) == condition.Negated {
 			return false
 		}
 	}
 	return true
+}
+
+// goMatches reads a slice as execution.InputSlice.Matches does - each
+// pattern as written, a missing label the empty value - each pattern compiled
+// once for the whole run, as the cases read thousands of series a slice.
+func goMatches(t *testing.T, slice execution.InputSlice, values series) bool {
+	t.Helper()
+	for _, condition := range slice.Conditions {
+		if compiled(t, condition.Pattern).MatchString(values[condition.Dimension]) == condition.Negated {
+			return false
+		}
+	}
+	return true
+}
+
+var patterns sync.Map
+
+func compiled(t *testing.T, pattern string) *regexp.Regexp {
+	t.Helper()
+	if known, ok := patterns.Load(pattern); ok {
+		return known.(*regexp.Regexp)
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		t.Fatalf("pattern %q does not compile: %v", pattern, err)
+	}
+	patterns.Store(pattern, re)
+	return re
 }
 
 // assertPartition checks the property the tree exists for, independently of
@@ -78,23 +103,28 @@ func assertPartition(t *testing.T, leaves []execution.InputSlice, population []s
 			t.Fatalf("leaf %d takes %d bytes", index, slice.ConditionBytes())
 		}
 	}
-	for _, values := range population {
-		goMatches, storeMatches := 0, 0
+	// Matches itself, once a leaf: the reading goMatches stands for.
+	if len(population) > 0 {
 		for _, slice := range leaves {
-			matched, err := slice.Matches(values)
-			if err != nil {
-				t.Fatalf("match: %v", err)
-			}
-			if matched {
-				goMatches++
-			}
-			if promMatches(t, slice, values) {
-				storeMatches++
+			matched, err := slice.Matches(population[0])
+			if err != nil || matched != goMatches(t, slice, population[0]) {
+				t.Fatalf("Matches %v %v and goMatches disagree on %q in %s", matched, err, population[0], describe([]execution.InputSlice{slice}))
 			}
 		}
-		if goMatches != 1 || storeMatches != 1 {
+	}
+	for _, values := range population {
+		byGo, byStore := 0, 0
+		for _, slice := range leaves {
+			if goMatches(t, slice, values) {
+				byGo++
+			}
+			if promMatches(t, slice, values) {
+				byStore++
+			}
+		}
+		if byGo != 1 || byStore != 1 {
 			t.Fatalf("series %q is in %d leaves by Matches and %d by the store's matcher, want 1 and 1; leaves %s",
-				values, goMatches, storeMatches, describe(leaves))
+				values, byGo, byStore, describe(leaves))
 		}
 	}
 }
@@ -116,11 +146,7 @@ func members(t *testing.T, slice execution.InputSlice, population []series) []se
 	t.Helper()
 	var in []series
 	for _, values := range population {
-		matched, err := slice.Matches(values)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if matched {
+		if goMatches(t, slice, values) {
 			in = append(in, values)
 		}
 	}
@@ -195,10 +221,12 @@ func randomPopulation(rng *rand.Rand, dimensions []string, size int) []series {
 }
 
 // TestEveryValueInExactlyOneLeafAfterAnySplits drives the tree from its public
-// entry with random landings and splits, samples that are the whole slice, a
-// prefix of it as a stream would deliver, or nothing, and checks after every
-// step that the leaves partition both the series the samples came from and
-// series no sample ever showed.
+// entry with random landings and splits, for its size or its time, samples
+// that are the whole slice, a prefix of it as a stream would deliver, or
+// nothing, and checks after every step that the leaves partition both the
+// series the samples came from and series no sample ever showed. Every other
+// seed starts cut by prefix - its slices split for their size switch to the
+// values' ends under their prefix - the others cut from the end.
 func TestEveryValueInExactlyOneLeafAfterAnySplits(t *testing.T) {
 	dimensions := []string{"service", "pod", "zone"}
 	for seed := int64(1); seed <= 12; seed++ {
@@ -207,7 +235,11 @@ func TestEveryValueInExactlyOneLeafAfterAnySplits(t *testing.T) {
 			population := randomPopulation(rng, dimensions, 300)
 			unseen := randomPopulation(rng, dimensions, 300)
 			probe := append(append([]series(nil), population...), unseen...)
-			tree, err := inputslice.New(dimensions, 1+rng.Intn(12), dimensions[0])
+			cut := inputslice.FixedCut(dimensions[0])
+			if seed%2 == 1 {
+				cut = inputslice.SuffixCut(dimensions[0])
+			}
+			tree, err := inputslice.NewCut(dimensions, 1+rng.Intn(12), cut)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -233,7 +265,11 @@ func TestEveryValueInExactlyOneLeafAfterAnySplits(t *testing.T) {
 					sample = sampleOf(dimensions, in)
 				}
 				before := tree.Leaves()
-				children, err := tree.Split(leaf.ID, sample)
+				split := tree.Split
+				if rng.Intn(3) == 0 {
+					split = tree.SplitKept
+				}
+				children, err := split(leaf.ID, sample)
 				if err != nil {
 					if !errors.Is(err, inputslice.ErrValueConcentrated) {
 						t.Fatalf("split: %v", err)
@@ -259,23 +295,23 @@ func TestEveryValueInExactlyOneLeafAfterAnySplits(t *testing.T) {
 	}
 }
 
-// TestRootSplitConditions pins the conditions of a split without a sample
-// to the forms of §7.3, worked out by hand: the fixed alphabet's 36
-// characters in four groups of nine, the last group left to the complement,
-// and the root's exhausted child negated.
+// TestRootSplitConditions pins the conditions of a split from the end
+// without a sample to the forms of §7.3, worked out by hand: the fixed
+// alphabet's 36 characters in four groups of nine, the last group left to the
+// complement, and the root's exhausted child negated.
 func TestRootSplitConditions(t *testing.T) {
-	tree, err := inputslice.New([]string{"pod"}, 1, "pod")
+	whole, err := inputslice.New([]string{"pod"}, 1, "pod")
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending := tree.Pending()
-	if len(pending) != 1 || !pending[0].Slice.IsZero() {
+	if pending := whole.Pending(); len(pending) != 1 || !pending[0].Slice.IsZero() {
 		t.Fatalf("a tree of one leaf is the zero slice, got %+v", pending)
 	}
-	children, err := tree.Split(pending[0].ID, nil)
+	tree, err := inputslice.NewCut([]string{"pod"}, 2, inputslice.SuffixCut("pod"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	children := tree.Pending()
 	want := []execution.InputSliceCondition{
 		{Dimension: "pod", Pattern: "^(?s:.*)[0-8]$"},
 		{Dimension: "pod", Pattern: "^(?s:.*)[9a-h]$"},
@@ -303,8 +339,8 @@ func TestRootSplitConditions(t *testing.T) {
 	if got := grandchildren[len(grandchildren)-1].Slice.Conditions[0].Pattern; got != "^[0-8]$" {
 		t.Fatalf("exhausted grandchild is %q", got)
 	}
-	if tree.Discarded() != 2 {
-		t.Fatalf("discarded %d, want 2", tree.Discarded())
+	if tree.Discarded() != 1 {
+		t.Fatalf("discarded %d, want 1: the starting split is no slice read", tree.Discarded())
 	}
 }
 
@@ -518,7 +554,7 @@ func TestConcentratedOnEveryDimensionIsNamed(t *testing.T) {
 // MaxLeaves, a leaf no split separates - cut to its end on both dimensions -
 // landed as it comes.
 func TestMaxLeavesIsNamed(t *testing.T) {
-	tree, err := inputslice.New([]string{"pod", "zone"}, 1, "pod")
+	tree, err := inputslice.NewCut([]string{"pod", "zone"}, 2, inputslice.SuffixCut("pod"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -557,7 +593,7 @@ func TestInitialTreeReachesK0(t *testing.T) {
 	probe := randomPopulation(rng, dimensions, 400)
 	reachable := 0
 	for k0 := 0; k0 <= inputslice.MaxLeaves; k0++ {
-		tree, err := inputslice.New(dimensions, k0, dimensions[0])
+		tree, err := inputslice.NewCut(dimensions, k0, inputslice.SuffixCut(dimensions[0]))
 		if err != nil {
 			assertConcentrated(t, err, inputslice.ReasonMaxLeaves)
 			if k0 <= 2 {
@@ -720,7 +756,7 @@ func TestASliceOfOneValueIsCutOnAnEarlierDimension(t *testing.T) {
 	}
 	probe := append(append([]series(nil), population...),
 		series{"zone": "z9", "host": "h2"}, series{"host": "h1"}, series{"zone": "z1"}, series{}, series{"zone": "z1", "host": "hx"})
-	tree, err := inputslice.New(dimensions, 2, "host")
+	tree, err := inputslice.NewCut(dimensions, 2, inputslice.SuffixCut("host"))
 	if err != nil {
 		t.Fatal(err)
 	}

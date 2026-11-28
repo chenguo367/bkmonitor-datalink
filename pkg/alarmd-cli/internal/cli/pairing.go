@@ -92,7 +92,13 @@ func (a *App) ensureSession(env string, force bool) (Profile, error) {
 	var out Profile
 	var gone error
 	err := a.Store.locked(func(c *config) (bool, error) {
-		p, ok := c.Profiles[env]
+		name, ok, err := resolve(c, env)
+		if err != nil {
+			return false, err
+		}
+		p := c.Profiles[name]
+		p.name = name
+		env = name
 		if !ok || (p.AccessToken == "" && p.RefreshToken == "") {
 			return false, errors.New("environment has no session; open the authorization page and run auth listen, or auth login")
 		}
@@ -106,14 +112,17 @@ func (a *App) ensureSession(env string, force bool) (Profile, error) {
 					// Written, then reported: a pairing the server ended is gone
 					// here too.
 					p.AccessToken, p.SessionID, p.ExpiresAt, p.RefreshToken, p.PairingID, p.Pairing = "", "", "", "", "", ""
+					p.name = ""
 					c.Profiles[env] = p
 					gone = err
 					return true, nil
 				}
 				return false, err
 			}
-			c.Profiles[env] = next
 			out = next
+			out.name = name
+			next.name = ""
+			c.Profiles[env] = next
 			return true, nil
 		}
 		// A session from before this client is offered for pairing once; the
@@ -124,8 +133,9 @@ func (a *App) ensureSession(env string, force bool) (Profile, error) {
 			if ok {
 				p.RefreshToken, p.PairingID, p.Pairing = refresh, id, "paired"
 			}
-			c.Profiles[env] = p
 			out = p
+			p.name = ""
+			c.Profiles[env] = p
 			return true, nil
 		}
 		out = p
@@ -425,10 +435,18 @@ func (a *App) exchange(code string, expected Profile, verifier string, rebind bo
 		return nil, "protocol_error", err.Error()
 	}
 	pairing := readPairing(result, &session)
-	if err := a.Store.save(session, rebind); err != nil {
+	session.name = p.name
+	name, renamed, err := a.Store.bind(session, rebind)
+	if err != nil {
 		return nil, "configuration_error", err.Error()
 	}
-	return map[string]any{"environment_id": session.EnvironmentID, "expires_at": session.ExpiresAt, "session_id": session.SessionID, "pairing": pairing, "scope": session.Scope}, "", ""
+	out := map[string]any{"profile": name, "environment_id": session.EnvironmentID, "expires_at": session.ExpiresAt, "session_id": session.SessionID, "pairing": pairing, "scope": session.Scope}
+	if renamed != nil {
+		out["profile_renamed"] = map[string]any{"from": renamed.From, "to": renamed.To}
+		fmt.Fprintf(a.Err, "Profile %s is now %s: environment %s has more than one deployment, so --env %s is refused as ambiguous; name each with --env %s or --env %s.\n",
+			renamed.From, renamed.To, session.EnvironmentID, session.EnvironmentID, renamed.To, name)
+	}
+	return out, "", ""
 }
 
 // listen runs one loopback login and returns its exit code.
@@ -442,10 +460,16 @@ func (a *App) listen(o options) int {
 	switch {
 	case o.env != "" && o.url != "":
 		return a.fail("invalid_input", "auth listen takes --env or --url, not both", 2)
+	case o.env != "" && o.profile != "":
+		return a.fail("invalid_input", "auth listen --env logs in to the profile --env names; --profile goes with --url", 2)
 	case o.env != "":
 		var err error
 		p, err = a.Store.profile(o.env)
 		if err != nil {
+			var ambiguous *ambiguousProfile
+			if errors.As(err, &ambiguous) {
+				return a.fail("ambiguous_environment", err.Error(), 2)
+			}
 			return a.fail("configuration_error", err.Error(), 1)
 		}
 	case o.url != "":
@@ -453,7 +477,7 @@ func (a *App) listen(o options) int {
 		if err != nil {
 			return a.fail("invalid_input", err.Error(), 2)
 		}
-		p = Profile{PublicBaseURL: entry, CACert: o.caCert, InsecureTLS: o.insecureTLS}
+		p = Profile{PublicBaseURL: entry, CACert: o.caCert, InsecureTLS: o.insecureTLS, name: o.profile}
 	default:
 		return a.fail("invalid_input", "auth listen requires --env <environment_id> or --url <entry URL>", 2)
 	}

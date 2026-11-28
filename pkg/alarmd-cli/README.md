@@ -44,11 +44,11 @@ tar -xzf alarmd-cli_<version>_<os>_<arch>.tar.gz
 ```sh
 alarmd-cli auth login
 alarmd-cli profile list
-alarmd-cli discover --env <environment_id>
-alarmd-cli describe <operation> --env <environment_id>
-alarmd-cli invoke <operation> --env <environment_id> --input '{"field":"value"}'
+alarmd-cli discover --env <profile>
+alarmd-cli describe <operation> --env <profile>
+alarmd-cli invoke <operation> --env <profile> --input '{"field":"value"}'
 # 参数也可以读取已有的 JSON 文件
-alarmd-cli invoke <operation> --env <environment_id> --input @input.json
+alarmd-cli invoke <operation> --env <profile> --input @input.json
 ```
 
 登录自动导入授权码中的稳定 `environment_id`、名称和入口；可选 `auth login --env <id>` 用于核对环境。其余远程命令必须显式传 `--env`。`profile use <id>` 仅记录人工偏好，不会给远程命令隐式选择环境。服务端更新操作目录后客户端无需升级；先读 discover 摘要，按需读 describe 中的 schema、limits、parameter_sources 和示例。部署自带与它同一提交构建的 alarmd-cli，并在 `api/cli/version` 报出版本；发行版 CLI（版本号为 `x.y.z`）在登录和每次 discover 时读一次，与本地版本不同就在 stderr 提示，并给出从这个部署安装匹配版本的命令（`curl -fsSL <入口>/api/cli/install.sh | sh -s -- --server <入口>`）。不自动更新；部署不报版本（旧部署 404、未打包 CLI 的 503）或本地是开发构建时不提示。
@@ -65,19 +65,25 @@ alarmd-cli invoke <operation> --env <environment_id> --input @input.json
 - Agent 拿到的是已经登录的环境。开始前确认：
 
   ```sh
-  alarmd-cli profile list                         # 找到 environment_id，不显示凭据
-  alarmd-cli auth status --env <environment_id>   # 由服务端核对会话
+  alarmd-cli profile list                         # 找到 profile，不显示凭据
+  alarmd-cli auth status --env <profile>   # 由服务端核对会话
   ```
 
 - 任何命令返回 `error.code` 为 `credentials_expired` 时，停下来，把输出里的登录页地址和命令交给人，等人重新登录后再继续。
-- 每个远程命令都显式带 `--env <environment_id>`。`profile use` 只记录人的偏好，不会替命令选环境。
+- 每个远程命令都显式带 `--env <profile>`。`profile use` 只记录人的偏好，不会替命令选环境。
+- profile 按名字保存，`profile list` 列出名字、`environment_id` 和入口地址：
+  - 名字的来源依次是：登录时的 `--profile`；已经绑定在同一 environment_id、同一入口上的 profile；否则取入口主机名里的部署名（`apps.<部署名>.<域名>`）。
+  - 几个部署报同一个 environment_id 时，各自一个 profile。`--env` 填这个 id 会返回 `ambiguous_environment`，错误里列出这几个 profile；填 profile 名字则只走它自己的入口。
+  - 每个 profile 钉住自己的入口：用同一个名字从另一个入口登录会被拒绝，除非带 `--rebind`；`--rebind` 只改指名的那一个 profile。
+  - 以前按 environment_id 保存的 profile，名字就是那个 id。在只有一个部署时照常可用，不用重新登录。
+  - 同一个 environment_id 的第二个部署登录时，这个老 profile 会自动改名为它自己入口派生出的名字。凭据和钉住的入口都跟着它走，不用重新登录。登录输出里有 `profile_renamed`（from、to），stderr 也会提示一行。之后再用 environment_id 当 `--env`，会返回 `ambiguous_environment`。
 
 ### 2. 固定调用顺序：discover → describe → invoke
 
 ```sh
-alarmd-cli discover --env <environment_id>
-alarmd-cli describe <operation> --env <environment_id>
-alarmd-cli invoke <operation> --env <environment_id> --input @input.json
+alarmd-cli discover --env <profile>
+alarmd-cli describe <operation> --env <profile>
+alarmd-cli invoke <operation> --env <profile> --input @input.json
 ```
 
 1. `discover`：列出当前服务端提供的操作。只使用这里列出的操作名。不同部署、不同版本的操作目录可能不同，本文提到的操作也以 discover 为准。
@@ -112,7 +118,7 @@ stdout 是一个 JSON 对象（`--help` 除外），进度和提示写在 stderr
 
 **没有 agent 的环境：先做一份诊断快照**
 
-1. `alarmd-cli snapshot --env <environment_id> [--out <目录>]`：按服务端 `discover` 给出的每会话调用速率，读操作目录、`fleet.get`、全部 `diagnose.environment` 分页、一组固定读取、`fleet.get` 里不正常的副本（逐个读运行配置、指标名单与关键指标族、日志）和不在检测的策略（`strategy.get` 与 `object.get`），写成一个 `alarmd-snapshot-<环境>-<UTC 时刻>.tar.gz` 和旁边的 `.sha256`。计划调用数和时长上限（调用数按速率折成分钟，再加一次调用的最长期限 30 秒）在开始收集前写进 `manifest.json`；超过时长或 512 MiB 的读取记为 `skipped_by_bound`。每会话调用速率由同一登录下的所有调用共用（另开终端跑的命令也算），所以一次读取可能被 `rate_limited` 拒绝；被拒的调用没有执行，快照按应答的 `Retry-After`（没有时等到本机时钟的下一分钟再多 1 秒）等待后重问同一读取，每项最多问 3 次。等待的时间没有调用能用，所以时长上限随每次等待顺延，顺延总量不超过上限本身（manifest 的 `budget_wait_seconds` 记总等待）；放不下的等待不等，该项记为 `refused`（原因 `rate_limited`）。其他拒绝不重问。退出码：0 每项都收到了；3 只在有没收到的项时（`refused`、`timeout`、`skipped_by_bound`、`not_in_catalog`，逐项写在 manifest 里）；应答状态为 `partial` 的读取算收到，按 `partial` 连同原因记进 manifest，不让退出码变成 3；1 什么都没写成。
+1. `alarmd-cli snapshot --env <profile> [--out <目录>]`：按服务端 `discover` 给出的每会话调用速率，读操作目录、`fleet.get`、全部 `diagnose.environment` 分页、一组固定读取、`fleet.get` 里不正常的副本（逐个读运行配置、指标名单与关键指标族、日志）和不在检测的策略（`strategy.get` 与 `object.get`），写成一个 `alarmd-snapshot-<环境>-<UTC 时刻>.tar.gz` 和旁边的 `.sha256`。计划调用数和时长上限（调用数按速率折成分钟，再加一次调用的最长期限 30 秒）在开始收集前写进 `manifest.json`；超过时长或 512 MiB 的读取记为 `skipped_by_bound`。每会话调用速率由同一登录下的所有调用共用（另开终端跑的命令也算），所以一次读取可能被 `rate_limited` 拒绝；被拒的调用没有执行，快照按应答的 `Retry-After`（没有时等到本机时钟的下一分钟再多 1 秒）等待后重问同一读取，每项最多问 3 次。等待的时间没有调用能用，所以时长上限随每次等待顺延，顺延总量不超过上限本身（manifest 的 `budget_wait_seconds` 记总等待）；放不下的等待不等，该项记为 `refused`（原因 `rate_limited`）。其他拒绝不重问。退出码：0 每项都收到了；3 只在有没收到的项时（`refused`、`timeout`、`skipped_by_bound`、`not_in_catalog`，逐项写在 manifest 里）；应答状态为 `partial` 的读取算收到，按 `partial` 连同原因记进 manifest，不让退出码变成 3；1 什么都没写成。
 2. 快照里保留主机地址、主机名和业务 ID（诊断要用），凭据已脱敏；交给谁就等于给了谁这个环境的这些信息。`manifest.json` 的 `redactions` 不为空，说明服务端漏脱了凭据，按缺陷上报。
 3. agent 读快照用同一套命令，加 `--snapshot <文件>`：`discover`、`describe <operation>`、`invoke <operation> --input …`、`diagnose`。读到的形状与在线相同，`meta.snapshot` 写明文件和收集时刻；快照里没有按这组参数读过的，返回 `not_in_snapshot` 并列出它读过的参数。读快照不连网络，`--env` 可省略；给了而与快照的环境不一致时返回退出码 2 并说出快照是哪个环境的，拿到一份不知来源的快照时可以这样核对。
 
@@ -131,7 +137,7 @@ stdout 是一个 JSON 对象（`--help` 除外），进度和提示写在 stderr
 
 **某条策略为什么没告警**
 
-1. `alarmd-cli diagnose --env <environment_id>`：逐页读 `diagnose.environment` 并核对覆盖（退出码 3 表示覆盖不成立）。在 `result.strategies` 里找 `strategy_id` 为 `<strategy_id>` 的行，看 `verdict`、`action`、`reason` 和 `dispositions`（每条的 `scope`、`disposition`、`reason`、`field_path`、`detail`）。
+1. `alarmd-cli diagnose --env <profile>`：逐页读 `diagnose.environment` 并核对覆盖（退出码 3 表示覆盖不成立）。在 `result.strategies` 里找 `strategy_id` 为 `<strategy_id>` 的行，看 `verdict`、`action`、`reason` 和 `dispositions`（每条的 `scope`、`disposition`、`reason`、`field_path`、`detail`）。
 2. `invoke strategy.get`，输入 `{"strategy_id":"<strategy_id>"}`：看 `standing`、`dispositions` 和 `plans[]`（每个运行对象的 `query_group`）。
 3. `invoke object.get`：参数取 strategy.get 的 `next_call` 里 `operation` 为 `object.get` 的那一项。看 `anomaly`、`facts`、`records_status` 和 `records`（保留的生命周期记录，只保留约一小时，没有时不出现）。
 4. `invoke slot.get`：输入 `query_group` 和 `evaluation_time`（Slot 的 Unix 秒）。object.get 只为它保留记录里的 Slot 给出 `slot.get` 的 `next_call`；没告警的策略常常没有保留记录，这时 `evaluation_time` 取第 1 步那一行的 `plans[].last_full_slot`（最近一轮读完整的 Slot，有的话）。它重建历史 Slot 的查询条件、关联保留记录，不请求查询服务。
@@ -139,7 +145,7 @@ stdout 是一个 JSON 对象（`--help` 除外），进度和提示写在 stderr
 
 **部署是否健康**
 
-1. `alarmd-cli accept --env <environment_id>`（可加 `--expect-build <build_prefix>`）：逐项给出 PASS、FAIL、INFO、READ_FAILED、NOT_BUILT 或 UNDECIDED，任何 FAIL 或 READ_FAILED 时退出码为 1。`column=governance` 的项是策略负责人要改的，不算部署失败。全部读数在 `meta.result_file`。
+1. `alarmd-cli accept --env <profile>`（可加 `--expect-build <build_prefix>`）：逐项给出 PASS、FAIL、INFO、READ_FAILED、NOT_BUILT 或 UNDECIDED，任何 FAIL 或 READ_FAILED 时退出码为 1。`column=governance` 的项是策略负责人要改的，不算部署失败。全部读数在 `meta.result_file`。
 2. `invoke fleet.get`：看 `health`（整体结论），再看对象计数 `expected`、`covered`、`healthy`、`unknown` 与 `anomalies_total`。
 3. `invoke k8s.pods`：看 Deployment 和各 Pod 的就绪、重启次数、上次退出原因。需要时再用 `k8s.events`（可选输入 `pod`）、`k8s.logs`（必填 `pod`；可选 `previous`、`lines`，按子串过滤用 `contains`，配 `since_seconds` 限定时间窗），`lifecycle.get` 看各副本的启动与停止记录。
 
@@ -166,8 +172,8 @@ stdout 是一个 JSON 对象（`--help` 除外），进度和提示写在 stderr
 需要服务端的操作目录里有 `slot.get` 和 `slot.query`（用 `discover` 查看）。先查看操作合同：
 
 ```sh
-alarmd-cli describe slot.get --env <environment_id>
-alarmd-cli describe slot.query --env <environment_id>
+alarmd-cli describe slot.get --env <profile>
+alarmd-cli describe slot.query --env <profile>
 ```
 
 从 `object.get` 的 `next_call` 取得 `slot.get` 参数；后者只读取保留证据和查询预览，再从其 `next_call` 选择一个 `slot.query`，将 `params` 原样保存为 JSON 文件并通过 `--input @文件名` 调用。大结果从 `meta.result_file` 读取。`slot.query` 默认由当前 owner 执行，也可按 describe 的合同显式传 `replica` 选择实例。
@@ -180,11 +186,11 @@ alarmd-cli describe slot.query --env <environment_id>
 
 ```sh
 # Deployment 状态，各 Pod 的阶段、就绪、重启次数与上次退出原因
-alarmd-cli invoke k8s.pods --env <environment_id>
+alarmd-cli invoke k8s.pods --env <profile>
 # Deployment、ReplicaSet、Pod 上的事件，新的在前；可只看一个 Pod
-alarmd-cli invoke k8s.events --env <environment_id> --input '{"pod":"<pod>"}'
+alarmd-cli invoke k8s.events --env <profile> --input '{"pod":"<pod>"}'
 # 容器日志末尾；previous=true 读上一次运行（崩溃前）
-alarmd-cli invoke k8s.logs --env <environment_id> --input '{"pod":"<pod>","previous":true,"lines":200}'
+alarmd-cli invoke k8s.logs --env <profile> --input '{"pod":"<pod>","previous":true,"lines":200}'
 ```
 
 读不到时按失败码区分：`k8s_rbac_forbidden`（Role 没建或被关）、`k8s_service_account_not_mounted`、`k8s_apiserver_unreachable`、`k8s_not_found`（含从未写过的 previous 日志）、`k8s_not_in_scope`（不是 alarmd 的 Pod 或容器）等，不会以空列表冒充"没有事件"。所有副本都挂掉时这条路读不到，只能用 kubectl。
@@ -197,11 +203,11 @@ SRE 通道有集群管理权限（RBAC 组只读，不给 bind/escalate）。三
 # 部署前检查：每个对象以 dryRun=All 交给 apiserver，准入 webhook、schema、配额、冲突照常检查，什么都不落库
 helm template <release> <chart> -n <ns> -f <values> > render.yaml
 python3 -c 'import json,sys;print(json.dumps({"manifests":open(sys.argv[1]).read(),"namespace":sys.argv[2]}))' render.yaml <ns> > dry.json
-alarmd-cli invoke k8s.dry_run --env <environment_id> --input @dry.json
+alarmd-cli invoke k8s.dry_run --env <profile> --input @dry.json
 # 写入：字段管理者 alarmd-sre；冲突时答 conflict，force=true 接管；结果给出字段差异，Secret 只显示键与指纹
-alarmd-cli invoke k8s.apply --env <environment_id> --input @apply.json
+alarmd-cli invoke k8s.apply --env <profile> --input @apply.json
 # 删除：按先前 k8s.list 读到的 uid；kube-system、kube-public、kube-node-lease、default 与 alarmd 所在命名空间不删
-alarmd-cli invoke k8s.delete --env <environment_id> --input '{"api_version":"networking.k8s.io/v1","kind":"Ingress","namespace":"<ns>","name":"<name>","uid":"<uid>"}'
+alarmd-cli invoke k8s.delete --env <profile> --input '{"api_version":"networking.k8s.io/v1","kind":"Ingress","namespace":"<ns>","name":"<name>","uid":"<uid>"}'
 ```
 
 Secret 的值只从本地文件经 `--input @文件` 传入，从不出现在应答、审计与日志里；CLI 到 alarmd 若是明文 HTTP，值会以明文经过集群网络。每次写入都留 `sre_action` 审计。对象带 `meta.helm.sh/release-name` 时应答写明 `helm_release`：下一次 `helm upgrade` 会改回或冲突。
@@ -216,8 +222,8 @@ Secret 的值只从本地文件经 `--input @文件` 传入，从不出现在应
 ## 会话与环境
 
 ```sh
-alarmd-cli auth status --env <environment_id>
-alarmd-cli auth logout --env <environment_id>
+alarmd-cli auth status --env <profile>
+alarmd-cli auth logout --env <profile>
 # 只有核实同一环境确实迁移入口后，才明确重新绑定
 alarmd-cli auth login --rebind
 ```

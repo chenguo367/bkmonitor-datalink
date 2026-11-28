@@ -18,16 +18,28 @@ Start here, without reading source code:
   alarmd-cli --version
   alarmd-cli auth listen --url <entry> --port <p> --state <s>   # the command the authorization page shows
   alarmd-cli auth login                    # paste the trusted OB page code; hidden input
-  alarmd-cli profile list                  # find environment_id; no secrets shown
-  alarmd-cli discover --env <environment_id>
-  alarmd-cli describe <operation> --env <environment_id>
-  alarmd-cli invoke <operation> --env <environment_id> --input '{"field":"value"}'
+  alarmd-cli profile list                  # find the profile; no secrets shown
+  alarmd-cli discover --env <profile>
+  alarmd-cli describe <operation> --env <profile>
+  alarmd-cli invoke <operation> --env <profile> --input '{"field":"value"}'
+
+Profiles:
+  Each login is kept under a profile name: --profile, else the profile already bound to that
+  environment at that entry, else the deployment's name in the entry's host (apps.<name>.<domain>).
+  Deployments that report one environment_id keep a profile each. --env takes a profile name, or
+  an environment_id only one profile has; one several profiles have is refused as
+  ambiguous_environment, naming them. A profile still named after its environment_id (one from
+  before names) is renamed to its own entry's name when a second deployment of that environment
+  logs in, credentials and entry with it; the login says from which name to which. A profile
+  stays pinned to its entry: a login from another entry under the same name is refused unless
+  --rebind, which moves only the profile it names.
 
 Commands:
-  auth listen (--url <entry> | --env <id>) --port <p> --state <s> [--timeout 5m]
+  auth listen (--url <entry> [--profile <name>] | --env <profile>) --port <p> --state <s> [--timeout 5m]
                                             Wait on 127.0.0.1:<p> for the authorization page to hand over
                                             a code bound to this process's PKCE verifier; exits after one login.
-  auth login [--env <id>] [--rebind]        Import code from hidden input or protected stdin (fallback when
+  auth login [--profile <name>] [--env <profile>] [--rebind]
+                                            Import code from hidden input or protected stdin (fallback when
                                             the browser and the CLI are on different machines).
                                             Default login is deployment_ops_readonly; renewal preserves it.
   A login pairs this machine: the session renews itself from a rolling renewal credential kept in the
@@ -37,17 +49,17 @@ Commands:
              [--insecure-tls]             Skip certificate/hostname verification for this environment.
                                            Mutually exclusive with --ca-cert; persists after login.
                                            No code/token command argument is accepted.
-                                           --rebind explicitly allows a changed origin.
-  auth status --env <id>                   Check server session; does not renew it.
-  auth logout --env <id>                   Revoke, then conditionally clear local credentials.
+                                           --rebind explicitly allows a changed origin for the named profile.
+  auth status --env <profile>                   Check server session; does not renew it.
+  auth logout --env <profile>                   Revoke, then conditionally clear local credentials.
                                            Reports when remote revocation is unconfirmed.
-  profile list                            List imported environments and expiry hints.
-  profile use <environment_id>             Record human preference only; remote --env required.
-  discover --env <id>                      Fetch concise current capabilities and next steps.
-  diagnose --env <id>                      Diagnose every strategy of the source's active set: reads all pages of
+  profile list                            List profiles: name, environment_id, entry and expiry hints.
+  profile use <profile>                    Record human preference only; remote --env required.
+  discover --env <profile>                      Fetch concise current capabilities and next steps.
+  diagnose --env <profile>                      Diagnose every strategy of the source's active set: reads all pages of
                                            diagnose.environment and proves the coverage across them (rows = universe,
                                            no id twice, verdicts sum to the universe); exit 3 when it does not hold.
-  accept --env <id> [--expect-build <prefix>] [--window 5m]
+  accept --env <profile> [--expect-build <prefix>] [--window 5m]
                                            Deployment acceptance: reads the catalog, fleet, Pods, Redis, each
                                            replica's counters, the full diagnosis and the public surface without a
                                            session, then the control source refresh counts again after --window
@@ -57,7 +69,7 @@ Commands:
                                            column=governance list what strategy owners must fix and never fail
                                            it (output refusals whose rule is the strategy's). The items and every
                                            answer they were decided from are saved in meta.result_file.
-  snapshot --env <id> [--out <dir>]        Write the deployment's diagnostic reads, at the session's rate, to one
+  snapshot --env <profile> [--out <dir>]        Write the deployment's diagnostic reads, at the session's rate, to one
                                            alarmd-snapshot-<env>-<UTC>.tar.gz with its .sha256; manifest.json
                                            files every read with its result. Exit 0 when every read was collected,
                                            exit 3 only when a read was not collected (refused, timeout,
@@ -65,8 +77,8 @@ Commands:
                                            status was collected, filed with its reason, and does not make it 3.
                                            Exit 1 when nothing was written. Read one back with --snapshot <file>
                                            on discover, describe, invoke and diagnose, without the network.
-  describe <operation> --env <id>           Fetch schema, limits, sources and examples.
-  invoke <operation> --env <id> [--input <JSON|@file> | --params-file <file|->]
+  describe <operation> --env <profile>           Fetch schema, limits, sources and examples.
+  invoke <operation> --env <profile> [--input <JSON|@file> | --params-file <file|->]
              [--stdin-file <file|-> | --script-file <file|->]
                                            Send file content through the described stdin parameter.
                                            Scripts are data; no local shell is started.
@@ -87,7 +99,7 @@ Commands:
   --version                               JSON version; no configuration or network required.
 
 Agent rules:
-  Always specify --env on remote commands; login may derive it from the code.
+  Always specify --env <profile> on remote commands; login may derive the profile from the code and entry.
   Discover/describe supplies all operation names and input contracts; only diagnose, accept
   and snapshot compose built-in reads.
   Read next_call as a suggestion. It is never executed automatically.

@@ -16,7 +16,8 @@ import (
 
 // splitKind is why a tree split a node: to start in the leaves asked
 // (New), for a slice past its limit (Split), for a slice the Query Group's
-// next Slot is to be read split too for its time (SplitKept), or for its size
+// next Slot is to be read split too for its time (SplitKept, and the
+// round's judgement of a tree cut by prefix, Next), or for its size
 // (SplitSized, KeepSizedSplit).
 type splitKind int
 
@@ -82,8 +83,13 @@ func (shape Shape) Leaves() int {
 func (shape Shape) Dimensions() []string { return slices.Clone(shape.dimensions) }
 
 // Shape is the tree's leaves as its Query Group's next Slot starts in them,
-// the zero Shape when the tree made no kept split.
+// the zero Shape when the tree made no kept split, or switched: a tree cut by
+// prefix a slice of which was split by its values' ends (Switched) leaves its
+// Query Group to start cut from the end, from its root.
 func (tree *Tree) Shape() Shape {
+	if tree.switched {
+		return Shape{}
+	}
 	madeBy := map[int]int{}
 	for index, split := range tree.splits {
 		for _, child := range split.children {
@@ -218,6 +224,7 @@ func FromShape(dimensions []string, shape Shape) (*Tree, error) {
 			return nil, &ShapeRefusedError{Reason: ShapeRefusedMaxLeaves}
 		}
 	}
+	tree.replayed = len(tree.splits)
 	return tree, nil
 }
 
@@ -268,7 +275,8 @@ func (tree *Tree) LastKept() []int {
 
 func (s segment) equal(other segment) bool {
 	return s.dimension == other.dimension && s.exhausted == other.exhausted &&
-		slices.EqualFunc(s.path, other.path, class.equal)
+		slices.EqualFunc(s.path, other.path, class.equal) &&
+		s.byPrefix == other.byPrefix && s.prefix == other.prefix && s.except == other.except
 }
 
 func (c class) equal(other class) bool {
@@ -289,6 +297,12 @@ func (c class) equal(other class) bool {
 func partitions(parent []segment, children [][]segment, dimensions int) bool {
 	if len(parent) == 0 || len(children) < 2 {
 		return false
+	}
+	// A split by prefix, every child cut so (splitOf): one kind of leaf a
+	// shape, the switch of a tree cut by prefix never in one (Shape).
+	if first := children[0]; first[len(first)-1].byPrefix {
+		_, _, ok := splitOf(parent, children, dimensions)
+		return ok
 	}
 	last := parent[len(parent)-1]
 	kept := parent[:len(parent)-1]
@@ -322,7 +336,7 @@ func deeperOf(kept []segment, parent segment, children [][]segment) bool {
 		}
 		cut := child[len(kept)]
 		switch {
-		case cut.dimension != parent.dimension:
+		case cut.dimension != parent.dimension || cut.byPrefix:
 			return false
 		case cut.exhausted:
 			if !slices.EqualFunc(cut.path, parent.path, class.equal) {
@@ -349,7 +363,7 @@ func refinedOf(kept []segment, parent segment, children [][]segment) bool {
 			return false
 		}
 		cut := child[len(kept)]
-		if cut.dimension != parent.dimension || cut.exhausted != parent.exhausted || len(cut.path) != len(parent.path) {
+		if cut.dimension != parent.dimension || cut.byPrefix || cut.exhausted != parent.exhausted || len(cut.path) != len(parent.path) {
 			return false
 		}
 		differs := -1

@@ -77,6 +77,35 @@ type Assignment struct {
 	// this view only while the two agree and match the timeline it holds
 	// (decision-016 batch 4). Zero when the record has not said.
 	TimelineRecordRevision uint64 `json:"timeline_record_revision,omitempty"`
+	// The record's own fields, sent only to a Worker that declares
+	// ownership.CapabilityViewAssignment (Desired.Project): the generation,
+	// the control epoch and placement of the decision, when it was made, and
+	// the segment skip words. Such a Worker rebuilds the record from them
+	// and admits its Runner's attempts on it (015 R1). Zero for any other
+	// Worker, and left out of the digest it computes: it decodes none of
+	// them.
+	AssignmentGeneration uint64 `json:"assignment_generation,omitempty"`
+	ControlEpoch         uint64 `json:"control_epoch,omitempty"`
+	PlacementReason      string `json:"placement_reason,omitempty"`
+	AssignedAtMs         int64  `json:"assigned_at_ms,omitempty"`
+	SegmentSkip          uint64 `json:"segment_skip,omitempty"`
+	SegmentSkipNoData    uint64 `json:"segment_skip_no_data,omitempty"`
+}
+
+// Complete reports whether the Assignment carries the record's own fields,
+// each of which every record a Leader wrote has: a generation, a control
+// epoch, an assignment time and a placement reason.
+func (assignment Assignment) Complete() bool {
+	return assignment.AssignmentGeneration > 0 && assignment.ControlEpoch > 0 && assignment.AssignedAtMs > 0 &&
+		assignment.PlacementReason != ""
+}
+
+// withoutRecordFields is the Assignment as a Worker that does not declare
+// the view-assignment capability is sent it.
+func (assignment Assignment) withoutRecordFields() Assignment {
+	assignment.AssignmentGeneration, assignment.ControlEpoch, assignment.PlacementReason = 0, 0, ""
+	assignment.AssignedAtMs, assignment.SegmentSkip, assignment.SegmentSkipNoData = 0, 0, 0
+	return assignment
 }
 
 // QueryGroupCost is one Query Group's cost as its Worker measured it, sent

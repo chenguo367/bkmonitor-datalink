@@ -104,7 +104,7 @@ func (a *App) diagnosisPages(p Profile, revision string) (diagnosisRun, Profile,
 			return m, status, err
 		}
 		if status == http.StatusUnauthorized && p.RefreshToken != "" {
-			if renewed, renewErr := a.ensureSession(p.EnvironmentID, true); renewErr == nil {
+			if renewed, renewErr := a.ensureSession(p.ref(), true); renewErr == nil {
 				p = renewed
 				m, status, err = a.channelRequest("invoke", diagnoseOperation, params, revision, p)
 				if err != nil {

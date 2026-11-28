@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
 )
 
 // A store outage is this deployment's own Redis-backed stores not answering
@@ -70,6 +72,9 @@ type StoreOutageRow struct {
 	DependencyReason string     `json:"dependency_reason"`
 	DependencyAt     *time.Time `json:"dependency_at,omitempty"`
 	Reason           string     `json:"reason,omitempty"`
+	// DependencyFrom and DependencyCalls are the span's (SkippedSpan).
+	DependencyFrom  string         `json:"dependency_from,omitempty"`
+	DependencyCalls map[string]int `json:"dependency_calls,omitempty"`
 }
 
 // StoreOutage is one outage: from the first span's first skip to the last
@@ -90,7 +95,10 @@ type StoreOutage struct {
 	AtLeast bool           `json:"at_least,omitempty"`
 	Slots   int            `json:"slots"`
 	Reasons map[string]int `json:"reasons"`
-	Line    string         `json:"line"`
+	// CallReasons sums the spans' DependencyCalls: why the store calls
+	// failed, sentinel_unreachable among them.
+	CallReasons map[string]int `json:"call_reasons,omitempty"`
+	Line        string         `json:"line"`
 	// Rows are the spans, oldest first, cut to the read's bound; RowsCut
 	// says some were left out (Objects counts them all).
 	Rows    []StoreOutageRow `json:"rows,omitempty"`
@@ -148,7 +156,8 @@ func storeOutageSpans(view *View, strategyID string) []StoreOutageRow {
 		}
 		rows = append(rows, StoreOutageRow{QueryGroup: queryGroup, Replica: span.Replica, Strategies: span.Strategies,
 			FirstSlot: span.FirstSlot, LastSlot: span.LastSlot, Slots: span.Slots, FirstAt: span.FirstAt, At: span.At,
-			DependencyReason: span.DependencyReason, DependencyAt: span.DependencyAt, Reason: span.Reason})
+			DependencyReason: span.DependencyReason, DependencyAt: span.DependencyAt, Reason: span.Reason,
+			DependencyFrom: span.DependencyFrom, DependencyCalls: copyCounts(span.DependencyCalls)})
 	}
 	sortStoreOutageSpans(rows)
 	return rows
@@ -203,6 +212,12 @@ func foldStoreOutages(spans []StoreOutageRow, tolerance time.Duration, rows int)
 		outage.objectKeys[span.QueryGroup] = struct{}{}
 		outage.Slots += span.Slots
 		outage.Reasons[span.DependencyReason]++
+		for reason, count := range span.DependencyCalls {
+			if outage.CallReasons == nil {
+				outage.CallReasons = map[string]int{}
+			}
+			outage.CallReasons[reason] += count
+		}
 		outage.addStrategies(span.Strategies)
 		switch {
 		case rows <= 0:
@@ -242,8 +257,14 @@ func (outage *StoreOutage) settle() {
 	if outage.AtLeast || outage.StrategiesAtLeast {
 		strategies = "至少 " + strategies
 	}
-	outage.Line = fmt.Sprintf("Redis 不可用 %s–%s：%s 个对象、%s 条策略丢了这些窗口",
-		outageClock(outage.From), outageClock(outage.To), objects, strategies)
+	what := "Redis 不可用"
+	if outage.CallReasons[redisfailure.SentinelUnreachable] > 0 {
+		// The store calls named the Sentinels: the master could not be
+		// found, which is where an operator looks first.
+		what = "Redis 不可用（哨兵不可达）"
+	}
+	outage.Line = fmt.Sprintf("%s %s–%s：%s 个对象、%s 条策略丢了这些窗口",
+		what, outageClock(outage.From), outageClock(outage.To), objects, strategies)
 }
 
 func outageClock(at time.Time) string {

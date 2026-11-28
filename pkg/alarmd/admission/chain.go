@@ -320,6 +320,11 @@ type PlanContext struct {
 	// TargetPlan is the same target in its second frozen form, with what this
 	// Slot resolved it to. A Plan carries at most one of the two forms.
 	TargetPlan *TargetPlanContext
+	// RealtimeConditions are a realtime item's condition groups, compiled
+	// once for its Plan (NewRealtimeConditions), that its points' series are
+	// judged by (RealtimeConditionFilter). Nil for a queried Plan, whose
+	// conditions the provider applied.
+	RealtimeConditions *RealtimeConditions
 }
 
 // Fuller derives facts from a series' dimensions.

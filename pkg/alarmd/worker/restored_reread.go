@@ -53,7 +53,7 @@ func RestoredSlices(coordinator *SlotExecutionCoordinator, request execution.Slo
 	}
 	if tree == nil {
 		leaves := max(slicesBySeries(last.series), slicesByTime(last.timedOutMillis), last.slices)
-		if limit := coordinator.wholeSliceLimit(); limit < ^uint64(0) && last.bytes > 0 {
+		if limit := coordinator.wholeSliceLimit(last.consumers); limit < ^uint64(0) && last.bytes > 0 {
 			leaves = max(leaves, int((last.bytes+limit-1)/limit))
 		}
 		on := last.cut

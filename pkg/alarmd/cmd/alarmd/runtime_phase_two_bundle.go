@@ -321,6 +321,7 @@ func openProductionPhaseTwoBundleAssembly(
 	// A span of Slots given up is attributed to a store outage seen up to one
 	// replay window before it: how long after its round a Slot is given up.
 	fleetTracker.SetSkipDependencyWindow(cfg.PhaseTwo.Scheduler.MaxReplayAge.Duration())
+	listenStoreCalls(recorder, fleetTracker)
 	recorder.SetRoundMemorySource(fleetTracker.RoundMemory)
 	var observer observability.Observer = fleetTracker
 	targetFlow, err := observability.NewTargetFlow(logger)
@@ -1059,6 +1060,12 @@ func openProductionPhaseTwoBundleAssembly(
 	viewGate.attach(viewClient)
 	installedEpoch.client.Store(viewClient)
 	productionOwnership.WithViewExecutionGate(viewGate)
+	// A Runner admits its attempts from the installed view while the Leader
+	// was heard within a heartbeat and a renewal interval (015 R1): past it
+	// a view a silent Leader left behind is not trusted, and every attempt
+	// checks its fence with the store.
+	productionOwnership.WithLocalOwnership(viewClient,
+		viewstream.HeartbeatInterval+cfg.PhaseTwo.Ownership.LeaseRenewInterval.Duration(), recorder.RecordOwnershipLocalCheck)
 	recorder.SetViewClientSource(func() metric.ViewClientCounts {
 		counts := viewClientCounts(viewClient.Stats())
 		counts.ExecutedFromView = viewGate.Counts()
@@ -1591,6 +1598,7 @@ func openProductionPhaseTwoBundleAssembly(
 	bundle.workerCosts = workerCosts
 	bundle.applied = publisher.applied
 	bundle.capacity = publisher.capacity
+	bundle.fleetTracker = fleetTracker
 	// Where an object stands in its cycle, for the object detail: from the
 	// due index the publisher puts on every listed row, so a healthy object,
 	// which no column lists, reads its next Slot the same way.
@@ -1992,4 +2000,15 @@ func planCarriesReadResult(err error) string {
 	default:
 		return "failed"
 	}
+}
+
+// listenStoreCalls hands the tracker the replica's own store calls failing,
+// as the Redis call hooks name them: a span given up while they were is the
+// store outage's even when its object's rounds never named the store. The
+// tracker keeps only the jobs whose data is this deployment's
+// (fleet.StoreOwnCallers).
+func listenStoreCalls(recorder *metric.Recorder, tracker *fleet.Tracker) {
+	recorder.OnRedisCallerFailure(func(caller, reason string, at time.Time) {
+		tracker.ObserveStoreCall(fleet.StoreCallFailure{Caller: caller, Reason: reason, At: at})
+	})
 }

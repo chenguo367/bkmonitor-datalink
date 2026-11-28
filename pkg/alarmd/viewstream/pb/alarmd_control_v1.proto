@@ -179,6 +179,16 @@ message Assignment {
   // agree and match the timeline it holds (decision-016 batch 4). Zero when
   // the record has not said.
   uint64 timeline_record_revision = 6;
+  // The record's own fields, sent only to a Worker that declares the
+  // view-assignment capability: it rebuilds the record from them and admits
+  // its Runner's attempts on it. Zero for any other Worker, which decodes
+  // none of them and so leaves them out of the digest it computes.
+  uint64 assignment_generation = 7;
+  uint64 control_epoch = 8;
+  string placement_reason = 9;
+  int64 assigned_at_ms = 10;
+  uint64 segment_skip = 11;
+  uint64 segment_skip_no_data = 12;
 }
 
 // Entry is one Query Group of the Worker's view. content is absent for a

@@ -161,7 +161,7 @@ func (run *acceptRun) read(name, operation string, params map[string]any) (map[s
 	}
 	m, status, err := run.app.channelRequest("invoke", operation, params, run.revision, run.p)
 	if err == nil && status == http.StatusUnauthorized && run.p.RefreshToken != "" {
-		if renewed, renewErr := run.app.ensureSession(run.p.EnvironmentID, true); renewErr == nil {
+		if renewed, renewErr := run.app.ensureSession(run.p.ref(), true); renewErr == nil {
 			run.p = renewed
 			m, status, err = run.app.channelRequest("invoke", operation, params, run.revision, run.p)
 		}

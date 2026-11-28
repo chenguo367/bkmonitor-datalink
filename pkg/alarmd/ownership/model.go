@@ -416,6 +416,22 @@ func MultiDetectAdmission(workers []WorkerRegistration) ShardSplitGate {
 	return capabilityGate(workers, CapabilityMultiDetect)
 }
 
+// CapabilityRealtimeInput is the realtime input contract (design 016 A8): a worker that declares it reads a realtime Query
+// Group's points from the channel's inner topic, holds the open periods' buckets and closes each period as that Query
+// Group's Slot. A worker without it would read such a Query Group through the query path, which has nothing to read, so a
+// Leader places realtime Query Groups only while every ready worker declares it.
+const CapabilityRealtimeInput = "realtime-input.v1"
+
+// RealtimeInputHeld is the word a realtime item carries while its Query Group is held because a ready worker does not
+// declare CapabilityRealtimeInput; the page names those workers.
+const RealtimeInputHeld = "REALTIME_INPUT_HELD"
+
+// RealtimeInputAdmission decides the realtime input gate for a ready set, the way MultiDetectAdmission decides its
+// release.
+func RealtimeInputAdmission(workers []WorkerRegistration) ShardSplitGate {
+	return capabilityGate(workers, CapabilityRealtimeInput)
+}
+
 // Declares reports whether the registration names the capability.
 func (worker WorkerRegistration) Declares(capability string) bool {
 	for _, declared := range worker.Capabilities {

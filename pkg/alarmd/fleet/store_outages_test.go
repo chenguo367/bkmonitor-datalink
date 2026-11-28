@@ -94,6 +94,13 @@ func (w *outageWorld) snapshot(started time.Time) Snapshot {
 	return Snapshot{Replica: "pod-a", TakenAt: w.at.at, StartedAt: started, GapSkips: skips}
 }
 
+// storeCall is one of the replica's calls to its own store failing at
+// offset, as the Redis call hook reports it: no object named.
+func (w *outageWorld) storeCall(caller, reason string, offset time.Duration) {
+	w.at.at = time.Date(2026, 10, 22, 2, 0, 0, 0, time.UTC).Add(offset)
+	w.tracker.ObserveStoreCall(StoreCallFailure{Caller: caller, Reason: reason, At: w.at.at})
+}
+
 func getOutages(t *testing.T, handler http.Handler, query string) (int, StoreOutagesResponse, string) {
 	t.Helper()
 	recorder := httptest.NewRecorder()
@@ -449,5 +456,141 @@ func TestUnattributedSpansAreCountedBesideNoneSeen(t *testing.T) {
 	}
 	if _, only, _ := getOutages(t, handler, "?strategy_id=12"); only.Coverage.Unattributed != 1 {
 		t.Fatalf("outage.list for 12 counts %d, want 1", only.Coverage.Unattributed)
+	}
+}
+
+// A span is the store outage's when the replica's own store calls were
+// failing as it was given up, though its object's rounds never named the
+// store: a round whose store read ran out on its caller's deadline fails as
+// internal_unknown, and a Slot behind it is skipped without failing at all.
+// An object that did name the store keeps its own failure. Nothing given up
+// in the outage is left unattributed.
+func TestStoreCallFailuresAttributeSpansWhoseObjectsNeverNamedTheStore(t *testing.T) {
+	w := newOutageWorld(t)
+	w.storeCall("runtime_state", "timeout", 0)
+	w.failed("qg-c", "13", "REDIS_UNAVAILABLE", 20*time.Second, 1000)
+	w.failed("qg-a", "11", "internal_unknown", 30*time.Second, 1000)
+	w.storeCall("control_plane", "timeout", 40*time.Second)
+	w.skipped("qg-b", "12", 90*time.Second, 1060)
+	w.skipped("qg-a", "11", 2*time.Minute, 1060)
+	w.skipped("qg-c", "13", 2*time.Minute, 1060)
+	_, response, body := getOutages(t, handlerWith(t, []Snapshot{w.snapshot(w.started)}, Expectation{}, []string{"pod-a"}), "")
+	if response.State != StoreOutageStateOutages || len(response.Outages) != 1 || response.Outages[0].Objects != 3 {
+		t.Fatalf("answer %s, want one outage of qg-a, qg-b and qg-c", body)
+	}
+	if response.Coverage.Unattributed != 0 || strings.Contains(response.Line, "未归因") {
+		t.Fatalf("answer %s, want nothing given up in the outage left unattributed", body)
+	}
+	rows := map[string]StoreOutageRow{}
+	for _, row := range response.Outages[0].Rows {
+		rows[row.QueryGroup] = row
+	}
+	for _, queryGroup := range []string{"qg-a", "qg-b"} {
+		row := rows[queryGroup]
+		if row.DependencyReason != "REDIS_UNAVAILABLE" || row.DependencyFrom != DependencyFromReplica || row.DependencyCalls["timeout"] != 2 {
+			t.Fatalf("%s row %+v, want the replica's two timed-out store calls", queryGroup, row)
+		}
+	}
+	if c := rows["qg-c"]; c.DependencyReason != "REDIS_UNAVAILABLE" || c.DependencyFrom != DependencyFromObject {
+		t.Fatalf("qg-c row %+v, want its own store failure first", c)
+	}
+	if response.Outages[0].CallReasons["timeout"] == 0 {
+		t.Fatalf("outage %+v, want the store calls' reasons", response.Outages[0])
+	}
+}
+
+// Sentinels that cannot name the master are a store outage, named so: no
+// round reported a store code, the store calls failed sentinel_unreachable,
+// and the Slots given up then are that outage's.
+func TestSentinelFailuresAloneAreAStoreOutageNamedSo(t *testing.T) {
+	w := newOutageWorld(t)
+	w.storeCall("runtime_state", "sentinel_unreachable", 0)
+	w.storeCall("ownership", "sentinel_unreachable", 10*time.Second)
+	w.skipped("qg-a", "11", time.Minute, 1060)
+	_, response, body := getOutages(t, handlerWith(t, []Snapshot{w.snapshot(w.started)}, Expectation{}, []string{"pod-a"}), "")
+	if response.State != StoreOutageStateOutages || len(response.Outages) != 1 {
+		t.Fatalf("answer %s, want the sentinel outage", body)
+	}
+	outage := response.Outages[0]
+	if outage.CallReasons["sentinel_unreachable"] != 2 || !strings.Contains(outage.Line, "哨兵不可达") {
+		t.Fatalf("outage %+v, want it named by the sentinels", outage)
+	}
+	if row := outage.Rows[0]; row.DependencyFrom != DependencyFromReplica || row.DependencyReason != "REDIS_UNAVAILABLE" {
+		t.Fatalf("row %+v, want the replica's store calls", row)
+	}
+}
+
+// A store call failure explains only the Slots given up while it lasted:
+// one given up before the calls began, or longer than the replay window
+// after the last, stays unattributed and counted.
+func TestASkipOutsideTheStoreCallFailuresStaysUnattributed(t *testing.T) {
+	w := newOutageWorld(t)
+	w.skipped("qg-a", "11", 5*time.Minute, 1060)
+	w.storeCall("runtime_state", "timeout", 20*time.Minute)
+	w.skipped("qg-b", "12", 50*time.Minute, 2860)
+	_, response, body := getOutages(t, handlerWith(t, []Snapshot{w.snapshot(w.started)}, Expectation{}, []string{"pod-a"}), "")
+	if response.State != StoreOutageStateNoneSeen || len(response.Outages) != 0 || response.Coverage.Unattributed != 2 {
+		t.Fatalf("answer %s, want none seen beside 2 unattributed", body)
+	}
+}
+
+// Only the jobs whose data this deployment keeps in its own store make a
+// store call segment: a diagnostics job, or another team's facts on the same
+// Redis, failing does not give up Slots, and a reason outside the closed set
+// counts as other.
+func TestOnlyTheDeploymentsOwnStoreCallersMakeAStoreOutage(t *testing.T) {
+	w := newOutageWorld(t)
+	w.storeCall("cost_projection", "sentinel_unreachable", 0)
+	w.storeCall("cmdb_cache", "timeout", 10*time.Second)
+	w.storeCall("strategy_source", "timeout", 20*time.Second)
+	// The census reads the source and service stores too, under one caller name: its timeouts are a large store, not this
+	// deployment's store failing.
+	w.storeCall("store_census", "timeout", 25*time.Second)
+	w.skipped("qg-a", "11", time.Minute, 1060)
+	if run, kept := w.tracker.StoreCallRun(); kept {
+		t.Fatalf("run %+v, want none from jobs outside the deployment's own store", run)
+	}
+	_, response, body := getOutages(t, handlerWith(t, []Snapshot{w.snapshot(w.started)}, Expectation{}, []string{"pod-a"}), "")
+	if response.State != StoreOutageStateNoneSeen || response.Coverage.Unattributed != 1 {
+		t.Fatalf("answer %s, want none seen beside 1 unattributed", body)
+	}
+	w.storeCall("runtime_state", "a word nobody wrote", 2*time.Minute)
+	if run, kept := w.tracker.StoreCallRun(); !kept || run.Reasons["other"] != 1 {
+		t.Fatalf("run %+v, want the unknown reason counted as other", run)
+	}
+}
+
+// The replica's store calls failing explain a span only when its object named nothing else in the window: an object whose
+// query timed out on its own gave its Slots up for that, and is not filed under the store. One that failed internal_unknown,
+// or never failed, is.
+func TestAnObjectThatNamedAnotherFailureIsNotTheStoresOutage(t *testing.T) {
+	w := newOutageWorld(t)
+	w.storeCall("runtime_state", "timeout", 0)
+	w.queryFailed("qg-q", "21", 20*time.Second, 1000)
+	w.failed("qg-u", "22", "internal_unknown", 25*time.Second, 1000)
+	w.skipped("qg-q", "21", 2*time.Minute, 1060)
+	w.skipped("qg-u", "22", 2*time.Minute, 1060)
+	_, response, body := getOutages(t, handlerWith(t, []Snapshot{w.snapshot(w.started)}, Expectation{}, []string{"pod-a"}), "")
+	if len(response.Outages) != 1 || response.Outages[0].Objects != 1 || response.Outages[0].Rows[0].QueryGroup != "qg-u" ||
+		response.Coverage.Unattributed != 1 {
+		t.Fatalf("answer %s, want qg-u alone the outage's and qg-q unattributed", body)
+	}
+}
+
+// A span the store's calls failed through twice keeps what both runs failed with: a sentinel outage first and a stray
+// timeout later still say the sentinels.
+func TestASpanKeepsTheReasonsOfEveryStoreCallRunItCrossed(t *testing.T) {
+	w := newOutageWorld(t)
+	w.storeCall("runtime_state", "sentinel_unreachable", 0)
+	w.skipped("qg-a", "11", time.Minute, 1060)
+	w.storeCall("ownership", "timeout", 20*time.Minute)
+	w.skipped("qg-a", "11", 21*time.Minute, 2260)
+	_, response, body := getOutages(t, handlerWith(t, []Snapshot{w.snapshot(w.started)}, Expectation{}, []string{"pod-a"}), "")
+	if len(response.Outages) != 1 {
+		t.Fatalf("answer %s, want the one span's outage", body)
+	}
+	calls := response.Outages[0].Rows[0].DependencyCalls
+	if calls["sentinel_unreachable"] != 1 || calls["timeout"] != 1 || !strings.Contains(response.Outages[0].Line, "哨兵不可达") {
+		t.Fatalf("row calls %v, line %q, want both runs' reasons and the sentinels said", calls, response.Outages[0].Line)
 	}
 }

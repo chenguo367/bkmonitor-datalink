@@ -55,8 +55,12 @@ func runOne(t *testing.T, hook *RedisCallHook, ctx context.Context, cmd redis.Cm
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The hook never changes a command's outcome: it returns nothing, or the
+	// command's own failure marked as the store not answering.
 	if err := hook.AfterProcess(issued, cmd); err != nil {
-		t.Fatalf("the hook returned %v: it must never fail a command", err)
+		if call := redisfailure.CallErrorOf(err); call == nil || call.Err != cmd.Err() {
+			t.Fatalf("the hook returned %v for a command that ended %v: it must never fail a command", err, cmd.Err())
+		}
 	}
 }
 
@@ -66,8 +70,16 @@ func runBatch(t *testing.T, hook *RedisCallHook, ctx context.Context, cmds []red
 	if err != nil {
 		t.Fatal(err)
 	}
+	// As for one command: nothing, or a member's own failure marked.
 	if err := hook.AfterProcessPipeline(issued, cmds); err != nil {
-		t.Fatalf("the hook returned %v: it must never fail a batch", err)
+		call := redisfailure.CallErrorOf(err)
+		marked := false
+		for _, cmd := range cmds {
+			marked = marked || (call != nil && cmd.Err() == error(call))
+		}
+		if !marked {
+			t.Fatalf("the hook returned %v: it must never fail a batch", err)
+		}
 	}
 }
 

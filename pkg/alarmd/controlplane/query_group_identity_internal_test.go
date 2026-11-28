@@ -57,6 +57,9 @@ var queryGroupIdentityFieldOfFact = map[string]string{
 	// QueryStepMillis: two items over the same buckets asked a different
 	// step apart read different points.
 	"QueryStepMillis": "QueryStep",
+	// Realtime: a realtime group is its whole input
+	// (queryGroupIdentityFacts.Realtime).
+	"Realtime": "Realtime",
 }
 
 // The identity has to read every fact the revision reads. A fact that only

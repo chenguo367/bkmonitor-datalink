@@ -55,7 +55,10 @@ type options struct {
 	hasWindow        bool
 	hasInput, rebind bool
 	insecureTLS      bool
-	args             []string
+	// profile is --profile: the name auth login and auth listen save the
+	// session under.
+	profile string
+	args    []string
 }
 
 func parse(args []string) (options, error) {
@@ -65,7 +68,8 @@ func parse(args []string) (options, error) {
 		arg := args[i]
 		name, value, equal := strings.Cut(arg, "=")
 		if name == "--env" || name == "--input" || name == "--ca-cert" || name == "--url" || name == "--port" || name == "--state" || name == "--timeout" ||
-			name == "--expect-build" || name == "--window" || name == "--params-file" || name == "--stdin-file" || name == "--script-file" || name == "--out" || name == "--snapshot" || name == "--entry" {
+			name == "--expect-build" || name == "--window" || name == "--params-file" || name == "--stdin-file" || name == "--script-file" || name == "--out" || name == "--snapshot" || name == "--entry" ||
+			name == "--profile" {
 			if seen[name] {
 				return o, errors.New("flags may only be provided once")
 			}
@@ -82,6 +86,11 @@ func parse(args []string) (options, error) {
 			}
 			if name == "--expect-build" {
 				o.expectBuild = value
+			} else if name == "--profile" {
+				if !validProfileName(value) {
+					return o, errors.New("--profile takes letters, digits and . _ / - (up to 64)")
+				}
+				o.profile = value
 			} else if name == "--entry" {
 				if value != entryAlarmd {
 					return o, errors.New("--entry takes alarmd: the deployment's own entry its server declared")
@@ -181,6 +190,9 @@ func (a *App) Run(args []string) int {
 	if o.rebind && command != "auth login" && command != "auth listen" {
 		return a.fail("invalid_input", "--rebind is only valid with auth login or auth listen", 2)
 	}
+	if o.profile != "" && command != "auth login" && command != "auth listen" {
+		return a.fail("invalid_input", "--profile is only valid with auth login or auth listen; remote commands name a profile with --env", 2)
+	}
 	if (o.url != "" || o.port != "" || o.state != "" || o.timeout != 0) && command != "auth listen" {
 		return a.fail("invalid_input", "--url, --port, --state and --timeout are only valid with auth listen", 2)
 	}
@@ -217,7 +229,7 @@ func (a *App) Run(args []string) int {
 	case "auth login", "auth listen", "profile list", "profile use":
 	case "auth status", "auth logout", "discover", "describe", "invoke", "diagnose", "accept", "snapshot":
 		if o.env == "" && o.snapshot == "" {
-			return a.fail("invalid_input", "remote commands require explicit --env <environment_id>; run profile list", 2)
+			return a.fail("invalid_input", "remote commands require explicit --env <profile or environment_id>; run profile list", 2)
 		}
 	default:
 		return a.fail("invalid_input", "unknown command; run --help", 2)
@@ -272,13 +284,17 @@ func (a *App) Run(args []string) int {
 	}
 	p, err := a.Store.get(o.env)
 	if err != nil {
+		var ambiguous *ambiguousProfile
+		if errors.As(err, &ambiguous) {
+			return a.fail("ambiguous_environment", err.Error(), 2)
+		}
 		return a.fail("configuration_error", err.Error(), 1)
 	}
 	if _, err := baseURL(p.PublicBaseURL); err != nil {
 		return a.fail("configuration_error", err.Error(), 1)
 	}
 	if command != "auth logout" {
-		renewed, err := a.ensureSession(o.env, false)
+		renewed, err := a.ensureSession(p.ref(), false)
 		if err != nil {
 			var gone *pairingGone
 			if errors.As(err, &gone) {
@@ -290,7 +306,7 @@ func (a *App) Run(args []string) int {
 		}
 		p = renewed
 	}
-	if p.EnvironmentID != o.env || (p.AccessToken != "" && !validScope(p.Scope)) || (p.AccessToken == "" && p.RefreshToken == "") {
+	if (o.env != p.name && o.env != p.EnvironmentID) || (p.AccessToken != "" && !validScope(p.Scope)) || (p.AccessToken == "" && p.RefreshToken == "") {
 		return a.fail("configuration_error", "stored profile environment, token or scope is invalid; log in again", 1)
 	}
 	if command == "auth status" || command == "auth logout" {
@@ -417,19 +433,30 @@ func (a *App) login(o options) int {
 	if err != nil {
 		return a.fail("invalid_input", err.Error(), 2)
 	}
-	if o.env != "" && o.env != b.EnvironmentID {
-		return a.fail("invalid_input", "--env does not match authorization code", 2)
-	}
 	// The session is what the code grants: the one operations session, or an
-	// execution session an earlier server granted.
-	p := Profile{EnvironmentID: b.EnvironmentID, EnvironmentName: b.EnvironmentName, PublicBaseURL: b.PublicBaseURL, Scope: b.Scope, CACert: o.caCert, InsecureTLS: o.insecureTLS}
+	// execution session an earlier server granted. It is saved under
+	// --profile, else under the profile --env names, else under the profile
+	// its entry gives (bindingName).
+	p := Profile{EnvironmentID: b.EnvironmentID, EnvironmentName: b.EnvironmentName, PublicBaseURL: b.PublicBaseURL, Scope: b.Scope, CACert: o.caCert, InsecureTLS: o.insecureTLS,
+		name: o.profile}
+	if o.env != "" && o.env != b.EnvironmentID {
+		named, err := a.Store.profile(o.env)
+		if err != nil || named.EnvironmentID != b.EnvironmentID {
+			return a.fail("invalid_input", "--env does not match authorization code", 2)
+		}
+		if p.name == "" {
+			p.name = named.name
+		}
+	}
 	entry, _ := baseURL(p.PublicBaseURL)
 	if entry.Scheme == "http" && (o.insecureTLS || o.caCert != "") {
 		return a.fail("invalid_input", "TLS options apply only to HTTPS environments", 2)
 	}
-	if err := a.Store.checkBinding(p, o.rebind); err != nil {
+	name, err := a.Store.bindingName(p, o.rebind)
+	if err != nil {
 		return a.fail("configuration_error", err.Error(), 1)
 	}
+	p.name = name
 	if p.InsecureTLS {
 		fmt.Fprintln(a.Err, "Certificate and hostname verification explicitly disabled for this environment; HTTPS remains enabled.")
 	}
@@ -439,7 +466,7 @@ func (a *App) login(o options) int {
 		return a.fail(failure, message, 1)
 	}
 	a.versionCheck(p)
-	return a.print(map[string]any{"status": "ok", "summary": "Environment imported. Run discover with explicit --env.", "session": session})
+	return a.print(map[string]any{"status": "ok", "summary": "Environment imported as profile " + name + ". Run discover with --env " + name + ".", "session": session})
 }
 
 func (a *App) session(command string, p Profile) int {
@@ -589,7 +616,7 @@ func (a *App) channel(mode, operation string, params map[string]any, p Profile, 
 	// A session the server ended before its local expiry is renewed once from
 	// the pairing; an unpaired one is reported as it is.
 	if status == http.StatusUnauthorized && p.RefreshToken != "" && !exec {
-		if renewed, renewErr := a.ensureSession(p.EnvironmentID, true); renewErr == nil {
+		if renewed, renewErr := a.ensureSession(p.ref(), true); renewErr == nil {
 			p, _ = onEntry(renewed, o.entry)
 			m, status, err = a.channelRequestTimeout(mode, operation, params, revision, p, timeout, exec)
 			if err != nil {

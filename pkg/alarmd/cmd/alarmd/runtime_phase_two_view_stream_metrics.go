@@ -6,6 +6,7 @@
 package main
 
 import (
+	"math"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
@@ -44,6 +45,16 @@ func viewClientCounts(stats viewstream.ClientStats) metric.ViewClientCounts {
 		Connected: stats.Connected, InstalledRevision: stats.Installed.Revision, InstalledEpoch: stats.Installed.ControlEpoch,
 		ObjectsMissing: stats.ObjectsMissing, ObjectsProbed: stats.ObjectsProbed, Installs: stats.Installs, InstallFailures: stats.InstallFailures,
 		SnapshotsRequested: stats.SnapshotsRequested, Refusals: stats.Refusals, Connections: stats.Connections,
-		DiscoveryMisses: stats.DiscoveryMisses,
+		DiscoveryMisses: stats.DiscoveryMisses, HeartbeatVersionAhead: stats.HeartbeatVersionAhead,
+		HeardAgeSeconds: heardAgeSeconds(stats.HeardAt, time.Now()),
 	}
+}
+
+// heardAgeSeconds is how long before at the Leader was last heard, NaN
+// before it was.
+func heardAgeSeconds(heard, at time.Time) float64 {
+	if heard.IsZero() {
+		return math.NaN()
+	}
+	return at.Sub(heard).Seconds()
 }

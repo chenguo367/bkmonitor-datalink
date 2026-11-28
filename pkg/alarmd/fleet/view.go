@@ -4501,6 +4501,15 @@ type SkippedSpan struct {
 	// this replica's process started: the failure is kept in memory only.
 	DependencyReason string     `json:"dependency_reason,omitempty"`
 	DependencyAt     *time.Time `json:"dependency_at,omitempty"`
+	// DependencyFrom is where the store failure was seen (DependencyFrom*),
+	// and DependencyCalls the reasons the replica's own store calls failed
+	// with around the span, by the closed set of package redisfailure.
+	DependencyFrom  string         `json:"dependency_from,omitempty"`
+	DependencyCalls map[string]int `json:"dependency_calls,omitempty"`
+	// callsBefore are the reasons of the runs the span met before the one
+	// that began at callsRunFrom; never published.
+	callsBefore  map[string]int
+	callsRunFrom time.Time
 }
 
 // ExecutionEvidence is one completion's reading of an earlier attempt, as

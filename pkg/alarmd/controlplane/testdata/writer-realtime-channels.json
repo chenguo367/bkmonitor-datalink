@@ -1,0 +1,65 @@
+{
+ "hash": {
+  "__schema__": "1",
+  "system|demo_pending.base": "{\"applied_at\":null,\"applied_items\":[],\"kafka_cluster\":\"\",\"phase\":\"\",\"refused_items\":[],\"schema_version\":1,\"source_kind\":\"\",\"topic\":\"\"}",
+  "system|demo_plugin.base": "{\"applied_at\":1795759200,\"applied_items\":[{\"item_id\":1,\"query_md5\":\"a1\",\"strategy_id\":7},{\"item_id\":2,\"query_md5\":\"b2\",\"strategy_id\":9}],\"kafka_cluster\":\"kafka-inner-demo\",\"phase\":\"Ok\",\"refused_items\":[{\"item_id\":1,\"query_md5\":\"c3\",\"reason\":\"rule_too_large\",\"strategy_id\":11}],\"schema_version\":1,\"source_kind\":\"plugin_nested\",\"topic\":\"table_demo_plugin\"}",
+  "tenant-b|demo_k8s.base": "{\"applied_at\":null,\"applied_items\":[],\"kafka_cluster\":\"kafka-inner-demo\",\"phase\":\"Pending\",\"refused_items\":[],\"schema_version\":1,\"source_kind\":\"k8s\",\"topic\":\"table_demo_k8s\"}"
+ },
+ "rows": [
+  {
+   "applied_at": null,
+   "applied_items": [],
+   "bk_tenant_id": "system",
+   "kafka_cluster": "",
+   "phase": "",
+   "refused_items": [],
+   "schema_version": 1,
+   "source_kind": "",
+   "table_id": "demo_pending.base",
+   "topic": ""
+  },
+  {
+   "applied_at": 1795759200,
+   "applied_items": [
+    {
+     "item_id": 1,
+     "query_md5": "a1",
+     "strategy_id": 7
+    },
+    {
+     "item_id": 2,
+     "query_md5": "b2",
+     "strategy_id": 9
+    }
+   ],
+   "bk_tenant_id": "system",
+   "kafka_cluster": "kafka-inner-demo",
+   "phase": "Ok",
+   "refused_items": [
+    {
+     "item_id": 1,
+     "query_md5": "c3",
+     "reason": "rule_too_large",
+     "strategy_id": 11
+    }
+   ],
+   "schema_version": 1,
+   "source_kind": "plugin_nested",
+   "table_id": "demo_plugin.base",
+   "topic": "table_demo_plugin"
+  },
+  {
+   "applied_at": null,
+   "applied_items": [],
+   "bk_tenant_id": "tenant-b",
+   "kafka_cluster": "kafka-inner-demo",
+   "phase": "Pending",
+   "refused_items": [],
+   "schema_version": 1,
+   "source_kind": "k8s",
+   "table_id": "demo_k8s.base",
+   "topic": "table_demo_k8s"
+  }
+ ],
+ "source": "Written by the strategy cache writer's own functions (read_realtime_channels, build_runtime_cache_indexes) for the channel rows listed, run by a throwaway test of the writer; the rows are the expectation, the hash is what it wrote."
+}

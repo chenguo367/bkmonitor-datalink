@@ -157,9 +157,11 @@ func TestCompiledConditionsReadInUQAsTheWrittenOnes(t *testing.T) {
 
 // The platform's log and event sources send an existence check with the one
 // empty value, whatever was written (_parse_conditions); UQ's storages that
-// run it read no value from it. A metric source sends it as written, and one
-// with no value is refused as before: alarmd's query has no condition without
-// a value.
+// run it read no value from it. A metric source's stores have no existence
+// check: VictoriaMetrics drops the condition and returns every series (UQ
+// query/structured/condition.go keeps it with no value, and the VM renderer
+// skips a field with none), so it is refused by name, with a value or
+// without, as every method the metric stores do not read is.
 func TestAnExistenceCheckIsSentAsThePlatformSendsIt(t *testing.T) {
 	for _, written := range []string{`[]`, `["x"]`} {
 		facts, err := compileWithConditions(t, emptyConditionLogConfig, `[{"key":"trace_id","method":"exists","value":`+written+`}]`)
@@ -171,10 +173,12 @@ func TestAnExistenceCheckIsSentAsThePlatformSendsIt(t *testing.T) {
 			t.Fatalf("log exists %s compiled as %+v, want existed with the one empty value", written, field)
 		}
 	}
-	_, err := compileWithConditions(t, emptyConditionMetricConfig, `[{"key":"host","method":"existed","value":[]}]`)
-	var failure *QueryPlanCompileError
-	if !errors.As(err, &failure) || failure.Disposition != DispositionConfigRejected || failure.Reason != "QUERY_CONDITION_INVALID" {
-		t.Fatalf("metric existed with no value: %v, want QUERY_CONDITION_INVALID", err)
+	for _, written := range []string{`[]`, `["x"]`} {
+		_, err := compileWithConditions(t, emptyConditionMetricConfig, `[{"key":"host","method":"existed","value":`+written+`}]`)
+		var failure *QueryPlanCompileError
+		if !errors.As(err, &failure) || failure.Disposition != DispositionConfigRejected || failure.Reason != "QUERY_CONDITION_METHOD_UNSUPPORTED" {
+			t.Fatalf("metric existed %s: %v, want QUERY_CONDITION_METHOD_UNSUPPORTED", written, err)
+		}
 	}
 }
 

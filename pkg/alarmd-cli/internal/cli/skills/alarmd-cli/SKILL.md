@@ -11,7 +11,11 @@ alarmd-cli 是 alarmd 自带的命令行，读 alarmd 自己的状态：舰队�
 
     alarmd-cli profile list
 
-结果里的 `environment_id` 就是后面每条远程命令都要显式带的 `--env`。profile 不含凭据。
+每个 profile 有名字、`environment_id` 和入口地址，不含凭据。后面每条远程命令都要显式带 `--env <profile>`：
+- 填 profile 名字。
+- 只有一个 profile 用某个 `environment_id` 时，也可以填这个 `environment_id`。
+- 几个部署报同一个 `environment_id` 时，填这个 id 会返回 `ambiguous_environment`，错误里列出这几个 profile。按要查的入口选一个名字重试。
+- 以前按 `environment_id` 命名的 profile，在同一环境出现第二个部署时会自动改名，登录输出里的 `profile_renamed` 会说明从哪个名字改成了哪个名字。之后一律用 profile 名字。
 
 ## 授权只能由人完成
 
@@ -19,11 +23,11 @@ alarmd-cli 是 alarmd 自带的命令行，读 alarmd 自己的状态：舰队�
 
 ## 工作流
 
-    alarmd-cli discover --env <environment_id>                    # 操作目录与摘要
-    alarmd-cli describe <operation> --env <environment_id>        # 参数、限额、effect 与示例
-    alarmd-cli invoke <operation> --env <environment_id> --input @input.json
-    alarmd-cli diagnose --env <environment_id>                    # 全部策略的诊断
-    alarmd-cli snapshot --env <environment_id>                    # 一次离线完整采集
+    alarmd-cli discover --env <profile>                    # 操作目录与摘要
+    alarmd-cli describe <operation> --env <profile>        # 参数、限额、effect 与示例
+    alarmd-cli invoke <operation> --env <profile> --input @input.json
+    alarmd-cli diagnose --env <profile>                    # 全部策略的诊断
+    alarmd-cli snapshot --env <profile>                    # 一次离线完整采集
 
 - 只用 discover 列出的操作名，参数按 describe 填；ID 类参数只从上一步结果里取。
 - `next_call` 是建议的下一步，不会自动执行；需要时照它的 `params` 调用。

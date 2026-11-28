@@ -19,7 +19,7 @@ import (
 // slice split for its time by the sample, and the index of that split.
 func keptShape(t *testing.T) (Shape, int) {
 	t.Helper()
-	tree, err := New([]string{"host"}, 4, "host")
+	tree, err := NewCut([]string{"host"}, 4, SuffixCut("host"))
 	if err != nil {
 		t.Fatal(err)
 	}

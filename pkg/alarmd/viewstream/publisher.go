@@ -35,6 +35,10 @@ type Publisher struct {
 	// round that hands over the same set again costs one hash and no
 	// projection.
 	fingerprint uint64
+	// recordFieldsTo is the last round's Desired.RecordFieldsTo: a
+	// publication from outside the round knows no registrations, and the
+	// last set stands for it, as the ready set does.
+	recordFieldsTo map[string]bool
 }
 
 func NewPublisher(controlEpoch uint64, now func() time.Time) (*Publisher, error) {
@@ -67,6 +71,11 @@ func (publisher *Publisher) Publish(desired Desired) (Published, error) {
 	}
 	publisher.mu.Lock()
 	defer publisher.mu.Unlock()
+	if desired.ReadyKnown {
+		publisher.recordFieldsTo = desired.RecordFieldsTo
+	} else {
+		desired.RecordFieldsTo = publisher.recordFieldsTo
+	}
 	fingerprint := desired.Fingerprint()
 	if publisher.revision > 0 && fingerprint == publisher.fingerprint {
 		return Published{Version: Key{ControlEpoch: publisher.epoch, Revision: publisher.revision}, Changed: false}, nil

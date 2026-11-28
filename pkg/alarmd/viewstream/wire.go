@@ -56,6 +56,9 @@ func entryToWire(entry Entry) *pb.Entry {
 		DesiredWorkerId: entry.Assignment.DesiredWorkerID, Revision: entry.Assignment.Revision,
 		ContentScope: entry.Assignment.ContentScope, PendingContentScope: entry.Assignment.PendingContentScope,
 		EffectiveAtMs: entry.Assignment.EffectiveAtMs, TimelineRecordRevision: entry.Assignment.TimelineRecordRevision,
+		AssignmentGeneration: entry.Assignment.AssignmentGeneration, ControlEpoch: entry.Assignment.ControlEpoch,
+		PlacementReason: entry.Assignment.PlacementReason, AssignedAtMs: entry.Assignment.AssignedAtMs,
+		SegmentSkip: entry.Assignment.SegmentSkip, SegmentSkipNoData: entry.Assignment.SegmentSkipNoData,
 	}}
 	if entry.Content != nil {
 		content := &pb.Content{ObjectDigest: string(entry.Content.ObjectDigest)}
@@ -80,6 +83,9 @@ func entryFromWire(wire *pb.Entry) (Entry, error) {
 			DesiredWorkerID: wire.Assignment.DesiredWorkerId, Revision: wire.Assignment.Revision,
 			ContentScope: wire.Assignment.ContentScope, PendingContentScope: wire.Assignment.PendingContentScope,
 			EffectiveAtMs: wire.Assignment.EffectiveAtMs, TimelineRecordRevision: wire.Assignment.TimelineRecordRevision,
+			AssignmentGeneration: wire.Assignment.AssignmentGeneration, ControlEpoch: wire.Assignment.ControlEpoch,
+			PlacementReason: wire.Assignment.PlacementReason, AssignedAtMs: wire.Assignment.AssignedAtMs,
+			SegmentSkip: wire.Assignment.SegmentSkip, SegmentSkipNoData: wire.Assignment.SegmentSkipNoData,
 		}
 	}
 	if wire.Content != nil {

@@ -531,6 +531,24 @@ type NoDataSlotFacts struct {
 // producing two statements for one key. The digests are what let two Slots'
 // lines be compared, and the expected revisions are what say whether the
 // second statement could ever have applied after the first.
+// StoreCallFacts is the store call a failed Slot's error carries when that
+// call failed because the store did not answer (redisfailure.CallError):
+// which client and job made it, why it failed, how long it ran, and how much
+// of its caller's deadline it had when it was issued. The two durations are
+// what tell a store that hung from a call that was issued with almost no
+// time left by the steps before it and was only the last thing to run out:
+// a Waited close to a usual Left is the first, a Left far below the caller's
+// usual budget the second.
+type StoreCallFacts struct {
+	Client string
+	Caller string
+	Reason string
+	Waited time.Duration
+	// Left is meaningful when LeftKnown: the caller's context had a deadline.
+	Left      time.Duration
+	LeftKnown bool
+}
+
 type GapStatementFacts struct {
 	// Shape is "across_lists" or "within_one_list".
 	Shape string
@@ -2955,7 +2973,10 @@ type Observation struct {
 	// none did. Its own field rather than only inside the error text: which
 	// write refused is what separates this Slot's other call from a writer in
 	// another process, and that cannot be grouped or counted out of a sentence.
-	GapApplySite  string
+	GapApplySite string
+	// StoreCall is the store call that did not answer, on a Slot's completion
+	// line whose error carries one; nil otherwise.
+	StoreCall     *StoreCallFacts
 	GapStatements *GapStatementFacts
 	GapExtensions []*GapExtensionFacts
 	GapConflict   *GapExtensionFacts
@@ -3192,6 +3213,9 @@ type Observation struct {
 	// SlotExecuteSlow is where a slow Slot attempt's time went
 	// (StageSlotExecuteSlow).
 	SlotExecuteSlow *SlotExecuteSlowFacts
+	// InputSliceLetGo is what a slice let go past its limit held, and what
+	// the limit counted beside it (StageInputSliceLetGo).
+	InputSliceLetGo *InputSliceLetGoFacts
 	// ExecutionSlotWait is what a Slot's dispatch waited for an execution
 	// slot (StageSlotStarted); nil for a Slot started without a dispatch.
 	ExecutionSlotWait *ExecutionSlotWaitFacts
@@ -4317,6 +4341,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentScheduler, StageSeriesNotEvaluated},
 	{ComponentState, StageSegmentRenewalFallback},
 	{ComponentAccess, StageQueryCompleted},
+	{ComponentAccess, StageInputSliceLetGo},
 	{ComponentAccess, StageQueryBudgetResolved},
 	{ComponentAccess, StageSlotReadinessArrival},
 	{ComponentEvaluation, StageEvaluationCompleted},
@@ -4567,6 +4592,9 @@ var ViewStreamReasons = []ReasonCode{
 	// An install the Worker refused.
 	"DELTA_BASE_MISMATCH", "DELTA_DIGEST_MISMATCH", "SNAPSHOT_INVALID", "SNAPSHOT_INCOMPLETE", "VIEW_FOR_ANOTHER_WORKER",
 	"OBJECTS_NOT_PROBED",
+	// A snapshot asked for because the Leader stayed ahead of the installed
+	// version past a heartbeat interval: a delta sent that never arrived.
+	"HEARTBEAT_VERSION_AHEAD",
 	// A Hello the Leader refused, or why it closed the stream.
 	"NOT_LEADER", "UNKNOWN_WORKER", "BAD_TOKEN", "PROTOCOL_VERSION", "REGISTRY_UNAVAILABLE", "HELLO_EXPECTED",
 	"REPLACED_BY_NEW_STREAM", "IDLE", "SHUTDOWN",

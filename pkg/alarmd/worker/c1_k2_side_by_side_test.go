@@ -204,7 +204,7 @@ func TestTwoConsumersWarmUpAPlanNewToItsActivationAsOneDoes(t *testing.T) {
 
 // spreadHosts is count series whose hosts' last two characters fall in
 // different classes of the fixed alphabet a Slot's starting slices are cut
-// by (inputslice.FixedCut), so most of the slices it starts in hold some:
+// by (inputslice.SuffixCut), so most of the slices it starts in hold some:
 // slicedHosts' host-NN all end in a digit, and start in two.
 func spreadHosts(count, padding int) []slicedSeries {
 	ends := []string{"00", "91", "i2", "r3", "0a", "9b", "ic", "rd", "xi", "xj", "xr", "xs"}
@@ -219,7 +219,7 @@ func spreadHosts(count, padding int) []slicedSeries {
 // host starts in: the tree cut level by level to at least that many.
 func startingLeaves(t *testing.T) int {
 	t.Helper()
-	tree, err := inputslice.NewCut([]string{"host"}, 12, inputslice.FixedCut("host"))
+	tree, err := inputslice.NewCut([]string{"host"}, 12, inputslice.SuffixCut("host"))
 	if err != nil {
 		t.Fatal(err)
 	}

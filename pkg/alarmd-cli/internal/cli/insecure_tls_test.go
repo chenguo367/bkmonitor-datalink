@@ -75,7 +75,7 @@ func TestExplicitInsecureTLSPersistsOnlyForSelectedEnvironment(t *testing.T) {
 				t.Fatal("evidence file omitted transport mode")
 			}
 			_, listed, _, _ := run(t, store, client, "", "profile", "list")
-			if objectField(objectField(listed, "profiles"), p.EnvironmentID)["insecure_tls"] != true {
+			if objectField(objectField(listed, "profiles"), current.name)["insecure_tls"] != true {
 				t.Fatal("profile list omitted exception")
 			}
 			other := p

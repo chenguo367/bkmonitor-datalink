@@ -122,6 +122,7 @@ type phaseTwoMetrics struct {
 	sliceReadsInFlight             prometheus.Histogram
 	sliceReadAheadWaitingSeconds   prometheus.Counter
 	inputSliceTimeouts             *prometheus.CounterVec
+	inputSliceTimeoutDeepening     prometheus.Histogram
 	inputSliceShapes               *prometheus.CounterVec
 	noDataStagesAhead              *prometheus.CounterVec
 	noDataGroupsStagedAhead        prometheus.Counter
@@ -255,6 +256,7 @@ type phaseTwoMetrics struct {
 	platformSettings                *platformSettingsCollector
 	redisCalls                      redisCallMetrics
 	redisHealth                     *redisClientHealthBook
+	redisFailureListeners           *redisFailureListeners
 	controlCache                    *controlCacheCollector
 	dispatchRotation                *dispatchRotationCollector
 	localView                       *localViewCollector
@@ -952,6 +954,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.liveness = newLivenessCollector()
 	metrics.redisCalls = newRedisCallMetrics()
 	metrics.redisHealth = &redisClientHealthBook{}
+	metrics.redisFailureListeners = &redisFailureListeners{}
 	metrics.controlCache = newControlCacheCollector()
 	metrics.dispatchRotation = newDispatchRotationCollector()
 	metrics.localView = newLocalViewCollector()
@@ -1150,6 +1153,14 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, phase := range observability.SliceReadAheadYieldPhases {
 		metrics.sliceReadAheadYields.WithLabelValues(phase)
 	}
+	metrics.inputSliceTimeoutDeepening = prometheus.NewHistogram(prometheus.HistogramOpts{Subsystem: metricSubsystem,
+		Name: "worker_input_slice_timeout_deepening", Buckets: []float64{1, 2, 3, 4, 6, 8, 12, 16, 24, 32},
+		Help: "Completed Slots of Query Groups read in a tree cut by prefix that split it a level deeper for a slice the " +
+			"provider timed out, by how many Slots in a row did so, this one included - the ones before it failing so. " +
+			"With no value of the slice ever delivered there is no common prefix to cut at, and values that share a " +
+			"long one are cut a character a Slot (015 C2 section 4.8): a count past 3 or 4 is a Query Group paying " +
+			"that, the case for keeping each slice's least and greatest value from round to round. Which Query Group " +
+			"is not a label here."})
 	metrics.inputSliceTimeouts = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem,
 		Name: "worker_input_slice_timeouts_total", Help: "Slices of Slots read in slices whose read ran out of time, by how each ended: split_succeeded, split and its " +
 			"children read in its place, the Slot's query completing; split_failed, split and the Slot's query failing " +
@@ -1188,6 +1199,16 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"for its size, its split kept for the next Slot to start in its parts (the completion row's " +
 			"input_slice_start_discarded; a Query Group that keeps paying it every round is what the split exists to " +
 			"end); sized_kept, a slice read whole past a slice's series kept split for the next Slot. " +
+			"Six count the round's judgement of its shape, each a count of the Slot's: split_time, a slice read slower " +
+			"than the target split a level deeper for the next Slot; split_held_uniform, one past the target not split, " +
+			"no slower than twice the round's median, a backend slow as a whole; split_unhelpful, a split for time taken " +
+			"back, its parts no faster; split_held_mark, a slice past the target held by such a split's mark; folded, a " +
+			"part that read as an empty slice does for three rounds folded into the rest of its level; " +
+			"leaf_cap_reached, a slice to split for its time with no leaves left for it, read as it is; " +
+			"refused_single_value and refused_condition_budget count too a slice to split for its time that no split " +
+			"separates or whose parts' conditions would pass the budget, read as it is. merged counts " +
+			"the splits the judgement took back. switched_to_suffix is a tree cut by prefix a slice of which was let go for " +
+			"its size: the Query Group's next Slot is cut from the end of its values, from its root. " +
 			"Which Query Group is not a label here."}, []string{"outcome"})
 	for _, outcome := range observability.InputSliceShapeOutcomes {
 		metrics.inputSliceShapes.WithLabelValues(outcome)
@@ -2581,7 +2602,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.queryAdmission, m.queryDownstreamDistress,
 		m.noDataSlotPlans, m.noDataAbsences, m.noDataManualCloseDropped, m.noDataManualCloseReadFailures, m.targetPlanResolutions, m.targetSelectorResolutions, m.targetExcludedAbsentMembers, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.inPlaceWaits, m.inPlaceHeldInputBytes, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetRedis,
-		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.retainedShareApproaching, m.inputSlices, m.slicedSlots, m.slotApplyWaitSeconds, m.slotLandSeconds, m.slotApplyOverlapSeconds, m.firstSeenCandidates, m.sliceReadAhead, m.seriesNotEvaluated, m.sliceReadAheadYields, m.windowZeroBoundCuts, m.windowAccountingClamped, m.sliceReadAheadWaits, m.sliceReadAheadWaitSeconds, m.sliceReadsInFlight, m.sliceReadAheadWaitingSeconds, m.inputSliceTimeouts, m.inputSliceShapes, m.noDataStagesAhead, m.noDataStageAheadDiffers, m.noDataGroupsStagedAhead, m.schedulePruneSkipped, m.scheduleCutoverDuration,
+		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.retainedShareApproaching, m.inputSlices, m.slicedSlots, m.slotApplyWaitSeconds, m.slotLandSeconds, m.slotApplyOverlapSeconds, m.firstSeenCandidates, m.sliceReadAhead, m.seriesNotEvaluated, m.sliceReadAheadYields, m.windowZeroBoundCuts, m.windowAccountingClamped, m.sliceReadAheadWaits, m.sliceReadAheadWaitSeconds, m.sliceReadsInFlight, m.sliceReadAheadWaitingSeconds, m.inputSliceTimeouts, m.inputSliceTimeoutDeepening, m.inputSliceShapes, m.noDataStagesAhead, m.noDataStageAheadDiffers, m.noDataGroupsStagedAhead, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
 		m.scheduleCutoverQueryGroups, m.scheduleCutoverReadHoldLinks, m.fleetOverdueEpisodes, m.fleetRestoreUnread, m.scheduleCutoverTimelinesRead, m.scheduleCutoverFirstDuration,
 		m.scheduleCutoverFirstTimelines, m.replayExpiries, m.replayTakeovers, m.slotDiversions, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
@@ -3947,7 +3968,13 @@ func (m phaseTwoMetrics) observeSlicing(usage *observability.SlotBudgetUsageFact
 		}
 	}
 	m.inputSliceTimeouts.WithLabelValues(observability.InputSliceTimeoutSplitSucceeded, observability.InputSliceTimeoutCauseProvider).Add(float64(usage.InputSliceTimeouts))
-	for outcome, count := range [...]uint64{usage.InputSliceShapeStarted, usage.InputSliceShapeKept, usage.InputSliceShapeMerged, usage.InputSliceShapeVoidedRevision, usage.InputSliceShapeVoidedDimensions, usage.InputSliceShapeVoidedMaxLeaves, usage.InputSliceShapeRefusedNotALeaf, usage.InputSliceShapeRefusedNotAPartition, usage.InputSliceShapeRefusedMaxLeaves, usage.InputSliceShapeEvictedIdle, usage.InputSliceShapeRefusedCondition, usage.InputSliceShapeRefusedSingleValue, usage.InputSliceShapeRefusedSplitError, usage.InputSliceShapeMergeRefused, usage.InputSliceStartDiscarded, usage.InputSliceShapeSizedKept} {
+	if usage.InputSliceTimeoutDeepening > 0 {
+		m.inputSliceTimeoutDeepening.Observe(float64(usage.InputSliceTimeoutDeepening))
+	}
+	for outcome, count := range [...]uint64{usage.InputSliceShapeStarted, usage.InputSliceShapeKept, usage.InputSliceShapeMerged, usage.InputSliceShapeVoidedRevision, usage.InputSliceShapeVoidedDimensions, usage.InputSliceShapeVoidedMaxLeaves, usage.InputSliceShapeRefusedNotALeaf, usage.InputSliceShapeRefusedNotAPartition, usage.InputSliceShapeRefusedMaxLeaves, usage.InputSliceShapeEvictedIdle, usage.InputSliceShapeRefusedCondition, usage.InputSliceShapeRefusedSingleValue, usage.InputSliceShapeRefusedSplitError, usage.InputSliceShapeMergeRefused, usage.InputSliceStartDiscarded, usage.InputSliceShapeSizedKept,
+		usage.InputSliceShapeSplitTime, usage.InputSliceShapeSplitHeldUniform, usage.InputSliceShapeSplitUnhelpful,
+		usage.InputSliceShapeSplitHeldMark, usage.InputSliceShapeFolded, usage.InputSliceShapeLeafCapReached,
+		usage.InputSliceShapeSwitchedToSuffix} {
 		m.inputSliceShapes.WithLabelValues(observability.InputSliceShapeOutcomes[outcome]).Add(float64(count))
 	}
 	for outcome, count := range [...]uint64{usage.NoDataStagesAheadCarried, usage.NoDataStagesAheadDiffers,

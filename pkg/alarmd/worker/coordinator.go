@@ -785,7 +785,46 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	defer func() { coordinator.noteWindowed(stream.windows.handed, executeResult, executeErr) }()
 	stream.applyCtx = run.completionCtx
 	for {
-		if k := stream.sliceConsumers(); k > 1 {
+		k := stream.sliceConsumers()
+		if k > 1 {
+			// The dispatch's own windows land before the Slot's k is chosen
+			// and before its consumers begin, every time they would (015 C1,
+			// the k = 2 share, 3.1) - an empty lane returns at once: in
+			// flight they are still the dispatch's, counted 1/k by each
+			// consumer, and a consumer's first slice judged beside them was
+			// let go and split for room they give back once written. A window
+			// that failed its write fails the Slot here, as one of the
+			// dispatch's does while its consumers read. The Slot comes here
+			// again only after its dimensions were found gone at its first
+			// Begin, a k set by a case or the measurement build
+			// (consumeSideBySide), before any window was handed: there a
+			// drain each time and one the first time are the same, and the
+			// drain each time is what keeps the windows landed should
+			// another way back be made.
+			landCtx := ctx
+			if run.completionCtx != nil {
+				landCtx = run.completionCtx
+			}
+			if err := stream.drainApply(landCtx); err != nil {
+				coordinator.observeQueryFailure(landCtx, run.request.Operation, run.started, "stream_complete", err)
+				return execution.SlotExecutionResult{}, inSlotStep(execution.SlotNotCommittedCompleteFailed,
+					fmt.Errorf("alarmd worker: complete Slot: %w", err))
+			}
+			// Chosen once: a Slot left to its own stream reads the rest of
+			// its slices without waiting on its windows before each, its k
+			// one from here (sliceConsumers). A k a case or the measurement
+			// build set is kept.
+			if stream.slices.chosen == 0 {
+				choice := consumersChoice{from: observability.InputSliceConsumersFromForced}
+				if sliceConsumersForTest.Load() == 0 {
+					choice = stream.consumersForRoom(k)
+					k = choice.k
+				}
+				choice.k = k
+				stream.slices.chosen, stream.slices.choice = k, choice
+			}
+		}
+		if k > 1 {
 			// Read in slices by now - from its start, or since its first read
 			// was let go and split: the slices pending are consumed by k
 			// streams side by side (015 C1).
@@ -1058,6 +1097,7 @@ func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 		InputSliceReadsInFlight:       stream.readsInFlight,
 		SharedFrameWaitConsumerMillis: stream.queryPhases.frameConsumer / 1000, SharedFrameWaitReaderMillis: stream.queryPhases.frameReader / 1000,
 		InputSliceTimeouts:                  stream.sliceTimeoutsSplit(),
+		InputSliceTimeoutDeepening:          stream.sliceTimeoutDeepening(),
 		InputSliceShapeStarted:              shapes[0],
 		InputSliceShapeKept:                 shapes[1],
 		InputSliceShapeMerged:               shapes[2],
@@ -1073,10 +1113,21 @@ func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 		InputSliceShapeRefusedSplitError:    shapes[12],
 		InputSliceShapeMergeRefused:         shapes[13],
 		InputSliceShapeSizedKept:            shapes[15],
+		InputSliceShapeSplitTime:            shapes[16],
+		InputSliceShapeSplitHeldUniform:     shapes[17],
+		InputSliceShapeSplitUnhelpful:       shapes[18],
+		InputSliceShapeSplitHeldMark:        shapes[19],
+		InputSliceShapeFolded:               shapes[20],
+		InputSliceShapeLeafCapReached:       shapes[21],
+		InputSliceShapeSwitchedToSuffix:     shapes[22],
 		InputSliceCutOn:                     stream.sliceCutFrom(),
 		InputSliceDimension:                 stream.sliceDimension(),
 		InputSlicesDeferred:                 stream.slicesDeferred(),
 		InputSliceStartDiscarded:            shapes[14],
+		InputSliceConsumers:                 stream.sliceConsumersUsed(),
+		InputSliceConsumersFrom:             stream.sliceConsumersChosen().from,
+		InputSliceRoomLimitBytes:            stream.sliceConsumersChosen().limit,
+		InputSliceFloorBytes:                stream.sliceConsumersChosen().floor,
 		NoDataStagesAheadCarried:            stream.stageAheadEnds[stageAheadCarried], NoDataStagesAheadDiffers: stream.stageAheadEnds[stageAheadDiffers],
 		NoDataStagesAheadDiscarded: stream.stageAheadEnds[stageAheadDiscarded], NoDataStagesAheadStopped: stream.stageAheadEnds[stageAheadStopped],
 		NoDataStageAheadDiffersKeptOtherwise: stream.stageAheadDiffers[0], NoDataStageAheadDiffersCountMismatch: stream.stageAheadDiffers[1],
@@ -3681,14 +3732,31 @@ func (coordinator *SlotExecutionCoordinator) judgeSliceRead(ctx context.Context,
 			// limit is, its children read in its place, once a Slot. A
 			// Slot whose children complete is no timeout of its group's
 			// cooldown; one whose do not is, as before.
-			if refused := stream.splitSliceKept(leaf); refused == nil {
+			refused := stream.splitSliceKept(leaf)
+			if refused == nil {
 				stream.slices.timeoutSplit = true
+				stream.slices.noteTimedOutSplit(leaf, took)
 				// Its read is no read: what the lookback captured of it
 				// is taken back, its children captured in its place.
 				if discarder, ok := coordinator.ports.Query.(sliceReadDiscarder); ok {
 					discarder.DiscardSliceRead(run.request.Contract, leaf.Slice)
 				}
 				return sliceAgain, execution.SlotExecutionResult{}, nil
+			}
+			// A tree cut by prefix with no room for the split even after
+			// folding the slices this Slot read empty (sliceReading.makeRoom)
+			// is read with the slice last the Slot after, every other slice
+			// read and foldable by then (deferLeaf), and fails out of time
+			// now; read last and still without room, it holds more slices
+			// with series than a tree may have, and the Slot is refused for
+			// it by name, INPUT_SLICE_LEAVES_EXHAUSTED, not failed out of
+			// time round after round (015 C2 section 4.8).
+			if word, _ := InputSliceRefusal(refused); word == contract.ReasonInputSliceLeavesExhausted && stream.slices.byPrefix() &&
+				!stream.slices.deferLeaf(leaf) {
+				refused = stream.finalSliceRefusal(refused)
+				coordinator.voidRefusedShape(run.request.Contract.Slot.QueryGroup, stream.slices, refused)
+				coordinator.observeQueryFailure(ctx, run.request.Operation, run.started, "execute", refused)
+				return sliceFailed, execution.SlotExecutionResult{}, inSlotStep(execution.SlotNotCommittedQueryFailed, fmt.Errorf("alarmd worker: query: %w", refused))
 			}
 		}
 		outcome := observability.InputSliceTimeoutNotSplit
@@ -3763,12 +3831,13 @@ func (coordinator *SlotExecutionCoordinator) judgeSliceRead(ctx context.Context,
 		// the backend's limit, whatever its answer took to come back: the
 		// slices after it are judged against that (timedOutForSize).
 		took := slowestQueryMillis(sliceCompletion)
-		if _, _, timedOut := providerTimedOut(sliceCompletion); timedOut {
+		_, _, timedOut := providerTimedOut(sliceCompletion)
+		if timedOut {
 			took = max(took, 2*sliceQueryTargetMillis)
 		}
 		stream.slices.queryMillis += took
 		stream.slices.sliceMillis = append(stream.slices.sliceMillis, took)
-		stream.slices.noteLeafRead(&stream.slice, leaf, took)
+		stream.slices.noteLeafRead(&stream.slice, leaf, took, timedOut)
 		stream.slices.noteSliceCompletion(sliceCompletion)
 	}
 	// The next slice is read while this one completes, up to half of what

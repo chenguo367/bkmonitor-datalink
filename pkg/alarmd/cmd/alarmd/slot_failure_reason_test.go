@@ -80,7 +80,7 @@ func TestASlotFailureThatNamesItselfIsNotReportedAsUnnamed(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			reason, site := slotFailureReason(test.err)
+			reason, site := slotFailureReason(test.err, nil)
 			if reason == observability.ReasonInternalUnknown {
 				t.Fatalf("%v is reported as %s: the failure carries its own name and the line says nobody "+
 					"could name it", test.err, reason)
@@ -94,7 +94,7 @@ func TestASlotFailureThatNamesItselfIsNotReportedAsUnnamed(t *testing.T) {
 			// Wrapped the way the Slot wraps it on the way out, which is how it
 			// actually arrives at the classification.
 			wrapped := fmt.Errorf("alarmd worker: complete Slot: %w", test.err)
-			if reason, _ := slotFailureReason(wrapped); reason != test.want {
+			if reason, _ := slotFailureReason(wrapped, nil); reason != test.want {
 				t.Fatalf("wrapped, %v is reported as %s, want %s", test.err, reason, test.want)
 			}
 		})
@@ -105,7 +105,7 @@ func TestASlotFailureThatNamesItselfIsNotReportedAsUnnamed(t *testing.T) {
 // still internal_unknown, which is what makes the word mean "nobody looked at
 // this yet" rather than "this site does not classify".
 func TestASlotFailureNothingRecognisesIsStillUnnamed(t *testing.T) {
-	reason, site := slotFailureReason(errors.New("something nobody has classified"))
+	reason, site := slotFailureReason(errors.New("something nobody has classified"), nil)
 	if reason != observability.ReasonInternalUnknown {
 		t.Fatalf("an unrecognised failure is reported as %s; the word for an unnamed failure has to stay "+
 			"reachable or a new one arrives wearing an old name", reason)

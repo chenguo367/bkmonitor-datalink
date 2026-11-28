@@ -253,6 +253,22 @@ func (runtime *productionPhaseTwoOwnership) publishView(
 	ready []ownership.WorkerRegistration,
 	readyKnown bool,
 ) {
+	runtime.publishViewRewritten(ctx, authority, records, owners, nil, ready, readyKnown)
+}
+
+// publishViewRewritten is publishView for a round that restated some of the
+// records it read - their segment skip words: those are sent without the
+// record's own fields, which are the read record's and not the one the store
+// holds now (015 R1).
+func (runtime *productionPhaseTwoOwnership) publishViewRewritten(
+	ctx context.Context,
+	authority ownership.PublicationAuthority,
+	records map[execution.QueryGroupIdentity]ownership.AssignmentRecord,
+	owners map[execution.QueryGroupIdentity]string,
+	rewritten map[execution.QueryGroupIdentity]bool,
+	ready []ownership.WorkerRegistration,
+	readyKnown bool,
+) {
 	stream, source := runtime.dependencies.ViewStream, runtime.dependencies.ViewSource
 	if stream == nil || source == nil {
 		return
@@ -286,6 +302,12 @@ func (runtime *productionPhaseTwoOwnership) publishView(
 	}
 	for _, worker := range ready {
 		desired.Ready = append(desired.Ready, worker.WorkerID)
+		if worker.Declares(ownership.CapabilityViewAssignment) {
+			if desired.RecordFieldsTo == nil {
+				desired.RecordFieldsTo = make(map[string]bool, len(ready))
+			}
+			desired.RecordFieldsTo[worker.WorkerID] = true
+		}
 	}
 	for identity, entry := range running {
 		content := viewstream.Content{ObjectDigest: entry.Digest, OutputContexts: make([]viewstream.OutputContextRef, 0, len(entry.Refs))}
@@ -340,20 +362,7 @@ func (runtime *productionPhaseTwoOwnership) publishView(
 		desired.Content[identity] = content
 	}
 	for identity, record := range records {
-		assignment := viewstream.Assignment{
-			DesiredWorkerID: record.DesiredWorkerID, Revision: record.RecordRevision,
-			ContentScope: record.ContentScope, PendingContentScope: record.PendingContentScope,
-			TimelineRecordRevision: record.TimelineRecordRevision,
-		}
-		if !record.EffectiveAt.IsZero() {
-			assignment.EffectiveAtMs = record.EffectiveAt.UnixMilli()
-		}
-		if owner, moved := owners[identity]; moved && owner != "" {
-			// The round's rebalance moved it after the record was read; the
-			// revision is the read one and the next round's read corrects it.
-			assignment.DesiredWorkerID = owner
-		}
-		desired.Assignments[identity] = assignment
+		desired.Assignments[identity] = viewAssignmentOf(record, owners[identity], rewritten[identity])
 	}
 	if _, err := stream.Publish(ctx, desired); err != nil {
 		report(err)
@@ -555,4 +564,40 @@ func (runtime *productionPhaseTwoOwnership) PublishStoredView(ctx context.Contex
 		return
 	}
 	runtime.publishView(ctx, authority, records, nil, nil, false)
+}
+
+// viewAssignmentOf is the view's Assignment of a record, with the record's
+// own fields, which Project sends only to a Worker that declares the
+// view-assignment capability (015 R1). owner, when not empty, is the worker
+// the round ends with the Query Group on - the record's own, or the one its
+// moves took it to: the view names it, at the read revision, and the next
+// round's read corrects it. A record the round wrote after reading it -
+// moved to another owner, or rewritten in place - is sent without its own
+// fields: they are the read record's, not the one the store holds, and the
+// Worker named checks its fence with the store until the next round's read.
+// A move is told by its owner: no round moves a Query Group away and back.
+func viewAssignmentOf(record ownership.AssignmentRecord, owner string, rewritten bool) viewstream.Assignment {
+	assignment := viewstream.Assignment{
+		DesiredWorkerID: record.DesiredWorkerID, Revision: record.RecordRevision,
+		ContentScope: record.ContentScope, PendingContentScope: record.PendingContentScope,
+		TimelineRecordRevision: record.TimelineRecordRevision,
+		AssignmentGeneration:   record.AssignmentGeneration, ControlEpoch: record.ControlEpoch,
+		PlacementReason: string(record.PlacementReason),
+		SegmentSkip:     record.SegmentSkip, SegmentSkipNoData: record.SegmentSkipNoData,
+	}
+	if !record.EffectiveAt.IsZero() {
+		assignment.EffectiveAtMs = record.EffectiveAt.UnixMilli()
+	}
+	if !record.AssignedAt.IsZero() {
+		assignment.AssignedAtMs = record.AssignedAt.UnixMilli()
+	}
+	if owner != "" {
+		rewritten = rewritten || owner != record.DesiredWorkerID
+		assignment.DesiredWorkerID = owner
+	}
+	if rewritten {
+		assignment.AssignmentGeneration, assignment.ControlEpoch, assignment.PlacementReason = 0, 0, ""
+		assignment.AssignedAtMs, assignment.SegmentSkip, assignment.SegmentSkipNoData = 0, 0, 0
+	}
+	return assignment
 }

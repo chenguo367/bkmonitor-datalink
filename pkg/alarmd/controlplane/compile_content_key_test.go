@@ -113,7 +113,7 @@ func TestACompileContentKeyNamesTheObjectThePlansOwnContextAndThePlan(t *testing
 // content until the key names its source too.
 func TestEveryCompiledPlanFieldComesFromAnObjectTheContentKeyNames(t *testing.T) {
 	fromGroupObject := []string{
-		"EffectiveTimeSnapshot", "InputProjection", "NoData", "OutputIdentity", "PlanID", "StrategyIR",
+		"EffectiveTimeSnapshot", "InputProjection", "NoData", "OutputIdentity", "PlanID", "Realtime", "StrategyIR",
 		"TargetPlan", "TargetScope", "TerminalReasonCode",
 	}
 	fromOutputContext := []string{

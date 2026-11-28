@@ -44,6 +44,11 @@ const (
 	queryGroupObjectContractVersionV3 = "alarmd-query-group-object-v3"
 	// v4 prevents older workers from silently dropping target exclusions.
 	queryGroupObjectContractVersionV4 = "alarmd-query-group-object-v4"
+	// queryGroupObjectContractVersionV5 is written on an object whose Plan
+	// carries a realtime part: a reader that predates the field refuses the
+	// object by name instead of decoding it without its metric and
+	// conditions and running the realtime item as a queried one.
+	queryGroupObjectContractVersionV5 = "alarmd-query-group-object-v5"
 	outputContextContractVersion      = "alarmd-output-context-v1"
 
 	// The two contracts' version strings are a prefix and a number, and the
@@ -52,7 +57,7 @@ const (
 	// corruption. The latest numbers are the ones the known-version checks
 	// above accept; a version bump moves both.
 	queryGroupObjectContractPrefix = "alarmd-query-group-object-v"
-	queryGroupObjectContractLatest = 4
+	queryGroupObjectContractLatest = 5
 	outputContextContractPrefix    = "alarmd-output-context-v"
 	outputContextContractLatest    = 1
 )
@@ -70,9 +75,14 @@ func newerContractVersion(version, prefix string, latest int) bool {
 }
 
 // queryGroupObjectVersion selects the oldest contract that preserves every
-// Plan: v4 for exclusions, v3 for effective-time snapshots, v2 for target
-// plans, and v1 otherwise.
+// Plan: v5 for realtime parts, v4 for exclusions, v3 for effective-time
+// snapshots, v2 for target plans, and v1 otherwise.
 func queryGroupObjectVersion(plans []QueryGroupPlanObject) string {
+	for _, plan := range plans {
+		if plan.Realtime != nil {
+			return queryGroupObjectContractVersionV5
+		}
+	}
 	for _, plan := range plans {
 		if plan.TargetPlan.HasExclusions() {
 			return queryGroupObjectContractVersionV4
@@ -94,7 +104,8 @@ func queryGroupObjectVersion(plans []QueryGroupPlanObject) string {
 // knownQueryGroupObjectVersion reports whether this build reads objects of
 // that contract version.
 func knownQueryGroupObjectVersion(version string) bool {
-	return version == queryGroupObjectContractVersion || version == queryGroupObjectContractVersionV2 || version == queryGroupObjectContractVersionV3 || version == queryGroupObjectContractVersionV4
+	return version == queryGroupObjectContractVersion || version == queryGroupObjectContractVersionV2 || version == queryGroupObjectContractVersionV3 || version == queryGroupObjectContractVersionV4 ||
+		version == queryGroupObjectContractVersionV5
 }
 
 // queryGroupObjectDomain reads the contract version a stored object declares
@@ -188,7 +199,11 @@ type QueryGroupPlanObject struct {
 	// Continuous is the trigger window the synthetic series is read with. It is
 	// omitted when the item does not detect no-data, which keeps the digest of
 	// every Plan that does not off this field - see the placement test.
-	NoData             *contract.NoDataConfigV1 `json:"no_data,omitempty"`
+	NoData *contract.NoDataConfigV1 `json:"no_data,omitempty"`
+	// Realtime is execution content: the metric a realtime item's points are
+	// and the conditions they are judged by as they are read (016). Omitted
+	// for a queried item, which keeps the digest of every other Plan.
+	Realtime           *contract.RealtimeItemV2 `json:"realtime,omitempty"`
 	StrategyIR         contract.StrategyIRV2    `json:"strategy_ir"`
 	TerminalReasonCode string                   `json:"terminal_reason_code,omitempty"`
 	// Shard is the piece of a split strategy this Plan is; omitted for a
@@ -295,7 +310,8 @@ func buildQueryGroupPlanObject(plan FrozenPlan) QueryGroupPlanObject {
 		RequirementTemplates: plan.RequirementTemplates, QueryPlans: plan.QueryPlans,
 		PlanID: plan.Plan.PlanID, Strategy: strategyIdentity(plan.Plan.StrategyRef),
 		InputProjection: plan.Plan.InputProjection, OutputIdentity: plan.Plan.OutputIdentity,
-		TargetScope: plan.Plan.TargetScope, TargetPlan: plan.Plan.TargetPlan, NoData: plan.Plan.NoData, StrategyIR: strategyIR,
+		TargetScope: plan.Plan.TargetScope, TargetPlan: plan.Plan.TargetPlan, NoData: plan.Plan.NoData, Realtime: plan.Plan.Realtime,
+		StrategyIR:            strategyIR,
 		EffectiveTimeSnapshot: append(json.RawMessage(nil), plan.Plan.EffectiveTimeSnapshot...),
 		TerminalReasonCode:    plan.Plan.TerminalReasonCode,
 		Shard:                 plan.Shard,

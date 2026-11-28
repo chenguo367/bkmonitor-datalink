@@ -39,8 +39,10 @@ func largeSlicedFixture(t *testing.T) *slicedFixture {
 // A Query Group never read on this replica, read whole and timed out by
 // the provider (UQ's 504 at its 30 s), completes degraded and is read in
 // slices next: two asked, the backend's limit over a slice's target, the
-// time being all it says of the size - a starting tree's one split. Under
-// the query cooldown nothing is learned from it, and it is read whole again.
+// time being all it says of the size - a starting tree's one split, its root
+// cut by prefix by the alphabet (41 slices: no read delivered a value to
+// cut it otherwise, 015 C2 section 4.8). Under the query cooldown nothing is
+// learned from it, and it is read whole again.
 func TestAQueryGroupOfUnknownSizeTimedOutWholeByTheProviderIsReadInSlicesNext(t *testing.T) {
 	for _, test := range []struct {
 		name     string
@@ -64,8 +66,8 @@ func TestAQueryGroupOfUnknownSizeTimedOutWholeByTheProviderIsReadInSlicesNext(t 
 			if sliced == test.cooldown {
 				t.Fatalf("next Slot read in slices %t (%d reads), want %t", sliced, len(calls), !test.cooldown)
 			}
-			if sliced && len(calls) > 5 {
-				t.Fatalf("next Slot read %d slices, want the starting tree two asked make (5)", len(calls))
+			if sliced && len(calls) > 41 {
+				t.Fatalf("next Slot read %d slices, want the starting tree two asked make (41)", len(calls))
 			}
 			// No read delivered a series to choose a dimension by: the
 			// first is all there is.

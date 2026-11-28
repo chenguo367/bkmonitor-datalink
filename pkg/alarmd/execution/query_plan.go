@@ -190,6 +190,16 @@ type QueryPlanFacts struct {
 	// StepMillis; omitted when zero, so every other Plan's facts serialize
 	// exactly as they did.
 	QueryStepMillis int64 `json:"QueryStepMillis,omitempty"`
+	// Realtime is the input of a Query Group read from its result table's
+	// inner Kafka topic period by period in process (016), its Provider
+	// ProviderRealtime; nil for a group read from a query provider. A
+	// pointer, omitted when nil, so the facts of every other Plan serialize
+	// exactly as they did. All of it is part of the revision and of the
+	// group's identity, as every other fact is (queryGroupIdentityFacts): a
+	// channel rebuilt on another topic is another group. The metrics the
+	// group's items reference are not in it - they are its Plans' own - so an
+	// item added or removed moves neither.
+	Realtime *RealtimeInputFacts `json:"Realtime,omitempty"`
 }
 
 // RequestStepMillis is the step the provider is asked for.
@@ -281,6 +291,12 @@ func BuildQueryPlanFacts(facts QueryPlanFacts) (QueryPlanFacts, error) {
 			return QueryPlanFacts{}, errors.New("alarmd execution: a zero shard is carried as no shard")
 		}
 	}
+	if facts.Provider == ProviderRealtime || facts.Realtime != nil {
+		if err := facts.realtimeFacts(); err != nil {
+			return QueryPlanFacts{}, err
+		}
+		return withQueryRevision(facts)
+	}
 	if facts.Provider != ProviderUQ || facts.ProviderRouteRef == "" || facts.TenantID == "" ||
 		facts.BusinessID == "" || facts.SpaceScope == "" || facts.StepMillis <= 0 || facts.AlignmentMillis <= 0 {
 		return QueryPlanFacts{}, errors.New("alarmd execution: incomplete query plan facts")
@@ -354,6 +370,11 @@ func BuildQueryPlanFacts(facts QueryPlanFacts) (QueryPlanFacts, error) {
 			}
 		}
 	}
+	return withQueryRevision(facts)
+}
+
+// withQueryRevision is facts with the revision derived from them.
+func withQueryRevision(facts QueryPlanFacts) (QueryPlanFacts, error) {
 	// The domain and the formula behind this digest are frozen. The revision
 	// is persisted with every published Plan, and Validate re-derives it and
 	// refuses a Plan whose persisted revision differs; Validate is asserted

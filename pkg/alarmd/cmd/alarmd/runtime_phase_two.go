@@ -819,6 +819,9 @@ type phaseTwoWorkerBundle struct {
 	// carries neither, which readers take as unknown.
 	applied  func() uint64
 	capacity func() *fleet.Capacity
+	// fleetTracker is the tracker the replica's observations and its store
+	// call failures pass through, the one the fleet snapshot publishes.
+	fleetTracker *fleet.Tracker
 	// retained is the coordinator's retained high-water, the window it
 	// covers and its per-Query-Group share, for the heartbeat's load.
 	retained func() (uint64, time.Duration, uint64)
@@ -3250,7 +3253,7 @@ func phaseTwoWorkerRegistration(
 		// The control contracts this binary takes part in. The leader
 		// starts a contract only when every ready worker declares it.
 		Capabilities: []string{ownership.CapabilityContentScope, ownership.CapabilityShardAware, ownership.CapabilitySegmentSkip,
-			ownership.CapabilitySegmentSkipNoData, ownership.CapabilityMultiDetect},
+			ownership.CapabilitySegmentSkipNoData, ownership.CapabilityMultiDetect, ownership.CapabilityViewAssignment},
 		// Where this process serves the view stream and what a Worker must
 		// present to it (decision-016); empty for a process without one.
 		Endpoint: stream.Endpoint, StreamToken: stream.Token,

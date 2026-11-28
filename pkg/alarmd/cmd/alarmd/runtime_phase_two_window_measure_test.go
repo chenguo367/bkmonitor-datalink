@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"runtime/debug"
@@ -1082,17 +1083,31 @@ func windowMeasureSliceDigest(body []byte) string {
 }
 
 // windowMeasureShapesLine is a Slot's shape outcomes, every one, as
-// observability.InputSliceShapeOutcomes names them.
+// observability.InputSliceShapeOutcomes names them, each read off the
+// completion row's field of its name - input_slice_shape_<outcome>, and
+// sized_split's input_slice_start_discarded, as the metric counts them - so
+// an outcome added to the list is said here without this being changed; one
+// with no such field is said "?".
 func windowMeasureShapesLine(usage observability.SlotBudgetUsageFacts) string {
-	counts := []uint64{usage.InputSliceShapeStarted, usage.InputSliceShapeKept, usage.InputSliceShapeMerged,
-		usage.InputSliceShapeVoidedRevision, usage.InputSliceShapeVoidedDimensions, usage.InputSliceShapeVoidedMaxLeaves,
-		usage.InputSliceShapeRefusedNotALeaf, usage.InputSliceShapeRefusedNotAPartition, usage.InputSliceShapeRefusedMaxLeaves,
-		usage.InputSliceShapeEvictedIdle, usage.InputSliceShapeRefusedCondition, usage.InputSliceShapeRefusedSingleValue,
-		usage.InputSliceShapeRefusedSplitError,
-		usage.InputSliceShapeMergeRefused, usage.InputSliceStartDiscarded, usage.InputSliceShapeSizedKept}
-	parts := make([]string, 0, len(counts))
-	for index, outcome := range observability.InputSliceShapeOutcomes {
-		parts = append(parts, fmt.Sprintf("%s:%d", outcome, counts[index]))
+	value := reflect.ValueOf(usage)
+	byTag := map[string]uint64{}
+	for _, field := range reflect.VisibleFields(value.Type()) {
+		tag, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if kind := field.Type.Kind(); kind >= reflect.Uint && kind <= reflect.Uint64 {
+			byTag[tag] = value.FieldByIndex(field.Index).Uint()
+		}
+	}
+	parts := make([]string, 0, len(observability.InputSliceShapeOutcomes))
+	for _, outcome := range observability.InputSliceShapeOutcomes {
+		tag := "input_slice_shape_" + outcome
+		if outcome == observability.InputSliceShapeSizedSplit {
+			tag = "input_slice_start_discarded"
+		}
+		if count, ok := byTag[tag]; ok {
+			parts = append(parts, fmt.Sprintf("%s:%d", outcome, count))
+		} else {
+			parts = append(parts, outcome+":?")
+		}
 	}
 	return strings.Join(parts, ",")
 }

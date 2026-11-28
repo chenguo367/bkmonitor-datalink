@@ -58,6 +58,12 @@ const (
 	FailureSnapshotInvalid    = "SNAPSHOT_INVALID"
 	FailureSnapshotIncomplete = "SNAPSHOT_INCOMPLETE"
 	FailureWrongWorker        = "VIEW_FOR_ANOTHER_WORKER"
+	// FailureHeartbeatVersionAhead is a snapshot asked for because the
+	// Leader's heartbeat said it had sent a version past the one installed,
+	// and no delta that follows the installed one came within a heartbeat
+	// interval: a delta it sent that never arrived, which no later delta's
+	// base would show until the Leader publishes again (015 R1).
+	FailureHeartbeatVersionAhead = "HEARTBEAT_VERSION_AHEAD"
 )
 
 // LeaderEndpoint is where the Leader's stream is served, as discovery
@@ -140,6 +146,15 @@ type ClientStats struct {
 	DiscoveryMisses map[string]uint64
 	// LookbackPlanSets is how many lookback plan sets the Leader sent.
 	LookbackPlanSets uint64
+	// HeardAt is when anything last came from the Leader - a publication,
+	// a heartbeat's reply - on the client's clock; zero before anything
+	// did. Connected says nothing of it: a stream the Leader stopped
+	// answering stays connected until the idle timeout (015 R1).
+	HeardAt time.Time
+	// HeartbeatVersionAhead is how many snapshots were asked for because
+	// the Leader stayed ahead of the installed version past a heartbeat
+	// interval (FailureHeartbeatVersionAhead).
+	HeartbeatVersionAhead uint64
 }
 
 // ClientOptions are the client's seams: the dialer a test replaces to reach
@@ -490,6 +505,9 @@ func (client *Client) session(ctx context.Context, stream pb.ControlService_Conn
 	}()
 	defer func() { cancel(); <-heartbeats }()
 	var pending []*pb.Snapshot
+	// aheadSince is when the Leader's heartbeat first said it had sent past
+	// the installed version, zero while it has not.
+	var aheadSince time.Time
 	for {
 		message, err := stream.Recv()
 		if err != nil {
@@ -501,7 +519,11 @@ func (client *Client) session(ctx context.Context, stream pb.ControlService_Conn
 			}
 			return "RECV_FAILED", err
 		}
-		lastHeard.Store(client.now().UnixNano())
+		heard := client.now()
+		lastHeard.Store(heard.UnixNano())
+		client.mu.Lock()
+		client.stats.HeardAt = heard
+		client.mu.Unlock()
 		switch body := message.Body.(type) {
 		case *pb.LeaderMessage_Refusal:
 			reason := body.Refusal.Reason
@@ -533,8 +555,34 @@ func (client *Client) session(ctx context.Context, stream pb.ControlService_Conn
 			if client.plans != nil {
 				client.plans(lookbackPlansFromWire(body.LookbackPlans))
 			}
-		case *pb.LeaderMessage_Heartbeat, *pb.LeaderMessage_ObjectResult:
-			// Nothing to do with either here.
+		case *pb.LeaderMessage_Heartbeat:
+			// The version the Leader last sent, against the one installed. A
+			// delta it sent that never arrived leaves the Leader ahead with
+			// nothing on the way, and no later delta's base shows it until
+			// the Leader publishes again: ahead past a heartbeat interval,
+			// the snapshot is asked for, by the path a delta that does not
+			// apply takes.
+			// A snapshot still arriving in chunks is the catch-up already
+			// on its way.
+			installed, _ := client.Installed()
+			if len(pending) > 0 || !leaderAhead(versionFromWire(body.Heartbeat.Installed), installed.Version) {
+				aheadSince = time.Time{}
+				continue
+			}
+			if aheadSince.IsZero() {
+				aheadSince = heard
+				continue
+			}
+			if heard.Sub(aheadSince) >= client.tick {
+				aheadSince = time.Time{}
+				client.mu.Lock()
+				client.stats.HeartbeatVersionAhead++
+				client.mu.Unlock()
+				client.observe(ctx, "install_behind", FailureHeartbeatVersionAhead, nil)
+				client.requestSnapshot(send, FailureHeartbeatVersionAhead)
+			}
+		case *pb.LeaderMessage_ObjectResult:
+			// Nothing to do with it here.
 		}
 	}
 }
@@ -752,7 +800,7 @@ func connectFailureReason(streamCtx context.Context, err error) string {
 // which the line carries apart from the reason.
 func (client *Client) observeAt(ctx context.Context, event, reason, endpoint string, err error) {
 	result := observability.Result(observability.ResultSuccess)
-	if err != nil || event == "discovery_missed" || event == "install_refused" {
+	if err != nil || event == "discovery_missed" || event == "install_refused" || event == "install_behind" {
 		result = observability.ResultDegraded
 	}
 	installed, _ := client.Installed()
@@ -776,4 +824,34 @@ func (client *Client) observeInstall(ctx context.Context, view View, missing int
 		ViewStream: &observability.ViewStreamFacts{Event: "installed", WorkerID: client.identity.WorkerID, Incarnation: client.identity.Incarnation,
 			ControlEpoch: view.Version.ControlEpoch, Revision: view.Version.Revision, Affected: len(view.Entries), ObjectsMissing: missing, Reason: reason},
 	})
+}
+
+// leaderAhead reports whether sent, the version a Leader's heartbeat says it
+// last sent, is past installed: a later revision of the same term, or a
+// version of a later term. A Leader of an earlier term than the view
+// installed is one a newer Leader replaced: what it sent is not ahead, and
+// a snapshot asked of it would not install. A heartbeat that names none
+// says nothing.
+func leaderAhead(sent, installed Version) bool {
+	if sent.ControlEpoch == 0 || sent.ControlEpoch < installed.ControlEpoch {
+		return false
+	}
+	if sent.ControlEpoch > installed.ControlEpoch {
+		return true
+	}
+	return sent.Revision > installed.Revision
+}
+
+// HeardWithin reports whether anything came from the Leader within bound,
+// on the client's own clock, the one HeardAt is on: the view the Worker
+// installed is then as fresh as the stream carries it, and a Runner may
+// admit an attempt from it (015 R1).
+func (client *Client) HeardWithin(bound time.Duration) bool {
+	if client == nil {
+		return false
+	}
+	client.mu.Lock()
+	heard := client.stats.HeardAt
+	client.mu.Unlock()
+	return !heard.IsZero() && client.now().Sub(heard) <= bound
 }

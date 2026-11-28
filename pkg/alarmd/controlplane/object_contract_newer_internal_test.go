@@ -32,7 +32,8 @@ func TestALaterVersionOfTheContractIsNewerNotCorrupt(t *testing.T) {
 	}{
 		"query group v3 is read":      {`{"object_contract_version":"alarmd-query-group-object-v3"}`, queryGroupObjectDomain, queryGroupObjectContractVersionV3, false, false},
 		"query group v4 is read":      {`{"object_contract_version":"alarmd-query-group-object-v4"}`, queryGroupObjectDomain, queryGroupObjectContractVersionV4, false, false},
-		"query group v5 is newer":     {`{"object_contract_version":"alarmd-query-group-object-v5"}`, queryGroupObjectDomain, "", true, false},
+		"query group v5 is read":      {`{"object_contract_version":"alarmd-query-group-object-v5"}`, queryGroupObjectDomain, queryGroupObjectContractVersionV5, false, false},
+		"query group v6 is newer":     {`{"object_contract_version":"alarmd-query-group-object-v6"}`, queryGroupObjectDomain, "", true, false},
 		"query group v999 is newer":   {`{"object_contract_version":"alarmd-query-group-object-v999"}`, queryGroupObjectDomain, "", true, false},
 		"query group v0 is invalid":   {`{"object_contract_version":"alarmd-query-group-object-v0"}`, queryGroupObjectDomain, "", false, true},
 		"query group vx is invalid":   {`{"object_contract_version":"alarmd-query-group-object-vx"}`, queryGroupObjectDomain, "", false, true},

@@ -779,11 +779,50 @@ func compileAggregation(rawMethod string, interval int64, dimensions []string) (
 type conditionDialect struct {
 	operators map[string]string
 	logSource bool
+	// strict refuses a method with no operator here: the stores this
+	// dialect's queries reach read an operator they do not know as equality
+	// (UQ query/structured/condition_field.go ToPromOperator), so a method
+	// passed through would select the wrong series with nothing said. UQ's
+	// own operator names that renderer reads (eq, ne, req, nreq, contains,
+	// ncontains) go through as written, as the platform sends them: strategies
+	// in service write req.
+	strict bool
+	// comparisons are the operators that take exactly one value.
+	comparisons map[string]bool
+}
+
+// MetricConditionOperator is the UQ operator the metric dialect compiles a
+// condition's method to, and whether it has one: the table a reader outside
+// the compiler takes the queried path's operators from rather than a copy of
+// it (the realtime conditions' comparison, 016 section 5.2).
+func MetricConditionOperator(method string) (operator string, known bool) {
+	operator, known = metricConditions.operators[method]
+	return operator, known
+}
+
+// withOperators is base's operators and more's, more's winning.
+func withOperators(base, more map[string]string) map[string]string {
+	operators := make(map[string]string, len(base)+len(more))
+	for method, operator := range base {
+		operators[method] = operator
+	}
+	for method, operator := range more {
+		operators[method] = operator
+	}
+	return operators
 }
 
 var (
-	metricConditions = conditionDialect{operators: map[string]string{
-		"reg": "req", "nreg": "nreq", "include": "req", "exclude": "nreq", "eq": "contains", "neq": "ncontains"}}
+	metricConditions = conditionDialect{strict: true, operators: map[string]string{
+		"reg": "req", "nreg": "nreq", "include": "req", "exclude": "nreq", "eq": "contains", "neq": "ncontains",
+		"ne": "ne", "req": "req", "nreq": "nreq", "contains": "contains", "ncontains": "ncontains"}}
+	// bkdataConditions is the metric dialect for the computing platform's
+	// tables, which BkSql reads: it compares with gt, gte, lt and lte as
+	// written (UQ tsdb/bksql/sql_expr/base.go), and refuses what it does not
+	// know at query time.
+	bkdataConditions = conditionDialect{strict: true, operators: withOperators(metricConditions.operators,
+		map[string]string{"gt": "gt", "gte": "gte", "lt": "lt", "lte": "lte"}),
+		comparisons: map[string]bool{"gt": true, "gte": true, "lt": true, "lte": true}}
 	logConditions = conditionDialect{logSource: true, operators: map[string]string{
 		"reg": "req", "regexp": "req", "is one of": "eq", "is not one of": "ne", "contains match phrase": "contains",
 		"not contains match phrase": "ncontains", "=": "eq", "!=": "ne", "is": "eq", "is not": "ne", ">": "gt", ">=": "gte",
@@ -817,10 +856,26 @@ func compileConditions(source []legacyCondition, dialect conditionDialect) (exec
 			return execution.QueryConditions{}, queryConfigRejected("QUERY_CONDITION_INVALID", errors.New("condition values must be scalar"))
 		}
 		field := execution.QueryConditionField{Field: condition.Key, Operator: condition.Method}
-		if mapped := dialect.operators[condition.Method]; mapped != "" {
+		mapped := dialect.operators[condition.Method]
+		if mapped != "" {
 			field.Operator = mapped
 		}
 		existence := field.Operator == "existed" || field.Operator == "nexisted"
+		// A method with no operator here refuses the strategy - after a
+		// condition with no value is dropped, as UQ drops it whatever its
+		// operator (AnalysisConditions), and as the platform's strategy runs.
+		// An existence check is refused with a value or without: UQ keeps it,
+		// and the metric stores drop it as they render.
+		if mapped == "" && dialect.strict && (existence || len(values) > 0) {
+			return execution.QueryConditions{}, queryConfigRejected("QUERY_CONDITION_METHOD_UNSUPPORTED",
+				fmt.Errorf("condition %d's method %q has no operator its store reads", index, condition.Method))
+		}
+		if dialect.comparisons[field.Operator] && len(values) > 1 {
+			// BkSql compares with one value and refuses more at every query
+			// (UQ tsdb/bksql/sql_expr): refused here, once, by name.
+			return execution.QueryConditions{}, queryConfigRejected("QUERY_CONDITION_INVALID",
+				fmt.Errorf("condition %d compares with %d values; a comparison takes one", index, len(values)))
+		}
 		if dialect.logSource {
 			switch {
 			case existence:

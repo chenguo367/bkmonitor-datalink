@@ -11,6 +11,7 @@ package worker
 
 import (
 	"errors"
+	"maps"
 	"slices"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
@@ -135,6 +136,61 @@ func (coordinator *SlotExecutionCoordinator) shapeAfter(reading *sliceReading, b
 	return reading.merged(shape.Merged())
 }
 
+// shapeAfterPrefix is shapeAfter for a tree cut by prefix
+// (inputslice.Tree.ByPrefix): the shape its Query Group's next Slot starts
+// in and the history it carries, the tree judged on the leaves this Slot read
+// whole (inputslice.Tree.Next, 015 C2 section 4.3) - a leaf read slower than
+// sliceTimeTargetMillis split a level deeper at its values' common prefix, a
+// split that did not help taken back and its node held, a child read as an
+// empty slice for sliceDecayRounds rounds folded into its rest, a kept split
+// whose leaves together read under half the target and hold under half a
+// slice's series and bytes for sliceDecayRounds rounds taken back. A slice
+// the provider timed out and this Slot split (splitsOnTimeout) gives its time
+// under its own leaf, what its split is judged against the round after. A
+// Slot no longer sliceable on the dimensions its shape cut leaves none.
+func (coordinator *SlotExecutionCoordinator) shapeAfterPrefix(reading *sliceReading, before slicedReading, current []string, sliceable bool, cooldown bool) (inputslice.Shape, inputslice.History) {
+	if reading.timeoutSplit {
+		reading.shape.kept = true
+	}
+	if cooldown {
+		// Under the query cooldown the shape is held as it was read in: a
+		// backend the cooldown protects is not split for its time, and the
+		// slices it timed out are asked again as they were (deferred).
+		shape := reading.tree.Shape()
+		if shape.IsZero() || !sliceable || !slices.Equal(current, shape.Dimensions()) {
+			return inputslice.Shape{}, nil
+		}
+		return shape, before.history
+	}
+	reading.compactForNext()
+	reads := make(map[int]inputslice.LeafRead, len(reading.leafMillis)+len(reading.timedOutSplits))
+	for leaf, took := range reading.leafMillis {
+		reads[leaf] = inputslice.LeafRead{Millis: took, Series: reading.leafSeriesByID[leaf], Bytes: reading.leafBytesByID[leaf],
+			Bounds: reading.slowBounds[leaf], TimedOut: reading.timedOutLeaves[leaf]}
+	}
+	// A slice split for a timeout is judged by the time it ran out after.
+	maps.Copy(reads, reading.timeoutSplitReads())
+	limit := coordinator.wholeSliceLimit(max(reading.consumers, 1))
+	shape, history, counts := reading.tree.Next(reads, before.history, inputslice.Rules{
+		TargetMillis: sliceTimeTargetMillis, Rounds: sliceDecayRounds,
+		HalfSeries: sizedSplitSeries() / 2, HalfBytes: limit / 2,
+	})
+	reading.shape.next = counts
+	if shape.IsZero() {
+		// Every split taken back: the next Slot reads the Query Group whole,
+		// or in the slices its size or a timeout starts it in, and a Query
+		// Group read whole is not split for its time - only a tree's leaves
+		// are judged here - so a mark on its root has nothing to hold, and
+		// the history goes with the shape.
+		return inputslice.Shape{}, nil
+	}
+	if !sliceable || !slices.Equal(current, shape.Dimensions()) {
+		reading.shape.dropped = observability.InputSliceShapeVoidedDimensions
+		return inputslice.Shape{}, nil
+	}
+	return shape, history
+}
+
 // merged is the shape a split taken back leaves, counted merged; or, when
 // the shape would not rebuild without it, the shape as it was, kept and
 // counted merge_refused, rather than every split in it lost.
@@ -212,15 +268,40 @@ func (stream *streamedExecution) keepTimedOutSplit(leaf inputslice.Leaf) {
 		!reading.timedOutForSize(&stream.slice, reading.timedOutTook, stream.cooldownHeld()) {
 		return
 	}
-	if _, err := reading.tree.SplitKept(leaf.ID, stream.slice.sample); err == nil {
+	reading.treeMu.Lock()
+	defer reading.treeMu.Unlock()
+	_, err := reading.tree.SplitKept(leaf.ID, stream.slice.sample)
+	if err != nil && reading.makeRoom(err) {
+		_, err = reading.tree.SplitKept(leaf.ID, stream.slice.sample)
+	}
+	if err == nil {
 		reading.keptOnFailure = true
+		return
+	}
+	// No room in a tree cut by prefix: the slice is read last the Slot
+	// after, every other one read and foldable by then.
+	if word, _ := InputSliceRefusal(err); word == contract.ReasonInputSliceLeavesExhausted && reading.byPrefix() {
+		reading.deferLeaf(leaf)
 	}
 }
 
+// timeoutSplitReads is, by the ID of each slice the provider timed out and
+// this Slot split for it in place (splitsOnTimeout), the time it ran out
+// after: what a split of it is judged against the round after.
+func (reading *sliceReading) timeoutSplitReads() map[int]inputslice.LeafRead {
+	reads := make(map[int]inputslice.LeafRead, len(reading.leafMillis)+len(reading.timedOutSplits))
+	for leaf, took := range reading.timedOutSplits {
+		reads[leaf] = inputslice.LeafRead{Millis: took}
+	}
+	return reads
+}
+
 // shapeOnFailure is the shape a Slot that failed with a slice split for its
-// size leaves its Query Group: its tree's, held to FromShape as every shape
-// read in is, none when it does not hold.
+// size leaves its Query Group: its tree's, brought within the leaves a Slot
+// starts in when it is cut by prefix (compactForNext), held to FromShape as
+// every shape read in is, none when it does not hold.
 func (coordinator *SlotExecutionCoordinator) shapeOnFailure(reading *sliceReading) inputslice.Shape {
+	reading.compactForNext()
 	shape := reading.tree.Shape()
 	if _, err := inputslice.FromShape(shape.Dimensions(), shape); err != nil {
 		return inputslice.Shape{}
@@ -236,13 +317,13 @@ func (trees *sliceTrees) forget(group execution.QueryGroupIdentity) {
 	delete(trees.input, group)
 }
 
-// dropShape takes a Query Group's shape out of the memory, what else it
-// holds kept.
+// dropShape takes a Query Group's shape out of the memory, and the history of
+// its nodes with it, what else it holds kept.
 func (trees *sliceTrees) dropShape(group execution.QueryGroupIdentity) {
 	trees.mu.Lock()
 	defer trees.mu.Unlock()
 	if reading, ok := trees.input[group]; ok {
-		reading.shape, reading.shapeQuickRounds = inputslice.Shape{}, 0
+		reading.shape, reading.shapeQuickRounds, reading.history = inputslice.Shape{}, 0, nil
 		trees.input[group] = reading
 	}
 }
@@ -278,7 +359,7 @@ func (trees *sliceTrees) voidShape(group execution.QueryGroupIdentity) {
 	if !ok || reading.shape.IsZero() {
 		return
 	}
-	reading.shape, reading.shapeQuickRounds, reading.shapeSizedRounds = inputslice.Shape{}, 0, 0
+	reading.shape, reading.shapeQuickRounds, reading.shapeSizedRounds, reading.history = inputslice.Shape{}, 0, 0, nil
 	trees.input[group] = reading
 	trees.voided++
 }
@@ -311,6 +392,29 @@ func (stream *streamedExecution) sliceShapeOutcomes() [len(observability.InputSl
 			// beside this Slot's own.
 			counts[index] = stream.coordinator.slicedInput.takeVoided()
 		}
+		// The round's judgement of a shape cut by prefix counts (Next).
+		switch outcome {
+		case observability.InputSliceShapeMerged:
+			counts[index] += usage.next.Merged
+		case observability.InputSliceShapeMergeRefused:
+			counts[index] += usage.next.MergeRefused
+		case observability.InputSliceShapeRefusedSingleValue:
+			counts[index] += usage.next.Concentrated
+		case observability.InputSliceShapeRefusedCondition:
+			counts[index] += usage.next.ConditionBudget
+		case observability.InputSliceShapeSplitTime:
+			counts[index] += usage.next.SplitForTime
+		case observability.InputSliceShapeSplitHeldUniform:
+			counts[index] += usage.next.HeldUniform
+		case observability.InputSliceShapeSplitUnhelpful:
+			counts[index] += usage.next.Unhelpful
+		case observability.InputSliceShapeSplitHeldMark:
+			counts[index] += usage.next.HeldByMark
+		case observability.InputSliceShapeFolded:
+			counts[index] += usage.next.Folded + stream.slices.roomFolded
+		case observability.InputSliceShapeLeafCapReached:
+			counts[index] += usage.next.LeafCap
+		}
 		switch {
 		case outcome == observability.InputSliceShapeStarted && usage.started,
 			outcome == observability.InputSliceShapeKept && usage.kept,
@@ -318,6 +422,7 @@ func (stream *streamedExecution) sliceShapeOutcomes() [len(observability.InputSl
 			outcome == observability.InputSliceShapeMergeRefused && usage.mergeRefused,
 			outcome == observability.InputSliceShapeSizedSplit && stream.slices.startDiscarded,
 			outcome == observability.InputSliceShapeSizedKept && stream.slices.sizedKept,
+			outcome == observability.InputSliceShapeSwitchedToSuffix && usage.switched,
 			outcome == usage.dropped:
 			counts[index]++
 		}

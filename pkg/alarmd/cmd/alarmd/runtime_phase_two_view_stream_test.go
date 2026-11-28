@@ -192,8 +192,14 @@ func TestTheProductionLeaderServesItsDesiredSetOverTheViewStream(t *testing.T) {
 	if stats.Counts != (viewstream.Counts{Expected: 1, Sent: 1, Acked: 1, Installed: 1}) || stats.Counts.Switched != 0 {
 		t.Fatalf("counts = %+v, want expected/sent/acked/installed 1 and switched 0 in the shadow", stats.Counts)
 	}
-	// Another round with nothing changed publishes no new revision.
-	revision := stats.Revision
+	// The round at the start restated every record's segment skip word and
+	// sent them without the record's own fields; the next reads the records
+	// it wrote and sends them (015 R1). A round with nothing changed after
+	// that publishes no new revision.
+	if err := bundle.refreshAndReconcile(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	revision := bundle.dependencies.ViewStreamStats().Revision
 	if err := bundle.refreshAndReconcile(ctx, true); err != nil {
 		t.Fatal(err)
 	}

@@ -340,8 +340,10 @@ func TestPublishedPlanFieldsAreEachPlacedInOneDigest(t *testing.T) {
 			// Continuous is the window the synthetic series is read with. The
 			// level it also carries is read at output, but a fact is placed
 			// where it is decided, not everywhere it is read.
+			// realtime is execution too: the metric a realtime item's points
+			// are and the conditions they are judged by as they are read.
 			execution: []string{
-				"plan_id", "input_projection", "output_identity", "target_scope", "target_plan", "no_data", "terminal_reason_code", "effective_time_snapshot",
+				"plan_id", "input_projection", "output_identity", "target_scope", "target_plan", "no_data", "realtime", "terminal_reason_code", "effective_time_snapshot",
 			},
 			// signal_type sits with wire_format: both describe the event this
 			// Plan publishes rather than what the Slot executes, and both are

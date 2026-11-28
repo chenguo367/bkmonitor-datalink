@@ -44,7 +44,7 @@ func TestTwoConsumersPastTheBudgetInTheirLastSliceFinishAsOneDoes(t *testing.T) 
 	// Hosts whose last characters spread over the cut's classes, and some of
 	// the slice the cut puts last, which the Slot is read last in: one stream
 	// finishes on that slice, two consumers on it as the slice numbered last.
-	tree, err := inputslice.NewCut([]string{"host"}, 12, inputslice.FixedCut("host"))
+	tree, err := inputslice.NewCut([]string{"host"}, 12, inputslice.SuffixCut("host"))
 	if err != nil {
 		t.Fatal(err)
 	}

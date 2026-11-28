@@ -269,8 +269,11 @@ func TestExplicitEnvironmentInputAndRebinding(t *testing.T) {
 			t.Fatalf("expected input error for %v: %d", args, code)
 		}
 	}
+	// The same profile, named, at another entry: a login from another entry
+	// without a name keeps a profile of its own instead.
 	next := p
 	next.PublicBaseURL = "https://new.example.com/"
+	next.name = derivedProfileName(p.PublicBaseURL)
 	if err := store.checkBinding(next, false); err == nil {
 		t.Fatal("origin silently rebound")
 	}
@@ -326,7 +329,9 @@ func TestLateResponsesDoNotReplaceNewLogin(t *testing.T) {
 			close(release)
 			wg.Wait()
 			current, err := store.get(p.EnvironmentID)
-			if err != nil || !reflect.DeepEqual(current, newSession) {
+			want := newSession
+			want.name = derivedProfileName(p.PublicBaseURL)
+			if err != nil || !reflect.DeepEqual(current, want) {
 				t.Fatalf("late %s replaced session B: %+v %v", command, current, err)
 			}
 		})
@@ -509,7 +514,9 @@ func TestNetworkLogoutClearsLocalAndReportsUnknown(t *testing.T) {
 	if _, err := store.get(p.EnvironmentID); err == nil {
 		t.Fatal("local credential retained")
 	}
-	if err := store.checkBinding(fixtureProfile("https://different.example.com"), false); err == nil {
+	moved := fixtureProfile("https://different.example.com")
+	moved.name = derivedProfileName(p.PublicBaseURL)
+	if err := store.checkBinding(moved, false); err == nil {
 		t.Fatal("logout lost environment binding")
 	}
 }

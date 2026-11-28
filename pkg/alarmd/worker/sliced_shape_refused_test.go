@@ -68,7 +68,7 @@ func TestASlotRefusedForTheLeavesOfItsShapeLeavesTheNextOneSlicesCounted(t *test
 // its size as a let-go slice's is (inputslice.Tree.SplitSized).
 func crowdedShape(t *testing.T, dimensions []string, series []slicedSeries) inputslice.Shape {
 	t.Helper()
-	tree, err := inputslice.New(dimensions, 4, dimensions[0])
+	tree, err := inputslice.NewCut(dimensions, 4, inputslice.SuffixCut(dimensions[0]))
 	if err != nil {
 		t.Fatal(err)
 	}

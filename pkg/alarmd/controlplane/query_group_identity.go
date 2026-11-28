@@ -83,6 +83,17 @@ type queryGroupIdentityFacts struct {
 	// step differently read different points. Omitted when zero, so every
 	// other group stays where it was.
 	QueryStep int64 `json:"query_step_millis,omitempty"`
+	// Realtime is a realtime group's input whole: its table, the cluster,
+	// topic and source kind its channel names, and its period. A channel
+	// rebuilt on another topic is another group - rare, and the price of
+	// the identity reading every fact the revision reads: a Plan retained
+	// from the last good publication still carries the input it was compiled
+	// with, and beside this build's Plans of the same table under one
+	// identity it would stop the Catalog (addPlan). The
+	// metrics the group's items reference, which move with every item added
+	// or removed, are their Plans' and not in the facts at all. Omitted for
+	// a queried group, so every identity stays where it was.
+	Realtime *execution.RealtimeInputFacts `json:"realtime,omitempty"`
 }
 
 // queryGroupIdentityFactsOf projects a Plan's facts onto the identity. The
@@ -97,7 +108,7 @@ func queryGroupIdentityFactsOf(facts execution.QueryPlanFacts) queryGroupIdentit
 		Normalization: facts.Normalization, QueryDelay: facts.QueryDelaySeconds,
 		SourceSemantics: facts.SourceSemantics, PromQL: facts.PromQL, TSDBMap: facts.TSDBMap,
 		Shard: facts.Shard, GlobalBusiness: facts.GlobalBusiness, NamedOutputs: facts.NamedOutputs,
-		QueryStep: facts.QueryStepMillis,
+		QueryStep: facts.QueryStepMillis, Realtime: facts.Realtime,
 	}
 }
 

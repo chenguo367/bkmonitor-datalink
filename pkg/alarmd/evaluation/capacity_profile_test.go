@@ -30,6 +30,62 @@ func (b *capacityBackend) MGet(_ context.Context, keys []string) ([][]byte, erro
 }
 func (*capacityBackend) SetMany(context.Context, []state.BackendWrite) error { return nil }
 
+// The rest is what the execution store asks of every backend as it opens
+// (state.MissingBackendCapabilities): the profile only loads the one record
+// MGet serves, so each reads nothing and writes nothing.
+
+func (*capacityBackend) CompareAndSet(context.Context, string, []byte, bool, []byte, time.Duration) (bool, error) {
+	return false, nil
+}
+
+func (*capacityBackend) RenewIfBelow(context.Context, string, time.Duration, time.Duration) (state.RenewalOutcome, error) {
+	return state.RenewalFresh, nil
+}
+
+func (*capacityBackend) RenewManyIfBelow(_ context.Context, keys []string, _, _ time.Duration) ([]state.RenewalOutcome, error) {
+	outcomes := make([]state.RenewalOutcome, len(keys))
+	for index := range outcomes {
+		outcomes[index] = state.RenewalFresh
+	}
+	return outcomes, nil
+}
+
+func (*capacityBackend) ReadHash(context.Context, string) (map[string][]byte, error) { return nil, nil }
+
+func (*capacityBackend) ReadHashField(context.Context, string, string) ([]byte, error) {
+	return nil, nil
+}
+
+func (*capacityBackend) ScanHashPage(context.Context, string, uint64, int64) ([]state.HashField, uint64, error) {
+	return nil, 0, nil
+}
+
+func (*capacityBackend) ReadHashFields(_ context.Context, _ string, fields []string) ([][]byte, error) {
+	return make([][]byte, len(fields)), nil
+}
+
+func (*capacityBackend) ApplyHashDelta(context.Context, state.HashDeltaWrite) (state.HashDeltaOutcome, error) {
+	return state.HashDeltaOutcome{}, nil
+}
+
+func (*capacityBackend) StageHashSegment(context.Context, state.HashStageSegment) (state.HashDeltaOutcome, error) {
+	return state.HashDeltaOutcome{}, nil
+}
+
+func (*capacityBackend) SwapStagedHash(context.Context, state.HashStageSwap) (state.HashDeltaOutcome, error) {
+	return state.HashDeltaOutcome{}, nil
+}
+
+func (*capacityBackend) DiscardStagedHash(context.Context, string, string, []byte) error { return nil }
+
+func (*capacityBackend) ScanHash(context.Context, string, int64) (map[string][]byte, error) {
+	return nil, nil
+}
+
+func (*capacityBackend) WriteHashFields(context.Context, string, map[string][]byte, []string, time.Duration) error {
+	return nil
+}
+
 func TestCapacityProfileLegalSeries(t *testing.T) {
 	if os.Getenv("ALARMD_CAPACITY_PROFILE") != "1" {
 		t.Skip("opt-in capacity measurement")
@@ -149,8 +205,16 @@ func TestCapacityProfileLegalSeries(t *testing.T) {
 				t.Fatalf("invalid final input: %v bytes=%d", err, len(raw))
 			}
 			backend := &capacityBackend{raw: raw}
-			router, _ := state.NewFixedRouter("capacity", backend)
-			store, _ := state.NewExecutionStore(state.ExecutionStoreOptions{Prefix: "capacity", Router: router, MaxValueBytes: cfg.Limits.Codec.MaxEncodedBytes, MaxItemsPerCall: cfg.Limits.Store.MaxKeysPerBatch, MinTTL: time.Minute, MaxTTL: time.Hour, RestartMargin: time.Minute})
+			router, err := state.NewFixedRouter("capacity", backend)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Its refusal said, not passed over: a store that did not open is
+			// no store to load from.
+			store, err := state.NewExecutionStore(state.ExecutionStoreOptions{Prefix: "capacity", Router: router, MaxValueBytes: cfg.Limits.Codec.MaxEncodedBytes, MaxItemsPerCall: cfg.Limits.Store.MaxKeysPerBatch, MinTTL: time.Minute, MaxTTL: time.Hour, RestartMargin: time.Minute})
+			if err != nil {
+				t.Fatal(err)
+			}
 			loaded, err := store.LoadRuntime(context.Background(), execution.StatePreflightRequest{Contract: req.Header.Contract, Items: []execution.StatePreflightItem{{Identity: req.State.Items[0].Identity, ApplyVersion: version}}})
 			if err != nil || len(loaded.Items) != 1 || loaded.Items[0].Status != execution.StateFoundReady {
 				t.Fatalf("legal state: %v %+v", err, loaded)

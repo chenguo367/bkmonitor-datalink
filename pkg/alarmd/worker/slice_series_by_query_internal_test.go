@@ -53,7 +53,7 @@ func readSliceOf(t *testing.T, sample inputslice.Sample, perQuery map[execution.
 func TestTheSeriesOfASliceAreTheMostOneOfItsQueriesRead(t *testing.T) {
 	ringRatio := map[execution.PhysicalQueryDigest]uint64{"primary": 80_000, "previous": 80_000}
 	reading, slice, leaf := readSliceOf(t, hostSample(80, 1000), ringRatio)
-	reading.noteLeafRead(slice, leaf, 10_000)
+	reading.noteLeafRead(slice, leaf, 10_000, false)
 	if !reading.tree.Shape().IsZero() {
 		t.Fatal("two queries of 80,000 series each, within a slice's 87,000 a request, were split for the next Slot")
 	}
@@ -67,7 +67,7 @@ func TestTheSeriesOfASliceAreTheMostOneOfItsQueriesRead(t *testing.T) {
 
 	past := map[execution.PhysicalQueryDigest]uint64{"primary": 100_000, "previous": 100_000}
 	reading, slice, leaf = readSliceOf(t, hostSample(100, 1000), past)
-	reading.noteLeafRead(slice, leaf, 20_000)
+	reading.noteLeafRead(slice, leaf, 20_000, false)
 	if reading.tree.Shape().IsZero() {
 		t.Fatal("two queries of 100,000 series each, past a slice's 87,000 a request, were not split for the next Slot")
 	}

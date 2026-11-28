@@ -42,6 +42,12 @@ type ViewClientCounts struct {
 	// 4b). The rest were renewed and still refused: the view ahead of the
 	// record.
 	GateRenewals, GateRenewalsSettled, GateRenewalsFailed uint64
+	// HeartbeatVersionAhead is the snapshots asked for because the
+	// Leader's heartbeat stayed ahead of the installed version past a
+	// heartbeat interval; HeardAgeSeconds how long ago anything came from
+	// the Leader, NaN before anything did (015 R1).
+	HeartbeatVersionAhead uint64
+	HeardAgeSeconds       float64
 }
 
 // viewClientInstallFailures and viewClientRefusals are the closed label
@@ -61,6 +67,8 @@ var (
 type viewClientCollector struct {
 	mu              sync.Mutex
 	source          func() ViewClientCounts
+	versionAhead    *prometheus.Desc
+	heardAge        *prometheus.Desc
 	connected       *prometheus.Desc
 	installed       *prometheus.Desc
 	objectsMissing  *prometheus.Desc
@@ -77,6 +85,20 @@ type viewClientCollector struct {
 func newViewClientCollector() *viewClientCollector {
 	name := func(suffix string) string { return prometheus.BuildFQName("", metricSubsystem, suffix) }
 	return &viewClientCollector{
+		versionAhead: prometheus.NewDesc(name("view_heartbeat_version_ahead_total"),
+			"Snapshots this Worker asked for because the Leader's heartbeat said it had sent a view version past the "+
+				"one installed and no delta that follows the installed one came within a heartbeat interval: a delta "+
+				"the Leader sent that never arrived, which no later delta would show until the Leader published "+
+				"again. Each is also in view_snapshot_request_total. It should stay zero; a rise is views a stream "+
+				"that stayed connected let fall behind.",
+			nil, nil),
+		heardAge: prometheus.NewDesc(name("control_view_heard_age_seconds"),
+			"Seconds since anything last came from the Leader on this Worker's view stream - a publication or a "+
+				"heartbeat's reply - NaN before anything did. A Runner admits an attempt from the view without a "+
+				"fence check only while this is within the heartbeat interval plus the lease renewal interval; past "+
+				"it every attempt checks its fence with the store, as before. view_client_connected says nothing of "+
+				"this: a stream the Leader stopped answering stays connected until the idle timeout.",
+			nil, nil),
 		connected: prometheus.NewDesc(name("view_client_connected"),
 			"1 while this Worker holds an admitted stream to the Control Leader, else 0. Read the fleet's sum against "+
 				"the Leader's view_stream_sessions: they count the same streams from both ends.", nil, nil),
@@ -147,7 +169,7 @@ func (r *Recorder) SetViewClientSource(source func() ViewClientCounts) {
 }
 
 func (c *viewClientCollector) Describe(ch chan<- *prometheus.Desc) {
-	for _, desc := range []*prometheus.Desc{c.connected, c.installed, c.objectsMissing, c.installs, c.installFailures, c.snapshots, c.refusals, c.connections, c.discoveryMisses, c.executed, c.renewals} {
+	for _, desc := range []*prometheus.Desc{c.connected, c.installed, c.objectsMissing, c.installs, c.installFailures, c.snapshots, c.refusals, c.connections, c.discoveryMisses, c.executed, c.renewals, c.versionAhead, c.heardAge} {
 		ch <- desc
 	}
 }
@@ -173,6 +195,8 @@ func (c *viewClientCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.objectsMissing, prometheus.GaugeValue, objectsMissing)
 	ch <- prometheus.MustNewConstMetric(c.snapshots, prometheus.CounterValue, float64(counts.SnapshotsRequested))
 	ch <- prometheus.MustNewConstMetric(c.connections, prometheus.CounterValue, float64(counts.Connections))
+	ch <- prometheus.MustNewConstMetric(c.versionAhead, prometheus.CounterValue, float64(counts.HeartbeatVersionAhead))
+	ch <- prometheus.MustNewConstMetric(c.heardAge, prometheus.GaugeValue, counts.HeardAgeSeconds)
 	emitClosed(ch, c.discoveryMisses, viewClientDiscoveryMisses, counts.DiscoveryMisses)
 	emitClosed(ch, c.installs, viewClientInstallKinds, counts.Installs)
 	emitClosed(ch, c.installFailures, viewClientInstallFailures, counts.InstallFailures)

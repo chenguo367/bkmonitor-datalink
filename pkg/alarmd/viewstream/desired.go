@@ -34,6 +34,12 @@ type Desired struct {
 	// stands.
 	Ready      []string
 	ReadyKnown bool
+	// RecordFieldsTo is the Workers that declare the view-assignment
+	// capability, sent each Assignment with the record's own fields (015
+	// R1); every other Worker is sent it without them, as before, and its
+	// Runner checks its fence with the store, as it did. Read with Ready:
+	// without ReadyKnown the publisher keeps the last round's set.
+	RecordFieldsTo map[string]bool
 }
 
 // Project is the view of one Worker: every Query Group whose Assignment
@@ -53,6 +59,9 @@ func (desired Desired) Project(workerID string) (View, error) {
 	for queryGroup, assignment := range desired.Assignments {
 		if assignment.DesiredWorkerID != workerID {
 			continue
+		}
+		if !desired.RecordFieldsTo[workerID] {
+			assignment = assignment.withoutRecordFields()
 		}
 		entry := Entry{QueryGroup: queryGroup, Assignment: assignment}
 		if content, published := desired.Content[queryGroup]; published {
@@ -113,6 +122,15 @@ func (desired Desired) Fingerprint() uint64 {
 	write(string(desired.Publication.SnapshotRevision))
 	writeUint(desired.Publication.PublicationEpoch)
 	writeUint(desired.Publication.ActivationRecordRevision)
+	// Who is sent the record's own fields is part of what each projects to.
+	capable := make([]string, 0, len(desired.RecordFieldsTo))
+	for worker, sent := range desired.RecordFieldsTo {
+		if sent {
+			capable = append(capable, worker)
+		}
+	}
+	sort.Strings(capable)
+	write(append([]string{"record_fields"}, capable...)...)
 	identities := make([]execution.QueryGroupIdentity, 0, len(desired.Assignments)+len(desired.Content))
 	seen := make(map[execution.QueryGroupIdentity]struct{}, cap(identities))
 	for identity := range desired.Assignments {
@@ -135,6 +153,14 @@ func (desired Desired) Fingerprint() uint64 {
 			// cutover beside the timeline, by placement on a record that
 			// had not said - so the revision above does not stand for it.
 			writeUint(assignment.TimelineRecordRevision)
+			// The record's own fields, which also move without the revision
+			// (the segment skip words).
+			write(assignment.PlacementReason)
+			writeUint(assignment.AssignmentGeneration)
+			writeUint(assignment.ControlEpoch)
+			writeUint(uint64(assignment.AssignedAtMs))
+			writeUint(assignment.SegmentSkip)
+			writeUint(assignment.SegmentSkipNoData)
 		}
 		if content, ok := desired.Content[identity]; ok {
 			write("c", string(content.ObjectDigest))

@@ -9,7 +9,11 @@
 
 package worker
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+)
 
 // PinSliceConsumersForTests has every Slot read in slices consume them on
 // its own stream, k = 1, unless a case sets k: this package's cases are one
@@ -51,4 +55,35 @@ func SetSlicesBySubstreamForTest(t testing.TB, note func(consumed []int, barrier
 	t.Helper()
 	before := slicesBySubstreamForTest.Swap(&note)
 	t.Cleanup(func() { slicesBySubstreamForTest.Store(before) })
+}
+
+// SetSliceReadTakenForTest tells note, until t ends, the slice of each read
+// a Slot's dispatch takes back from its consumers, before it judges it.
+func SetSliceReadTakenForTest(t testing.TB, note func(slice execution.InputSlice)) {
+	t.Helper()
+	before := sliceReadTakenForTest.Swap(&note)
+	t.Cleanup(func() { sliceReadTakenForTest.Store(before) })
+}
+
+// SetConsumersBeganForTest tells note, until t ends, as a Slot's consumers
+// are about to begin.
+func SetConsumersBeganForTest(t testing.TB, note func()) {
+	t.Helper()
+	before := consumersBeganForTest.Swap(&note)
+	t.Cleanup(func() { consumersBeganForTest.Store(before) })
+}
+
+// SetSliceRoomHeldForTest has a Slot's k chosen by its room, until t ends, as
+// if its dispatch held bytes more than it does.
+func SetSliceRoomHeldForTest(t testing.TB, bytes uint64) {
+	t.Helper()
+	before := sliceRoomHeldForTest.Swap(bytes)
+	t.Cleanup(func() { sliceRoomHeldForTest.Store(before) })
+}
+
+// SliceShareForTest is a Query Group's share on the coordinator and the floor
+// of a slice consumed side by side, L_min (consumersForRoom).
+func SliceShareForTest(coordinator *SlotExecutionCoordinator) (share, floor uint64) {
+	share = coordinator.qgShareBytes()
+	return share, share / sliceFloorDivisor
 }

@@ -52,21 +52,23 @@ func consumerFails(t *testing.T, what string, waiting func() bool,
 			[]string{"host"}, inputslice.Shape{}, 12, 1, 24)
 		return fixture
 	}
-	// One stream lands the slices in the order they are numbered.
-	learn := setup()
-	if _, err := learn.coordinator.Execute(context.Background(), request); err != nil {
-		t.Fatalf("one stream: %v", err)
-	}
-	var numbered []string
-	for _, call := range learn.source.landed() {
-		numbered = append(numbered, call.slice.Digest())
-	}
-	if len(numbered) < 4 {
-		t.Fatalf("fixture: one stream landed %d slices, want several", len(numbered))
-	}
-
 	worker.SetSliceConsumersByCoresForTest(t, 4)
 	fixture := setup()
+	// The slices the Slot starts in, numbered in the order the tree has them:
+	// the order they are handed out, the dispatch reading the first. What a
+	// Slot's reads come back in is no order of theirs - several read ahead at
+	// once come back as they finish.
+	slices, held := worker.RestoredSlices(fixture.coordinator, request)
+	if !held {
+		t.Fatal("fixture: the memory holds no slices of the Query Group")
+	}
+	var numbered []string
+	for _, slice := range slices {
+		numbered = append(numbered, slice.Digest())
+	}
+	if len(numbered) < 4 {
+		t.Fatalf("fixture: the Slot starts in %d slices, want several", len(numbered))
+	}
 	release := make(chan struct{})
 	// Released on every way out, the case's failure too: a read held on
 	// release would otherwise hold its Slot's goroutines into the cases after.

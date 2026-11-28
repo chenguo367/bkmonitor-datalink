@@ -14,6 +14,8 @@ import (
 
 	"github.com/go-redis/redis/v8"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
 )
 
 func TestRedisCallHookCountsEveryPipelinedMember(t *testing.T) {
@@ -76,8 +78,10 @@ func TestRedisCallHookBoundsCommandNamesAndRecordsFailures(t *testing.T) {
 	ctx, _ = hook.BeforeProcess(context.Background(), nil)
 	failed := redis.NewStringCmd(ctx, "GET", "k")
 	failed.SetErr(context.DeadlineExceeded)
-	if err := hook.AfterProcess(ctx, failed); err != nil {
-		t.Fatalf("AfterProcess: %v", err)
+	// A call that ran out of time is the store not answering: the hook hands
+	// it back marked, the command's own error inside.
+	if call := redisfailure.CallErrorOf(hook.AfterProcess(ctx, failed)); call == nil || call.Err != context.DeadlineExceeded {
+		t.Fatalf("AfterProcess returned %v, want the timeout marked", call)
 	}
 	if got := testutil.ToFloat64(hook.metrics.failures.WithLabelValues("runtime", "get", "false")); got != 1 {
 		t.Fatalf("real error must count as a failure, got %v", got)

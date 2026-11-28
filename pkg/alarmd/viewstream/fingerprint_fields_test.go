@@ -57,9 +57,13 @@ func TestADesiredSetWhoseOnlyChangeIsATimelineRevisionIsPublished(t *testing.T) 
 // to the record's preview later is covered without anyone remembering to
 // add a row; a field of a kind this case cannot move fails it until taught.
 func TestEveryAssignmentFieldMovesTheFingerprint(t *testing.T) {
+	// w1 declares the view-assignment capability: the record's own fields
+	// are in its projection, so moving one moves it (015 R1).
 	base := func() viewstream.Desired {
-		return desiredAt(publicationA, map[string]string{"qg-1": "w1", "qg-2": "w2"},
+		desired := desiredAt(publicationA, map[string]string{"qg-1": "w1", "qg-2": "w2"},
 			map[string]viewstream.Content{"qg-1": content("obj-1", "s1"), "qg-2": content("obj-2", "s2")})
+		desired.RecordFieldsTo, desired.ReadyKnown = map[string]bool{"w1": true}, true
+		return desired
 	}
 	fields := reflect.TypeOf(viewstream.Assignment{})
 	for index := 0; index < fields.NumField(); index++ {

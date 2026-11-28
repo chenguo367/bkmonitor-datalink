@@ -31,7 +31,24 @@ import (
 // most, and the series bounded only by the pool.
 func witnessRig(t *testing.T, hosts, padding int, pool, states uint64) *shadowRig {
 	t.Helper()
-	rig := newShadowRig(t, hosts, padding, shadowRecoveryOff)
+	return witnessRigOver(t, newShadowRig(t, hosts, padding, shadowRecoveryOff), pool, states, false)
+}
+
+// orderedWitnessRig is witnessRig over a threshold Plan, its one physical
+// query read one slice at a time (orderedReads): the rig two Slots are
+// compared on slice for slice. Over the ring ratio's two physical queries
+// read at once, where a slice was let go was the order their batches
+// interleaved in, not what the Slot held beside it.
+func orderedWitnessRig(t *testing.T, hosts int, pool, states uint64) *shadowRig {
+	t.Helper()
+	return witnessRigOver(t, newThresholdShadowRig(t, hosts, 0), pool, states, true)
+}
+
+// witnessRigOver gives rig the store as its State port, the pool and
+// per-window State mutations given (zero, the rig's), the series bounded
+// only by the pool, and ordered, its reads in order (orderedReads).
+func witnessRigOver(t *testing.T, rig *shadowRig, pool, states uint64, ordered bool) *shadowRig {
+	t.Helper()
 	wiring, budget := rig.wiring, rig.budget
 	wiring.State = rig.store.ExecutionStore
 	budget.MaxSeries = 1 << 20
@@ -40,6 +57,9 @@ func witnessRig(t *testing.T, hosts, padding int, pool, states uint64) *shadowRi
 	}
 	if states > 0 {
 		budget.MaxStateMutations = states
+	}
+	if ordered {
+		orderedReads(t, &budget)
 	}
 	coordinator, err := worker.NewSlotExecutionCoordinator(wiring, budget)
 	if err != nil {
@@ -173,11 +193,13 @@ func TestTheWitnessesOfTheSeriesARetryFindsAppliedGoAsTheirWindowsLand(t *testin
 // decides them, a Slot whose steady members the segment skip leaves
 // unwritten is read in the slices the same Slot is read in when every
 // member is written, round after round: the witnesses its windows leave go
-// as they land, so its slice limit does not fall as it reads.
+// as they land, so its slice limit does not fall as it reads. Both read the
+// same series in the same order (orderedWitnessRig), so where a slice is let
+// go is what the two hold beside it.
 func TestASlotLeavingItsMembersUnwrittenIsReadInTheSlicesOfOneWritingThem(t *testing.T) {
 	const hosts, rounds = 2000, 12
 	const pool = 2 << 20
-	skipping, writing := witnessRig(t, hosts, 0, pool, 16), witnessRig(t, hosts, 0, pool, 16)
+	skipping, writing := orderedWitnessRig(t, hosts, pool, 16), orderedWitnessRig(t, hosts, pool, 16)
 	skipping.skipWord.Store(7)
 	at := frozenContract().Slot.EvaluationTime
 	left, compared, sliced := int64(0), 0, uint64(0)

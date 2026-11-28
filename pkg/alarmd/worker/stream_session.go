@@ -660,13 +660,40 @@ func (stream *streamedExecution) boundTotal() uint64 {
 	}
 	slot := stream.aheadBytes.Load()
 	if stream.dispatch != nil && stream.dispatch != stream {
-		slot += stream.dispatch.ownTotalNow()
+		for phase := range retainPhaseCount {
+			slot += stream.dispatch.heldForConsumers(phase)
+		}
 	}
 	total := slot/k + stream.applyHeld()
 	for _, retained := range stream.retainedByPhase {
 		total += retained
 	}
 	return total
+}
+
+// heldForConsumers is what the dispatch holds of phase that its consumers'
+// bounds count, safe to read from a consumer's goroutine: all it holds, its
+// windows in flight with it. Counted beside them, the dispatch is never
+// counted at less than it holds: its windows in flight are taken off the
+// lane before what they held is given back (landResult), and a count less
+// what is in flight would, for that while, count less than is held. What it
+// holds beside its windows - the Plans it merged first, its summary, the
+// keys no window consumed - it holds to the Slot's end, as a consumer holds
+// its own. Its windows are counted until they land: the dispatch takes its
+// own landings while its consumers read (consumeSideBySide).
+//
+// What that comes to, measured on a Query Group of 150,000 series at two
+// consumers on a share S of 768 MiB: as its consumers begin, the window of
+// the slice it read before they began is cut and in flight, and counted here
+// until it lands - its input a consumer's slice at most (limitConsumers),
+// 55.8 MiB, beside output and State of 160.9 and 148.4 MiB, the Slot's
+// retained peak at that moment. It lands once written, giving back its
+// input and most of its State; until then each consumer counts 1/k
+// of it, and a first slice judged then had a limit of 3.9 MiB, was let go
+// and split, and the Query Group's shape grew from 17 slices to 33 (015 C1,
+// the k = 2 share).
+func (dispatch *streamedExecution) heldForConsumers(phase retainPhase) uint64 {
+	return dispatch.ownNow[phase].Load()
 }
 
 // RetainedInputBytesNow is the input this execution has retained so far,

@@ -227,3 +227,40 @@ func TestACallerALaterHookNamesIsCounted(t *testing.T) {
 		t.Fatalf("operations %v reasons %v, want each job's operation and the state store's timeout under the source client", operations, reasons)
 	}
 }
+
+// A failed call that had time to reach the store reaches the listener once,
+// with the job that made it and why it failed - a pipeline as one call. A
+// call its caller cancelled, one issued with its deadline already past, and
+// one that names no job do not: none of them says the store failed.
+func TestAStoreCallFailureReachesTheListenerWithItsCallerAndReason(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	type heard struct{ caller, reason string }
+	var got []heard
+	r.OnRedisCallerFailure(func(caller, reason string, at time.Time) {
+		if at.IsZero() {
+			t.Error("a failure handed over without its time")
+		}
+		got = append(got, heard{caller, reason})
+	})
+	hook := r.RedisHook("source")
+	call := func(ctx context.Context, err error) {
+		ctx, _ = hook.BeforeProcess(ctx, nil)
+		_ = hook.AfterProcess(ctx, failedCommand("get", err))
+	}
+	state := redisfailure.WithCaller(context.Background(), redisfailure.CallerRuntimeState)
+	call(state, context.DeadlineExceeded)
+	call(state, nil)
+	cancelled, cancel := context.WithCancel(redisfailure.WithCaller(context.Background(), redisfailure.CallerOwnership))
+	cancel()
+	call(cancelled, context.Canceled)
+	spent, stop := context.WithDeadline(redisfailure.WithCaller(context.Background(), redisfailure.CallerControlPlane), time.Now().Add(-time.Second)) // fixed-wait: a deadline already past, the call issued with no time left; nothing waits on it
+	defer stop()
+	call(spent, context.DeadlineExceeded)
+	call(context.Background(), context.DeadlineExceeded)
+	ctx, _ := hook.BeforeProcessPipeline(redisfailure.WithCaller(context.Background(), redisfailure.CallerControlPlane), nil)
+	_ = hook.AfterProcessPipeline(ctx, []redis.Cmder{failedCommand("hget", context.DeadlineExceeded), failedCommand("hget", context.DeadlineExceeded)})
+	want := []heard{{redisfailure.CallerRuntimeState, redisfailure.Timeout}, {redisfailure.CallerControlPlane, redisfailure.Timeout}}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("listener heard %+v, want %+v", got, want)
+	}
+}

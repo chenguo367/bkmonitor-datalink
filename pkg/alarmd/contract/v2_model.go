@@ -658,7 +658,12 @@ type EvaluationPlanV2 struct {
 	// NoData is the item's no-data detection setting. Absent means the item
 	// does not detect no-data; see NoDataConfigV1 for why enablement is the
 	// presence of the section rather than a field inside it.
-	NoData     *NoDataConfigV1 `json:"no_data,omitempty"`
+	NoData *NoDataConfigV1 `json:"no_data,omitempty"`
+	// Realtime is the item's realtime part (016): the metric it reads from
+	// its result table's topic and the conditions its points are judged by.
+	// Absent for an item that is queried; a pointer, omitted when nil, so
+	// every other Plan serializes exactly as it did.
+	Realtime   *RealtimeItemV2 `json:"realtime,omitempty"`
 	StrategyIR StrategyIRV2    `json:"strategy_ir"`
 	// WireFormat is the format this Plan's events are published as, decided
 	// when the Plan was built and frozen with it so a retried Slot cannot
@@ -851,9 +856,10 @@ func (plan EvaluationPlanV2) MarshalJSON() ([]byte, error) {
 		TargetScope           *TargetScopeV2         `json:"target_scope,omitempty"`
 		TargetPlan            *TargetPlanV1          `json:"target_plan,omitempty"`
 		NoData                *NoDataConfigV1        `json:"no_data,omitempty"`
+		Realtime              *RealtimeItemV2        `json:"realtime,omitempty"`
 		StrategyIR            StrategyIRV2           `json:"strategy_ir"`
 		WireFormat            string                 `json:"wire_format,omitempty"`
-	}{plan.EffectiveTimeSnapshot, plan.PlanID, plan.StrategyRef, plan.InputProjection, plan.SourceCompatibility, plan.OutputIdentity, plan.SubjectFacts, plan.LegacyOutput, plan.TargetScope, plan.TargetPlan, plan.NoData, plan.StrategyIR, plan.WireFormat})
+	}{plan.EffectiveTimeSnapshot, plan.PlanID, plan.StrategyRef, plan.InputProjection, plan.SourceCompatibility, plan.OutputIdentity, plan.SubjectFacts, plan.LegacyOutput, plan.TargetScope, plan.TargetPlan, plan.NoData, plan.Realtime, plan.StrategyIR, plan.WireFormat})
 }
 
 type PlanSetV2 struct {

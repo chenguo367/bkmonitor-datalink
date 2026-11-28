@@ -181,8 +181,17 @@ type SlotBudgetUsageFacts struct {
 	// InputSliceTimeouts is the slices that ran out of time and were split
 	// and read again, the Slot completing: at most one a Slot.
 	InputSliceTimeouts uint64 `json:"input_slice_timeouts,omitempty"`
+	// InputSliceTimeoutDeepening is the Slots in a row, this one included,
+	// that split the Query Group's tree cut by prefix a level deeper for a
+	// slice the provider timed out - in place, or into its shape as the Slot
+	// failed - read on the Slot that completes; zero for a Slot that split
+	// nothing so. A Query Group that has never delivered a series, and whose
+	// values share a long prefix, needs one Slot a character (015 C2 section
+	// 4.8): this says how many it took.
+	InputSliceTimeoutDeepening uint64 `json:"input_slice_timeout_deepening,omitempty"`
 	// InputSliceShape* is what the Slot did with its Query Group's shape,
-	// one each at most (InputSliceShapeOutcomes).
+	// one each at most, but for merged and the six of the round's judgement,
+	// which count (InputSliceShapeOutcomes).
 	InputSliceShapeStarted              uint64 `json:"input_slice_shape_started,omitempty"`
 	InputSliceShapeKept                 uint64 `json:"input_slice_shape_kept,omitempty"`
 	InputSliceShapeMerged               uint64 `json:"input_slice_shape_merged,omitempty"`
@@ -198,6 +207,21 @@ type SlotBudgetUsageFacts struct {
 	InputSliceShapeRefusedSplitError    uint64 `json:"input_slice_shape_refused_split_error,omitempty"`
 	InputSliceShapeMergeRefused         uint64 `json:"input_slice_shape_merge_refused,omitempty"`
 	InputSliceShapeSizedKept            uint64 `json:"input_slice_shape_sized_kept,omitempty"`
+	// The round's judgement of its shape (inputslice.Tree.Next), counts of
+	// this Slot's: the leaves split for their time, past the target and not
+	// split for a backend slow as a whole, splits for time taken back for no
+	// help, leaves held by such a split's mark, children folded into their
+	// rest, and leaves the leaves a Slot starts in left no room to split.
+	InputSliceShapeSplitTime        uint64 `json:"input_slice_shape_split_time,omitempty"`
+	InputSliceShapeSplitHeldUniform uint64 `json:"input_slice_shape_split_held_uniform,omitempty"`
+	InputSliceShapeSplitUnhelpful   uint64 `json:"input_slice_shape_split_unhelpful,omitempty"`
+	InputSliceShapeSplitHeldMark    uint64 `json:"input_slice_shape_split_held_mark,omitempty"`
+	InputSliceShapeFolded           uint64 `json:"input_slice_shape_folded,omitempty"`
+	InputSliceShapeLeafCapReached   uint64 `json:"input_slice_shape_leaf_cap_reached,omitempty"`
+	// InputSliceShapeSwitchedToSuffix is a tree cut by prefix a slice of
+	// which was let go for its size: its Query Group starts its next Slot cut
+	// from the end, from its root (slice_tree_switched_to_suffix).
+	InputSliceShapeSwitchedToSuffix uint64 `json:"input_slice_shape_switched_to_suffix,omitempty"`
 	// InputSliceCutOn is where the dimension the Slot's starting slices
 	// were cut on came from (InputSliceCutOnSources), empty for a Slot not
 	// started in slices counted: read whole, or in its Query Group's shape.
@@ -214,6 +238,20 @@ type SlotBudgetUsageFacts struct {
 	// its memory - the cut a read before chose, or its shape - was let go
 	// for its size: the cut did not fit the input.
 	InputSliceStartDiscarded uint64 `json:"input_slice_start_discarded,omitempty"`
+	// InputSliceConsumers is k, the streams that consumed the Slot's slices
+	// side by side (015 C1): one for a Slot read in slices on its own
+	// stream, none for one read whole.
+	InputSliceConsumers uint64 `json:"input_slice_consumers,omitempty"`
+	// InputSliceConsumersFrom is where k came from
+	// (InputSliceConsumersFromSources), none for a Slot whose k was never
+	// more than one. For a k the room took down, InputSliceRoomLimitBytes is
+	// the slice limit L(k) the room left the cores' k, and
+	// InputSliceFloorBytes the bar it fell short of: the floor L_min, or a
+	// quarter more for a k above the one the Query Group last consumed with
+	// (015 C1, the k = 2 share, 3.2).
+	InputSliceConsumersFrom  string `json:"input_slice_consumers_from,omitempty"`
+	InputSliceRoomLimitBytes uint64 `json:"input_slice_room_limit_bytes,omitempty"`
+	InputSliceFloorBytes     uint64 `json:"input_slice_floor_bytes,omitempty"`
 	// NoDataStagesAhead* is how the Slot's no-data first writes staged as
 	// their windows landed ended, a Plan each (NoDataStageAheadOutcomes);
 	// NoDataStageAheadDiffers* the differs among them by why
@@ -449,7 +487,25 @@ var NoDataStageAheadOutcomes = [4]string{"carried", "differs", "discarded", "sto
 // a slice the Slot started in let go for its size and its split kept for the
 // next Slot (inputslice.Tree.SplitSized; the Slot's
 // input_slice_start_discarded), and sized_kept, a slice read whole past a
-// slice's series kept split for the next Slot (KeepSizedSplit).
+// slice's series kept split for the next Slot (KeepSizedSplit). Six count
+// the round's judgement of its shape (inputslice.Tree.Next, 015 C2 section
+// 4.3), each of a Slot's count: split_time, a leaf read slower than the
+// target split a level deeper for the next Slot; split_held_uniform, one
+// past the target not split, no slower than twice the round's median - a
+// backend slow as a whole; split_unhelpful, a split for time taken back, its
+// children's median no faster than half its node's time; split_held_mark, a
+// leaf past the target held by such a split's mark until it reads at twice
+// that; folded, a child kept apart that read as an empty slice does for
+// three rounds folded into its rest; leaf_cap_reached, a leaf to split for
+// its time that the leaves a Slot starts in left no room for, read as it is.
+// switched_to_suffix is a tree cut by prefix a slice of which was let go for
+// its size, split by its values' ends: the Query Group's shape dropped, its
+// next Slot cut from the end from its root (015 C2 section 4.8).
+// merged counts the kept splits the judgement took back, merge_refused a
+// round whose splits to take back would not rebuild without them,
+// refused_single_value a leaf to split for its time no split separates, and
+// refused_condition_budget one whose children's conditions would pass the
+// budget.
 const (
 	InputSliceShapeStarted              = "started"
 	InputSliceShapeKept                 = "kept"
@@ -467,31 +523,58 @@ const (
 	InputSliceShapeMergeRefused         = "merge_refused"
 	InputSliceShapeSizedSplit           = "sized_split"
 	InputSliceShapeSizedKept            = "sized_kept"
+	InputSliceShapeSplitTime            = "split_time"
+	InputSliceShapeSplitHeldUniform     = "split_held_uniform"
+	InputSliceShapeSplitUnhelpful       = "split_unhelpful"
+	InputSliceShapeSplitHeldMark        = "split_held_mark"
+	InputSliceShapeFolded               = "folded"
+	InputSliceShapeLeafCapReached       = "leaf_cap_reached"
+	InputSliceShapeSwitchedToSuffix     = "switched_to_suffix"
 )
 
 // InputSliceShapeOutcomes is every outcome, in the order of the
 // SlotBudgetUsageFacts fields that count them; sized_split's is
 // InputSliceStartDiscarded.
-var InputSliceShapeOutcomes = [16]string{InputSliceShapeStarted, InputSliceShapeKept, InputSliceShapeMerged,
+var InputSliceShapeOutcomes = [23]string{InputSliceShapeStarted, InputSliceShapeKept, InputSliceShapeMerged,
 	InputSliceShapeVoidedRevision, InputSliceShapeVoidedDimensions, InputSliceShapeVoidedMaxLeaves,
 	InputSliceShapeRefusedNotALeaf, InputSliceShapeRefusedNotAPartition, InputSliceShapeRefusedMaxLeaves,
 	InputSliceShapeEvictedIdle, InputSliceShapeRefusedCondition, InputSliceShapeRefusedSingleValue,
-	InputSliceShapeRefusedSplitError, InputSliceShapeMergeRefused, InputSliceShapeSizedSplit, InputSliceShapeSizedKept}
+	InputSliceShapeRefusedSplitError, InputSliceShapeMergeRefused, InputSliceShapeSizedSplit, InputSliceShapeSizedKept,
+	InputSliceShapeSplitTime, InputSliceShapeSplitHeldUniform, InputSliceShapeSplitUnhelpful, InputSliceShapeSplitHeldMark,
+	InputSliceShapeFolded, InputSliceShapeLeafCapReached, InputSliceShapeSwitchedToSuffix}
 
 // Where the dimension a Slot's starting slices were cut on came from,
 // closed: root_split, the one its Query Group's last read had its root split
 // on; whole_sample, the one the sample of its last read, read whole, split
 // most evenly; first_dimension_fallback, the first of its dimensions, for a
 // Query Group no read ever delivered a series of - its read whole the
-// provider timed out - which nothing else can choose for.
+// provider timed out - which nothing else can choose for;
+// switched_to_suffix, the one the sample of the slice that switched its
+// tree from prefix to the end split most evenly (015 C2 section 4.8).
 const (
-	InputSliceCutOnRootSplit      = "root_split"
-	InputSliceCutOnWholeSample    = "whole_sample"
-	InputSliceCutOnFirstDimension = "first_dimension_fallback"
+	InputSliceCutOnRootSplit        = "root_split"
+	InputSliceCutOnWholeSample      = "whole_sample"
+	InputSliceCutOnFirstDimension   = "first_dimension_fallback"
+	InputSliceCutOnSwitchedToSuffix = "switched_to_suffix"
 )
 
+// Where a Slot's k came from, closed: cores, the process's cores' k within
+// its read width, the room its share left once the dispatch's own windows
+// landed allowing it; room, fewer, that room holding no more consumers'
+// slices to the floor; forced, the k a case or the measurement build set.
+const (
+	InputSliceConsumersFromCores  = "cores"
+	InputSliceConsumersFromRoom   = "room"
+	InputSliceConsumersFromForced = "forced"
+)
+
+// InputSliceConsumersFromSources is every source of k.
+var InputSliceConsumersFromSources = [3]string{InputSliceConsumersFromCores, InputSliceConsumersFromRoom,
+	InputSliceConsumersFromForced}
+
 // InputSliceCutOnSources is every source.
-var InputSliceCutOnSources = [3]string{InputSliceCutOnRootSplit, InputSliceCutOnWholeSample, InputSliceCutOnFirstDimension}
+var InputSliceCutOnSources = [4]string{InputSliceCutOnRootSplit, InputSliceCutOnWholeSample, InputSliceCutOnFirstDimension,
+	InputSliceCutOnSwitchedToSuffix}
 
 // InputSliceTimeoutOutcomes is every outcome.
 var InputSliceTimeoutOutcomes = []string{InputSliceTimeoutSplitSucceeded, InputSliceTimeoutSplitFailed, InputSliceTimeoutNotSplit}

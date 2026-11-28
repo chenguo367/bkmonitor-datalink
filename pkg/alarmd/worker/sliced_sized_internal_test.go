@@ -46,7 +46,7 @@ func readWhole(t *testing.T, series uint64, sample inputslice.Sample) (*sliceRea
 // is within a slice and is not split.
 func TestASliceReadWholePastASlicesSeriesStartsInItsPartsNext(t *testing.T) {
 	reading, slice, leaf := readWhole(t, 150_000, hostSample(150, 1000))
-	reading.noteLeafRead(slice, leaf, 20_000)
+	reading.noteLeafRead(slice, leaf, 20_000, false)
 	next, err := inputslice.FromShape([]string{"host"}, reading.tree.Shape())
 	if err != nil {
 		t.Fatalf("the shape kept does not rebuild: %v", err)
@@ -71,7 +71,7 @@ func TestASliceReadWholePastASlicesSeriesStartsInItsPartsNext(t *testing.T) {
 	}
 
 	within, slice, leaf := readWhole(t, 80_000, hostSample(80, 1000))
-	within.noteLeafRead(slice, leaf, 10_000)
+	within.noteLeafRead(slice, leaf, 10_000, false)
 	if !within.tree.Shape().IsZero() {
 		t.Fatal("a slice of 80,000 series, within a slice's 87,000, was split for the next Slot")
 	}
@@ -89,12 +89,12 @@ func TestASizedSplitPastTheStartingLeavesIsRefused(t *testing.T) {
 		sample inputslice.Sample
 		want   string
 	}{{hostSample(150, 1000), observability.InputSliceShapeRefusedMaxLeaves}, {inputslice.Sample{"host": {{Value: "x", Series: 150_000}}}, observability.InputSliceShapeRefusedSingleValue}} {
-		tree, err := inputslice.New([]string{"host"}, inputslice.MaxLeaves-3, "host")
+		tree, err := inputslice.NewCut([]string{"host"}, inputslice.MaxLeaves-3, inputslice.SuffixCut("host"))
 		if err != nil {
 			t.Fatal(err)
 		}
 		reading := &sliceReading{tree: tree, dimensions: []string{"host"}}
-		reading.noteLeafRead(&sliceRead{series: 150_000, sample: test.sample}, tree.Pending()[1], 20_000)
+		reading.noteLeafRead(&sliceRead{series: 150_000, sample: test.sample}, tree.Pending()[1], 20_000, false)
 		if reading.sizedKept || reading.shape.dropped != test.want {
 			t.Fatalf("kept %v, shape %q: want nothing kept, refused %s", reading.sizedKept, reading.shape.dropped, test.want)
 		}
@@ -110,7 +110,7 @@ func TestASizedSplitPastTheStartingLeavesIsRefused(t *testing.T) {
 // nothing.
 func TestASizedSplitIsTakenBackAfterThreeQuietRoundsOnly(t *testing.T) {
 	cut, slice, leaf := readWhole(t, 150_000, hostSample(150, 1000))
-	cut.noteLeafRead(slice, leaf, 20_000)
+	cut.noteLeafRead(slice, leaf, 20_000, false)
 	shape := cut.tree.Shape()
 	const limit = 384 << 10
 	partBytes := uint64(0)
@@ -239,7 +239,7 @@ func TestATimeMergeTheRoundALeafOfItIsKeptSplitKeepsEverySplit(t *testing.T) {
 		if leaf.ID == kept[0] {
 			slice.series = 150_000
 		}
-		reading.noteLeafRead(slice, leaf, 1)
+		reading.noteLeafRead(slice, leaf, 1, false)
 	}
 	if !reading.sizedKept {
 		t.Fatal("the leaf past a slice's series was not kept split")
@@ -265,7 +265,7 @@ func TestATimeMergeTheRoundALeafOfItIsKeptSplitKeepsEverySplit(t *testing.T) {
 // round it was made - to be let go again the round after.
 func TestASizedSplitMadeThisRoundStartsItsOwnCount(t *testing.T) {
 	cut, slice, leaf := readWhole(t, 150_000, hostSample(150, 1000))
-	cut.noteLeafRead(slice, leaf, 20_000)
+	cut.noteLeafRead(slice, leaf, 20_000, false)
 	shape := cut.tree.Shape()
 	tree, err := inputslice.FromShape([]string{"host"}, shape)
 	if err != nil {

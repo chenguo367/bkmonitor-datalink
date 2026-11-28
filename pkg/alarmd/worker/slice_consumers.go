@@ -11,6 +11,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/inputslice"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // sliceConsumersForTest, set only by cases and the alarmd_measure build
@@ -30,6 +32,14 @@ var sliceConsumersForTest atomic.Int32
 // is told how many slices each of the k consumers consumed, and how many
 // barriers they held, as a Slot's consumers end.
 var slicesBySubstreamForTest atomic.Pointer[func(consumed []int, barriers uint64)]
+
+// consumersBeganForTest, set only by cases, is told as a Slot's consumers
+// are about to begin, its dispatch's own slice read.
+var consumersBeganForTest atomic.Pointer[func()]
+
+// sliceReadTakenForTest, set only by cases, is told the slice of each read
+// the dispatch takes back from its consumers, before it judges the read.
+var sliceReadTakenForTest atomic.Pointer[func(slice execution.InputSlice)]
 
 // sliceConsumerProcsForTest, set only by cases, is the cores a case asks
 // sliceConsumersByCores for (sliceConsumers).
@@ -58,8 +68,78 @@ func (stream *streamedExecution) sliceConsumers() int {
 	if !stream.began || procs == 0 {
 		return 1
 	}
+	if stream.slices.chosen > 0 {
+		return stream.slices.chosen
+	}
 	width := stream.coordinator.sliceReadWidth(judgedRequests(stream.header))
 	return max(1, min(sliceConsumersByCores(procs), width-1))
+}
+
+// sliceFloorDivisor is L_min, the least a slice of a Slot consumed
+// side by side is to be able to hold, as a part of the share: S/64 (015 C1,
+// the k = 2 share, K1), 12 MiB of a 768 MiB share. Below it a slice's
+// fixed cost - its query, its Begin - takes too much of what it reads for
+// another consumer to pay.
+const sliceFloorDivisor = 64
+
+// sliceRoomHeldForTest, set only by cases, is held beside what the dispatch
+// holds as a Slot's k is chosen by its room (consumersForRoom).
+var sliceRoomHeldForTest atomic.Uint64
+
+// consumersForRoom is k for a Slot by the room its share leaves once the
+// dispatch's own windows have landed (015 C1, the k = 2 share, 3.2): the
+// most of cores consumers whose slices may each still hold L_min, one when
+// none may. What the Slot holds that slicing does not change - its output
+// and State - is counted in full, 1/k by each consumer as before; what is
+// chosen is how many it is split between. A consumer holds a slice and a
+// window of at most L each, a read ahead a slice, w - k of them: so
+// L(k) = (S/2 - D)/(k + w), D what the dispatch holds, the reads ahead
+// counted at their most rather than as they are, none begun yet. A k above
+// the one the Query Group's last Slot consumed with needs a quarter more,
+// so a room near L_min does not split and join its shape round by round; a
+// Query Group with no k remembered takes the most whose slices hold L_min.
+// L(k) chooses k and bounds nothing: the consumers' slice limits are
+// sliceLimit's, read as they read.
+func (stream *streamedExecution) consumersForRoom(cores int) consumersChoice {
+	share := stream.coordinator.qgShareBytes()
+	if share == 0 || cores <= 1 {
+		return consumersChoice{k: cores, from: observability.InputSliceConsumersFromCores}
+	}
+	width := uint64(stream.coordinator.sliceReadWidth(judgedRequests(stream.header)))
+	room := boundLess(share/2, stream.ownTotalNow()+sliceRoomHeldForTest.Load())
+	floor := share / sliceFloorDivisor
+	last := stream.coordinator.slicedInput.lastInput(stream.request.Contract.Slot.QueryGroup).consumers
+	need := func(k int) uint64 {
+		if last > 0 && k > last {
+			return floor + floor/4
+		}
+		return floor
+	}
+	// For a k the room took down: the cores' k's limit and the bar it fell
+	// short of - the floor, or a quarter more to rise past the k remembered.
+	short := consumersChoice{from: observability.InputSliceConsumersFromRoom, limit: room / (uint64(cores) + width),
+		floor: need(cores)}
+	for k := cores; k > 1; k-- {
+		if room/(uint64(k)+width) >= need(k) {
+			if k == cores {
+				return consumersChoice{k: k, from: observability.InputSliceConsumersFromCores}
+			}
+			short.k = k
+			return short
+		}
+	}
+	short.k = 1
+	return short
+}
+
+// consumersChoice is the k a Slot was given and where it came from
+// (observability.InputSliceConsumersFromSources): for a k the room took
+// down, the slice limit the room left the cores' k and the bar it fell short
+// of - the floor, or a quarter more to rise past the k remembered.
+type consumersChoice struct {
+	k            int
+	from         string
+	limit, floor uint64
 }
 
 // sliceConsumersByCores is k by the process's cores, as the cells chose it
@@ -153,6 +233,20 @@ func sideBySideStreams(dispatch *streamedExecution, k int, yields chan<- yieldRe
 func (coordinator *SlotExecutionCoordinator) consumeSideBySide(ctx context.Context, run *sliceRun, dispatch *streamedExecution,
 	k int,
 ) (result execution.SlotExecutionResult, err error, ended bool) {
+	// The k the Slot consumed with, for its usage row and its Query Group's
+	// next Slot (rememberSlotInput): written before any consumer starts.
+	dispatch.slices.consumers = k
+	// The dispatch's own windows - of the slice it read before its consumers
+	// began - have landed: the Slot waited for them before choosing its k
+	// (015 C1, the k = 2 share, 3.1), and the dispatch hands none while its
+	// consumers read. So nothing of its own is taken as they read; a window of
+	// its handed after all is drained, and its failed write found, as the Slot
+	// finishes (landConsumers). Whoever has the dispatch hand windows while
+	// its consumers read is to take their landings here again.
+	dispatch.stopClockForConsumers()
+	if note := consumersBeganForTest.Load(); note != nil {
+		(*note)()
+	}
 	yields := make(chan yieldRequest)
 	done := make(chan struct{})
 	events := make(chan sliceEvent)
@@ -245,34 +339,28 @@ func (coordinator *SlotExecutionCoordinator) consumeSideBySide(ctx context.Conte
 		execution.MarkStage(ctx, execution.SlotStageQuery)
 		select {
 		case <-ctx.Done():
-			// The Slot's context ended - its lease lost, its Query Group moved,
-			// the process stopping. A consumer that sees it end returns from
-			// whatever it waits on without a word to the dispatch (run), so the
-			// dispatch does not wait for one: the Slot ends as one stream does
-			// when the read in hand fails on that context, the read in hand
-			// being the lowest slice a consumer has.
-			consumer := lowestBusyConsumer(consumers)
-			if consumer.judged {
-				// Its read was judged and it is completing the slice: the Slot
-				// ends as one stream does when its completion fails on that
-				// context - a step of ours, not the query, which was fine.
-				coordinator.observeQueryFailure(run.completionCtx, run.request.Operation, run.started, "stream_complete", ctx.Err())
-				stop()
-				return execution.SlotExecutionResult{}, inSlotStep(execution.SlotNotCommittedCompleteFailed,
-					fmt.Errorf("alarmd worker: complete Slot: %w", ctx.Err())), true
-			}
-			_, failed, failure := coordinator.judgeSliceRead(ctx, run, consumer.stream, consumer.leaf,
-				execution.QueryExecutionCompletion{}, ctx.Err(), consumer.handed, time.Now())
-			stop()
-			if failure == nil {
-				failure = inSlotStep(execution.SlotNotCommittedQueryFailed, fmt.Errorf("alarmd worker: query: %w", ctx.Err()))
-			}
+			failed, failure := coordinator.endSideBySideOnContext(ctx, run, consumers, stop)
 			return failed, failure, true
 		case request := <-yields:
+			if ctx.Err() != nil {
+				failed, failure := coordinator.endSideBySideOnContext(ctx, run, consumers, stop)
+				return failed, failure, true
+			}
 			request.reply <- dispatch.yieldReadAhead(request.phase)
 		case event := <-events:
+			if ctx.Err() != nil {
+				// Whatever came back with the context ended - a slice above
+				// read, the lowest's completion failed on it - the Slot ends
+				// by the lowest slice a consumer has, as it does when the
+				// context's end is what the dispatch takes first.
+				failed, failure := coordinator.endSideBySideOnContext(ctx, run, consumers, stop)
+				return failed, failure, true
+			}
 			consumer := event.consumer
 			if event.read {
+				if note := sliceReadTakenForTest.Load(); note != nil {
+					(*note)(consumer.leaf.Slice)
+				}
 				consumer.completion = event.completion
 				first := !run.read
 				verdict, failed, failure := coordinator.judgeSliceRead(ctx, run, consumer.stream, consumer.leaf, event.completion, event.err,
@@ -312,6 +400,15 @@ func (coordinator *SlotExecutionCoordinator) consumeSideBySide(ctx context.Conte
 					}
 				case sliceFailed:
 					consumer.verdicts <- sliceGo{verdict: sliceFailed}
+					if err := ctx.Err(); err != nil && errors.Is(failure, err) && lowestBusyConsumer(consumers) != consumer {
+						// The context ended as this read was judged, after the
+						// dispatch took it, and failed it on the completion
+						// deadline: a slice below it busy, the Slot ends by
+						// that slice, as it does when the end came first. This
+						// read the lowest, its judgement is one stream's.
+						failed, failure := coordinator.endSideBySideOnContext(ctx, run, consumers, stop)
+						return failed, failure, true
+					}
 					stop()
 					return failed, failure, true
 				}
@@ -455,6 +552,20 @@ func (consumer *sliceConsumer) run(ctx context.Context, coordinator *SlotExecuti
 	}
 }
 
+// stopClockForConsumers stops the dispatch's clock while its consumers read:
+// what it spent since its first slice completed - waiting for its own
+// windows to land among it (drainApply, apply_wait) - is charged now, and
+// nothing is charged to it while they read - a Slot's phases are its
+// streams' together, and the wall clock of the consumers' reads is theirs.
+// It starts again as the consumers end (finishSideBySide).
+func (dispatch *streamedExecution) stopClockForConsumers() {
+	if dispatch.clockSince.IsZero() {
+		return
+	}
+	dispatch.chargeClock()
+	dispatch.clockSince = time.Time{}
+}
+
 // stopConsumers ends the consumers of a Slot consumed side by side, on every
 // way consumeSideBySide returns: done closed (the yields a consumer's stream
 // asks end unserved), their context cancelled (and with it the context they
@@ -497,6 +608,38 @@ func stopUntakenReadsAhead(consumers []*sliceConsumer) {
 			}
 		}
 	}
+}
+
+// endSideBySideOnContext ends a Slot whose context ended as its slices were
+// consumed side by side - its lease lost, its Query Group moved, the process
+// stopping - and stops its consumers. A consumer that sees the context end
+// returns from whatever it waits on without a word to the dispatch (run), so
+// the dispatch does not wait for one: the Slot ends as one stream does when
+// the read in hand fails on that context, the read in hand being the lowest
+// slice a consumer has. Whatever the dispatch takes first once the context
+// ended - the end itself, a slice above read, the lowest's completion failed
+// on it - or a read above it judged as the context ends, the Slot ends by
+// that slice.
+func (coordinator *SlotExecutionCoordinator) endSideBySideOnContext(ctx context.Context, run *sliceRun,
+	consumers []*sliceConsumer, stop func(),
+) (execution.SlotExecutionResult, error) {
+	consumer := lowestBusyConsumer(consumers)
+	if consumer.judged {
+		// Its read was judged and it is completing the slice: the Slot ends
+		// as one stream does when its completion fails on that context - a
+		// step of ours, not the query, which was fine.
+		coordinator.observeQueryFailure(run.completionCtx, run.request.Operation, run.started, "stream_complete", ctx.Err())
+		stop()
+		return execution.SlotExecutionResult{}, inSlotStep(execution.SlotNotCommittedCompleteFailed,
+			fmt.Errorf("alarmd worker: complete Slot: %w", ctx.Err()))
+	}
+	_, failed, failure := coordinator.judgeSliceRead(ctx, run, consumer.stream, consumer.leaf,
+		execution.QueryExecutionCompletion{}, ctx.Err(), consumer.handed, time.Now())
+	stop()
+	if failure == nil {
+		failure = inSlotStep(execution.SlotNotCommittedQueryFailed, fmt.Errorf("alarmd worker: query: %w", ctx.Err()))
+	}
+	return failed, failure
 }
 
 // lowestBusyConsumer is the consumer with the lowest numbered slice of those
@@ -562,14 +705,17 @@ func (stream *streamedExecution) letGoConsumers(consumers []*sliceConsumer) {
 	stream.consumers = 0
 }
 
-// landConsumers waits until the windows every consumer handed are written,
-// and lands each on its own stream: on the dispatch, once the consumers have
-// ended.
+// landConsumers waits until the windows every consumer and the dispatch
+// handed are written, and lands each on its own stream: on the dispatch,
+// once the consumers have ended.
 func (stream *streamedExecution) landConsumers(ctx context.Context) error {
+	// The dispatch's own lane too (015 C1, the k = 2 share, 3.3): a window of
+	// its in flight as the Slot finishes would be counted in the merge that
+	// finishes it, as a consumer's would - refused where one stream's is
+	// admitted, and given back again after the replacement. A guard: the
+	// dispatch's windows landed before its consumers began, and it hands none
+	// as they read, so its lane is empty here today.
 	for _, each := range stream.accounts {
-		if each == stream {
-			continue
-		}
 		if err := each.drainApply(ctx); err != nil {
 			return err
 		}

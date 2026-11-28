@@ -739,6 +739,12 @@ type queryGroupState struct {
 	// retrying: what a span of Slots given up after it is attributed to
 	// (SkippedSpan.DependencyReason). Kept in memory only.
 	lastStoreFailure *storeFailure
+	// lastOtherFailure is the last failure of another name a round of this
+	// object reported: a query failure, or a round failed or retried under a
+	// code that is neither a store failure nor internal_unknown. A span with
+	// one in its window gave its Slots up for that, not for the replica's
+	// store calls failing (storeCallRunFor). Kept in memory only.
+	lastOtherFailure *storeFailure
 	// lastFailureSlot is the Slot the last failure was observed on, so a
 	// skip can carry the failure that preceded it only when it was this
 	// Slot's -- lastFailure itself is never cleared and would otherwise
@@ -1009,6 +1015,9 @@ type Tracker struct {
 	// failure of the same object attributes the span to it
 	// (SetSkipDependencyWindow).
 	skipDependencyWindow time.Duration
+	// storeCallRun is the replica's latest run of failed calls to its own
+	// store (ObserveStoreCall); nil before any.
+	storeCallRun *StoreCallRun
 	// emptyEveryRoundAfter is how long an object that never returned records
 	// must have completed every round empty before NoData lists it as such;
 	// noDataAfter how long one that did must have gone without them.
@@ -1324,6 +1333,8 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	// remembered for the span its Slots behind it may be given up in.
 	if code := storeFailureOf(observation); code != "" {
 		state.lastStoreFailure = &storeFailure{code: code, at: at}
+	} else if code := otherFailureOf(observation); code != "" {
+		state.lastOtherFailure = &storeFailure{code: code, at: at}
 	}
 	if shareSkip != nil {
 		state.noteShareRefusal(shareSkip.Share, shareSkip.FirstSlot, shareSkip.LastSlot, shareSkip.SlotCount, at)
@@ -2691,8 +2702,52 @@ func (tracker *Tracker) extendSkipSpan(state *queryGroupState, first, last int64
 	if failure := state.lastStoreFailure; failure != nil &&
 		!failure.at.Before(span.FirstAt.Add(-tracker.skipDependencyWindow)) {
 		failureAt := failure.at
-		span.DependencyReason, span.DependencyAt = failure.code, &failureAt
+		span.DependencyReason, span.DependencyAt, span.DependencyFrom = failure.code, &failureAt, DependencyFromObject
 	}
+	// The replica's own store calls failing while the span was given up: the
+	// object's rounds may never have named the store - a store read that ran
+	// out on its caller's deadline fails as internal_unknown, and a Slot
+	// behind it is skipped without failing - and the span is the outage's
+	// all the same. The object's own failure, when it has one, stays first.
+	// Only for an object that named nothing else in the window: one whose own
+	// query failed gave its Slots up for that.
+	from := span.FirstAt.Add(-tracker.skipDependencyWindow)
+	named := state.lastOtherFailure != nil && !state.lastOtherFailure.at.Before(from)
+	if run, found := tracker.storeCallRunFor(span.FirstAt, at); found && (span.DependencyFrom == DependencyFromObject || !named) {
+		if span.DependencyFrom != DependencyFromObject {
+			runTo := run.To
+			span.DependencyReason, span.DependencyAt, span.DependencyFrom = contract.ReasonRedisUnavailable, &runTo, DependencyFromReplica
+		}
+		// A span crossing several runs keeps every run's reasons: the runs it
+		// met before, and the latest as it stands now.
+		if !run.From.Equal(span.callsRunFrom) {
+			span.callsBefore = copyCounts(span.DependencyCalls)
+			span.callsRunFrom = run.From
+		}
+		span.DependencyCalls = copyCounts(span.callsBefore)
+		if span.DependencyCalls == nil {
+			span.DependencyCalls = map[string]int{}
+		}
+		for reason, count := range run.Reasons {
+			span.DependencyCalls[reason] += count
+		}
+	}
+}
+
+// otherFailureOf is a failure of another name the observation reports, or
+// empty: a query failure's code, or a round failed or retried under a code
+// that is neither a store failure nor internal_unknown (which a store call run
+// out on its caller's deadline is named).
+func otherFailureOf(observation observability.Observation) string {
+	if failure := observation.QueryFailure; failure != nil && failure.Code != "" {
+		return failure.Code
+	}
+	code := string(observation.ReasonCode)
+	if observation.Stage == observability.StageSlotCompleted && code != "" && code != string(observability.ReasonInternalUnknown) &&
+		!storeOutageCode(code) && (observation.Result == observability.Result(observability.ResultFailed) || observation.Result == observability.ResultRetrying) {
+		return code
+	}
+	return ""
 }
 
 // noteAnswerTruncation keeps whether the object's latest answered query may

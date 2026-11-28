@@ -19,6 +19,12 @@ func BackoffsForTest(client *Client, attempt, samples int) []time.Duration {
 	return waits
 }
 
+// LeaderAheadForTest is whether a heartbeat naming sent shows the Leader
+// ahead of installed.
+func LeaderAheadForTest(sent, installed Version) bool {
+	return leaderAhead(sent, installed)
+}
+
 // ConnectFailureReasonForTest is the word a stream that did not open is
 // observed with.
 func ConnectFailureReasonForTest(streamCtx context.Context, err error) string {

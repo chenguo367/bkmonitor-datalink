@@ -1,0 +1,635 @@
+{
+ "messages": {
+  "custom_report-1.bin": {
+   "kind": "custom_report",
+   "records": 1,
+   "rows": [
+    {
+     "dimensions": "{\"region\":\"r2\",\"service\":\"cart\",\"target\":\"192.0.2.21\"}",
+     "dtEventTime": "2026-11-27 13:23:04",
+     "dtEventTimeStamp": 1795756984537,
+     "localTime": "2026-11-27 13:23:04",
+     "metric": "rt016_err",
+     "time": 1795756984537,
+     "timestamp": 1795756984,
+     "value": 1.0
+    },
+    {
+     "dimensions": "{\"region\":\"r2\",\"service\":\"cart\",\"target\":\"192.0.2.21\"}",
+     "dtEventTime": "2026-11-27 13:23:04",
+     "dtEventTimeStamp": 1795756984537,
+     "localTime": "2026-11-27 13:23:04",
+     "metric": "rt016_req",
+     "time": 1795756984537,
+     "timestamp": 1795756984,
+     "value": 20.0
+    },
+    {
+     "dimensions": "{\"region\":\"r1\",\"service\":\"checkout\",\"target\":\"192.0.2.20\"}",
+     "dtEventTime": "2026-11-27 13:23:04",
+     "dtEventTimeStamp": 1795756984537,
+     "localTime": "2026-11-27 13:23:04",
+     "metric": "rt016_req",
+     "time": 1795756984537,
+     "timestamp": 1795756984,
+     "value": 10.0
+    }
+   ]
+  },
+  "custom_report-2.bin": {
+   "kind": "custom_report",
+   "records": 1,
+   "rows": [
+    {
+     "dimensions": "{\"region\":\"r2\",\"service\":\"cart\",\"target\":\"192.0.2.21\"}",
+     "dtEventTime": "2026-11-27 13:23:06",
+     "dtEventTimeStamp": 1795756986037,
+     "localTime": "2026-11-27 13:23:06",
+     "metric": "rt016_err",
+     "time": 1795756986037,
+     "timestamp": 1795756986,
+     "value": 1.0
+    },
+    {
+     "dimensions": "{\"region\":\"r2\",\"service\":\"cart\",\"target\":\"192.0.2.21\"}",
+     "dtEventTime": "2026-11-27 13:23:06",
+     "dtEventTimeStamp": 1795756986037,
+     "localTime": "2026-11-27 13:23:06",
+     "metric": "rt016_req",
+     "time": 1795756986037,
+     "timestamp": 1795756986,
+     "value": 21.0
+    },
+    {
+     "dimensions": "{\"region\":\"r1\",\"service\":\"checkout\",\"target\":\"192.0.2.20\"}",
+     "dtEventTime": "2026-11-27 13:23:06",
+     "dtEventTimeStamp": 1795756986037,
+     "localTime": "2026-11-27 13:23:06",
+     "metric": "rt016_req",
+     "time": 1795756986037,
+     "timestamp": 1795756986,
+     "value": 11.0
+    }
+   ]
+  },
+  "custom_report-3.bin": {
+   "kind": "custom_report",
+   "records": 1,
+   "rows": [
+    {
+     "dimensions": "{\"region\":\"r2\",\"service\":\"cart\",\"target\":\"192.0.2.21\"}",
+     "dtEventTime": "2026-11-27 13:23:07",
+     "dtEventTimeStamp": 1795756987537,
+     "localTime": "2026-11-27 13:23:07",
+     "metric": "rt016_err",
+     "time": 1795756987537,
+     "timestamp": 1795756987,
+     "value": 1.0
+    },
+    {
+     "dimensions": "{\"region\":\"r2\",\"service\":\"cart\",\"target\":\"192.0.2.21\"}",
+     "dtEventTime": "2026-11-27 13:23:07",
+     "dtEventTimeStamp": 1795756987537,
+     "localTime": "2026-11-27 13:23:07",
+     "metric": "rt016_req",
+     "time": 1795756987537,
+     "timestamp": 1795756987,
+     "value": 22.0
+    },
+    {
+     "dimensions": "{\"region\":\"r1\",\"service\":\"checkout\",\"target\":\"192.0.2.20\"}",
+     "dtEventTime": "2026-11-27 13:23:07",
+     "dtEventTimeStamp": 1795756987537,
+     "localTime": "2026-11-27 13:23:07",
+     "metric": "rt016_req",
+     "time": 1795756987537,
+     "timestamp": 1795756987,
+     "value": 12.0
+    }
+   ]
+  },
+  "k8s-1.bin": {
+   "kind": "k8s",
+   "records": 1,
+   "rows": [
+    {
+     "dimensions": "{\"namespace\":\"demo\",\"pod_name\":\"web-2\"}",
+     "dtEventTime": "2026-11-27 13:18:45",
+     "dtEventTimeStamp": 1795756725736,
+     "localTime": "2026-11-27 13:18:45",
+     "metric": "rt016_cpu",
+     "time": 1795756725736,
+     "timestamp": 1795756725,
+     "value": 9.223372036854776e+18
+    },
+    {
+     "dimensions": "{\"namespace\":\"demo\",\"pod_name\":\"web-0\",\"replica\":1}",
+     "dtEventTime": "2026-11-27 13:18:45",
+     "dtEventTimeStamp": 1795756725736,
+     "localTime": "2026-11-27 13:18:45",
+     "metric": "rt016_mem",
+     "time": 1795756725736,
+     "timestamp": 1795756725,
+     "value": 1024.0
+    },
+    {
+     "dimensions": "{\"container\":\"app\",\"pod_name\":\"web-1\",\"namespace\":\"demo\"}",
+     "dtEventTime": "2026-11-27 13:18:45",
+     "dtEventTimeStamp": 1795756725736,
+     "localTime": "2026-11-27 13:18:45",
+     "metric": "rt016_cpu",
+     "time": 1795756725736,
+     "timestamp": 1795756725,
+     "value": 0.5
+    },
+    {
+     "dimensions": "{\"namespace\":\"demo\",\"pod_name\":\"web-0\",\"container\":\"app\"}",
+     "dtEventTime": "2026-11-27 13:18:45",
+     "dtEventTimeStamp": 1795756725736,
+     "localTime": "2026-11-27 13:18:45",
+     "metric": "rt016_cpu",
+     "time": 1795756725736,
+     "timestamp": 1795756725,
+     "value": 0.25
+    }
+   ]
+  },
+  "k8s-2.bin": {
+   "kind": "k8s",
+   "records": 1,
+   "rows": [
+    {
+     "dimensions": "{\"namespace\":\"demo\",\"pod_name\":\"web-2\"}",
+     "dtEventTime": "2026-11-27 13:18:47",
+     "dtEventTimeStamp": 1795756727236,
+     "localTime": "2026-11-27 13:18:47",
+     "metric": "rt016_cpu",
+     "time": 1795756727236,
+     "timestamp": 1795756727,
+     "value": 9.223372036854776e+18
+    },
+    {
+     "dimensions": "{\"namespace\":\"demo\",\"pod_name\":\"web-0\",\"replica\":1}",
+     "dtEventTime": "2026-11-27 13:18:47",
+     "dtEventTimeStamp": 1795756727236,
+     "localTime": "2026-11-27 13:18:47",
+     "metric": "rt016_mem",
+     "time": 1795756727236,
+     "timestamp": 1795756727,
+     "value": 1025.0
+    },
+    {
+     "dimensions": "{\"container\":\"app\",\"pod_name\":\"web-1\",\"namespace\":\"demo\"}",
+     "dtEventTime": "2026-11-27 13:18:47",
+     "dtEventTimeStamp": 1795756727236,
+     "localTime": "2026-11-27 13:18:47",
+     "metric": "rt016_cpu",
+     "time": 1795756727236,
+     "timestamp": 1795756727,
+     "value": 1.5
+    },
+    {
+     "dimensions": "{\"namespace\":\"demo\",\"pod_name\":\"web-0\",\"container\":\"app\"}",
+     "dtEventTime": "2026-11-27 13:18:47",
+     "dtEventTimeStamp": 1795756727236,
+     "localTime": "2026-11-27 13:18:47",
+     "metric": "rt016_cpu",
+     "time": 1795756727236,
+     "timestamp": 1795756727,
+     "value": 1.25
+    }
+   ]
+  },
+  "k8s-3.bin": {
+   "kind": "k8s",
+   "records": 1,
+   "rows": [
+    {
+     "dimensions": "{\"namespace\":\"demo\",\"pod_name\":\"web-2\"}",
+     "dtEventTime": "2026-11-27 13:18:48",
+     "dtEventTimeStamp": 1795756728737,
+     "localTime": "2026-11-27 13:18:48",
+     "metric": "rt016_cpu",
+     "time": 1795756728737,
+     "timestamp": 1795756728,
+     "value": 9.223372036854776e+18
+    },
+    {
+     "dimensions": "{\"namespace\":\"demo\",\"pod_name\":\"web-0\",\"replica\":1}",
+     "dtEventTime": "2026-11-27 13:18:48",
+     "dtEventTimeStamp": 1795756728737,
+     "localTime": "2026-11-27 13:18:48",
+     "metric": "rt016_mem",
+     "time": 1795756728737,
+     "timestamp": 1795756728,
+     "value": 1026.0
+    },
+    {
+     "dimensions": "{\"container\":\"app\",\"pod_name\":\"web-1\",\"namespace\":\"demo\"}",
+     "dtEventTime": "2026-11-27 13:18:48",
+     "dtEventTimeStamp": 1795756728737,
+     "localTime": "2026-11-27 13:18:48",
+     "metric": "rt016_cpu",
+     "time": 1795756728737,
+     "timestamp": 1795756728,
+     "value": 2.5
+    },
+    {
+     "dimensions": "{\"namespace\":\"demo\",\"pod_name\":\"web-0\",\"container\":\"app\"}",
+     "dtEventTime": "2026-11-27 13:18:48",
+     "dtEventTimeStamp": 1795756728737,
+     "localTime": "2026-11-27 13:18:48",
+     "metric": "rt016_cpu",
+     "time": 1795756728737,
+     "timestamp": 1795756728,
+     "value": 2.25
+    }
+   ]
+  },
+  "plugin_flat-1.bin": {
+   "kind": "plugin_flat",
+   "records": 1,
+   "rows": [
+    {
+     "bizid": "5",
+     "bk_agent_id": "agent-demo-0001",
+     "bk_cloud_id": "3",
+     "bk_cmdb_level": "[{\"bk_biz_id\":6,\"bk_module_id\":71,\"bk_set_id\":72}]",
+     "bk_host_id": "1001",
+     "cloudid": "4",
+     "dimensions": "{\"service\":\"checkout\",\"zone\":\"z1\"}",
+     "dtEventTime": "2026-11-27 13:55:14",
+     "dtEventTimeStamp": 1795758914000,
+     "ip": "192.0.2.30",
+     "localTime": "2026-11-27 13:55:14",
+     "metric": "rt016w_empty",
+     "target": "[{\"bk_biz_id\":\"6\",\"bk_collect_config_id\":\"11\",\"bk_target_cloud_id\":\"20\",\"bk_target_host_id\":\"\",\"bk_target_ip\":\"\",\"entity_uid\":\"demo-entity-1\",\"model_id\":\"Host\",\"model_inst_id\":\"3001\"}]",
+     "time": 1795758914,
+     "timestamp": 1795758914,
+     "value": 1.0
+    },
+    {
+     "bizid": "5",
+     "bk_agent_id": "agent-demo-0001",
+     "bk_cloud_id": "3",
+     "bk_cmdb_level": "[{\"bk_biz_id\":6,\"bk_module_id\":71,\"bk_set_id\":72}]",
+     "bk_host_id": "1001",
+     "cloudid": "4",
+     "dimensions": "{\"service\":\"checkout\",\"zone\":\"z1\",\"entity_uid\":\"dim-entity\",\"bk_cloud_id\":\"77\",\"bk_supplier_id\":\"88\",\"model_id\":\"dim-model\"}",
+     "dtEventTime": "2026-11-27 13:55:14",
+     "dtEventTimeStamp": 1795758914000,
+     "ip": "192.0.2.30",
+     "localTime": "2026-11-27 13:55:14",
+     "metric": "rt016w_col",
+     "target": "[{\"bk_biz_id\":\"6\",\"bk_collect_config_id\":\"11\",\"bk_target_cloud_id\":\"20\",\"bk_target_host_id\":\"2001\",\"bk_target_ip\":\"192.0.2.50\",\"entity_uid\":\"demo-entity-1\",\"model_id\":\"Host\",\"model_inst_id\":\"3001\"}]",
+     "time": 1795758914,
+     "timestamp": 1795758914,
+     "value": 1.0
+    },
+    {
+     "bizid": "5",
+     "bk_agent_id": "agent-demo-0001",
+     "bk_cloud_id": "3",
+     "bk_cmdb_level": "[{\"bk_biz_id\":9,\"bk_module_id\":71,\"bk_set_id\":72}]",
+     "bk_host_id": "1001",
+     "cloudid": "4",
+     "dimensions": "{\"service\":\"checkout\",\"zone\":\"z1\"}",
+     "dtEventTime": "2026-11-27 13:55:14",
+     "dtEventTimeStamp": 1795758914000,
+     "ip": "192.0.2.30",
+     "localTime": "2026-11-27 13:55:14",
+     "metric": "rt016w_biz1",
+     "target": "[{\"bk_biz_id\":\"8\",\"bk_collect_config_id\":\"11\",\"bk_target_cloud_id\":\"20\",\"bk_target_host_id\":\"2001\",\"bk_target_ip\":\"192.0.2.50\",\"entity_uid\":\"demo-entity-1\",\"model_id\":\"Host\",\"model_inst_id\":\"3001\"}]",
+     "time": 1795758914,
+     "timestamp": 1795758914,
+     "value": 1.0
+    },
+    {
+     "bizid": "5",
+     "bk_agent_id": "agent-demo-0001",
+     "bk_cloud_id": "3",
+     "bk_cmdb_level": "[{\"bk_biz_id\":9,\"bk_module_id\":71,\"bk_set_id\":72}]",
+     "bk_host_id": "1001",
+     "cloudid": "4",
+     "dimensions": "{\"service\":\"checkout\",\"zone\":\"z1\"}",
+     "dtEventTime": "2026-11-27 13:55:14",
+     "dtEventTimeStamp": 1795758914000,
+     "ip": "192.0.2.30",
+     "localTime": "2026-11-27 13:55:14",
+     "metric": "rt016w_biz0",
+     "target": "[]",
+     "time": 1795758914,
+     "timestamp": 1795758914,
+     "value": 1.0
+    },
+    {
+     "bizid": "5",
+     "bk_agent_id": "agent-demo-0001",
+     "bk_cloud_id": "3",
+     "bk_cmdb_level": "[{\"bk_biz_id\":6,\"bk_module_id\":71,\"bk_set_id\":72}]",
+     "bk_host_id": "1001",
+     "cloudid": "4",
+     "dimensions": "{\"service\":\"checkout\",\"zone\":\"z1\",\"ip\":\"192.0.2.99\"}",
+     "dtEventTime": "2026-11-27 13:55:14",
+     "dtEventTimeStamp": 1795758914000,
+     "ip": "192.0.2.30",
+     "localTime": "2026-11-27 13:55:14",
+     "metric": "rt016v_uip",
+     "target": "[{\"bk_biz_id\":\"6\",\"bk_collect_config_id\":\"11\",\"bk_target_cloud_id\":\"20\",\"bk_target_host_id\":\"2001\",\"bk_target_ip\":\"192.0.2.50\",\"entity_uid\":\"demo-entity-1\",\"model_id\":\"Host\",\"model_inst_id\":\"3001\"}]",
+     "time": 1795758914,
+     "timestamp": 1795758914,
+     "value": 1.0
+    },
+    {
+     "bizid": "5",
+     "bk_agent_id": "agent-demo-0001",
+     "bk_cloud_id": "3",
+     "bk_cmdb_level": "[{\"bk_biz_id\":6,\"bk_module_id\":71,\"bk_set_id\":72}]",
+     "bk_host_id": "1001",
+     "cloudid": "4",
+     "dimensions": "{\"service\":\"checkout\",\"zone\":\"z1\"}",
+     "dtEventTime": "2026-11-27 13:55:14",
+     "dtEventTimeStamp": 1795758914000,
+     "ip": "192.0.2.30",
+     "localTime": "2026-11-27 13:55:14",
+     "metric": "rt016v_gi2",
+     "target": "[{\"bk_biz_id\":\"6\",\"bk_collect_config_id\":\"11\",\"bk_target_cloud_id\":\"20\",\"bk_target_host_id\":\"2001\",\"bk_target_ip\":\"192.0.2.50\",\"entity_uid\":\"demo-entity-1\",\"model_id\":\"Host\",\"model_inst_id\":\"3001\"},{\"bk_biz_id\":\"6\",\"bk_collect_config_id\":\"11\",\"bk_target_cloud_id\":\"21\",\"bk_target_host_id\":\"2002\",\"bk_target_ip\":\"192.0.2.51\",\"entity_uid\":\"demo-entity-2\",\"model_id\":\"Host\",\"model_inst_id\":\"3002\"}]",
+     "time": 1795758914,
+     "timestamp": 1795758914,
+     "value": 1.0
+    },
+    {
+     "bizid": "5",
+     "bk_agent_id": "agent-demo-0001",
+     "bk_cloud_id": "3",
+     "bk_cmdb_level": "[{\"bk_biz_id\":6,\"bk_module_id\":71,\"bk_set_id\":72}]",
+     "bk_host_id": "1001",
+     "cloudid": "4",
+     "dimensions": "{\"service\":\"checkout\",\"zone\":\"z1\"}",
+     "dtEventTime": "2026-11-27 13:55:14",
+     "dtEventTimeStamp": 1795758914000,
+     "ip": "192.0.2.30",
+     "localTime": "2026-11-27 13:55:14",
+     "metric": "rt016v_gi1",
+     "target": "[{\"bk_biz_id\":\"6\",\"bk_collect_config_id\":\"11\",\"bk_target_cloud_id\":\"20\",\"bk_target_host_id\":\"2001\",\"bk_target_ip\":\"192.0.2.50\",\"entity_uid\":\"demo-entity-1\",\"model_id\":\"Host\",\"model_inst_id\":\"3001\"}]",
+     "time": 1795758914,
+     "timestamp": 1795758914,
+     "value": 1.0
+    },
+    {
+     "bizid": "5",
+     "bk_agent_id": "agent-demo-0001",
+     "bk_cloud_id": "3",
+     "bk_cmdb_level": "[{\"bk_biz_id\":6,\"bk_module_id\":71,\"bk_set_id\":72}]",
+     "bk_host_id": "1001",
+     "cloudid": "4",
+     "dimensions": "{\"service\":\"checkout\",\"zone\":\"z1\"}",
+     "dtEventTime": "2026-11-27 13:55:14",
+     "dtEventTimeStamp": 1795758914000,
+     "ip": "192.0.2.30",
+     "localTime": "2026-11-27 13:55:14",
+     "metric": "rt016v_gi0",
+     "target": "[]",
+     "time": 1795758914,
+     "timestamp": 1795758914,
+     "value": 1.0
+    }
+   ]
+  },
+  "plugin_flat-2.bin": {
+   "kind": "plugin_flat",
+   "records": 1,
+   "rows": [
+    {
+     "bizid": "5",
+     "bk_agent_id": "agent-demo-0001",
+     "bk_cloud_id": "3",
+     "bk_cmdb_level": "[{\"bk_biz_id\":6,\"bk_module_id\":71,\"bk_set_id\":72}]",
+     "bk_host_id": "1001",
+     "cloudid": "4",
+     "dimensions": "{\"service\":\"checkout\",\"zone\":\"z1\"}",
+     "dtEventTime": "2026-11-27 14:22:09",
+     "dtEventTimeStamp": 1795760529000,
+     "ip": "192.0.2.30",
+     "localTime": "2026-11-27 14:22:09",
+     "metric": "rt016x_gshell",
+     "target": "[{\"bk_biz_id\":\"6\",\"bk_collect_config_id\":\"11\",\"bk_target_cloud_id\":\"20\",\"bk_target_host_id\":\"2001\",\"bk_target_ip\":\"192.0.2.50\",\"entity_uid\":\"demo-entity-1\",\"model_id\":\"Host\",\"model_inst_id\":\"3001\",\"ip\":\"192.0.2.77\",\"bk_cloud_id\":\"66\",\"bk_supplier_id\":\"55\",\"bk_agent_id\":\"agent-in-group\",\"bk_host_id\":\"4444\"}]",
+     "time": 1795760529,
+     "timestamp": 1795760529,
+     "value": 1.0
+    },
+    {
+     "bizid": "5",
+     "bk_agent_id": "agent-demo-0001",
+     "bk_cloud_id": "3",
+     "bk_cmdb_level": "[{\"bk_biz_id\":6,\"bk_module_id\":71,\"bk_set_id\":72}]",
+     "bk_host_id": "1001",
+     "cloudid": "4",
+     "dimensions": "{\"service\":\"checkout\",\"zone\":\"z1\"}",
+     "dtEventTime": "2026-11-27 14:22:09",
+     "dtEventTimeStamp": 1795760529000,
+     "ip": "192.0.2.30",
+     "localTime": "2026-11-27 14:22:09",
+     "metric": "rt016x_gi2x",
+     "target": "[{\"bk_biz_id\":\"6\",\"bk_collect_config_id\":\"11\",\"bk_target_cloud_id\":\"20\",\"bk_target_host_id\":\"2001\",\"bk_target_ip\":\"192.0.2.50\",\"entity_uid\":\"demo-entity-1\",\"model_id\":\"Host\",\"model_inst_id\":\"3001\",\"rt016_only_first\":\"first\"},{\"bk_biz_id\":\"6\",\"bk_collect_config_id\":\"11\",\"bk_target_cloud_id\":\"21\",\"bk_target_host_id\":\"2002\",\"bk_target_ip\":\"192.0.2.51\",\"entity_uid\":\"demo-entity-2\",\"model_id\":\"Host\",\"model_inst_id\":\"3002\",\"rt016_only_second\":\"second\"}]",
+     "time": 1795760529,
+     "timestamp": 1795760529,
+     "value": 1.0
+    }
+   ]
+  },
+  "plugin_nested-1.bin": {
+   "kind": "plugin_nested",
+   "records": 1,
+   "rows": [
+    {
+     "bizid": "5",
+     "bk_agent_id": "agent-demo-0001",
+     "bk_cloud_id": "3",
+     "bk_cmdb_level": "[{\"bk_biz_id\":6,\"bk_module_id\":71,\"bk_set_id\":72}]",
+     "bk_host_id": "1001",
+     "cloudid": "4",
+     "dimensions": "{\"job\":\"demo\",\"instance\":\"192.0.2.40:9100\"}",
+     "dtEventTime": "2026-11-27 13:59:39",
+     "dtEventTimeStamp": 1795759179000,
+     "ip": "192.0.2.30",
+     "localTime": "2026-11-27 13:59:39",
+     "metric": "rt016w_empty",
+     "target": "[{\"bk_biz_id\":\"6\",\"bk_collect_config_id\":\"11\",\"bk_target_cloud_id\":\"20\",\"bk_target_host_id\":\"\",\"bk_target_ip\":\"\",\"entity_uid\":\"demo-entity-1\",\"model_id\":\"Host\",\"model_inst_id\":\"3001\"}]",
+     "time": 1795759179,
+     "timestamp": 1795759179,
+     "value": 1.0
+    },
+    {
+     "bizid": "5",
+     "bk_agent_id": "agent-demo-0001",
+     "bk_cloud_id": "3",
+     "bk_cmdb_level": "[{\"bk_biz_id\":6,\"bk_module_id\":71,\"bk_set_id\":72}]",
+     "bk_host_id": "1001",
+     "cloudid": "4",
+     "dimensions": "{\"job\":\"demo\",\"instance\":\"192.0.2.40:9100\",\"entity_uid\":\"dim-entity\",\"bk_cloud_id\":\"77\",\"bk_supplier_id\":\"88\",\"model_id\":\"dim-model\"}",
+     "dtEventTime": "2026-11-27 13:59:39",
+     "dtEventTimeStamp": 1795759179000,
+     "ip": "192.0.2.30",
+     "localTime": "2026-11-27 13:59:39",
+     "metric": "rt016w_col",
+     "target": "[{\"bk_biz_id\":\"6\",\"bk_collect_config_id\":\"11\",\"bk_target_cloud_id\":\"20\",\"bk_target_host_id\":\"2001\",\"bk_target_ip\":\"192.0.2.50\",\"entity_uid\":\"demo-entity-1\",\"model_id\":\"Host\",\"model_inst_id\":\"3001\"}]",
+     "time": 1795759179,
+     "timestamp": 1795759179,
+     "value": 1.0
+    },
+    {
+     "bizid": "5",
+     "bk_agent_id": "agent-demo-0001",
+     "bk_cloud_id": "3",
+     "bk_cmdb_level": "[{\"bk_biz_id\":9,\"bk_module_id\":71,\"bk_set_id\":72}]",
+     "bk_host_id": "1001",
+     "cloudid": "4",
+     "dimensions": "{\"job\":\"demo\",\"instance\":\"192.0.2.40:9100\"}",
+     "dtEventTime": "2026-11-27 13:59:39",
+     "dtEventTimeStamp": 1795759179000,
+     "ip": "192.0.2.30",
+     "localTime": "2026-11-27 13:59:39",
+     "metric": "rt016w_biz1",
+     "target": "[{\"bk_biz_id\":\"8\",\"bk_collect_config_id\":\"11\",\"bk_target_cloud_id\":\"20\",\"bk_target_host_id\":\"2001\",\"bk_target_ip\":\"192.0.2.50\",\"entity_uid\":\"demo-entity-1\",\"model_id\":\"Host\",\"model_inst_id\":\"3001\"}]",
+     "time": 1795759179,
+     "timestamp": 1795759179,
+     "value": 1.0
+    },
+    {
+     "bizid": "5",
+     "bk_agent_id": "agent-demo-0001",
+     "bk_cloud_id": "3",
+     "bk_cmdb_level": "[{\"bk_biz_id\":9,\"bk_module_id\":71,\"bk_set_id\":72}]",
+     "bk_host_id": "1001",
+     "cloudid": "4",
+     "dimensions": "{\"job\":\"demo\",\"instance\":\"192.0.2.40:9100\"}",
+     "dtEventTime": "2026-11-27 13:59:39",
+     "dtEventTimeStamp": 1795759179000,
+     "ip": "192.0.2.30",
+     "localTime": "2026-11-27 13:59:39",
+     "metric": "rt016w_biz0",
+     "target": "[]",
+     "time": 1795759179,
+     "timestamp": 1795759179,
+     "value": 1.0
+    },
+    {
+     "bizid": "5",
+     "bk_agent_id": "agent-demo-0001",
+     "bk_cloud_id": "3",
+     "bk_cmdb_level": "[{\"bk_biz_id\":6,\"bk_module_id\":71,\"bk_set_id\":72}]",
+     "bk_host_id": "1001",
+     "cloudid": "4",
+     "dimensions": "{\"job\":\"demo\",\"instance\":\"192.0.2.40:9100\",\"ip\":\"192.0.2.99\"}",
+     "dtEventTime": "2026-11-27 13:59:39",
+     "dtEventTimeStamp": 1795759179000,
+     "ip": "192.0.2.30",
+     "localTime": "2026-11-27 13:59:39",
+     "metric": "rt016v_uip",
+     "target": "[{\"bk_biz_id\":\"6\",\"bk_collect_config_id\":\"11\",\"bk_target_cloud_id\":\"20\",\"bk_target_host_id\":\"2001\",\"bk_target_ip\":\"192.0.2.50\",\"entity_uid\":\"demo-entity-1\",\"model_id\":\"Host\",\"model_inst_id\":\"3001\"}]",
+     "time": 1795759179,
+     "timestamp": 1795759179,
+     "value": 1.0
+    },
+    {
+     "bizid": "5",
+     "bk_agent_id": "agent-demo-0001",
+     "bk_cloud_id": "3",
+     "bk_cmdb_level": "[{\"bk_biz_id\":6,\"bk_module_id\":71,\"bk_set_id\":72}]",
+     "bk_host_id": "1001",
+     "cloudid": "4",
+     "dimensions": "{\"job\":\"demo\",\"instance\":\"192.0.2.40:9100\"}",
+     "dtEventTime": "2026-11-27 13:59:39",
+     "dtEventTimeStamp": 1795759179000,
+     "ip": "192.0.2.30",
+     "localTime": "2026-11-27 13:59:39",
+     "metric": "rt016v_gi2",
+     "target": "[{\"bk_biz_id\":\"6\",\"bk_collect_config_id\":\"11\",\"bk_target_cloud_id\":\"20\",\"bk_target_host_id\":\"2001\",\"bk_target_ip\":\"192.0.2.50\",\"entity_uid\":\"demo-entity-1\",\"model_id\":\"Host\",\"model_inst_id\":\"3001\"},{\"bk_biz_id\":\"6\",\"bk_collect_config_id\":\"11\",\"bk_target_cloud_id\":\"21\",\"bk_target_host_id\":\"2002\",\"bk_target_ip\":\"192.0.2.51\",\"entity_uid\":\"demo-entity-2\",\"model_id\":\"Host\",\"model_inst_id\":\"3002\"}]",
+     "time": 1795759179,
+     "timestamp": 1795759179,
+     "value": 1.0
+    },
+    {
+     "bizid": "5",
+     "bk_agent_id": "agent-demo-0001",
+     "bk_cloud_id": "3",
+     "bk_cmdb_level": "[{\"bk_biz_id\":6,\"bk_module_id\":71,\"bk_set_id\":72}]",
+     "bk_host_id": "1001",
+     "cloudid": "4",
+     "dimensions": "{\"job\":\"demo\",\"instance\":\"192.0.2.40:9100\"}",
+     "dtEventTime": "2026-11-27 13:59:39",
+     "dtEventTimeStamp": 1795759179000,
+     "ip": "192.0.2.30",
+     "localTime": "2026-11-27 13:59:39",
+     "metric": "rt016v_gi1",
+     "target": "[{\"bk_biz_id\":\"6\",\"bk_collect_config_id\":\"11\",\"bk_target_cloud_id\":\"20\",\"bk_target_host_id\":\"2001\",\"bk_target_ip\":\"192.0.2.50\",\"entity_uid\":\"demo-entity-1\",\"model_id\":\"Host\",\"model_inst_id\":\"3001\"}]",
+     "time": 1795759179,
+     "timestamp": 1795759179,
+     "value": 1.0
+    },
+    {
+     "bizid": "5",
+     "bk_agent_id": "agent-demo-0001",
+     "bk_cloud_id": "3",
+     "bk_cmdb_level": "[{\"bk_biz_id\":6,\"bk_module_id\":71,\"bk_set_id\":72}]",
+     "bk_host_id": "1001",
+     "cloudid": "4",
+     "dimensions": "{\"job\":\"demo\",\"instance\":\"192.0.2.40:9100\"}",
+     "dtEventTime": "2026-11-27 13:59:39",
+     "dtEventTimeStamp": 1795759179000,
+     "ip": "192.0.2.30",
+     "localTime": "2026-11-27 13:59:39",
+     "metric": "rt016v_gi0",
+     "target": "[]",
+     "time": 1795759179,
+     "timestamp": 1795759179,
+     "value": 1.0
+    }
+   ]
+  },
+  "plugin_nested-2.bin": {
+   "kind": "plugin_nested",
+   "records": 1,
+   "rows": [
+    {
+     "bizid": "5",
+     "bk_agent_id": "agent-demo-0001",
+     "bk_cloud_id": "3",
+     "bk_cmdb_level": "[{\"bk_biz_id\":6,\"bk_module_id\":71,\"bk_set_id\":72}]",
+     "bk_host_id": "1001",
+     "cloudid": "4",
+     "dimensions": "{\"job\":\"demo\",\"instance\":\"192.0.2.40:9100\"}",
+     "dtEventTime": "2026-11-27 14:26:29",
+     "dtEventTimeStamp": 1795760789000,
+     "ip": "192.0.2.30",
+     "localTime": "2026-11-27 14:26:29",
+     "metric": "rt016x_gshell",
+     "target": "[{\"bk_biz_id\":\"6\",\"bk_collect_config_id\":\"11\",\"bk_target_cloud_id\":\"20\",\"bk_target_host_id\":\"2001\",\"bk_target_ip\":\"192.0.2.50\",\"entity_uid\":\"demo-entity-1\",\"model_id\":\"Host\",\"model_inst_id\":\"3001\",\"ip\":\"192.0.2.77\",\"bk_cloud_id\":\"66\",\"bk_supplier_id\":\"55\",\"bk_agent_id\":\"agent-in-group\",\"bk_host_id\":\"4444\"}]",
+     "time": 1795760789,
+     "timestamp": 1795760789,
+     "value": 1.0
+    },
+    {
+     "bizid": "5",
+     "bk_agent_id": "agent-demo-0001",
+     "bk_cloud_id": "3",
+     "bk_cmdb_level": "[{\"bk_biz_id\":6,\"bk_module_id\":71,\"bk_set_id\":72}]",
+     "bk_host_id": "1001",
+     "cloudid": "4",
+     "dimensions": "{\"job\":\"demo\",\"instance\":\"192.0.2.40:9100\"}",
+     "dtEventTime": "2026-11-27 14:26:29",
+     "dtEventTimeStamp": 1795760789000,
+     "ip": "192.0.2.30",
+     "localTime": "2026-11-27 14:26:29",
+     "metric": "rt016x_gi2x",
+     "target": "[{\"bk_biz_id\":\"6\",\"bk_collect_config_id\":\"11\",\"bk_target_cloud_id\":\"20\",\"bk_target_host_id\":\"2001\",\"bk_target_ip\":\"192.0.2.50\",\"entity_uid\":\"demo-entity-1\",\"model_id\":\"Host\",\"model_inst_id\":\"3001\",\"rt016_only_first\":\"first\"},{\"bk_biz_id\":\"6\",\"bk_collect_config_id\":\"11\",\"bk_target_cloud_id\":\"21\",\"bk_target_host_id\":\"2002\",\"bk_target_ip\":\"192.0.2.51\",\"entity_uid\":\"demo-entity-2\",\"model_id\":\"Host\",\"model_inst_id\":\"3002\",\"rt016_only_second\":\"second\"}]",
+     "time": 1795760789,
+     "timestamp": 1795760789,
+     "value": 1.0
+    }
+   ]
+  }
+ },
+ "source": "Inner topic messages written by BKBase Databus with the realtime channel's clean rules from neutral synthetic input; rows decoded at capture by an independent pure-Python Avro container reader, not by the code under test."
+}

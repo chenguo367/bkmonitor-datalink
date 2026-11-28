@@ -18,13 +18,24 @@ import (
 // RememberSliceShapeForTest has coordinator remember of group what its
 // completed Slots leave once slices they started in were let go and kept
 // split (inputslice.Tree.SplitSized): a last read of bytes and series at
-// revision, sliced on dimensions and cut on the first of them, in slices
+// revision, sliced on dimensions and cut on the end of the first of them
+// (inputslice.SuffixCut: a Query Group whose slices were let go for their
+// size, 015 C2 section 4.8), in slices
 // counted slices, and shape, the leaves the next Slot starts in. It is for a
 // case to start a Slot in a shape as large as a Slot may start in without
 // reading the rounds that grow one.
 func RememberSliceShapeForTest(coordinator *SlotExecutionCoordinator, group execution.QueryGroupIdentity,
 	revision execution.QueryRevision, dimensions []string, shape inputslice.Shape, slices int, bytes, series uint64) {
 	coordinator.slicedInput.remember(group, slicedReading{bytes: bytes, series: series, dimensions: dimensions,
-		slices: slices, shape: shape, revision: revision, cut: inputslice.FixedCut(dimensions[0]),
+		slices: slices, shape: shape, revision: revision, cut: inputslice.SuffixCut(dimensions[0]),
 		cutFrom: observability.InputSliceCutOnRootSplit})
+}
+
+// RememberSliceConsumersForTest has coordinator remember that group's last
+// Slot consumed its slices with k streams, what is remembered of it beside
+// kept: the k its next Slot's slices are counted and held for.
+func RememberSliceConsumersForTest(coordinator *SlotExecutionCoordinator, group execution.QueryGroupIdentity, k int) {
+	last := coordinator.slicedInput.lastInput(group)
+	last.consumers = k
+	coordinator.slicedInput.remember(group, last)
 }

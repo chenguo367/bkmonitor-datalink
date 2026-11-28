@@ -736,6 +736,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("worker_slice_shape_leaves_max"):                1,
 		fqName("state_segment_members_left_total"):             len(observability.AllStateSeriesKinds()),
 		fqName("worker_slice_reads_in_flight"):                 histogramSeries(1, 5),
+		fqName("worker_input_slice_timeout_deepening"):         histogramSeries(1, 10),
 		fqName("slot_windowed_total"):                          3,
 		fqName("container_memory_limit_bytes"):                 len(capacitySources) + 1,
 		fqName("container_cpu_cores"):                          len(capacitySources) + 1,
@@ -915,15 +916,19 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		// settled, unsettled and failed, with the gate.
 		fqName("view_gate_lease_renewal_total"): 3,
 		// The Worker's side: closed failure and refusal words plus other.
-		fqName("view_client_connected"):        1,
-		fqName("view_installed_revision"):      1,
-		fqName("view_objects_missing"):         1,
-		fqName("view_install_total"):           len(viewClientInstallKinds) + 1,
-		fqName("view_install_failure_total"):   len(viewClientInstallFailures) + 1,
-		fqName("view_snapshot_request_total"):  1,
-		fqName("view_client_refusal_total"):    len(viewClientRefusals) + 1,
-		fqName("view_client_connection_total"): 1,
-		fqName("view_discovery_miss_total"):    len(viewClientDiscoveryMisses) + 1,
+		fqName("view_client_connected"):       1,
+		fqName("view_installed_revision"):     1,
+		fqName("view_objects_missing"):        1,
+		fqName("view_install_total"):          len(viewClientInstallKinds) + 1,
+		fqName("view_install_failure_total"):  len(viewClientInstallFailures) + 1,
+		fqName("view_snapshot_request_total"): 1,
+		// 015 R1: the snapshots a heartbeat ahead of the view asked for, and
+		// how long ago the Leader was heard.
+		fqName("view_heartbeat_version_ahead_total"): 1,
+		fqName("control_view_heard_age_seconds"):     1,
+		fqName("view_client_refusal_total"):          len(viewClientRefusals) + 1,
+		fqName("view_client_connection_total"):       1,
+		fqName("view_discovery_miss_total"):          len(viewClientDiscoveryMisses) + 1,
 		// Audited dispatches only -- one Query Group per generation -- which is
 		// why it is its own metric and not a cell on due_index_prediction_total,
 		// whose four cells mix a sampled population with a full one.
@@ -1081,6 +1086,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("progress_projection_superseded_total")] = len(progress.SupersededProjectionFields)
 	bounds[fqName("progress_conflicts_total")] = len(progress.ProgressConflictOperations) * (len(execution.ProgressConflicts) + 1)
 	bounds[fqName("progress_query_free_applied_total")] = len(progress.QueryFreeAppliedKinds)
+	bounds[fqName("ownership_local_check_total")] = len(ownership.OwnershipCheckCells())
 	// The segment shadow: every outcome and event by every period class and
 	// family, the outcomes in each round.
 	families := len(observability.AllSegmentFamilies())

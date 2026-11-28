@@ -74,7 +74,7 @@ func TestAShapeIsReadInWhileItHoldsAndDroppedOnceItDoesNot(t *testing.T) {
 	dimensions := []string{"host"}
 	keptTree := func(t *testing.T, leaves int) inputslice.Shape {
 		t.Helper()
-		tree, err := inputslice.New(dimensions, leaves, dimensions[0])
+		tree, err := inputslice.NewCut(dimensions, leaves, inputslice.SuffixCut(dimensions[0]))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -287,7 +287,7 @@ func TestIdleEvictionsAreCountedByTheNextSlotThatCompletes(t *testing.T) {
 // was not read whole, and the round is no quick one.
 func TestARoundThatSplitALeafOfTheLastKeptSplitForItsSizeIsNoQuickOne(t *testing.T) {
 	dimensions := []string{"host"}
-	tree, err := inputslice.New(dimensions, 4, dimensions[0])
+	tree, err := inputslice.NewCut(dimensions, 4, inputslice.SuffixCut(dimensions[0]))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +308,7 @@ func TestARoundThatSplitALeafOfTheLastKeptSplitForItsSizeIsNoQuickOne(t *testing
 				}
 				continue
 			}
-			reading.noteLeafRead(&sliceRead{}, inputslice.Leaf{ID: leaf}, 1_000)
+			reading.noteLeafRead(&sliceRead{}, inputslice.Leaf{ID: leaf}, 1_000, false)
 		}
 		return reading, tree.Shape()
 	}

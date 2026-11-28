@@ -55,6 +55,13 @@ type Session struct {
 	// whose answer set the lease's horizon began.
 	under     WorkerSessionSource
 	confirmed time.Time
+	// confirmedGeneration is the assignment generation the last fence check
+	// that confirmed the lease read, zero before one did; fenceRefusedAt is
+	// when a write's own fence last refused the lease, zero once a check
+	// that began after it confirmed the lease. Both are what ValidateLocally
+	// holds a view against (015 R1).
+	confirmedGeneration uint64
+	fenceRefusedAt      time.Time
 }
 
 // WorkerSessionSource is the worker session this process holds now, if any.
@@ -200,6 +207,11 @@ func (session *Session) confirm(at time.Time, record AssignmentRecord) {
 		horizon = at
 	}
 	session.confirmed = at
+	session.confirmedGeneration = record.AssignmentGeneration
+	// A check that began before the refusal says nothing about it.
+	if !session.fenceRefusedAt.IsZero() && at.After(session.fenceRefusedAt) {
+		session.fenceRefusedAt = time.Time{}
+	}
 	session.lease.Deadline = horizon
 	session.lease.ContentScope = record.ContentScope
 	session.lease.PendingContentScope = record.PendingContentScope

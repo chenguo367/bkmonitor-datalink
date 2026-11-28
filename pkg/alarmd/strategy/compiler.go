@@ -355,6 +355,13 @@ func (c *PlanCompiler) validatePlan(request CompileRequest) *Terminal {
 	if err := plan.LegacyOutput.Validate(); err != nil {
 		return &Terminal{ReasonCode: contract.ReasonPlanInvalid, FieldPath: "legacy_output", Detail: err.Error()}
 	}
+	// A realtime part is judged on every point it is read with: one that
+	// does not hold is refused where the Plan is read, not run.
+	if plan.Realtime != nil {
+		if err := plan.Realtime.Validate(); err != nil {
+			return &Terminal{ReasonCode: contract.ReasonPlanInvalid, FieldPath: "realtime", Detail: err.Error()}
+		}
+	}
 	// The conversion context belongs to the Plans that publish that protocol
 	// and to no others: carrying it elsewhere means a Plan that could be
 	// converted two ways. This read the frozen revision until a deployment

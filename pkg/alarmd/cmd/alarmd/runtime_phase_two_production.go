@@ -25,6 +25,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/progress"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/tracing"
@@ -1403,6 +1404,13 @@ type productionPhaseTwoOwnership struct {
 	// from the installed view (decision-016 batch 4); nil reads every
 	// Query Group the control plane's way.
 	viewGate *viewExecutionGate
+	// localView is the installed view a Runner admits its attempts from
+	// without a fence check, while the Leader was heard within
+	// localViewHeard; countLocalCheck counts each check (015 R1). Nil checks
+	// every attempt's fence with the store.
+	localView       localOwnershipView
+	localViewHeard  time.Duration
+	countLocalCheck func(outcome, reason string)
 	// takeovers is when this process took each Query Group over, shared by
 	// every Slot source it opens: a Query Group reopened here keeps the
 	// moment, so only Slots due before a real takeover are replayed past the
@@ -1721,7 +1729,13 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 	shardGate := ownership.ShardSplitAdmission(workers)
 	// The segment skip word, restated on the records the round settled
 	// before any move: a move leaves the word as it is.
-	skip, err := runtime.reconcileSegmentSkip(ctx, authority, workers, records, at)
+	// A record the round restates after reading it - its segment skip word -
+	// is published without the record's own fields (015 R1). A move needs no
+	// mark: it changes the owner the view names, which is what tells it, and
+	// no round moves a Query Group away and back
+	// (scheduler.TestNoRoundMovesAQueryGroupAwayAndBack).
+	rewritten := make(map[execution.QueryGroupIdentity]bool)
+	skip, err := runtime.reconcileSegmentSkip(ctx, authority, workers, records, rewritten, at)
 	if err != nil {
 		if errors.Is(err, ownership.ErrStaleFence) {
 			runtime.clearControlAuthority(authority)
@@ -1767,7 +1781,7 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 	round.done(fleet.LeaderRoundStageAssignmentIndex)
 	runtime.sweepRetiredAssignments(ctx, authority, ordered)
 	round.done(fleet.LeaderRoundStageAssignmentSweep)
-	runtime.publishView(ctx, authority, records, owners, workers, true)
+	runtime.publishViewRewritten(ctx, authority, records, owners, rewritten, workers, true)
 	round.done(fleet.LeaderRoundStageViewPublish)
 	return nil
 }
@@ -2875,12 +2889,26 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 	if runtime.dependencies.QueryCooldowns != nil {
 		runner.WithQueryCooldownStore(runtime.dependencies.QueryCooldowns)
 	}
+	if runtime.localView != nil {
+		runner.WithLocalOwnership(productionLocalOwnership{
+			session: session, queryGroup: queryGroup, view: runtime.localView, heardWithin: runtime.localViewHeard,
+		}, runtime.countLocalCheck)
+	}
 	runner.WithSlotSkipReport(runtime.dependencies.Observer, runtime.dependencies.LookbackBusy)
 	return &productionPhaseTwoQueryGroup{
 		session: session, runner: runner, observer: runtime.dependencies.Observer, now: runtime.dependencies.Now,
 		release: release, flights: runtime.flights, queryGroup: queryGroup, viewGate: runtime.viewGate, source: source,
 		progress: runtime.dependencies.Progress,
 	}, nil
+}
+
+// WithLocalOwnership makes every Runner opened from now on admit its
+// attempts from view while the Leader was heard within heard, counting each
+// check with count (015 R1).
+func (runtime *productionPhaseTwoOwnership) WithLocalOwnership(view localOwnershipView, heard time.Duration, count func(outcome, reason string)) {
+	if runtime != nil && view != nil {
+		runtime.localView, runtime.localViewHeard, runtime.countLocalCheck = view, heard, count
+	}
 }
 
 // WithViewExecutionGate makes every Query Group opened from now on read the
@@ -3154,7 +3182,12 @@ func (executor observedProductionSlotExecutor) Execute(
 	// The attempt's query budget, recorded by access for whichever plan binds
 	// the round, rendered on the completion only when the round ends degraded.
 	ctx, budget := observability.ContextWithBudgetCapture(ctx)
+	// This attempt's own store calls that ran out their time, for a failure
+	// whose error no longer says so (slotStoreCall).
+	ctx, storeWitness := redisfailure.WithWitness(ctx, fleet.StoreOwnCaller)
+	attemptStarted := time.Now()
 	result, err := executor.next.Execute(ctx, request)
+	attempt := time.Since(attemptStarted)
 	if executor.readHolds != nil {
 		// Overtaken by newer state: refused for it, as a State write that met
 		// a later one still is, or -- the shape the preflight refusal used to
@@ -3201,6 +3234,7 @@ func (executor observedProductionSlotExecutor) Execute(
 	// completion lines named the outcome and never the cause.
 	var heldBy *observability.HeldByFacts
 	var gapApplySite string
+	var storeCall *redisfailure.CallError
 	if result.CompletionKind == execution.CompletionGapSkipped || request.ReplayExpired ||
 		result.ReasonCode == execution.ReasonCode(contract.ReasonGapSkipped) {
 		// The reason is asked as well as the kind, because the line reports the
@@ -3263,7 +3297,15 @@ func (executor observedProductionSlotExecutor) Execute(
 			readiness = access.ReadinessDeferralOf(err)
 		} else {
 			observedResult = observability.ResultFailed
-			reason, gapApplySite = slotFailureReason(err)
+			// Measured on the clock the store calls are timed on, not the
+			// executor's, so the call's wait and the attempt's compare.
+			var storeFailed bool
+			storeCall, storeFailed = slotStoreCall(err, storeWitness, attempt)
+			namedCall := storeCall
+			if !storeFailed {
+				namedCall = nil
+			}
+			reason, gapApplySite = slotFailureReason(err, namedCall)
 			// A Slot stopped by its own context's cancellation -- the process
 			// stopping or its Query Group leaving -- names that.
 			if reason == observability.ReasonInternalUnknown && observability.CancelledFromAbove(ctx, err) {
@@ -3285,7 +3327,7 @@ func (executor observedProductionSlotExecutor) Execute(
 		Component: observability.ComponentScheduler, Stage: observability.StageSlotCompleted,
 		Operation: observability.Operation(request.Operation), ShortPeriodCompletion: shortCompletion,
 		AwaitingView: notExecutable != nil && notExecutable.AwaitingView, RetryingAfterFailure: retryingAfterFailure,
-		ReadAtLimit: readAtLimit, HeldBy: heldBy, GapApplySite: gapApplySite,
+		ReadAtLimit: readAtLimit, HeldBy: heldBy, GapApplySite: gapApplySite, StoreCall: storeCallFacts(storeCall),
 		DivertDecision: lostRoundDecision(ctx, queryLossResult(observedResult, result), retryingAfterFailure, budget),
 		QueryBudget:    lostRoundBudget(queryLossResult(observedResult, result), retryingAfterFailure, budget),
 		// The completion the Slot reached, beside the reason it reports. They
@@ -3787,6 +3829,7 @@ func slotBudgetUsageFacts(usage execution.SlotBudgetUsage) *observability.SlotBu
 		InputSliceReadsInFlight:       usage.InputSliceReadsInFlight,
 		SharedFrameWaitConsumerMillis: usage.SharedFrameWaitConsumerMillis, SharedFrameWaitReaderMillis: usage.SharedFrameWaitReaderMillis,
 		InputSliceTimeouts:                  usage.InputSliceTimeouts,
+		InputSliceTimeoutDeepening:          usage.InputSliceTimeoutDeepening,
 		InputSliceShapeStarted:              usage.InputSliceShapeStarted,
 		InputSliceShapeKept:                 usage.InputSliceShapeKept,
 		InputSliceShapeMerged:               usage.InputSliceShapeMerged,
@@ -3802,10 +3845,21 @@ func slotBudgetUsageFacts(usage execution.SlotBudgetUsage) *observability.SlotBu
 		InputSliceShapeRefusedSplitError:    usage.InputSliceShapeRefusedSplitError,
 		InputSliceShapeMergeRefused:         usage.InputSliceShapeMergeRefused,
 		InputSliceShapeSizedKept:            usage.InputSliceShapeSizedKept,
+		InputSliceShapeSplitTime:            usage.InputSliceShapeSplitTime,
+		InputSliceShapeSplitHeldUniform:     usage.InputSliceShapeSplitHeldUniform,
+		InputSliceShapeSplitUnhelpful:       usage.InputSliceShapeSplitUnhelpful,
+		InputSliceShapeSplitHeldMark:        usage.InputSliceShapeSplitHeldMark,
+		InputSliceShapeFolded:               usage.InputSliceShapeFolded,
+		InputSliceShapeLeafCapReached:       usage.InputSliceShapeLeafCapReached,
+		InputSliceShapeSwitchedToSuffix:     usage.InputSliceShapeSwitchedToSuffix,
 		InputSliceCutOn:                     usage.InputSliceCutOn,
 		InputSliceDimension:                 usage.InputSliceDimension,
 		InputSlicesDeferred:                 usage.InputSlicesDeferred,
 		InputSliceStartDiscarded:            usage.InputSliceStartDiscarded,
+		InputSliceConsumers:                 usage.InputSliceConsumers,
+		InputSliceConsumersFrom:             usage.InputSliceConsumersFrom,
+		InputSliceRoomLimitBytes:            usage.InputSliceRoomLimitBytes,
+		InputSliceFloorBytes:                usage.InputSliceFloorBytes,
 		NoDataStagesAheadCarried:            usage.NoDataStagesAheadCarried, NoDataStagesAheadDiffers: usage.NoDataStagesAheadDiffers,
 		NoDataStagesAheadDiscarded: usage.NoDataStagesAheadDiscarded, NoDataStagesAheadStopped: usage.NoDataStagesAheadStopped,
 		NoDataStageAheadDiffersKeptOtherwise: usage.NoDataStageAheadDiffersKeptOtherwise,

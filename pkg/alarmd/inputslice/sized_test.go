@@ -31,7 +31,7 @@ func hosts(n int) inputslice.Sample {
 func TestASizedSplitOfAStartingSliceIsTheNextStart(t *testing.T) {
 	dimensions := []string{"host"}
 	for name, sized := range map[string]bool{"sized": true, "for this round": false} {
-		tree, err := inputslice.New(dimensions, 4, "host")
+		tree, err := inputslice.NewCut(dimensions, 4, inputslice.SuffixCut("host"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -75,7 +75,7 @@ func TestAKeptSizedSplitChangesOnlyTheShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	leaf := tree.Pending()[0]
-	children, sampled, err := tree.KeepSizedSplit(leaf.ID, hosts(40))
+	children, sampled, err := tree.KeepSizedSplit(leaf.ID, hosts(40), nil)
 	if err != nil || len(children) < 2 || sampled != 40 {
 		t.Fatalf("kept %d parts of %d sampled, err %v; want parts of the 40", len(children), sampled, err)
 	}
@@ -91,7 +91,7 @@ func TestAKeptSizedSplitChangesOnlyTheShape(t *testing.T) {
 			t.Fatalf("part %d is %s, kept %s", index, part.Slice.Digest(), children[index].Slice.Digest())
 		}
 	}
-	if _, _, err := tree.KeepSizedSplit(leaf.ID, hosts(40)); err == nil {
+	if _, _, err := tree.KeepSizedSplit(leaf.ID, hosts(40), nil); err == nil {
 		t.Fatal("a leaf kept split twice")
 	}
 }
@@ -103,7 +103,7 @@ func TestAKeptSizedSplitChangesOnlyTheShape(t *testing.T) {
 // Shape - every split lost, the next Slot read whole.
 func TestAMergeThatWouldNotRebuildKeepsTheShape(t *testing.T) {
 	dimensions := []string{"host"}
-	tree, err := inputslice.New(dimensions, 1, "")
+	tree, err := inputslice.NewCut(dimensions, 2, inputslice.SuffixCut("host"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestAMergeThatWouldNotRebuildKeepsTheShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := tree.KeepSizedSplit(children[0].ID, hosts(40)); err != nil {
+	if _, _, err := tree.KeepSizedSplit(children[0].ID, hosts(40), nil); err != nil {
 		t.Fatal(err)
 	}
 	shape := tree.Shape()

@@ -14,6 +14,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/progress"
 )
 
@@ -25,6 +26,9 @@ import (
 // cell of every family exists from the start, so a zero is a reading.
 type slotProgressMetrics struct {
 	reads, begins, notCommitted, superseded, conflicts, appliedWhole *prometheus.CounterVec
+	// localChecks is each Runner attempt's ownership check by how it was
+	// answered (015 R1).
+	localChecks *prometheus.CounterVec
 }
 
 func newSlotProgressMetrics() slotProgressMetrics {
@@ -120,11 +124,44 @@ func newSlotProgressMetrics() slotProgressMetrics {
 	for _, kind := range progress.QueryFreeAppliedKinds {
 		metrics.appliedWhole.WithLabelValues(kind)
 	}
+	metrics.localChecks = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: metricSubsystem, Name: "ownership_local_check_total",
+		Help: "Runner attempts' ownership checks, by how each was answered: local_pass, admitted from the lease and the " +
+			"installed view without a fence check; fallback_redis, checked with the store as before, by the first of the " +
+			"local conditions that did not hold (not_in_view, view_fields_missing - a Leader that does not send the " +
+			"record's fields -, not_desired, never_confirmed - the lease's first check -, generation_changed, " +
+			"pending_content, unconfirmed_record - the view names a content scope or timeline the lease was not " +
+			"confirmed with -, view_silent - nothing from the Leader within the heartbeat and renewal intervals -, " +
+			"fence_refused - a write's fence refused the lease since its last check -, own_lease - a lease not held " +
+			"under a worker session); local_refused, the lease refusing itself before any store was asked; " +
+			"other/other, a check under words this build has no cell for. " +
+			"fallback_redis is what the ownership_check_fence script count is made of; a steady Query Group reads " +
+			"local_pass.",
+	}, []string{"outcome", "reason"})
+	for _, cell := range ownership.OwnershipCheckCells() {
+		metrics.localChecks.WithLabelValues(cell[0], cell[1])
+	}
 	return metrics
 }
 
 func (m slotProgressMetrics) collectors() []prometheus.Collector {
-	return []prometheus.Collector{m.reads, m.begins, m.notCommitted, m.superseded, m.conflicts, m.appliedWhole}
+	return []prometheus.Collector{m.reads, m.begins, m.notCommitted, m.superseded, m.conflicts, m.appliedWhole, m.localChecks}
+}
+
+// RecordOwnershipLocalCheck counts one Runner attempt's ownership check; a
+// cell outside ownership.OwnershipCheckCells is counted under other/other,
+// not dropped.
+func (r *Recorder) RecordOwnershipLocalCheck(outcome, reason string) {
+	if r == nil {
+		return
+	}
+	for _, cell := range ownership.OwnershipCheckCells() {
+		if cell[0] == outcome && cell[1] == reason {
+			r.phaseTwo.slotProgress.localChecks.WithLabelValues(outcome, reason).Inc()
+			return
+		}
+	}
+	r.phaseTwo.slotProgress.localChecks.WithLabelValues(ownership.LocalCheckOther, ownership.LocalCheckOther).Inc()
 }
 
 // RecordProgressRead counts one read of a Progress record by its owner; a

@@ -69,3 +69,27 @@ func TestTheSplitGateNamesEveryReadyWorkerThatDoesNotDeclare(t *testing.T) {
 		t.Fatalf("gate = %+v, want held with the two that do not declare, in id order", gate)
 	}
 }
+
+func TestTheRealtimeInputGateNamesEveryReadyWorkerThatDoesNotDeclare(t *testing.T) {
+	// The word the registry and the page read; a worker built before it declares nothing under it.
+	if CapabilityRealtimeInput != "realtime-input.v1" || RealtimeInputHeld != "REALTIME_INPUT_HELD" {
+		t.Fatalf("contract words %q, %q", CapabilityRealtimeInput, RealtimeInputHeld)
+	}
+	reading := func(id string) WorkerRegistration {
+		return WorkerRegistration{WorkerID: id, Capabilities: []string{CapabilityContentScope, CapabilityRealtimeInput}}
+	}
+	if gate := RealtimeInputAdmission(nil); gate.Admitted || gate.Ready != 0 {
+		t.Fatalf("an empty fleet admitted realtime Query Groups: %+v", gate)
+	}
+	if gate := RealtimeInputAdmission([]WorkerRegistration{reading("a"), reading("b")}); !gate.Admitted || gate.Ready != 2 || len(gate.Unaware) != 0 {
+		t.Fatalf("a fleet that declares throughout was not admitted: %+v", gate)
+	}
+	var old WorkerRegistration
+	if err := json.Unmarshal([]byte(`{"worker_id":"old","assignment_readiness":"READY","capabilities":["content-scope.v1","segment-skip.v1"]}`), &old); err != nil {
+		t.Fatal(err)
+	}
+	gate := RealtimeInputAdmission([]WorkerRegistration{reading("z"), old, reading("a"), {WorkerID: "m"}})
+	if gate.Admitted || gate.Ready != 4 || len(gate.Unaware) != 2 || gate.Unaware[0] != "m" || gate.Unaware[1] != "old" {
+		t.Fatalf("gate = %+v, want held with the two that do not declare, in id order", gate)
+	}
+}

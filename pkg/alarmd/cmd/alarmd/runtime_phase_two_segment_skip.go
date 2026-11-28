@@ -41,6 +41,7 @@ func (runtime *productionPhaseTwoOwnership) reconcileSegmentSkip(
 	authority ownership.PublicationAuthority,
 	workers []ownership.WorkerRegistration,
 	records map[execution.QueryGroupIdentity]ownership.AssignmentRecord,
+	rewritten map[execution.QueryGroupIdentity]bool,
 	at time.Time,
 ) (observability.SegmentSkipFacts, error) {
 	gate := ownership.SegmentSkipAdmission(workers)
@@ -76,6 +77,9 @@ func (runtime *productionPhaseTwoOwnership) reconcileSegmentSkip(
 			PlacementReason: record.PlacementReason, DecidedAt: at, SetSegmentSkip: want, WithdrawSegmentSkip: !want,
 			SetSegmentSkipNoData: wantNoData, WithdrawSegmentSkipNoData: !wantNoData,
 		})
+		if err == nil && rewritten != nil {
+			rewritten[queryGroup] = true
+		}
 		switch {
 		case err == nil && want:
 			facts.Set++

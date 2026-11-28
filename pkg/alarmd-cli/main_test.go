@@ -34,7 +34,7 @@ func TestRealBinaryHelpAndVersionWithoutConfiguration(t *testing.T) {
 		}
 		if arg == "--help" {
 			for _, need := range []string{"auth login", "profile list", "discover --env", "describe <operation>", "invoke <operation>", "meta.result_file", "3=partial",
-				"snapshot --env <id>", "exit 3 only when a read was not collected"} {
+				"snapshot --env <profile>", "exit 3 only when a read was not collected", "ambiguous_environment", "--profile <name>"} {
 				if !strings.Contains(string(out), need) {
 					t.Errorf("help missing %q", need)
 				}

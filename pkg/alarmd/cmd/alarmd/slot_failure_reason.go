@@ -6,16 +6,58 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/trigger"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/worker"
 )
+
+// slotStoreCall is the store call that did not answer behind a failed Slot,
+// for its completion row, and whether that call is what failed the Slot.
+//
+// The call is the one its error carries, or, for a Slot whose error is its
+// own deadline and nothing more, the call of this attempt that ran out the
+// time it was issued with (redisfailure.Witness): a store that turns a failed
+// read into a status, and a worker that then stops on the Slot's deadline,
+// leave the error with nothing to say the time ran out inside the store. nil
+// when there is neither.
+//
+// A call that failed with time left -- refused, cut, no Sentinel, no pooled
+// connection, a read past the client's own timeout -- failed the Slot. A call
+// that ran out the time it was issued with did only when that wait was at
+// least half of the attempt: one issued with the last moments of a Slot
+// whose time went elsewhere, or one that ran out a short time of its own
+// before the Slot went on and spent the rest, is only the last thing that
+// waited. Its facts still go on the row.
+func slotStoreCall(err error, witness *redisfailure.Witness, attempt time.Duration) (*redisfailure.CallError, bool) {
+	call := redisfailure.CallErrorOf(err)
+	if call == nil && errors.Is(err, context.DeadlineExceeded) {
+		call = witness.Call()
+	}
+	if call == nil {
+		return nil, false
+	}
+	return call, !call.RanOutItsTime() || 2*call.Waited >= attempt
+}
+
+// storeCallFacts is a Slot's store call that did not answer (slotStoreCall),
+// for its completion line; nil for none.
+func storeCallFacts(call *redisfailure.CallError) *observability.StoreCallFacts {
+	if call == nil {
+		return nil
+	}
+	return &observability.StoreCallFacts{Client: call.Client, Caller: call.Caller, Reason: call.Reason,
+		Waited: call.Waited, Left: call.Left, LeftKnown: call.LeftKnown}
+}
 
 // slotFailureReason names a failed Slot's reason and, where the refusal has
 // one, the apply site that produced it.
@@ -29,7 +71,10 @@ import (
 // A function of its own so the classification can be exercised without
 // standing up a runtime. The block it came from decides a Slot's whole
 // completion line, and a rule nobody can call is a rule nobody tests.
-func slotFailureReason(err error) (observability.ReasonCode, string) {
+//
+// storeCall is the Slot's store call that did not answer (slotStoreCall),
+// nil for none.
+func slotFailureReason(err error, storeCall *redisfailure.CallError) (observability.ReasonCode, string) {
 	reason := observability.ReasonInternalUnknown
 	gapApplySite := ""
 	if errors.Is(err, access.ErrFrozenQueryPlanUnavailable) {
@@ -131,6 +176,17 @@ func slotFailureReason(err error) (observability.ReasonCode, string) {
 		// this refusal exists to answer, and an answer that has to be parsed
 		// out of a sentence is one nobody can group or count by.
 		gapApplySite = worker.GapApplySiteOf(err)
+	}
+	// A Slot whose own store did not answer: a call of a job whose data this
+	// deployment keeps (fleet.StoreOwnCaller) that had time to reach the
+	// store and failed there, marked by the call hook, in the error or in the
+	// attempt's witness. A gap preflight whose read ran out its time on a hung
+	// master arrived here as nothing more than "context deadline exceeded" and
+	// read as an unclassified defect. It is the store's word only when nothing
+	// above named the Slot, and not for another job's store on the same
+	// client.
+	if reason == observability.ReasonInternalUnknown && storeCall != nil && fleet.StoreOwnCaller(storeCall.Caller) {
+		reason = observability.ReasonCode(contract.ReasonRedisUnavailable)
 	}
 	return reason, gapApplySite
 }

@@ -66,9 +66,9 @@ func TestTheSliceMemoryScrapeCountsTheSlicesACompletedShapeLanded(t *testing.T) 
 	readWholeTimedOut(t, fixture, request)
 	fixture.source.mu.Lock()
 	fixture.source.timeoutWhole, fixture.source.queryMillis = false, 1_000
-	// The slice, its child and its grandchild each run out of time once
-	// asked: the first Slot fails, its slice split for the next.
-	fixture.source.timeoutAfter, fixture.source.timeoutTimes = 1, 3
+	// The slice and its child each run out of time once asked: the first
+	// Slot fails, its slice split for the next.
+	fixture.source.timeoutAfter, fixture.source.timeoutTimes = 1, 2
 	fixture.source.mu.Unlock()
 	if _, err := fixture.coordinator.Execute(context.Background(), request); err == nil {
 		t.Fatal("round 1, the slice and its child out of time, completed")

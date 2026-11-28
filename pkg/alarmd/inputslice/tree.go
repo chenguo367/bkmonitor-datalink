@@ -8,9 +8,19 @@
 // specific language governing permissions and limitations under the License.
 
 // Package inputslice is the slicer of decision-020 batch 8 §7.3: the
-// adaptive reverse-prefix tree that cuts a Query Group's series for one Slot
-// into slices small enough to be read one after another within the Query
-// Group's share, refining only the slice that turned out too large.
+// adaptive tree that cuts a Query Group's series for one Slot into slices
+// small enough to be read one after another within the Query Group's share
+// and its time, refining only the slice that turned out too large or too
+// slow. A tree is cut one of two ways from its root (015 C2 section 4.8),
+// by why its root was split: a root split for its size by a sample of its
+// values is cut from the end of the values (this file), a root split for its
+// time, or with no sample to cut by, by literal prefixes (prefix.go, and the
+// round's judgement of it, rounds.go). A sample is of what a slice
+// delivered, and a slice let go for its size delivered the start of its
+// stream only, which the store answers in label order: a cut of the
+// values' ends is even whatever that start was, a cut of their starts is
+// not. A literal prefix is what the store reads a slice by, where a pattern
+// led by .* reads every value of the label.
 //
 // A node is a path of character classes read from the end of a dimension's
 // value backwards. Its children split it by the next character from the end
@@ -107,8 +117,11 @@ func (err *ValueConcentratedError) Error() string {
 // Is makes every ValueConcentratedError match ErrValueConcentrated.
 func (err *ValueConcentratedError) Is(target error) bool { return target == ErrValueConcentrated }
 
-// segment is a node's path on one dimension. Depth zero and not exhausted is
-// that dimension's root, which constrains nothing and writes no condition.
+// segment is a node's cut on one dimension, of one of two kinds: a path of
+// classes from the end of the values, or, byPrefix, a literal prefix less
+// what other children of its splits hold (prefix.go). Depth zero and not
+// exhausted, of either kind, is that dimension's root, which constrains
+// nothing and writes no condition.
 type segment struct {
 	dimension int
 	// path is P read from the end: path[0] is X_1, the last character's
@@ -117,9 +130,27 @@ type segment struct {
 	// exhausted is the child of values exactly len(path) characters long; at
 	// depth zero, the empty value and the missing label.
 	exhausted bool
+	// byPrefix is a segment cut by literal prefixes: prefix and except say
+	// which values (prefix.go), path and exhausted are not used.
+	byPrefix bool
+	prefix   string
+	except   string
 }
 
-func (s segment) writesCondition() bool { return len(s.path) > 0 || s.exhausted }
+func (s segment) writesCondition() bool {
+	if s.byPrefix {
+		return s.prefix != "" || s.except != ""
+	}
+	return len(s.path) > 0 || s.exhausted
+}
+
+// conditionsOf is every condition the segment writes.
+func (s segment) conditionsOf(dimensions []string) []execution.InputSliceCondition {
+	if s.byPrefix {
+		return s.prefixConditions(dimensions)
+	}
+	return []execution.InputSliceCondition{s.condition(dimensions)}
+}
 
 func (s segment) condition(dimensions []string) execution.InputSliceCondition {
 	name := dimensions[s.dimension]
@@ -186,6 +217,14 @@ type Tree struct {
 	// (KeepSizedSplit): in the Shape after splits, never in this tree's
 	// pending leaves.
 	later []laterSplit
+	// replayed is how many of splits a tree started in a Shape replayed
+	// (FromShape): the ones after are this Slot's own.
+	replayed int
+	// switched is set once a slice of a tree cut by prefix was let go for
+	// its size and split by the classes of its values' ends, ANDed after its
+	// prefix (switchSegments): the Query Group's next Slot starts in a tree
+	// cut from the end, its Shape none (Switched).
+	switched bool
 }
 
 // New starts a tree that cuts on dimensions: each split on the one of them
@@ -194,15 +233,12 @@ type Tree struct {
 // the caller checks.
 //
 // With on one of the dimensions - the one the Query Group's last read was
-// cut on, which a sample chose - the tree starts with at least
-// leavesAtLeast leaves (K_0, §7.4): the root is split level by level on that
-// dimension by the fixed alphabet, the shallowest leaf first, so the starting
-// slices are as even as an alphabet without a sample of this read can make
-// them. With on empty, nothing chose a dimension, and one or fewer leaves
-// asked, it is the single root leaf, the zero slice, which reads the whole
-// Query Group as before slicing. A K_0 the tree cannot reach within
-// MaxLeaves is a ValueConcentratedError: the Query Group needs more slices
-// than the tree may have.
+// cut on - the tree starts with at least leavesAtLeast leaves (K_0, §7.4)
+// cut by prefix (FixedCut), as far as MaxLeaves takes it: the root split on
+// that dimension by the alphabet, then its leaves level by level, the
+// shallowest first. With on empty, nothing chose a dimension, and one or
+// fewer leaves asked, it is the single root leaf, the zero slice, which
+// reads the whole Query Group as before slicing.
 func New(dimensions []string, leavesAtLeast int, on string) (*Tree, error) {
 	cut := Cut{}
 	if on != "" {
@@ -211,28 +247,49 @@ func New(dimensions []string, leavesAtLeast int, on string) (*Tree, error) {
 	return newTree(dimensions, leavesAtLeast, MaxLeaves, cut)
 }
 
-// Cut is how a tree's root is cut: the dimension and the classes of its
-// last character, a partition of every rune. A tree started on a Cut
-// (NewCut) cuts every level of its starting leaves by those classes; the
-// Cut a sample makes (BestCut) is what a read whole cuts its root by
+// Cut is how a tree's root is cut: the dimension, and either the classes of
+// its values' last character, a partition of every rune, or, byPrefix, the
+// prefix its split cuts at and the characters it keeps apart after it. A
+// tree started on a Cut (NewCut) cuts its root so, and every split of it
+// is of that kind (015 C2 section 4.8); the Cut a sample makes (BestCut),
+// by classes, is what a read whole let go for its size cuts its root by
 // (SplitCut), and the one a tree's root was cut by (RootCut) is what the
 // Query Group's next Slot, and this Slot's retry, start in - the same root
 // slices. The zero Cut is none.
 type Cut struct {
 	Dimension string
 	classes   []class
+	byPrefix  bool
+	at, apart string
 }
 
 // IsZero reports whether the Cut is none.
 func (cut Cut) IsZero() bool { return cut.Dimension == "" }
 
-// FixedCut is the Cut of a dimension by the fixed alphabet: what a tree is
-// cut by when no sample chose its classes.
-func FixedCut(dimension string) Cut { return Cut{Dimension: dimension, classes: fixedClasses()} }
+// ByPrefix reports whether the Cut is by literal prefixes.
+func (cut Cut) ByPrefix() bool { return cut.byPrefix }
 
-// NewCut is New starting on a Cut: the root split level by level on its
-// dimension by its classes to at least leavesAtLeast leaves, the zero Cut
-// the single root leaf.
+// FixedCut is the Cut of a dimension at its root by the whole alphabet, by
+// prefix: what a tree is cut by with no sample to cut it by - a Query Group
+// that ran out of time before its read delivered any, or one split for its
+// time.
+func FixedCut(dimension string) Cut {
+	return Cut{Dimension: dimension, byPrefix: true, apart: alphabet}
+}
+
+// SuffixCut is the Cut of a dimension by the fixed classes of its values'
+// last character: what a tree that switched from prefix starts cut by when
+// the slice that switched it showed no sample (015 C2 section 4.8).
+func SuffixCut(dimension string) Cut { return Cut{Dimension: dimension, classes: fixedClasses()} }
+
+// PrefixCutOn is cut's dimension cut by prefix at its root by the whole
+// alphabet: a Query Group split for its time on the dimension a sample chose
+// (BestCut), cut by prefix as every tree split for its time is.
+func PrefixCutOn(cut Cut) Cut { return FixedCut(cut.Dimension) }
+
+// NewCut is New starting on a Cut: the root split on its dimension by it,
+// then level by level to at least leavesAtLeast leaves, as far as MaxLeaves
+// takes it, the zero Cut the single root leaf.
 func NewCut(dimensions []string, leavesAtLeast int, cut Cut) (*Tree, error) {
 	return newTree(dimensions, leavesAtLeast, MaxLeaves, cut)
 }
@@ -258,10 +315,13 @@ func newTree(dimensions []string, leavesAtLeast, maxLeaves int, cut Cut) (*Tree,
 			return nil, fmt.Errorf("alarmd inputslice: dimension %q to start on is not one to slice on", on)
 		}
 	}
+	tree := &Tree{dimensions: append([]string(nil), dimensions...), maxLeaves: maxLeaves}
+	if cut.byPrefix {
+		return tree.startByPrefix(root, leavesAtLeast, cut)
+	}
 	if on != "" && !partitionOf(class{negated: true}, cut.classes) {
 		return nil, fmt.Errorf("alarmd inputslice: the classes to start on %q are no partition of every rune", on)
 	}
-	tree := &Tree{dimensions: append([]string(nil), dimensions...), maxLeaves: maxLeaves}
 	tree.add([]segment{{dimension: root}}, -1)
 	for on != "" && tree.leaves < leavesAtLeast {
 		target := tree.shallowestCuttable()
@@ -271,6 +331,46 @@ func newTree(dimensions []string, leavesAtLeast, maxLeaves int, cut Cut) (*Tree,
 		last := target.segments[len(target.segments)-1]
 		children := deeper(target.segments[:len(target.segments)-1], last, cut.classes)
 		if _, err := tree.splitInto(target, children, last.dimension, splitStarting); err != nil {
+			return nil, err
+		}
+	}
+	return tree, nil
+}
+
+// startByPrefix is newTree for a Cut by prefix: the root split by the cut,
+// then the shallowest leaf with a character left to keep apart split by the
+// alphabet at its own prefix, until the leaves asked or as far as the
+// leaves a tree may have take it - a split past them would be refused, and
+// the tree read in fewer slices than asked.
+func (tree *Tree) startByPrefix(root, leavesAtLeast int, cut Cut) (*Tree, error) {
+	rootSegment := segment{dimension: root, byPrefix: true}
+	if !rootSegment.canSplitAt(cut.at, cut.apart) {
+		return nil, fmt.Errorf("alarmd inputslice: the cut to start on %q keeps no literal characters apart", cut.Dimension)
+	}
+	rootNode := tree.add([]segment{rootSegment}, -1)
+	if leavesAtLeast <= 1 {
+		return tree, nil
+	}
+	if _, err := tree.splitInto(rootNode, splitBy(nil, rootSegment, cut.at, cut.apart), root, splitStarting); err != nil {
+		return nil, err
+	}
+	for tree.leaves < leavesAtLeast {
+		var target *node
+		for _, candidate := range tree.nodes {
+			if candidate.state == statePending && candidate.segments[len(candidate.segments)-1].free() != "" {
+				target = candidate
+				break
+			}
+		}
+		if target == nil {
+			break
+		}
+		last := target.segments[len(target.segments)-1]
+		free := last.free()
+		if tree.leaves-1+len(free)+1 > tree.maxLeaves {
+			break
+		}
+		if _, err := tree.splitInto(target, splitBy(target.segments[:len(target.segments)-1], last, "", free), last.dimension, splitStarting); err != nil {
 			return nil, err
 		}
 	}
@@ -290,16 +390,21 @@ func (tree *Tree) shallowestCuttable() *node {
 }
 
 func (tree *Tree) add(segments []segment, parent int) *node {
-	conditions := make([]execution.InputSliceCondition, 0, len(segments))
-	for _, s := range segments {
-		if s.writesCondition() {
-			conditions = append(conditions, s.condition(tree.dimensions))
-		}
-	}
-	created := &node{id: len(tree.nodes), segments: segments, slice: execution.InputSlice{Conditions: conditions}, parent: parent}
+	created := &node{id: len(tree.nodes), segments: segments, slice: sliceOf(segments, tree.dimensions), parent: parent}
 	tree.nodes = append(tree.nodes, created)
 	tree.leaves++
 	return created
+}
+
+// sliceOf is the slice of a node's segments: every condition each writes.
+func sliceOf(segments []segment, dimensions []string) execution.InputSlice {
+	conditions := make([]execution.InputSliceCondition, 0, len(segments))
+	for _, s := range segments {
+		if s.writesCondition() {
+			conditions = append(conditions, s.conditionsOf(dimensions)...)
+		}
+	}
+	return execution.InputSlice{Conditions: conditions}
 }
 
 // Pending is the leaves neither landed nor split, in the order they were
@@ -319,12 +424,24 @@ func (tree *Tree) Pending() []Leaf {
 func (tree *Tree) CutOn() string { return tree.RootCut().Dimension }
 
 // RootCut is the Cut the tree's root was split by - the dimension and the
-// classes of its children's last character - the zero Cut while the root is
-// a leaf.
+// classes of its children's last character, or the prefix and the
+// characters a split by prefix kept apart - the zero Cut while the root is a
+// leaf.
 func (tree *Tree) RootCut() Cut {
 	for _, split := range tree.splits {
 		if split.parent != 0 {
 			continue
+		}
+		if first := tree.nodes[split.children[0]].segments; first[len(first)-1].byPrefix {
+			children := make([][]segment, 0, len(split.children))
+			for _, child := range split.children {
+				children = append(children, tree.nodes[child].segments)
+			}
+			at, apart, ok := splitOf(tree.nodes[0].segments, children, len(tree.dimensions))
+			if !ok {
+				return Cut{}
+			}
+			return Cut{Dimension: tree.dimensions[first[len(first)-1].dimension], byPrefix: true, at: at, apart: apart}
 		}
 		var cut Cut
 		for _, child := range split.children {
@@ -348,11 +465,19 @@ func (tree *Tree) SplitCut(id int, cut Cut) ([]Leaf, error) {
 		return nil, err
 	}
 	dimension := slices.Index(tree.dimensions, cut.Dimension)
-	if len(target.segments) != 1 || target.segments[0].writesCondition() || dimension < 0 ||
-		!partitionOf(class{negated: true}, cut.classes) {
+	if len(target.segments) != 1 || target.segments[0].writesCondition() || dimension < 0 {
+		return nil, fmt.Errorf("alarmd inputslice: slice %d is no root to cut on %q", id, cut.Dimension)
+	}
+	var segments [][]segment
+	switch {
+	case cut.byPrefix && (segment{dimension: dimension, byPrefix: true}).canSplitAt(cut.at, cut.apart):
+		segments = splitBy(nil, segment{dimension: dimension, byPrefix: true}, cut.at, cut.apart)
+	case !cut.byPrefix && partitionOf(class{negated: true}, cut.classes):
+		segments = deeper(nil, segment{dimension: dimension}, cut.classes)
+	default:
 		return nil, fmt.Errorf("alarmd inputslice: slice %d is no root to cut on %q by its classes", id, cut.Dimension)
 	}
-	children, err := tree.splitInto(target, deeper(nil, segment{dimension: dimension}, cut.classes), dimension, splitRead)
+	children, err := tree.splitInto(target, segments, dimension, splitRead)
 	if err != nil {
 		return nil, err
 	}
@@ -517,13 +642,136 @@ func (tree *Tree) pending(id int) (*node, error) {
 	return target, nil
 }
 
+// split is target's children, by the kind of its last segment and why it is
+// split (015 C2 section 4.8): a leaf cut from the end is cut further so
+// (childSegments); a leaf cut by prefix is cut further by prefix for its
+// time (prefixChildSegments), and for its size - let go as it was read, its
+// sample the start of its stream only - by the classes of its values' ends
+// ANDed after its prefix, the tree switched (switchSegments); the root, cut
+// neither way yet, by its sample's classes for its size, and by prefix for
+// its time or with no sample.
 func (tree *Tree) split(target *node, sample Sample, kind splitKind) ([]*node, error) {
-	children, dimension, err := tree.childSegments(target, sample)
+	last := target.segments[len(target.segments)-1]
+	root := len(target.segments) == 1 && !last.writesCondition()
+	forSize := kind == splitRead || kind == splitSized
+	var (
+		children  [][]segment
+		dimension int
+		err       error
+		switching bool
+	)
+	switch {
+	case root && forSize && sampled(sample):
+		children, dimension, err = tree.childSegments(target, sample)
+	case root || last.byPrefix && !forSize:
+		children, dimension, err = tree.prefixChildSegments(target.segments, target.slice, nil)
+	case last.byPrefix:
+		children, dimension, err = tree.switchSegments(target, sample)
+		switching = true
+	default:
+		children, dimension, err = tree.childSegments(target, sample)
+	}
 	if err != nil {
 		return nil, err
 	}
-	return tree.splitInto(target, children, dimension, kind)
+	created, err := tree.splitInto(target, children, dimension, kind)
+	if err == nil && switching {
+		tree.switched = true
+	}
+	return created, err
 }
+
+// sampled reports whether the sample shows any value.
+func sampled(sample Sample) bool {
+	for _, values := range sample {
+		if len(values) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// switchSegments is the children of target, a leaf cut by prefix let go for
+// its size: of every dimension the sample tells apart, the leaf's own first,
+// cut from its root by the classes of its values' last characters
+// (splitClasses), ANDed after every segment of the leaf, the most even by the
+// sample - a split of the values' ends, which the start of a stream in label
+// order samples as evenly as the whole. The leaves under it are cut so as a
+// tree cut from the end is.
+func (tree *Tree) switchSegments(target *node, sample Sample) ([][]segment, int, error) {
+	last := target.segments[len(target.segments)-1]
+	var best [][]segment
+	bestDimension, bestShare := last.dimension, share{}
+	order := append([]int{last.dimension}, slices.DeleteFunc(slices.Clone(rangeOf(len(tree.dimensions))), func(at int) bool { return at == last.dimension })...)
+	for _, next := range order {
+		values := sample[tree.dimensions[next]]
+		histogram, progress := nextHistogram(values, 0)
+		if len(values) > 0 && !progress {
+			continue
+		}
+		children := deeper(target.segments, segment{dimension: next}, splitClasses(histogram))
+		if part := shareOf(children, values); best == nil || part.below(bestShare) {
+			best, bestDimension, bestShare = children, next, part
+		}
+	}
+	if best == nil {
+		return nil, last.dimension, &ValueConcentratedError{Reason: ReasonSingleValue, Dimension: tree.dimensions[last.dimension], Slice: target.slice}
+	}
+	return best, bestDimension, nil
+}
+
+func rangeOf(n int) []int {
+	out := make([]int, n)
+	for index := range out {
+		out[index] = index
+	}
+	return out
+}
+
+// prefixChildSegments is the children of the node of segments cut by prefix
+// and the dimension they are cut on: on the node's own dimension where its
+// bound cuts it (boundedCut), at its own prefix by the alphabet with none;
+// failing that, the first other dimension it is not cut on that tells its
+// values apart, from its root, the node's segments kept. A dimension whose
+// bound is one value tells nothing apart. Neither is a ValueConcentratedError
+// of ReasonSingleValue.
+func (tree *Tree) prefixChildSegments(segments []segment, slice execution.InputSlice, bounds Bounds) ([][]segment, int, error) {
+	last := segments[len(segments)-1]
+	boundOf := func(dimension int) *Bound {
+		if bound, ok := bounds[tree.dimensions[dimension]]; ok {
+			return &bound
+		}
+		return nil
+	}
+	own := last
+	own.byPrefix = true
+	if children, ok := boundedCut(segments[:len(segments)-1], own, boundOf(last.dimension)); ok {
+		return children, last.dimension, nil
+	}
+	kept := segments
+	if !last.writesCondition() {
+		// A root that constrains nothing need not be carried.
+		kept = kept[:len(kept)-1]
+	}
+	for next := range tree.dimensions {
+		if next == last.dimension || cutOn(segments, next) {
+			continue
+		}
+		if children, ok := boundedCut(kept, segment{dimension: next, byPrefix: true}, boundOf(next)); ok {
+			return children, next, nil
+		}
+	}
+	return nil, last.dimension, &ValueConcentratedError{Reason: ReasonSingleValue, Dimension: tree.dimensions[last.dimension], Slice: slice}
+}
+
+// Switched reports whether a slice of the tree, cut by prefix, was let go for
+// its size and split by its values' ends (switchSegments): the Query Group's
+// next Slot starts in a tree cut from the end, its Shape none.
+func (tree *Tree) Switched() bool { return tree.switched }
+
+// ByPrefix reports whether the tree's root was split by prefix: a tree
+// whose splits of a round are judged by Next.
+func (tree *Tree) ByPrefix() bool { return tree.RootCut().byPrefix }
 
 // splitInto replaces target by children, the split's kind kept with it.
 func (tree *Tree) splitInto(target *node, children [][]segment, dimension int, kind splitKind) ([]*node, error) {
@@ -551,13 +799,20 @@ func (tree *Tree) splitInto(target *node, children [][]segment, dimension int, k
 }
 
 // conditionCost is what a leaf is charged against ConditionBudget: 10 for
-// each dimension that writes a condition and 48 for each level of each path.
-// It bounds the bytes the conditions actually take, since no class is wider
-// than its level's share.
+// each dimension cut from the end that writes a condition and 48 for each
+// level of each path - it bounds the bytes the conditions actually take,
+// since no class is wider than its level's share - and the bytes a segment
+// cut by prefix writes.
 func conditionCost(segments []segment) int {
 	cost := 0
 	for _, s := range segments {
-		if s.writesCondition() {
+		switch {
+		case !s.writesCondition():
+		case s.byPrefix:
+			for _, condition := range s.prefixPatterns() {
+				cost += len(condition.Pattern)
+			}
+		default:
 			cost += dimensionBytes + levelBytes*len(s.path)
 		}
 	}
@@ -675,8 +930,12 @@ func shareOf(children [][]segment, values []SampledValue) share {
 func (s share) below(other share) bool { return s.largest*other.of < other.largest*s.of }
 
 // holds reports whether value is in the segment: its characters from the
-// end in the path's classes, and, for an exhausted segment, none before them.
+// end in the path's classes, and, for an exhausted segment, none before them;
+// for a segment cut by prefix, prefixHolds.
 func (s segment) holds(value string) bool {
+	if s.byPrefix {
+		return s.prefixHolds(value)
+	}
 	for depth, c := range s.path {
 		if r, ok := nextRune(value, depth); !ok || !c.contains(r) {
 			return false

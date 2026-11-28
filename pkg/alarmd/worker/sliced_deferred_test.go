@@ -14,7 +14,8 @@ import (
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/inputslice"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/worker"
 )
 
 // A slice the provider times out with no slice read before it in the Slot
@@ -40,42 +41,47 @@ func cloudZeroFixture(t *testing.T, holding int) *slicedFixture {
 
 // A Query Group never read, cloud "0" throughout, the provider timing out a
 // read of 13 series or more - the whole Query Group, 24, and nothing of six.
-//
-//   - Slot 1 reads it whole: timed out, degraded, its size unknown; the next
-//     is sliced by that time, two slices, on its first dimension, no read
-//     having delivered a series to choose another by.
-//   - Slot 2: cut on cloud by the fixed alphabet, "0" puts all 24 in [0-8],
-//     the first slice made and read: timed out with none before it, planned
-//     at 30 s over two slices, 15 s, which is not over a slice's target -
-//     degraded, as before; the four others empty.
-//   - Slot 3: [0-8] read last, after four empty slices: its 30 s is twice
-//     their median and more, split for its time, with no sample (a read
-//     timed out delivers none) on cloud further - "0", one character, all in
-//     the exhausted child, read after the four others made with it, and
-//     timed out again: a Slot splits so once, and it fails, that slice split
-//     into its shape - on host, cloud having no character left.
-//   - Slot 3 again: in its shape, host's four classes six series each, none
-//     timed out: completed, every query answered.
-//
-// Read first every Slot, as before, [0-8] degrades every Slot for good.
-func TestAFirstDimensionOfOneValueTimedOutWholeIsReadByTheThirdSlot(t *testing.T) {
+// Read whole and timed out, it is read next in a tree cut by prefix on its
+// first dimension, no read having delivered a value to cut otherwise (015 C2
+// section 4.8): cloud's slice of "0" holds all 24 and is split out of time,
+// "0" being its one value its rest holding them still, then host from its
+// root under it, and node-0 to node-x a character a Slot - every Slot
+// failing out of time, none refused - until node- is cut by its last
+// character and a Slot completes, every query answered. The Slots in a row
+// that split it so are what that one says (input_slice_timeout_deepening).
+func TestAFirstDimensionOfOneValueTimedOutWholeIsReadOnceItsHostsAreCut(t *testing.T) {
 	fixture := cloudZeroFixture(t, 13)
 	fixture.source.queryMillis = 1_000
 	request := windowedRequest()
 	readWholeTimedOut(t, fixture, request)
-	result, err := fixture.coordinator.Execute(context.Background(), request)
-	if err != nil || !result.Completed || result.CompletionKind != execution.CompletionUnavailable ||
-		result.Usage.InputSliceCutOn != observability.InputSliceCutOnFirstDimension {
-		t.Fatalf("Slot 2: result=%+v err=%v, want it completed degraded, cut on its first dimension", result, err)
+	for slot := 2; slot <= 12; slot++ {
+		result, err := fixture.coordinator.Execute(context.Background(), request)
+		if reason, refused := worker.InputSliceRefusal(err); refused {
+			t.Fatalf("Slot %d refused %s, want it failed out of time or completed", slot, reason)
+		}
+		if err != nil {
+			continue
+		}
+		if !result.Completed || result.QueryAvailability != execution.QueryAvailabilityAvailable {
+			t.Fatalf("Slot %d: result=%+v, want it completed, every query answered", slot, result)
+		}
+		if deepening := result.Usage.InputSliceTimeoutDeepening; deepening == 0 || deepening > uint64(slot-1) {
+			t.Fatalf("Slot %d completed, deepening %d: want the Slots in a row that split it, %d at most", slot, deepening, slot-1)
+		}
+		t.Logf("completed in Slot %d, deepening %d, %d slices", slot, result.Usage.InputSliceTimeoutDeepening, result.Usage.InputSlices)
+		// The shape it leaves is within the leaves a Slot starts in, so the
+		// next Slot reads in it rather than dropping it and starting over.
+		if kept := worker.SliceMemory(fixture.coordinator).LeavesMax; kept > uint64(inputslice.MaxLeaves-3) {
+			t.Fatalf("Slot %d keeps a shape of %d leaves, past the %d a Slot starts in", slot, kept, inputslice.MaxLeaves-3)
+		}
+		result, err = fixture.coordinator.Execute(context.Background(), request)
+		if err != nil || !result.Completed || result.Usage.InputSliceShapeVoidedMaxLeaves != 0 || result.Usage.InputSliceTimeoutDeepening != 0 {
+			t.Fatalf("Slot %d after it: result=%+v err=%v, want it completed in the shape left, none voided, nothing split deeper",
+				slot+1, result, err)
+		}
+		return
 	}
-	if _, err := fixture.coordinator.Execute(context.Background(), request); err == nil {
-		t.Fatal("Slot 3 completed, want it failed with the slice read last split and timed out again")
-	}
-	result, err = fixture.coordinator.Execute(context.Background(), request)
-	if err != nil || !result.Completed || result.QueryAvailability != execution.QueryAvailabilityAvailable ||
-		result.Usage.InputSliceShapeStarted != 1 {
-		t.Fatalf("Slot 3 again: result=%+v err=%v, want it completed in its shape, every query answered", result, err)
-	}
+	t.Fatal("still failing out of time by Slot 12")
 }
 
 // A backend that times out every read, whatever it holds: every slice of
@@ -100,8 +106,8 @@ func TestABackendThatTimesOutEveryReadStopsDegradedUnsplit(t *testing.T) {
 			result.Usage.InputSliceTimeouts != 0 || result.Usage.InputSliceShapeKept != 0 || result.Usage.InputSlicesDiscarded != 0 {
 			t.Fatalf("Slot %d: result=%+v err=%v, want it completed degraded, nothing split, kept or discarded", slot, result, err)
 		}
-		if slot == 3 && result.Usage.InputSlicesDeferred != 5 {
-			t.Fatalf("Slot 3 read %d slices last, want all five Slot 2 degraded", result.Usage.InputSlicesDeferred)
+		if slot == 3 && result.Usage.InputSlicesDeferred != 41 {
+			t.Fatalf("Slot 3 read %d slices last, want all 41 Slot 2 degraded", result.Usage.InputSlicesDeferred)
 		}
 		slices := map[string]bool{}
 		for _, call := range fixture.source.calls[first:] {

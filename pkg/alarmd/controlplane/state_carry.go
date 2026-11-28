@@ -200,7 +200,7 @@ func (reconciler *ScheduleActivationReconciler) previousPlan(
 			return found{plan: contract.EvaluationPlanV2{
 				PlanID: plan.PlanID, StrategyRef: plan.Strategy, InputProjection: plan.InputProjection,
 				OutputIdentity: plan.OutputIdentity, TargetScope: plan.TargetScope, TargetPlan: plan.TargetPlan,
-				NoData: plan.NoData, EffectiveTimeSnapshot: plan.EffectiveTimeSnapshot,
+				NoData: plan.NoData, Realtime: plan.Realtime, EffectiveTimeSnapshot: plan.EffectiveTimeSnapshot,
 				StrategyIR: strategyIR, TerminalReasonCode: plan.TerminalReasonCode,
 			}, dataset: object.QueryPlan.Normalization.DatasetContract, queries: plan.QueryPlans}, true, nil
 		}
